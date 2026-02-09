@@ -1,0 +1,1 @@
+// DC algorithm: edge detection, QEF, face generation
