@@ -26,6 +26,7 @@ struct AppState {
     uniform_bind_group: wgpu::BindGroup,
     debug_cube: DebugCube,
     last_frame: std::time::Instant,
+    world: world::World,
 }
 
 impl AppState {
@@ -55,6 +56,13 @@ impl AppState {
 
         let debug_cube = DebugCube::new(&gpu.device);
 
+        // Generate world
+        let gen_start = std::time::Instant::now();
+        let world = world::World::generate(12345);
+        let gen_elapsed = gen_start.elapsed();
+        log::info!("World generated in {:.2?}", gen_elapsed);
+        world.print_debug_stats();
+        
         Self {
             window,
             gpu,
@@ -64,6 +72,7 @@ impl AppState {
             uniform_bind_group,
             debug_cube,
             last_frame: std::time::Instant::now(),
+            world,
         }
     }
 
