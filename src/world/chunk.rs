@@ -51,10 +51,25 @@ impl Chunk {
 }
 
 pub struct ChunkNeighbors<'a> {
-    pub pos_x: Option<&'a Chunk>,
-    pub neg_x: Option<&'a Chunk>,
-    pub pos_y: Option<&'a Chunk>,
-    pub neg_y: Option<&'a Chunk>,
-    pub pos_z: Option<&'a Chunk>,
-    pub neg_z: Option<&'a Chunk>,
+    /// 27-entry array: index = (dx+1)*9 + (dy+1)*3 + (dz+1)
+    /// where dx,dy,dz ∈ {-1, 0, 1}. Index 13 = (0,0,0) = self, unused.
+    pub neighbors: [Option<&'a Chunk>; 27],
+}
+
+impl<'a> ChunkNeighbors<'a> {
+    pub fn empty() -> Self {
+        Self { neighbors: [None; 27] }
+    }
+
+    #[inline]
+    pub fn set(&mut self, dx: i32, dy: i32, dz: i32, chunk: Option<&'a Chunk>) {
+        let idx = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
+        self.neighbors[idx] = chunk;
+    }
+
+    #[inline]
+    pub fn get(&self, dx: i32, dy: i32, dz: i32) -> Option<&'a Chunk> {
+        let idx = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
+        self.neighbors[idx]
+    }
 }

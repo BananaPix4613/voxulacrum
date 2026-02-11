@@ -17,8 +17,8 @@ pub struct IsometricCamera {
 impl IsometricCamera {
     pub fn new() -> Self {
         Self {
-            target: Vec3::ZERO,
-            zoom: 30.0,
+            target: Vec3::new(128.0, 64.0, 128.0),
+            zoom: 80.0,
             rotation: std::f32::consts::FRAC_PI_4,
             aspect: 1.0,
             pan_speed: 20.0,
@@ -36,7 +36,7 @@ impl IsometricCamera {
             pitch.sin(),
             self.rotation.sin() * pitch.cos(),
         );
-        let eye = self.target + direction * 100.0;
+        let eye = self.target + direction * 300.0;
         Mat4::look_at_rh(eye, self.target, Vec3::Y)
     }
 
@@ -49,7 +49,7 @@ impl IsometricCamera {
             -half_height,
             half_height,
             0.1,
-            300.0,
+            600.0,
         )
     }
 

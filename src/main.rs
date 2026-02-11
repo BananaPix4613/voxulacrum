@@ -14,7 +14,6 @@ use winit::window::{Window, WindowAttributes, WindowId};
 use camera::IsometricCamera;
 use rendering::gpu_state::GpuState;
 use rendering::pipelines;
-use rendering::terrain_pass::DebugCube;
 use rendering::uniforms::{self, GlobalUniforms};
 
 struct AppState {
@@ -24,7 +23,6 @@ struct AppState {
     terrain_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-    debug_cube: DebugCube,
     last_frame: std::time::Instant,
     world: world::World,
 }
@@ -54,14 +52,19 @@ impl AppState {
             &bind_group_layout,
         );
 
-        let debug_cube = DebugCube::new(&gpu.device);
-
         // Generate world
         let gen_start = std::time::Instant::now();
-        let world = world::World::generate(12345);
+        let mut world = world::World::generate(12345);
         let gen_elapsed = gen_start.elapsed();
         log::info!("World generated in {:.2?}", gen_elapsed);
         world.print_debug_stats();
+        
+        // Mesh all chunks
+        let mesh_start = std::time::Instant::now();
+        world.mesh_all_chunks(&gpu.device);
+        let mesh_elapsed = mesh_start.elapsed();
+        log::info!("World meshed in {:.2?}", mesh_elapsed);
+        
         
         Self {
             window,
@@ -70,7 +73,6 @@ impl AppState {
             terrain_pipeline,
             uniform_buffer,
             uniform_bind_group,
-            debug_cube,
             last_frame: std::time::Instant::now(),
             world,
         }
@@ -151,12 +153,18 @@ impl AppState {
 
             pass.set_pipeline(&self.terrain_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.debug_cube.vertex_buffer.slice(..));
-            pass.set_index_buffer(
-                self.debug_cube.index_buffer.slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            pass.draw_indexed(0..self.debug_cube.index_count, 0, 0..1);
+            
+            // Draw all chunk meshes
+            for chunk in &self.world.chunks {
+                if let Some(mesh) = &chunk.mesh {
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(
+                        mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
         }
 
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
