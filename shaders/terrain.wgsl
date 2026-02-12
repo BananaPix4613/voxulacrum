@@ -116,8 +116,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let cloud_uv = in.world_position.xz * 0.03 + globals.cloud_shadow_offset;
     let cloud_sample = textureSample(cloud_texture, cloud_sampler, cloud_uv).r;
     let cloud_threshold = smoothstep(
-        globals.cloud_coverage - 0.15,
-        globals.cloud_coverage + 0.15,
+        globals.cloud_coverage - 0.20,
+        globals.cloud_coverage + 0.20,
         cloud_sample
     );
     let cloud_factor = mix(0.45, 1.0, cloud_threshold);
@@ -125,6 +125,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Shadow mapping — only affects direct sunlight
     let shadow = compute_shadow(in.world_position);
 
-    let lit_color = in.color * (diffuse * shadow * cloud_factor + ambient) * ao_factor;
+    let lit_color = in.color * (diffuse * shadow * cloud_factor + ambient); // * ao_factor;
     return vec4<f32>(lit_color, 1.0);
 }

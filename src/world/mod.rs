@@ -14,6 +14,7 @@ pub struct World {
     pub chunks_x: usize,
     pub chunks_y: usize,
     pub chunks_z: usize,
+    pub generator: TerrainGenerator,
 }
 
 impl World {
@@ -26,6 +27,7 @@ impl World {
             chunks_x: WORLD_CHUNKS_X,
             chunks_y: WORLD_CHUNKS_Y,
             chunks_z: WORLD_CHUNKS_Z,
+            generator,
         }
     }
 

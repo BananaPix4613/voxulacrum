@@ -16,15 +16,15 @@ impl CloudShadowState {
         // Use three separate noise generators at different frequencies for proper multi-octave
         let mut noise1 = fastnoise_lite::FastNoiseLite::with_seed(42);
         noise1.set_noise_type(Some(fastnoise_lite::NoiseType::OpenSimplex2));
-        noise1.set_frequency(Some(0.02));
+        noise1.set_frequency(Some(0.008));
 
         let mut noise2 = fastnoise_lite::FastNoiseLite::with_seed(137);
         noise2.set_noise_type(Some(fastnoise_lite::NoiseType::OpenSimplex2));
-        noise2.set_frequency(Some(0.04));
+        noise2.set_frequency(Some(0.016));
 
         let mut noise3 = fastnoise_lite::FastNoiseLite::with_seed(256);
         noise3.set_noise_type(Some(fastnoise_lite::NoiseType::OpenSimplex2));
-        noise3.set_frequency(Some(0.08));
+        noise3.set_frequency(Some(0.032));
 
         let mut pixels = vec![0u8; (size * size) as usize];
         for y in 0..size {
@@ -72,7 +72,7 @@ impl CloudShadowState {
         
         Self {
             offset: Vec2::ZERO,
-            coverage: 0.55,
+            coverage: 0.35,
             texture,
             texture_view,
             sampler,
@@ -81,6 +81,6 @@ impl CloudShadowState {
     
     pub fn update(&mut self, dt: f32, wind: &Vec2, elapsed: f32) {
         self.offset += *wind * dt * 0.002;
-        self.coverage = 0.55 + 0.15 * (elapsed * 0.05).sin();
+        self.coverage = 0.35 + 0.10 * (elapsed * 0.05).sin();
     }
 }

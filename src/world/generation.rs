@@ -74,7 +74,7 @@ impl TerrainGenerator {
     }
 
     /// Compute terrain height at a world XZ position.
-    fn terrain_height(&self, wx: f32, wz: f32) -> f32 {
+    pub fn terrain_height(&self, wx: f32, wz: f32) -> f32 {
         BASE_HEIGHT
             + 20.0 * self.height_fbm.get_noise_2d(wx * 0.005, wz * 0.005)
             + 8.0 * self.height_ridged.get_noise_2d(wx * 0.02, wz * 0.02)
@@ -89,14 +89,14 @@ impl TerrainGenerator {
     }
 
     /// Compute the Z coordinate of the river center at a given X.
-    fn river_center_z(&self, wx: f32) -> f32 {
+    pub fn river_center_z(&self, wx: f32) -> f32 {
         128.0
             + 20.0 * self.river_noise.get_noise_2d(wx * 0.015, 0.0)
             + 6.0 * (wx * 0.05).sin()
     }
 
     /// Distance from a world XZ point to the river center line.
-    fn distance_to_river(&self, wx: f32, wz: f32) -> f32 {
+    pub fn distance_to_river(&self, wx: f32, wz: f32) -> f32 {
         (wz - self.river_center_z(wx)).abs()
     }
     

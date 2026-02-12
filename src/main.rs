@@ -17,6 +17,8 @@ use rendering::gpu_state::GpuState;
 use rendering::pipelines;
 use rendering::uniforms::{self, GlobalUniforms, ShadowUniforms};
 use rendering::vegetation_pass::VegetationPass;
+use rendering::water_pass::WaterPass;
+use simulation::water::StaticWater;
 use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
 
@@ -41,6 +43,9 @@ struct AppState {
     elapsed: f32,
     vegetation_pipeline: wgpu::RenderPipeline,
     vegetation_pass: VegetationPass,
+    water_pipeline: wgpu::RenderPipeline,
+    static_water: StaticWater,
+    water_pass: WaterPass,
 }
 
 impl AppState {
@@ -124,7 +129,7 @@ impl AppState {
 
         // Generate world
         let gen_start = std::time::Instant::now();
-        let mut world = world::World::generate(12345);
+        let mut world = world::World::generate(54321);
         let gen_elapsed = gen_start.elapsed();
         log::info!("World generated in {:.2?}", gen_elapsed);
         world.print_debug_stats();
@@ -145,6 +150,16 @@ impl AppState {
         let vegetation_pass = VegetationPass::new(&gpu.device, &world);
         log::info!("Vegetation pass in {:.2?}", veg_start.elapsed());
 
+        // Water
+        let water_pipeline = pipelines::create_water_pipeline(
+            &gpu.device,
+            gpu.surface_format,
+            &bind_group_layout,
+        );
+        let static_water = StaticWater::new(&world);
+        let water_pass = WaterPass::new(&gpu.device, &static_water);
+        log::info!("Water simulation initialized");
+
         Self {
             window,
             gpu,
@@ -164,6 +179,9 @@ impl AppState {
             elapsed: 0.0,
             vegetation_pipeline,
             vegetation_pass,
+            water_pipeline,
+            static_water,
+            water_pass,
         }
     }
 
@@ -341,6 +359,17 @@ impl AppState {
                     0,
                     0..self.vegetation_pass.instance_count,
                 );
+            }
+
+            if self.water_pass.index_count > 0 {
+                pass.set_pipeline(&self.water_pipeline);
+                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.water_pass.vertex_buffer.slice(..));
+                pass.set_index_buffer(
+                    self.water_pass.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..self.water_pass.index_count, 0, 0..1);
             }
         }
 
