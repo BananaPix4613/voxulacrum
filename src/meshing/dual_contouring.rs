@@ -1,13 +1,37 @@
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::{Chunk, ChunkNeighbors, CHUNK_SIZE};
 use crate::world::voxel::{Voxel, MATERIAL_TABLE, MAT_AIR};
+use std::collections::HashMap;
 
 use super::qef::QefSolver;
+
+/// Map from (cx, cy, cz) local cell coords to the TerrainVertex for boundary cells.
+pub type BoundaryVertexMap = HashMap<(u8, u8, u8), TerrainVertex>;
+
+/// Intermediate result from Phase 1 (vertex generation).
+pub struct CellVertexData {
+    pub vertices: Vec<TerrainVertex>,
+    pub vertex_indices: Vec<u32>,  // cell_count^3 entries
+    pub boundary_map: BoundaryVertexMap,
+}
 
 /// Result of meshing a single chunk.
 pub struct ChunkMeshData {
     pub vertices: Vec<TerrainVertex>,
     pub indices: Vec<u32>,
+}
+
+/// Boundary vertex maps from the +X, +Y, +Z (and diagonal) neighbors.
+/// Indexed as dx + dy*2 + dz*4, where dx/dy/dz are 0 or 1.
+/// Index 0 is unused (self). Indices 1..=7 are the 7 positive-direction neighbors.
+pub struct NeighborBoundaries<'a> {
+    pub maps: [Option<&'a BoundaryVertexMap>; 8],
+}
+
+impl<'a> NeighborBoundaries<'a> {
+    pub fn empty() -> Self {
+        Self { maps: [None; 8] }
+    }
 }
 
 /// Resolve a voxel reference at potentially out-of-bounds coordinates.
@@ -51,7 +75,7 @@ fn density_gradient(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z
     let gx = (sample_density(chunk, neighbors, x + 1, y, z) - sample_density(chunk, neighbors, x - 1, y, z)) * 0.5;
     let gy = (sample_density(chunk, neighbors, x, y + 1, z) - sample_density(chunk, neighbors, x, y - 1, z)) * 0.5;
     let gz = (sample_density(chunk, neighbors, x, y, z + 1) - sample_density(chunk, neighbors, x, y, z - 1)) * 0.5;
-    [gx, gy, gz]
+    [-gx, -gy, -gz]  // Negate: gradient points INTO surface, normals should point OUT
 }
 
 /// Normalize a 3D vector. Returns zero vector if length is near zero.
@@ -124,28 +148,31 @@ fn compute_ao(chunk: &Chunk, neighbors: &ChunkNeighbors, pos: [f32; 3], chunk_of
 
 /// Generate mesh data for a single chunk using dual contouring.
 pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
+    let mut cell_data = generate_cell_vertices(chunk, neighbors);
+    let nb = NeighborBoundaries::empty();
+    let indices = generate_faces(&mut cell_data, chunk, neighbors, &nb);
+    ChunkMeshData { vertices: cell_data.vertices, indices }
+}
+
+pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> CellVertexData {
     let chunk_offset = [
         chunk.position.x as f32 * CHUNK_SIZE as f32,
         chunk.position.y as f32 * CHUNK_SIZE as f32,
         chunk.position.z as f32 * CHUNK_SIZE as f32,
     ];
 
-    // Phase 1: For each cell [0..CHUNK_SIZE)^3, detect sign-changing edges
-    // and solve QEF to place a vertex.
-    // Cell (cx, cy, cz) spans voxels [cx..cx+1, cy..cy+1, cz..cz+1].
-    let cell_count = CHUNK_SIZE + 1;
-    let total_cells = cell_count * cell_count * cell_count;
-
-    // vertex_indices[cell_index] = index into vertices vec, or u32::MAX if no vertex
+    // Use stride CHUNK_SIZE+1 so indices 0..CHUNK_SIZE are for owned cells,
+    // and index CHUNK_SIZE is reserved for imported boundary vertices.
+    let stride = CHUNK_SIZE + 1;
+    let total_cells = stride * stride * stride;
     let mut vertex_indices = vec![u32::MAX; total_cells];
     let mut vertices: Vec<TerrainVertex> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    let mut boundary_map = BoundaryVertexMap::new();
 
-    // For each cell, check all 12 edges for sign changes and solve QEF.
-    for cz in 0..cell_count {
-        for cy in 0..cell_count {
-            for cx in 0..cell_count {
-                let cell_idx = cx + cy * cell_count + cz * cell_count * cell_count;
+    for cz in 0..CHUNK_SIZE {
+        for cy in 0..CHUNK_SIZE {
+            for cx in 0..CHUNK_SIZE {
+                let cell_idx = cx + cy * stride + cz * stride * stride;
 
                 // Sample the 8 corners of this cell
                 let ix = cx as i32;
@@ -276,32 +303,77 @@ pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
 
                 let vert_idx = vertices.len() as u32;
                 vertex_indices[cell_idx] = vert_idx;
-                vertices.push(TerrainVertex {
-                    position,
-                    normal: avg_normal,
-                    color,
-                    ao,
-                });
+                let vertex = TerrainVertex { position, normal: avg_normal, color, ao };
+
+                // Record boundary vertices (cells at the low face of the chunk)
+                if cx == 0 || cy == 0 || cz == 0 {
+                    boundary_map.insert((cx as u8, cy as u8, cz as u8), vertex);
+                }
+
+                vertices.push(vertex);
             }
         }
     }
 
-    // Phase 2: Generate faces (quads split into 2 triangles).
-    // For each edge that has a sign change, connect the 4 cells sharing that edge.
-    // X-edges are shared by cells at (x, cy, cz) where cy in {y-1, y}, cz in {z-1, z}
-    // Y-edges are shared by cells at (cx, y, cz) where cx in {x-1, x}, cz in {z-1, z}
-    // Z-edges are shared by cells at (cx, cy, z) where cx in {x-1, x}, cy in {y-1, y}
+    CellVertexData { vertices, vertex_indices, boundary_map }
+}
+
+pub fn generate_faces(
+    cell_data: &mut CellVertexData,
+    chunk: &Chunk,
+    neighbors: &ChunkNeighbors,
+    neighbor_boundaries: &NeighborBoundaries,
+) -> Vec<u32> {
+    let stride = CHUNK_SIZE + 1;
+
+    // Import boundary vertices from +X, +Y, +Z (and diagonal) neighbors.
+    // The +X neighbor's cell (0, cy, cz) corresponds to our cell (CHUNK_SIZE, cy, cz).
+    // The +Y neighbor's cell (cx, 0, cz) corresponds to our cell (cx, CHUNK_SIZE, cz).
+    // The +Z neighbor's cell (cx, cy, 0) corresponds to our cell (cx, cy, CHUNK_SIZE).
+    // Similarly for diagonals: +XY neighbor's (0, 0, cz) → our (CS, CS, cz), etc.
+    for (map_idx, map_opt) in neighbor_boundaries.maps.iter().enumerate() {
+        let Some(bmap) = map_opt else { continue };
+        if map_idx == 0 { continue; } // skip self
+
+        let dx = map_idx & 1;       // 0 or 1
+        let dy = (map_idx >> 1) & 1; // 0 or 1
+        let dz = (map_idx >> 2) & 1; // 0 or 1
+
+        for (&(bcx, bcy, bcz), vertex) in bmap.iter() {
+            // Only import vertices where the relevant coords are 0
+            // (matching the axes along which this neighbor is offset)
+            let matches = (dx == 0 || bcx == 0)
+                && (dy == 0 || bcy == 0)
+                && (dz == 0 || bcz == 0);
+            if !matches { continue; }
+
+            // Map to local cell coordinates
+            let local_cx = if dx == 1 { CHUNK_SIZE } else { bcx as usize };
+            let local_cy = if dy == 1 { CHUNK_SIZE } else { bcy as usize };
+            let local_cz = if dz == 1 { CHUNK_SIZE } else { bcz as usize };
+
+            let cell_idx = local_cx + local_cy * stride + local_cz * stride * stride;
+
+            // Only import if we don't already have a vertex here
+            if cell_data.vertex_indices[cell_idx] == u32::MAX {
+                let vert_idx = cell_data.vertices.len() as u32;
+                cell_data.vertex_indices[cell_idx] = vert_idx;
+                cell_data.vertices.push(*vertex);
+            }
+        }
+    }
+
+    // Phase 2: face generation (unchanged from current code, lines 300-374)
+    let mut indices: Vec<u32> = Vec::new();
+
     for z in 0..=CHUNK_SIZE as i32 {
         for y in 0..=CHUNK_SIZE as i32 {
             for x in 0..=CHUNK_SIZE as i32 {
-                let ix = x;
-                let iy = y;
-                let iz = z;
-                let d0 = sample_density(chunk, neighbors, ix, iy, iz);
+                let d0 = sample_density(chunk, neighbors, x, y, z);
 
-                // X-edge: between (x,y,z) and (x+1,y,z)
+                // X-edge
                 if x + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = sample_density(chunk, neighbors, ix + 1, iy, iz);
+                    let d1 = sample_density(chunk, neighbors, x + 1, y, z);
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             (x as usize, (y - 1) as usize, (z - 1) as usize),
@@ -309,19 +381,13 @@ pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
                             (x as usize, y as usize, z as usize),
                             (x as usize, (y - 1) as usize, z as usize),
                         ];
-                        emit_quad(
-                            &cells,
-                            cell_count,
-                            &vertex_indices,
-                            &mut indices,
-                            d0 > 0.0,
-                        );
+                        emit_quad(&cells, stride, &cell_data.vertex_indices, &mut indices, d0 > 0.0);
                     }
                 }
 
-                // Y-edge: between (x,y,z) and (x,y+1,z)
+                // Y-edge
                 if y + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = sample_density(chunk, neighbors, ix, iy + 1, iz);
+                    let d1 = sample_density(chunk, neighbors, x, y + 1, z);
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             ((x - 1) as usize, y as usize, (z - 1) as usize),
@@ -329,19 +395,13 @@ pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
                             (x as usize, y as usize, z as usize),
                             (x as usize, y as usize, (z - 1) as usize),
                         ];
-                        emit_quad(
-                            &cells,
-                            cell_count,
-                            &vertex_indices,
-                            &mut indices,
-                            d0 > 0.0,
-                        );
+                        emit_quad(&cells, stride, &cell_data.vertex_indices, &mut indices, d0 > 0.0);
                     }
                 }
 
-                // Z-edge: between (x,y,z) and (x,y,z+1)
+                // Z-edge
                 if z + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = sample_density(chunk, neighbors, ix, iy, iz + 1);
+                    let d1 = sample_density(chunk, neighbors, x, y, z + 1);
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             ((x - 1) as usize, (y - 1) as usize, z as usize),
@@ -349,20 +409,14 @@ pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
                             (x as usize, y as usize, z as usize),
                             ((x - 1) as usize, y as usize, z as usize),
                         ];
-                        emit_quad(
-                            &cells,
-                            cell_count,
-                            &vertex_indices,
-                            &mut indices,
-                            d0 > 0.0,
-                        );
+                        emit_quad(&cells, stride, &cell_data.vertex_indices, &mut indices, d0 > 0.0);
                     }
                 }
             }
         }
     }
 
-    ChunkMeshData { vertices, indices }
+    indices
 }
 
 /// Emit a quad connecting 4 cells that share a sign-changing edge.
@@ -371,7 +425,7 @@ pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
 /// which determines winding order.
 fn emit_quad(
     cells: &[(usize, usize, usize); 4],
-    cell_count: usize,
+    stride: usize,
     vertex_indices: &[u32],
     indices: &mut Vec<u32>,
     solid_first: bool,
@@ -379,10 +433,10 @@ fn emit_quad(
     // Validate all cells are in bounds and have vertices
     let mut vis = [0u32; 4];
     for (i, &(cx, cy, cz)) in cells.iter().enumerate() {
-        if cx >= cell_count || cy >= cell_count || cz >= cell_count {
+        if cx >= stride || cy >= stride || cz >= stride {
             return;
         }
-        let idx = cx + cy * cell_count + cz * cell_count * cell_count;
+        let idx = cx + cy * stride + cz * stride * stride;
         let vi = vertex_indices[idx];
         if vi == u32::MAX {
             return;
