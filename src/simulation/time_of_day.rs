@@ -11,7 +11,7 @@ impl TimeOfDay {
     pub fn new() -> Self {
         Self {
             time: 0.30, // Start at morning
-            day_duration_seconds: 15.0,
+            day_duration_seconds: 300.0,
         }
     }
 

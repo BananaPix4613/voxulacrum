@@ -16,6 +16,7 @@ use cloud_shadow::CloudShadowState;
 use rendering::gpu_state::GpuState;
 use rendering::pipelines;
 use rendering::uniforms::{self, GlobalUniforms, ShadowUniforms};
+use rendering::vegetation_pass::VegetationPass;
 use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
 
@@ -38,6 +39,8 @@ struct AppState {
     wind: WindState,
     cloud_shadow: CloudShadowState,
     elapsed: f32,
+    vegetation_pipeline: wgpu::RenderPipeline,
+    vegetation_pass: VegetationPass,
 }
 
 impl AppState {
@@ -132,6 +135,16 @@ impl AppState {
         let mesh_elapsed = mesh_start.elapsed();
         log::info!("World meshed in {:.2?}", mesh_elapsed);
 
+        // Vegetation
+        let vegetation_pipeline = pipelines::create_vegetation_pipeline(
+            &gpu.device,
+            gpu.surface_format,
+            &bind_group_layout,
+        );
+        let veg_start = std::time::Instant::now();
+        let vegetation_pass = VegetationPass::new(&gpu.device, &world);
+        log::info!("Vegetation pass in {:.2?}", veg_start.elapsed());
+
         Self {
             window,
             gpu,
@@ -149,6 +162,8 @@ impl AppState {
             wind: WindState::new(),
             cloud_shadow,
             elapsed: 0.0,
+            vegetation_pipeline,
+            vegetation_pass,
         }
     }
 
@@ -310,6 +325,22 @@ impl AppState {
                     );
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
+            }
+
+            if self.vegetation_pass.instance_count > 0 {
+                pass.set_pipeline(&self.vegetation_pipeline);
+                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.vegetation_pass.grass_vertex_buffer.slice(..));
+                pass.set_vertex_buffer(1, self.vegetation_pass.instance_buffer.slice(..));
+                pass.set_index_buffer(
+                    self.vegetation_pass.grass_index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(
+                    0..self.vegetation_pass.grass_index_count,
+                    0,
+                    0..self.vegetation_pass.instance_count,
+                );
             }
         }
 

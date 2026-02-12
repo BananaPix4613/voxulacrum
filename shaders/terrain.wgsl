@@ -120,7 +120,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         globals.cloud_coverage + 0.15,
         cloud_sample
     );
-    let cloud_factor = 1.0; //mix(0.45, 1.0, cloud_threshold);
+    let cloud_factor = mix(0.45, 1.0, cloud_threshold);
 
     // Shadow mapping — only affects direct sunlight
     let shadow = compute_shadow(in.world_position);
