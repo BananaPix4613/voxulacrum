@@ -15,14 +15,15 @@ use camera::IsometricCamera;
 use cloud_shadow::CloudShadowState;
 use rendering::gpu_state::GpuState;
 use rendering::pipelines;
-use rendering::uniforms::{self, GlobalUniforms, ShadowUniforms};
+use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
 use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
+use rendering::post_process::PostProcessPass;
 use simulation::water::StaticWater;
 use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
 
-const SHADOW_MAP_SIZE: u32 = 2048;
+const SHADOW_MAP_SIZE: u32 = 4096;
 
 struct AppState {
     window: Arc<Window>,
@@ -46,6 +47,7 @@ struct AppState {
     water_pipeline: wgpu::RenderPipeline,
     static_water: StaticWater,
     water_pass: WaterPass,
+    post_process: PostProcessPass,
 }
 
 impl AppState {
@@ -160,6 +162,13 @@ impl AppState {
         let water_pass = WaterPass::new(&gpu.device, &static_water);
         log::info!("Water simulation initialized");
 
+        // Post-processing
+        let post_process = PostProcessPass::new(
+            &gpu.device,
+            gpu.surface_format,
+            &gpu.scene_view,
+        );
+
         Self {
             window,
             gpu,
@@ -182,6 +191,7 @@ impl AppState {
             water_pipeline,
             static_water,
             water_pass,
+            post_process,
         }
     }
 
@@ -236,11 +246,24 @@ impl AppState {
             .queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
+        // Update post-process uniforms
+        let (tint_color, tint_strength) = self.time_of_day.warm_tint();
+        let pp_uniforms = PostProcessUniforms {
+            warm_tint: tint_color.into(),
+            warm_tint_strength: tint_strength,
+            desaturation: self.cloud_shadow.coverage * 0.3,
+            vignette_strength: 0.35,
+            exposure: 1.1,
+            _pad: 0.0,
+        };
+        self.post_process.update_uniforms(&self.gpu.queue, pp_uniforms);
+
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 let size = self.window.inner_size();
                 self.gpu.resize(size.width, size.height);
+                self.post_process.rebuild_bind_group(&self.gpu.device, &self.gpu.scene_view);
                 return;
             }
             Err(wgpu::SurfaceError::Timeout) => {
@@ -253,7 +276,7 @@ impl AppState {
             }
         };
 
-        let view = frame
+        let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -296,7 +319,7 @@ impl AppState {
             }
         }
 
-        // === Main pass ===
+        // === Main pass (render to scene texture) ===
         let sky = self.time_of_day.ambient_color();
         let sky_brightness = sky.length() / 0.8_f32.sqrt();
         let sky_r = (0.5 * sky_brightness).clamp(0.02, 0.5) as f64;
@@ -307,7 +330,7 @@ impl AppState {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.gpu.scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -373,6 +396,28 @@ impl AppState {
             }
         }
 
+        // === Post-processing pass (scene texture -> surface) ===
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("post_process_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            pass.set_pipeline(&self.post_process.pipeline);
+            pass.set_bind_group(0, &self.post_process.bind_group, &[]);
+            pass.draw(0..3, 0..1); // Fullscreen triangle
+        }
+
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }
@@ -426,6 +471,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(new_size) => {
                 state.gpu.resize(new_size.width, new_size.height);
                 state.camera.resize(new_size.width, new_size.height);
+                state.post_process.rebuild_bind_group(&state.gpu.device, &state.gpu.scene_view);
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 state

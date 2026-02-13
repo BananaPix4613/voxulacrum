@@ -1,5 +1,5 @@
 use crate::rendering::pipelines::TerrainVertex;
-use crate::world::chunk::{Chunk, ChunkNeighbors, CHUNK_SIZE};
+use crate::world::chunk::{Chunk, ChunkNeighbors, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
 use crate::world::voxel::{Voxel, MATERIAL_TABLE, MAT_AIR};
 use std::collections::HashMap;
 
@@ -70,6 +70,14 @@ fn sample_material(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z:
     }
 }
 
+/// Get ambient occlusion density, resolving across chunk boundaries.
+fn sample_ao_density(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> f32 {
+    match resolve_voxel(chunk, neighbors, x, y, z) {
+        Some(v) => v.density as f32,
+        None => 1.0,  // Treat out-of-bounds as solid for AO (not air!)
+    }
+}
+
 /// Compute density gradient via central differences at chunk-local integer coords.
 fn density_gradient(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> [f32; 3] {
     let gx = (sample_density(chunk, neighbors, x + 1, y, z) - sample_density(chunk, neighbors, x - 1, y, z)) * 0.5;
@@ -111,39 +119,46 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 /// Compute ambient occlusion for a position by sampling nearby solid voxels.
+/// Uses distance-weighted 5x5x5 sampling for smoother results.
 fn compute_ao(chunk: &Chunk, neighbors: &ChunkNeighbors, pos: [f32; 3], chunk_offset: [f32; 3]) -> f32 {
-    // Convert world position to chunk-local
-    let lx = pos[0] - chunk_offset[0];
-    let ly = pos[1] - chunk_offset[1];
-    let lz = pos[2] - chunk_offset[2];
+    // Convert world position to voxel-local indices
+    let lx = (pos[0] - chunk_offset[0]) / VOXEL_SCALE;
+    let ly = (pos[1] - chunk_offset[1]) / VOXEL_SCALE;
+    let lz = (pos[2] - chunk_offset[2]) / VOXEL_SCALE;
 
-    // Sample a 3x3x3 neighborhood around the position
     let cx = lx.round() as i32;
     let cy = ly.round() as i32;
     let cz = lz.round() as i32;
 
-    let mut solid_count = 0;
+    let radius: i32 = 2;
+    let mut weighted_solid = 0.0_f32;
+    let mut total_weight = 0.0_f32;
 
-    for dz in -1..=1 {
-        for dy in -1..=1 {
-            for dx in -1..=1 {
+    for dz in -radius..=radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
                 if dx == 0 && dy == 0 && dz == 0 {
                     continue;
                 }
-                let sx = cx + dx;
-                let sy = cy + dy;
-                let sz = cz + dz;
+                let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
+                let weight = 1.0 / dist_sq;
+                total_weight += weight;
 
-                if sample_density(chunk, neighbors, sx, sy, sz) > 0.0 {
-                    solid_count += 1;
+                if sample_ao_density(chunk, neighbors, cx + dx, cy + dy, cz + dz) > 0.0 {
+                    weighted_solid += weight;
                 }
             }
         }
     }
 
-    // AO: more nearby solid = more occlusion
-    let occlusion = solid_count as f32 / 26.0;
-    (1.0 - occlusion * 0.7).clamp(0.3, 1.0)
+    let occlusion = weighted_solid / total_weight;
+    (1.0 - occlusion * 0.5).clamp(0.5, 1.0)
+}
+
+/// Deterministic per-vertex color variation based on world position.
+fn vertex_color_variation(position: [f32; 3]) -> f32 {
+    let hash = (position[0] * 7.3 + position[1] * 13.7 + position[2] * 5.1).sin() * 43758.5453;
+    (hash.fract() - 0.5) * 0.08 // +/- 4% brightness variation
 }
 
 /// Generate mesh data for a single chunk using dual contouring.
@@ -156,9 +171,9 @@ pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
 
 pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> CellVertexData {
     let chunk_offset = [
-        chunk.position.x as f32 * CHUNK_SIZE as f32,
-        chunk.position.y as f32 * CHUNK_SIZE as f32,
-        chunk.position.z as f32 * CHUNK_SIZE as f32,
+        chunk.position.x as f32 * CHUNK_WORLD_SIZE,
+        chunk.position.y as f32 * CHUNK_WORLD_SIZE,
+        chunk.position.z as f32 * CHUNK_WORLD_SIZE,
     ];
 
     // Use stride CHUNK_SIZE+1 so indices 0..CHUNK_SIZE are for owned cells,
@@ -227,19 +242,19 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
 
                     has_crossing = true;
 
-                    // Intersection point via linear interpolation
+                    // Intersection point via linear interpolation (in world space)
                     let t = if (da - db).abs() < 1e-6 {
                         0.5
                     } else {
                         da / (da - db)
                     };
                     let intersection = [
-                        pa[0] as f32 + (pb[0] - pa[0]) as f32 * t + chunk_offset[0],
-                        pa[1] as f32 + (pb[1] - pa[1]) as f32 * t + chunk_offset[1],
-                        pa[2] as f32 + (pb[2] - pa[2]) as f32 * t + chunk_offset[2],
+                        pa[0] as f32 * VOXEL_SCALE + (pb[0] - pa[0]) as f32 * VOXEL_SCALE * t + chunk_offset[0],
+                        pa[1] as f32 * VOXEL_SCALE + (pb[1] - pa[1]) as f32 * VOXEL_SCALE * t + chunk_offset[1],
+                        pa[2] as f32 * VOXEL_SCALE + (pb[2] - pa[2]) as f32 * VOXEL_SCALE * t + chunk_offset[2],
                     ];
 
-                    // Gradient at intersection (use nearest integer coordinate)
+                    // Gradient at intersection (use nearest voxel index)
                     let grad_x = (pa[0] as f32 + (pb[0] - pa[0]) as f32 * t).round() as i32;
                     let grad_y = (pa[1] as f32 + (pb[1] - pa[1]) as f32 * t).round() as i32;
                     let grad_z = (pa[2] as f32 + (pb[2] - pa[2]) as f32 * t).round() as i32;
@@ -274,16 +289,16 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
                     continue;
                 }
 
-                // Solve QEF
+                // Solve QEF - cell bounds in world space
                 let cell_min = [
-                    cx as f32 + chunk_offset[0],
-                    cy as f32 + chunk_offset[1],
-                    cz as f32 + chunk_offset[2],
+                    cx as f32 * VOXEL_SCALE + chunk_offset[0],
+                    cy as f32 * VOXEL_SCALE + chunk_offset[1],
+                    cz as f32 * VOXEL_SCALE + chunk_offset[2],
                 ];
                 let cell_max = [
-                    cell_min[0] + 1.0,
-                    cell_min[1] + 1.0,
-                    cell_min[2] + 1.0,
+                    cell_min[0] + VOXEL_SCALE,
+                    cell_min[1] + VOXEL_SCALE,
+                    cell_min[2] + VOXEL_SCALE,
                 ];
 
                 let (position, _error) = qef.solve(cell_min, cell_max);
@@ -291,12 +306,18 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
                 // Average normal
                 let avg_normal = normalize(normal_sum);
 
-                // Material color
-                let color = if (dominant_material as usize) < MATERIAL_TABLE.len() {
+                // Material color with per-vertex variation
+                let base_color = if (dominant_material as usize) < MATERIAL_TABLE.len() {
                     MATERIAL_TABLE[dominant_material as usize].color
                 } else {
                     [0.5, 0.5, 0.5]
                 };
+                let variation = vertex_color_variation(position);
+                let color = [
+                    (base_color[0] + variation).clamp(0.0, 1.0),
+                    (base_color[1] + variation * 0.8).clamp(0.0, 1.0),
+                    (base_color[2] + variation * 0.6).clamp(0.0, 1.0),
+                ];
 
                 // AO
                 let ao = compute_ao(chunk, neighbors, position, chunk_offset);
@@ -327,34 +348,26 @@ pub fn generate_faces(
     let stride = CHUNK_SIZE + 1;
 
     // Import boundary vertices from +X, +Y, +Z (and diagonal) neighbors.
-    // The +X neighbor's cell (0, cy, cz) corresponds to our cell (CHUNK_SIZE, cy, cz).
-    // The +Y neighbor's cell (cx, 0, cz) corresponds to our cell (cx, CHUNK_SIZE, cz).
-    // The +Z neighbor's cell (cx, cy, 0) corresponds to our cell (cx, cy, CHUNK_SIZE).
-    // Similarly for diagonals: +XY neighbor's (0, 0, cz) → our (CS, CS, cz), etc.
     for (map_idx, map_opt) in neighbor_boundaries.maps.iter().enumerate() {
         let Some(bmap) = map_opt else { continue };
-        if map_idx == 0 { continue; } // skip self
+        if map_idx == 0 { continue; }
 
-        let dx = map_idx & 1;       // 0 or 1
-        let dy = (map_idx >> 1) & 1; // 0 or 1
-        let dz = (map_idx >> 2) & 1; // 0 or 1
+        let dx = map_idx & 1;
+        let dy = (map_idx >> 1) & 1;
+        let dz = (map_idx >> 2) & 1;
 
         for (&(bcx, bcy, bcz), vertex) in bmap.iter() {
-            // Only import vertices where the relevant coords are 0
-            // (matching the axes along which this neighbor is offset)
             let matches = (dx == 0 || bcx == 0)
                 && (dy == 0 || bcy == 0)
                 && (dz == 0 || bcz == 0);
             if !matches { continue; }
 
-            // Map to local cell coordinates
             let local_cx = if dx == 1 { CHUNK_SIZE } else { bcx as usize };
             let local_cy = if dy == 1 { CHUNK_SIZE } else { bcy as usize };
             let local_cz = if dz == 1 { CHUNK_SIZE } else { bcz as usize };
 
             let cell_idx = local_cx + local_cy * stride + local_cz * stride * stride;
 
-            // Only import if we don't already have a vertex here
             if cell_data.vertex_indices[cell_idx] == u32::MAX {
                 let vert_idx = cell_data.vertices.len() as u32;
                 cell_data.vertex_indices[cell_idx] = vert_idx;
@@ -363,7 +376,6 @@ pub fn generate_faces(
         }
     }
 
-    // Phase 2: face generation (unchanged from current code, lines 300-374)
     let mut indices: Vec<u32> = Vec::new();
 
     for z in 0..=CHUNK_SIZE as i32 {
@@ -420,9 +432,6 @@ pub fn generate_faces(
 }
 
 /// Emit a quad connecting 4 cells that share a sign-changing edge.
-/// `cells` contains 4 (cx, cy, cz) tuples in the cell grid.
-/// `solid_first` indicates whether the first endpoint of the edge is solid,
-/// which determines winding order.
 fn emit_quad(
     cells: &[(usize, usize, usize); 4],
     stride: usize,
@@ -430,7 +439,6 @@ fn emit_quad(
     indices: &mut Vec<u32>,
     solid_first: bool,
 ) {
-    // Validate all cells are in bounds and have vertices
     let mut vis = [0u32; 4];
     for (i, &(cx, cy, cz)) in cells.iter().enumerate() {
         if cx >= stride || cy >= stride || cz >= stride {
@@ -444,10 +452,6 @@ fn emit_quad(
         vis[i] = vi;
     }
 
-    // Emit two triangles for the quad.
-    // Vertices are in ring order [0,1,2,3]. Split along diagonal 0-2.
-    // Triangles: 0-1-2 and 2-3-0
-    // Winding depends on which side of the edge is solid.
     if solid_first {
         indices.push(vis[0]);
         indices.push(vis[1]);

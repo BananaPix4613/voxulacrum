@@ -71,28 +71,28 @@ pub static MATERIAL_TABLE: [MaterialDef; MATERIAL_COUNT] = [
         permeable: true,
         supports_flora: false,
     },
-    // 1: Limestone
+    // 1: Limestone - warmer, more distinct off-white
     MaterialDef {
         name: "Limestone",
-        color: [0.92, 0.88, 0.82],
+        color: [0.95, 0.90, 0.82],
         sharpness: 0.9,
         hardness: 0.9,
         permeable: false,
         supports_flora: false,
     },
-    // 2: Granite
+    // 2: Granite - slightly cool blue-grey
     MaterialDef {
         name: "Granite",
-        color: [0.55, 0.55, 0.55],
+        color: [0.50, 0.50, 0.53],
         sharpness: 0.85,
         hardness: 0.95,
         permeable: false,
         supports_flora: false,
     },
-    // 3: Soil
+    // 3: Soil - richer brown
     MaterialDef {
         name: "Soil",
-        color: [0.35, 0.2, 0.1],
+        color: [0.40, 0.22, 0.10],
         sharpness: 0.3,
         hardness: 0.2,
         permeable: false,
@@ -101,25 +101,25 @@ pub static MATERIAL_TABLE: [MaterialDef; MATERIAL_COUNT] = [
     // 4: Clay
     MaterialDef {
         name: "Clay",
-        color: [0.6, 0.35, 0.2],
+        color: [0.62, 0.36, 0.20],
         sharpness: 0.4,
         hardness: 0.4,
         permeable: false,
         supports_flora: false,
     },
-    // 5: Sand
+    // 5: Sand - brighter warm yellow
     MaterialDef {
         name: "Sand",
-        color: [0.85, 0.78, 0.55],
+        color: [0.90, 0.82, 0.55],
         sharpness: 0.15,
         hardness: 0.1,
         permeable: true,
         supports_flora: false,
     },
-    // 6: Grass-covered soil
+    // 6: Grass-covered soil - more vivid green
     MaterialDef {
         name: "Grass Soil",
-        color: [0.35, 0.5, 0.2],
+        color: [0.30, 0.55, 0.18],
         sharpness: 0.35,
         hardness: 0.2,
         permeable: false,
@@ -137,7 +137,7 @@ pub static MATERIAL_TABLE: [MaterialDef; MATERIAL_COUNT] = [
     // 8: Gravel
     MaterialDef {
         name: "Gravel",
-        color: [0.5, 0.48, 0.45],
+        color: [0.52, 0.49, 0.45],
         sharpness: 0.6,
         hardness: 0.5,
         permeable: true,

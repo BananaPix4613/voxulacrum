@@ -119,7 +119,7 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
 
     let bias = 0.004;
     let biased_depth = current_depth - bias;
-    let texel_size = 1.0 / 2048.0;
+    let texel_size = 1.0 / 4096.0;
     var shadow_sum = 0.0;
     for (var x: i32 = -1; x <= 1; x++) {
         for (var y: i32 = -1; y <= 1; y++) {
@@ -150,7 +150,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = globals.sun_color * n_dot_l;
     let ambient = globals.ambient_color * 0.6;
 
-    let cloud_uv = in.world_position.xz * 0.03 + globals.cloud_shadow_offset;
+    let cloud_uv = in.world_position.xz * 0.015 + globals.cloud_shadow_offset;
     let cloud_sample = textureSample(cloud_texture, cloud_sampler, cloud_uv).r;
     let cloud_threshold = smoothstep(
         globals.cloud_coverage - 0.15,

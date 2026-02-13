@@ -127,7 +127,7 @@ pub fn create_shadow_pipeline(
             buffers: &[TerrainVertex::layout()],
             compilation_options: Default::default(),
         },
-        fragment: None, // Depth-only pass — no fragment shader needed
+        fragment: None,
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
@@ -143,7 +143,7 @@ pub fn create_shadow_pipeline(
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState {
-                constant: 2,    // Prevent shadow acne
+                constant: 2,
                 slope_scale: 2.0,
                 clamp: 0.0,
             },
@@ -201,7 +201,6 @@ pub fn create_vegetation_pipeline(
             module: &shader_module,
             entry_point: Some("vs_main"),
             buffers: &[
-                // Slot 0: per-vertex blade geometry
                 wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<GrassVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
@@ -218,7 +217,6 @@ pub fn create_vegetation_pipeline(
                         },
                     ],
                 },
-                // Slot 1: per-instance data
                 wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<GrassInstance>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Instance,
@@ -272,7 +270,7 @@ pub fn create_vegetation_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None, // Double-sided for crossed quads
+            cull_mode: None,
             unclipped_depth: false,
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
@@ -368,18 +366,74 @@ pub fn create_water_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None, // Render both sides of water surface
+            cull_mode: None,
             unclipped_depth: false,
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: false, // Transparent: don't write depth
+            depth_write_enabled: false,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
+pub fn create_post_process_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    pp_bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader_source = include_str!("../../shaders/post_process.wgsl");
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("post_process_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("post_process_pipeline_layout"),
+        bind_group_layouts: &[pp_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("post_process_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader_module,
+            entry_point: Some("vs_main"),
+            buffers: &[], // Fullscreen triangle via vertex_index
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None, // No depth needed for fullscreen quad
         multisample: wgpu::MultisampleState {
             count: 1,
             mask: !0,

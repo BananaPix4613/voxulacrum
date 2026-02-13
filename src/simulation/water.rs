@@ -1,10 +1,9 @@
 use crate::world::World;
-use crate::world::chunk::CHUNK_SIZE;
+use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 
 const WORLD_WIDTH: usize = 8 * CHUNK_SIZE;
 const WORLD_DEPTH: usize = 8 * CHUNK_SIZE;
-const RIVER_WIDTH: f32 = 5.0;
-const WATER_LEVEL: f32 = 60.0;
+const WATER_LEVEL: f32 = 30.0;
 
 pub struct StaticWater {
     terrain_heights: Vec<f32>,
@@ -24,12 +23,10 @@ impl StaticWater {
 
         for z in 0..depth {
             for x in 0..width {
-                let wx = x as f32;
-                let wz = z as f32;
-                let mut height = gen.terrain_height(wx, wz);
-                let river_dist = gen.distance_to_river(wx, wz);
-                let channel_depth = (RIVER_WIDTH - river_dist).max(0.0) * 1.5;
-                height -= channel_depth;
+                let wx = x as f32 * VOXEL_SCALE;
+                let wz = z as f32 * VOXEL_SCALE;
+                let height = gen.terrain_height(wx, wz);
+                // NO river carving
                 terrain_heights[z * width + x] = height;
                 if height < WATER_LEVEL {
                     water_cells += 1;

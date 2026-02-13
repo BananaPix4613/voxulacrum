@@ -3,6 +3,8 @@ use super::voxel::Voxel;
 
 pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+pub const VOXEL_SCALE: f32 = 0.5;
+pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 16.0
 
 pub struct ChunkMesh {
     pub vertex_buffer: wgpu::Buffer,

@@ -1,5 +1,7 @@
 use glam::{Mat4, Vec3};
 
+use crate::world::generation::{WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
+
 pub struct TimeOfDay {
     /// 0.0 = midnight, 0.5 = noon
     pub time: f32,
@@ -22,7 +24,6 @@ impl TimeOfDay {
 
     pub fn sun_direction(&self) -> Vec3 {
         let angle = (self.time - 0.25) * 2.0 * std::f32::consts::PI;
-        // Sun rises from +X+Z (southeast), arcs overhead, sets toward -X-Z (northwest)
         let elevation = angle.sin();
         let horizontal = angle.cos();
         Vec3::new(
@@ -44,7 +45,7 @@ impl TimeOfDay {
             (0.73, Vec3::new(1.0, 0.6, 0.3)),
             (0.78, Vec3::new(0.6, 0.3, 0.15)),
             (0.83, Vec3::new(0.15, 0.08, 0.05)),
-            (0.92, Vec3::new(0.0, 0.0, 0.0)),
+            (0.87, Vec3::new(0.0, 0.0, 0.0)),
             (1.00, Vec3::new(0.0, 0.0, 0.0)),
         ];
         // Multiply by smooth horizon fade to avoid hard cutoff
@@ -71,29 +72,52 @@ impl TimeOfDay {
         Self::interpolate_keyframes(keyframes, self.time)
     }
 
-    /// When sun is below horizon (y <= 0), contribution should be zero
     pub fn sun_intensity(&self) -> f32 {
         let dir = self.sun_direction();
         dir.y.max(0.0)
     }
 
+    /// Compute warm tint for post-processing based on time of day.
+    /// Returns (tint_color, strength).
+    pub fn warm_tint(&self) -> (Vec3, f32) {
+        let dawn_strength = Self::bell_curve(self.time, 0.27, 0.04);
+        let dusk_strength = Self::bell_curve(self.time, 0.72, 0.05);
+        let golden_strength= (dawn_strength + dusk_strength).min(1.0);
+
+        let night_strength = if self.time < 0.22 || self.time > 0.82 {
+            let night_t = if self.time < 0.22 {
+                1.0 - self.time / 0.22
+            } else {
+                (self.time - 0.82) / 0.18
+            };
+            night_t.clamp(0.0, 1.0) * 0.3
+        } else {
+            0.0
+        };
+
+        if golden_strength > night_strength {
+            (Vec3::new(1.2, 0.9, 0.7), golden_strength * 0.3)
+        } else {
+            (Vec3::new(0.7, 0.8, 1.2), night_strength)
+        }
+    }
+
+    fn bell_curve(t: f32, center: f32, width: f32) -> f32 {
+        let d = (t - center) / width;
+        (-d * d * 0.5).exp()
+    }
+
     /// Compute orthographic light-space view-projection matrix for shadow mapping.
-    /// Covers the entire world (256x128x256) from the sun's perspective.
     pub fn light_space_matrix(&self) -> Mat4 {
         let sun_dir = self.sun_direction();
 
-        // If sun is below horizon, return identity (no shadows at night)
         if sun_dir.y <= 0.01 {
             return Mat4::IDENTITY;
         }
 
-        // World center
-        let center = Vec3::new(128.0, 64.0, 128.0);
-
-        // Eye far from scene along sun direction
+        let center = Vec3::new(WORLD_SIZE_X * 0.5, WORLD_SIZE_Y * 0.5, WORLD_SIZE_Z * 0.5);
         let eye = center + sun_dir * 500.0;
 
-        // Choose up vector that isn't parallel to sun direction
         let up = if sun_dir.y.abs() > 0.99 {
             Vec3::Z
         } else {
@@ -102,10 +126,8 @@ impl TimeOfDay {
 
         let view = Mat4::look_at_rh(eye, center, up);
 
-        // Transform all 8 world AABB corners into light-view space
-        // to compute a tight-fitting ortho frustum
         let world_min = Vec3::ZERO;
-        let world_max = Vec3::new(256.0, 128.0, 256.0);
+        let world_max = Vec3::new(WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z);
         let corners = [
             Vec3::new(world_min.x, world_min.y, world_min.z),
             Vec3::new(world_max.x, world_min.y, world_min.z),
@@ -134,15 +156,11 @@ impl TimeOfDay {
             max_z = max_z.max(p.z);
         }
 
-        // Add some padding to avoid edge clipping
         let pad = 10.0;
         min_x -= pad;
         max_x += pad;
         min_y -= pad;
         max_y += pad;
-        // For near/far in RH view space, Z is negative (looking down -Z)
-        // min_z is the farthest point, max_z is the nearest
-        // orthographic_rh expects positive near/far distances
         let near = -max_z - pad;
         let far = -min_z + pad;
 

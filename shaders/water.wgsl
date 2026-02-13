@@ -77,7 +77,7 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
 
     let bias = 0.003;
     let biased_depth = current_depth - bias;
-    let texel_size = 1.0 / 2048.0;
+    let texel_size = 1.0 / 4096.0;
     var shadow_sum = 0.0;
     for (var x: i32 = -1; x <= 1; x++) {
         for (var y: i32 = -1; y <= 1; y++) {

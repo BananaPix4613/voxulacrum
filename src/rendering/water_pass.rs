@@ -2,6 +2,7 @@ use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::WaterVertex;
 use crate::simulation::water::StaticWater;
+use crate::world::chunk::VOXEL_SCALE;
 
 pub struct WaterPass {
     pub vertex_buffer: wgpu::Buffer,
@@ -101,8 +102,8 @@ fn generate_water_mesh(water: &StaticWater) -> (Vec<WaterVertex>, Vec<u32>) {
                 if vertex_index_map[vidx] == u32::MAX {
                     vertex_index_map[vidx] = vertices.len() as u32;
                     vertices.push(WaterVertex {
-                        position: [vx as f32, water_y, vz as f32],
-                        flow: [0.0, 0.0],  // Static — no flow
+                        position: [vx as f32 * VOXEL_SCALE, water_y, vz as f32 * VOXEL_SCALE],
+                        flow: [0.0, 0.0],
                         depth: vertex_depths[vidx].clamp(0.0, 10.0),
                     });
                 }

@@ -1,3 +1,6 @@
+const AO_MIN: f32 = 0.5;       // minimum brightness in fully occluded areas (0.0=black, 1.0=no AO)
+const AO_STRENGTH: f32 = 0.4;  // how much AO affects ambient light (0.0=no AO, 1.0=full AO)
+
 struct GlobalUniforms {
     view_proj: mat4x4<f32>,
     light_space_matrix: mat4x4<f32>,
@@ -57,34 +60,24 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 }
 
 fn compute_shadow(world_pos: vec3<f32>) -> f32 {
-    // Transform world position to light space
     let light_space_pos = globals.light_space_matrix * vec4<f32>(world_pos, 1.0);
+        let proj_coords = light_space_pos.xyz / light_space_pos.w;
+        let shadow_uv = vec2<f32>(
+            proj_coords.x * 0.5 + 0.5,
+            proj_coords.y * -0.5 + 0.5,
+        );
+        let current_depth = proj_coords.z;
 
-    // Perspective divide (no-op for ortho, but correct regardless)
-    let proj_coords = light_space_pos.xyz / light_space_pos.w;
+        if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 {
+            return 1.0;
+        }
+        if current_depth > 1.0 || current_depth < 0.0 {
+            return 1.0;
+        }
 
-    // Convert from NDC [-1,1] to texture coordinates [0,1]
-    let shadow_uv = vec2<f32>(
-        proj_coords.x * 0.5 + 0.5,
-        proj_coords.y * -0.5 + 0.5,
-    );
-
-    // Depth in light space (already in [0,1] for orthographic RH)
-    let current_depth = proj_coords.z;
-
-    // Out of shadow map bounds = fully lit
-    if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 {
-        return 1.0;
-    }
-    if current_depth > 1.0 || current_depth < 0.0 {
-        return 1.0;
-    }
-
-    // PCF (Percentage Closer Filtering) — 3x3 kernel for soft shadow edges
-    // Apply small bias to prevent shadow acne
     let bias = 0.002;
     let biased_depth = current_depth - bias;
-    let texel_size = 1.0 / 2048.0;
+    let texel_size = 1.0 / 4096.0;
     var shadow_sum = 0.0;
     for (var x: i32 = -1; x <= 1; x++) {
         for (var y: i32 = -1; y <= 1; y++) {
@@ -106,25 +99,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_dir = normalize(globals.sun_direction);
     let n_dot_l = max(dot(n, sun_dir), 0.0);
 
-    // Sun color is already faded to zero at horizon by the CPU
     let diffuse = globals.sun_color * n_dot_l;
 
     let ambient = globals.ambient_color * 0.4;
-    let ao_factor = mix(0.3, 1.0, in.ao);
+    let ao_factor = mix(AO_MIN, 1.0, in.ao);
 
     // Cloud shadow sampling
-    let cloud_uv = in.world_position.xz * 0.03 + globals.cloud_shadow_offset;
+    let cloud_uv = in.world_position.xz * 0.015 + globals.cloud_shadow_offset;
     let cloud_sample = textureSample(cloud_texture, cloud_sampler, cloud_uv).r;
     let cloud_threshold = smoothstep(
-        globals.cloud_coverage - 0.20,
-        globals.cloud_coverage + 0.20,
+        globals.cloud_coverage - 0.15,
+        globals.cloud_coverage + 0.15,
         cloud_sample
     );
-    let cloud_factor = mix(0.45, 1.0, cloud_threshold);
+    let cloud_factor = mix(0.25, 1.0, cloud_threshold);
 
-    // Shadow mapping — only affects direct sunlight
     let shadow = compute_shadow(in.world_position);
 
-    let lit_color = in.color * (diffuse * shadow * cloud_factor + ambient); // * ao_factor;
+    let lit_color = in.color * (diffuse * shadow * cloud_factor + ambient * ao_factor * AO_STRENGTH + ambient * (1.0 - AO_STRENGTH));
     return vec4<f32>(lit_color, 1.0);
 }

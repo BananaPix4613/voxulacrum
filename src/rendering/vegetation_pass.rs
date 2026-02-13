@@ -2,7 +2,7 @@ use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::{GrassInstance, GrassVertex};
 use crate::world::World;
-use crate::world::chunk::CHUNK_SIZE;
+use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 use crate::world::voxel::MATERIAL_TABLE;
 
 pub struct VegetationPass {
@@ -34,7 +34,6 @@ impl VegetationPass {
         log::info!("Collected {} grass instances", instance_count);
 
         let instance_buffer = if instances.is_empty() {
-            // Create a minimal buffer even if empty to avoid wgpu errors
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("grass_instance_buffer_empty"),
                 size: std::mem::size_of::<GrassInstance>() as u64,
@@ -59,11 +58,10 @@ impl VegetationPass {
     }
 }
 
-/// Single upward triangle — reads better in isometric view than crossed quads.
-/// 3 vertices, 6 indices (front + back face).
+/// Grass blade sized for 0.5m voxels.
 fn create_grass_blade_mesh() -> (Vec<GrassVertex>, Vec<u32>) {
-    let hw = 0.12; // half-width of blade
-    let h = 1.0;   // height of blade
+    let hw = 0.08; // half-width of blade
+    let h = 0.6;   // height of blade
 
     let vertices = vec![
         GrassVertex { position: [-hw, 0.0, 0.0], uv: [0.0, 0.0], _pad: 0.0 },
@@ -88,7 +86,6 @@ fn hash_u32(mut h: u32) -> u32 {
     h
 }
 
-/// Simple deterministic hash for position-based randomness (no rand dependency).
 fn hash_position(x: i32, z: i32) -> u32 {
     let mut h = (x as u32).wrapping_mul(374761393);
     h = h.wrapping_add((z as u32).wrapping_mul(668265263));
@@ -102,7 +99,6 @@ fn hash_position_seed(x: i32, z: i32, seed: u32) -> u32 {
     hash_u32(h)
 }
 
-/// Convert a hash value to a float in [0.0, 1.0).
 fn hash_to_float(h: u32) -> f32 {
     (h & 0x00FF_FFFF) as f32 / 16777216.0
 }
@@ -187,11 +183,11 @@ fn collect_grass_instances(world: &World) -> Vec<GrassInstance> {
                         let h3 = hash_position_seed(wx, wz, blade_idx * 3 + 2);
                         let h4 = hash_position_seed(wx, wz, blade_idx * 3 + 100);
 
-                        let scale = 0.5 + hash_to_float(h1) * 0.7;
+                        let scale = 0.3 + hash_to_float(h1) * 0.5;
                         let rotation = hash_to_float(h2) * std::f32::consts::TAU;
                         let blade_phase = hash_to_float(h4) * std::f32::consts::TAU;
-                        let jitter_x = hash_to_float_signed(h3) * 0.4;
-                        let jitter_z = hash_to_float_signed(hash_u32(h3)) * 0.4;
+                        let jitter_x = hash_to_float_signed(h3) * 0.2;
+                        let jitter_z = hash_to_float_signed(hash_u32(h3)) * 0.2;
 
                         let cv = hash_to_float(hash_u32(h1)) * 0.15 - 0.075;
                         let terrain_color = [
@@ -202,9 +198,9 @@ fn collect_grass_instances(world: &World) -> Vec<GrassInstance> {
 
                         instances.push(GrassInstance {
                             position: [
-                                wx as f32 + 0.5 + jitter_x,
-                                wy as f32 + 1.0,
-                                wz as f32 + 0.5 + jitter_z,
+                                wx as f32 * VOXEL_SCALE + VOXEL_SCALE * 0.5 + jitter_x,
+                                wy as f32 * VOXEL_SCALE + VOXEL_SCALE,
+                                wz as f32 * VOXEL_SCALE + VOXEL_SCALE * 0.5 + jitter_z,
                             ],
                             scale,
                             rotation,
