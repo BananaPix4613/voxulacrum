@@ -1,0 +1,320 @@
+use crate::params::*;
+use std::path::PathBuf;
+
+/// Transient UI state not persisted in EngineParams.
+pub struct UiState {
+    pub params: EngineParams,
+    pub change_detector: ParamChangeDetector,
+    pub presets_dir: PathBuf,
+    pub preset_list: Vec<String>,
+    pub selected_preset: usize,
+    pub save_name: String,
+    pub selected_material: usize,
+    pub selected_keyframe: usize,
+    pub fps: f32,
+    pub frame_time_ms: f32,
+    pub total_vertices: u64,
+    pub total_triangles: u64,
+}
+
+impl UiState {
+    pub fn new(params: EngineParams, presets_dir: PathBuf) -> Self {
+        let change_detector = ParamChangeDetector::new(&params);
+        let preset_list = EngineParams::list_presets(&presets_dir);
+        Self {
+            params,
+            change_detector,
+            presets_dir,
+            preset_list,
+            selected_preset: 0,
+            save_name: "default".into(),
+            selected_material: 1,
+            selected_keyframe: 0,
+            fps: 0.0,
+            frame_time_ms: 0.0,
+            total_vertices: 0,
+            total_triangles: 0,
+        }
+    }
+
+    pub fn refresh_presets(&mut self) {
+        self.preset_list = EngineParams::list_presets(&self.presets_dir);
+    }
+}
+
+fn change_dot(ui: &mut egui::Ui, color: egui::Color32, tooltip: &str) {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
+    response.on_hover_text(tooltip);
+}
+
+fn dot_green(ui: &mut egui::Ui) {
+    change_dot(ui, egui::Color32::from_rgb(80, 200, 80), "Instant (uniform-only)");
+}
+
+fn dot_yellow(ui: &mut egui::Ui) {
+    change_dot(ui, egui::Color32::from_rgb(220, 200, 60), "Requires remeshing");
+}
+
+fn dot_red(ui: &mut egui::Ui) {
+    change_dot(ui, egui::Color32::from_rgb(220, 60, 60), "Requires world regeneration");
+}
+
+pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
+    egui::SidePanel::right("engine_params_panel")
+        .default_width(320.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Engine Parameters");
+                ui.separator();
+                draw_time_control(ui, &mut state.params.time_control);
+                ui.separator();
+                draw_lighting(ui, &mut state.params.lighting, &mut state.selected_keyframe);
+                ui.separator();
+                draw_materials(ui, &mut state.params.materials, &mut state.selected_material);
+                ui.separator();
+                draw_wind(ui, &mut state.params.wind);
+                ui.separator();
+                draw_cloud(ui, &mut state.params.cloud);
+                ui.separator();
+                draw_post_process(ui, &mut state.params.post_process);
+                ui.separator();
+                draw_camera(ui, &mut state.params.camera);
+                ui.separator();
+                draw_water(ui, &mut state.params.water);
+                ui.separator();
+                draw_vegetation(ui, &mut state.params.vegetation);
+                ui.separator();
+                draw_terrain_gen(ui, &mut state.params.terrain_gen);
+                ui.separator();
+                draw_debug(ui, &mut state.params.debug);
+                ui.separator();
+                draw_performance(ui, state);
+                ui.separator();
+                draw_preset_controls(ui, state);
+            });
+        });
+}
+
+fn draw_time_control(ui: &mut egui::Ui, p: &mut TimeControlParams) {
+    ui.collapsing("Time Control", |ui| {
+        ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut p.paused, "Paused"); });
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.label("Speed:");
+            ui.add(egui::Slider::new(&mut p.speed_multiplier, 0.0..=10.0));
+        });
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.label("Day duration (s):");
+            ui.add(egui::DragValue::new(&mut p.day_duration_seconds).speed(1.0).range(10.0..=3600.0));
+        });
+        if p.paused {
+            ui.horizontal(|ui| {
+                dot_green(ui);
+                ui.label("Time of day:");
+                ui.add(egui::Slider::new(&mut p.manual_time, 0.0..=1.0));
+            });
+        }
+    });
+}
+
+fn draw_lighting(ui: &mut egui::Ui, p: &mut LightingParams, selected: &mut usize) {
+    ui.collapsing("Lighting", |ui| {
+        let names: Vec<String> = p.keyframes.iter().enumerate()
+            .map(|(i, kf)| format!("{}: t={:.2}", i, kf.time))
+            .collect();
+
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.label("Keyframe:");
+            egui::ComboBox::from_id_salt("keyframe_select")
+                .selected_text(names.get(*selected).cloned().unwrap_or_default())
+                .show_ui(ui, |ui| {
+                    for (i, name) in names.iter().enumerate() {
+                        ui.selectable_value(selected, i, name);
+                    }
+                });
+        });
+
+        if let Some(kf) = p.keyframes.get_mut(*selected) {
+            ui.horizontal(|ui| { dot_green(ui); ui.label("Time:"); ui.add(egui::Slider::new(&mut kf.time, 0.0..=1.0)); });
+            ui.horizontal(|ui| { dot_green(ui); ui.label("Sun:"); ui.color_edit_button_rgb(&mut kf.sun_color); });
+            ui.horizontal(|ui| { dot_green(ui); ui.label("Ambient:"); ui.color_edit_button_rgb(&mut kf.ambient_color); });
+        }
+    });
+}
+
+fn draw_materials(ui: &mut egui::Ui, p: &mut MaterialParams, selected: &mut usize) {
+    ui.collapsing("Materials", |ui| {
+        let names: Vec<String> = p.entries.iter().map(|e| e.name.clone()).collect();
+
+        egui::ComboBox::from_id_salt("material_select")
+            .selected_text(names.get(*selected).cloned().unwrap_or_default())
+            .show_ui(ui, |ui| {
+                for (i, name) in names.iter().enumerate() {
+                    ui.selectable_value(selected, i, name);
+                }
+            });
+
+        if let Some(mat) = p.entries.get_mut(*selected) {
+            ui.horizontal(|ui| { dot_green(ui); ui.label("Color:"); ui.color_edit_button_rgb(&mut mat.color); });
+            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Sharpness:"); ui.add(egui::Slider::new(&mut mat.sharpness, 0.0..=1.0)); });
+            ui.horizontal(|ui| { dot_green(ui); ui.label("Hardness:"); ui.add(egui::Slider::new(&mut mat.hardness, 0.0..=1.0)); });
+            ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut mat.permeable, "Permeable"); });
+            ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut mat.supports_flora, "Supports flora"); });
+        }
+    });
+}
+
+fn draw_wind(ui: &mut egui::Ui, p: &mut WindParams) {
+    ui.collapsing("Wind", |ui| {
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Base magnitude:"); ui.add(egui::Slider::new(&mut p.base_magnitude, 0.0..=10.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Variation:"); ui.add(egui::Slider::new(&mut p.magnitude_variation, 0.0..=5.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Mag frequency:"); ui.add(egui::Slider::new(&mut p.magnitude_frequency, 0.001..=0.2)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Dir frequency:"); ui.add(egui::Slider::new(&mut p.direction_frequency, 0.001..=0.2)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Gust strength:"); ui.add(egui::Slider::new(&mut p.gust_strength, 0.0..=10.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Gust freq A:"); ui.add(egui::Slider::new(&mut p.gust_frequency_a, 0.1..=5.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Gust freq B:"); ui.add(egui::Slider::new(&mut p.gust_frequency_b, 0.1..=5.0)); });
+    });
+}
+
+fn draw_cloud(ui: &mut egui::Ui, p: &mut CloudParams) {
+    ui.collapsing("Clouds", |ui| {
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Base coverage:"); ui.add(egui::Slider::new(&mut p.base_coverage, 0.0..=1.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Variation:"); ui.add(egui::Slider::new(&mut p.coverage_variation, 0.0..=0.5)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Coverage freq:"); ui.add(egui::Slider::new(&mut p.coverage_frequency, 0.001..=0.2)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Scroll speed:"); ui.add(egui::Slider::new(&mut p.scroll_speed, 0.0..=0.05)); });
+    });
+}
+
+fn draw_post_process(ui: &mut egui::Ui, p: &mut PostProcessParams) {
+    ui.collapsing("Post Processing", |ui| {
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Vignette:"); ui.add(egui::Slider::new(&mut p.vignette_strength, 0.0..=1.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Exposure:"); ui.add(egui::Slider::new(&mut p.exposure, 0.1..=3.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Overcast desat:"); ui.add(egui::Slider::new(&mut p.overcast_desaturation_factor, 0.0..=1.0)); });
+    });
+}
+
+fn draw_camera(ui: &mut egui::Ui, p: &mut CameraParams) {
+    ui.collapsing("Camera", |ui| {
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Pan speed:"); ui.add(egui::Slider::new(&mut p.pan_speed, 1.0..=50.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Scroll speed:"); ui.add(egui::Slider::new(&mut p.scroll_speed, 0.5..=10.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Zoom min:"); ui.add(egui::DragValue::new(&mut p.zoom_min).speed(0.5).range(1.0..=p.zoom_max)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Zoom max:"); ui.add(egui::DragValue::new(&mut p.zoom_max).speed(0.5).range(p.zoom_min..=200.0)); });
+    });
+}
+
+fn draw_water(ui: &mut egui::Ui, p: &mut WaterVisualParams) {
+    ui.collapsing("Water", |ui| {
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Water level:"); ui.add(egui::Slider::new(&mut p.water_level, 0.0..=64.0)); });
+    });
+}
+
+fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams) {
+    ui.collapsing("Vegetation", |ui| {
+        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blade half-width:"); ui.add(egui::Slider::new(&mut p.blade_half_width, 0.01..=0.3)); });
+        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blade height:"); ui.add(egui::Slider::new(&mut p.blade_height, 0.1..=2.0)); });
+        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blades/voxel:"); ui.add(egui::DragValue::new(&mut p.blades_per_voxel).range(1..=10)); });
+    });
+}
+
+fn draw_terrain_gen(ui: &mut egui::Ui, p: &mut TerrainGenParams) {
+    ui.collapsing("Terrain Generation", |ui| {
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Seed:"); ui.add(egui::DragValue::new(&mut p.seed)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Base height:"); ui.add(egui::Slider::new(&mut p.base_height, 0.0..=64.0)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Cliff threshold:"); ui.add(egui::Slider::new(&mut p.cliff_threshold, 0.5..=5.0)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Hill amplitude:"); ui.add(egui::Slider::new(&mut p.hill_amplitude, 0.0..=50.0)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Hill frequency:"); ui.add(egui::Slider::new(&mut p.hill_frequency, 0.0001..=0.05).logarithmic(true)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge amplitude:"); ui.add(egui::Slider::new(&mut p.ridge_amplitude, 0.0..=30.0)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge frequency:"); ui.add(egui::Slider::new(&mut p.ridge_frequency, 0.001..=0.1).logarithmic(true)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Detail amplitude:"); ui.add(egui::Slider::new(&mut p.detail_amplitude, 0.0..=10.0)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Detail frequency:"); ui.add(egui::Slider::new(&mut p.detail_frequency, 0.001..=0.2).logarithmic(true)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Cave amplitude:"); ui.add(egui::Slider::new(&mut p.cave_amplitude, 0.0..=20.0)); });
+        ui.horizontal(|ui| { dot_red(ui); ui.label("Cave frequency:"); ui.add(egui::Slider::new(&mut p.cave_frequency, 0.001..=0.1).logarithmic(true)); });
+        ui.add_space(4.0);
+        ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "Changes require world regeneration.");
+    });
+}
+
+fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
+    ui.collapsing("Debug Overlays", |ui| {
+        ui.checkbox(&mut p.show_wireframe, "Wireframe");
+        ui.checkbox(&mut p.show_chunk_boundaries, "Chunk boundaries");
+        ui.checkbox(&mut p.show_material_ids, "Material IDs");
+        ui.checkbox(&mut p.show_ao_only, "AO only");
+        ui.checkbox(&mut p.show_normals, "Normals");
+        ui.checkbox(&mut p.show_water_debug, "Water debug");
+        ui.checkbox(&mut p.show_performance, "Show performance");
+        ui.checkbox(&mut p.freeze_culling, "Freeze culling");
+    });
+}
+
+fn draw_performance(ui: &mut egui::Ui, state: &UiState) {
+    if !state.params.debug.show_performance { return; }
+    ui.collapsing("Performance", |ui| {
+        ui.label(format!("FPS: {:.0}", state.fps));
+        ui.label(format!("Frame: {:.1}ms", state.frame_time_ms));
+        ui.label(format!("Triangles: {}", state.total_triangles));
+    });
+}
+
+fn draw_preset_controls(ui: &mut egui::Ui, state: &mut UiState) {
+    ui.collapsing("Presets", |ui| {
+        if !state.preset_list.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Preset:");
+                egui::ComboBox::from_id_salt("preset_select")
+                    .selected_text(
+                        state.preset_list.get(state.selected_preset)
+                            .cloned().unwrap_or_else(|| "(none)".into()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (i, name) in state.preset_list.iter().enumerate() {
+                            ui.selectable_value(&mut state.selected_preset, i, name);
+                        }
+                    });
+            });
+
+            if ui.button("Load Selected").clicked() {
+                if let Some(name) = state.preset_list.get(state.selected_preset) {
+                    let path = state.presets_dir.join(format!("{}.json", name));
+                    match EngineParams::load(&path) {
+                        Ok(loaded) => {
+                            state.params = loaded;
+                            log::info!("Loaded preset: {}", name);
+                        }
+                        Err(e) => log::error!("Failed to load preset {}: {}", name, e),
+                    }
+                }
+            }
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            ui.text_edit_singleline(&mut state.save_name);
+        });
+
+        if ui.button("Save Preset").clicked() {
+            let path = state.presets_dir.join(format!("{}.json", state.save_name));
+            match state.params.save(&path) {
+                Ok(()) => {
+                    log::info!("Saved preset: {}", state.save_name);
+                    state.refresh_presets();
+                }
+                Err(e) => log::error!("Failed to save preset: {}", e),
+            }
+        }
+
+        if ui.button("Refresh List").clicked() {
+            state.refresh_presets();
+        }
+
+        if ui.button("Reset to Defaults").clicked() {
+            state.params = EngineParams::default();
+        }
+    });
+}

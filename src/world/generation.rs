@@ -3,6 +3,7 @@ use glam::IVec3;
 
 use super::chunk::{Chunk, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
 use super::voxel::*;
+use crate::params::TerrainGenParams;
 
 /// World dimensions in chunks
 pub const WORLD_CHUNKS_X: usize = 8;
@@ -14,11 +15,6 @@ pub const WORLD_SIZE_X: f32 = WORLD_CHUNKS_X as f32 * CHUNK_WORLD_SIZE;
 pub const WORLD_SIZE_Y: f32 = WORLD_CHUNKS_Y as f32 * CHUNK_WORLD_SIZE;
 pub const WORLD_SIZE_Z: f32 = WORLD_CHUNKS_Z as f32 * CHUNK_WORLD_SIZE;
 
-/// Base terrain height (sea level reference) in world meters
-const BASE_HEIGHT: f32 = 32.0;
-/// Steepness threshold for limestone cliffs
-const CLIFF_THRESHOLD: f32 = 2.0;
-
 pub struct TerrainGenerator {
     height_fbm: FastNoiseLite,
     height_ridged: FastNoiseLite,
@@ -29,7 +25,9 @@ pub struct TerrainGenerator {
 }
 
 impl TerrainGenerator {
-    pub fn new(seed: i32) -> Self {
+    pub fn new(params: &TerrainGenParams) -> Self {
+        let seed = params.seed;
+
         let mut height_fbm = FastNoiseLite::with_seed(seed);
         height_fbm.set_noise_type(Some(NoiseType::OpenSimplex2));
         height_fbm.set_fractal_type(Some(FractalType::FBm));
@@ -68,24 +66,26 @@ impl TerrainGenerator {
         }
     }
 
-    /// Compute terrain height at a world-space XZ position (in meters).
-    pub fn terrain_height(&self, wx: f32, wz: f32) -> f32 {
-        BASE_HEIGHT
-            + 20.0 * self.height_fbm.get_noise_2d(wx * 0.0025, wz * 0.0025)
-            + 8.0 * self.height_ridged.get_noise_2d(wx * 0.01, wz * 0.01)
-            + 2.0 * self.height_detail.get_noise_2d(wx * 0.05, wz * 0.05)
+    pub fn terrain_height(&self, wx: f32, wz: f32, params: &TerrainGenParams) -> f32 {
+        params.base_height
+            + params.hill_amplitude
+            * self.height_fbm.get_noise_2d(wx * params.hill_frequency, wz * params.hill_frequency)
+            + params.ridge_amplitude
+            * self.height_ridged.get_noise_2d(wx * params.ridge_frequency, wz * params.ridge_frequency)
+            + params.detail_amplitude
+            * self.height_detail.get_noise_2d(wx * params.detail_frequency, wz * params.detail_frequency)
     }
 
-    /// Compute cliff steepness via finite differences on the heightmap.
-    fn cliff_steepness(&self, wx: f32, wz: f32) -> f32 {
+    fn cliff_steepness(&self, wx: f32, wz: f32, params: &TerrainGenParams) -> f32 {
         let step = VOXEL_SCALE;
-        let dx = self.terrain_height(wx + step, wz) - self.terrain_height(wx - step, wz);
-        let dz = self.terrain_height(wx, wz + step) - self.terrain_height(wx, wz - step);
+        let dx = self.terrain_height(wx + step, wz, params)
+            - self.terrain_height(wx - step, wz, params);
+        let dz = self.terrain_height(wx, wz + step, params)
+            - self.terrain_height(wx, wz - step, params);
         (dx * dx + dz * dz).sqrt() / (2.0 * step)
     }
 
-    /// Generate all chunks for the world.
-    pub fn generate_world(&self) -> Vec<Chunk> {
+    pub fn generate_world(&self, params: &TerrainGenParams) -> Vec<Chunk> {
         let total = WORLD_CHUNKS_X * WORLD_CHUNKS_Y * WORLD_CHUNKS_Z;
         let mut chunks = Vec::with_capacity(total);
 
@@ -93,7 +93,7 @@ impl TerrainGenerator {
             for cy in 0..WORLD_CHUNKS_Y {
                 for cx in 0..WORLD_CHUNKS_X {
                     let mut chunk = Chunk::new(IVec3::new(cx as i32, cy as i32, cz as i32));
-                    self.generate_chunk(&mut chunk);
+                    self.generate_chunk(&mut chunk, params);
                     chunks.push(chunk);
                 }
             }
@@ -102,8 +102,7 @@ impl TerrainGenerator {
         chunks
     }
 
-    /// Fill a single chunk with terrain data.
-    fn generate_chunk(&self, chunk: &mut Chunk) {
+    fn generate_chunk(&self, chunk: &mut Chunk, params: &TerrainGenParams) {
         let chunk_world_x = chunk.position.x as f32 * CHUNK_WORLD_SIZE;
         let chunk_world_y = chunk.position.y as f32 * CHUNK_WORLD_SIZE;
         let chunk_world_z = chunk.position.z as f32 * CHUNK_WORLD_SIZE;
@@ -116,50 +115,48 @@ impl TerrainGenerator {
                     let wz = chunk_world_z + lz as f32 * VOXEL_SCALE;
 
                     let voxel = chunk.get_voxel_mut(lx, ly, lz);
-                    self.generate_voxel(voxel, wx, wy, wz);
+                    self.generate_voxel(voxel, wx, wy, wz, params);
                 }
             }
         }
     }
 
-    /// Generate a single voxel at the given world position (meters).
-    fn generate_voxel(&self, voxel: &mut Voxel, wx: f32, wy: f32, wz: f32) {
-        let mut height = self.terrain_height(wx, wz);
+    fn generate_voxel(&self, voxel: &mut Voxel, wx: f32, wy: f32, wz: f32, params: &TerrainGenParams) {
+        let height = self.terrain_height(wx, wz, params);
 
         let mut density = height - wy;
-        density += 4.0 * self.cave_noise.get_noise_3d(wx * 0.015, wy * 0.015, wz * 0.015);
+        density += params.cave_amplitude
+            * self.cave_noise.get_noise_3d(
+            wx * params.cave_frequency,
+            wy * params.cave_frequency,
+            wz * params.cave_frequency,
+        );
         voxel.density = density.clamp(-128.0, 127.0) as i8;
 
         if voxel.density > 0 {
             let depth_below_surface = height - wy;
-            let steepness = self.cliff_steepness(wx, wz);
+            let steepness = self.cliff_steepness(wx, wz, params);
             let mat_noise = self.material_noise.get_noise_2d(wx * 0.05, wz * 0.05);
-            
-            voxel.material = if steepness > CLIFF_THRESHOLD && depth_below_surface < 6.0 {
+
+            voxel.material = if steepness > params.cliff_threshold && depth_below_surface < 6.0 {
                 MAT_LIMESTONE
             } else if depth_below_surface < 0.5 {
                 MAT_GRASS_SOIL
             } else if depth_below_surface < 2.0 {
                 MAT_SOIL
             } else if depth_below_surface < 4.0 {
-                if mat_noise > 0.3 {
-                    MAT_CLAY
-                } else {
-                    MAT_SOIL
-                }
+                if mat_noise > 0.3 { MAT_CLAY } else { MAT_SOIL }
             } else {
                 MAT_GRANITE
             };
 
-            // Moisture (depth-based only, no river)
             let depth_moisture = (depth_below_surface * 10.0).min(100.0);
             voxel.moisture = depth_moisture.clamp(0.0, 255.0) as u8;
 
-            // Flora placement (surface grass voxels only)
             if voxel.material == MAT_GRASS_SOIL && depth_below_surface < 1.5 {
                 let flora_val = self.flora_noise.get_noise_2d(wx * 0.08, wz * 0.08);
                 if flora_val > 0.3 {
-                    voxel.flora_id = 1; // Generic grass
+                    voxel.flora_id = 1;
                     let growth_noise = self.flora_noise.get_noise_2d(wx * 0.2, wz * 0.2);
                     voxel.flora_growth =
                         128 + ((growth_noise + 1.0) * 0.5 * 127.0).clamp(0.0, 127.0) as u8;

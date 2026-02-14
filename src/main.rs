@@ -1,18 +1,22 @@
 mod camera;
 mod cloud_shadow;
 mod meshing;
+mod params;
 mod rendering;
 mod simulation;
+mod ui;
 mod world;
 
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{StartCause, WindowEvent};
+use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use camera::IsometricCamera;
 use cloud_shadow::CloudShadowState;
+use params::{EngineParams, ParamChangeKind};
 use rendering::gpu_state::GpuState;
 use rendering::pipelines;
 use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
@@ -22,8 +26,34 @@ use rendering::post_process::PostProcessPass;
 use simulation::water::StaticWater;
 use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
+use ui::panels::UiState;
 
 const SHADOW_MAP_SIZE: u32 = 4096;
+
+struct FrameCounter {
+    last_second: std::time::Instant,
+    frames_this_second: u32,
+    fps: f32,
+}
+
+impl FrameCounter {
+    fn new() -> Self {
+        Self {
+            last_second: std::time::Instant::now(),
+            frames_this_second: 0,
+            fps: 0.0,
+        }
+    }
+
+    fn tick(&mut self) {
+        self.frames_this_second += 1;
+        if self.last_second.elapsed().as_secs_f32() >= 1.0 {
+            self.fps = self.frames_this_second as f32;
+            self.frames_this_second = 0;
+            self.last_second = std::time::Instant::now();
+        }
+    }
+}
 
 struct AppState {
     window: Arc<Window>,
@@ -48,16 +78,24 @@ struct AppState {
     static_water: StaticWater,
     water_pass: WaterPass,
     post_process: PostProcessPass,
+    egui_renderer: ui::EguiRenderer,
+    ui_state: UiState,
+    frame_counter: FrameCounter,
 }
 
 impl AppState {
     fn new(window: Arc<Window>) -> Self {
         let gpu = GpuState::new(window.clone());
 
-        let mut camera = IsometricCamera::new();
+        // Initialize params (try loading saved, fall back to defaults)
+        let presets_dir = std::path::PathBuf::from("params");
+        let initial_params = EngineParams::load(&presets_dir.join("default.json"))
+            .unwrap_or_default();
+
+        let mut camera = IsometricCamera::new(&initial_params.camera);
         camera.resize(gpu.surface_config.width, gpu.surface_config.height);
 
-        // Create shadow map depth texture
+        // Shadow map
         let shadow_depth_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow_depth_texture"),
             size: wgpu::Extent3d {
@@ -69,14 +107,12 @@ impl AppState {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let shadow_depth_view =
             shadow_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Shadow comparison sampler
         let shadow_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow_comparison_sampler"),
             compare: Some(wgpu::CompareFunction::LessEqual),
@@ -94,7 +130,7 @@ impl AppState {
             mapped_at_creation: false,
         });
 
-        let cloud_shadow = CloudShadowState::new(&gpu.device, &gpu.queue);
+        let cloud_shadow = CloudShadowState::new(&gpu.device, &gpu.queue, &initial_params.cloud);
 
         let uniform_bind_group = uniforms::create_bind_group(
             &gpu.device,
@@ -107,14 +143,10 @@ impl AppState {
         );
 
         let terrain_pipeline = pipelines::create_terrain_pipeline(
-            &gpu.device,
-            gpu.surface_format,
-            &bind_group_layout,
+            &gpu.device, gpu.surface_format, &bind_group_layout,
         );
 
-        // Shadow pass resources
-        let shadow_bind_group_layout =
-            uniforms::create_shadow_bind_group_layout(&gpu.device);
+        let shadow_bind_group_layout = uniforms::create_shadow_bind_group_layout(&gpu.device);
         let shadow_uniform_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shadow_uniform_buffer"),
             size: std::mem::size_of::<ShadowUniforms>() as u64,
@@ -122,52 +154,43 @@ impl AppState {
             mapped_at_creation: false,
         });
         let shadow_bind_group = uniforms::create_shadow_bind_group(
-            &gpu.device,
-            &shadow_bind_group_layout,
-            &shadow_uniform_buffer,
+            &gpu.device, &shadow_bind_group_layout, &shadow_uniform_buffer,
         );
         let shadow_pipeline =
             pipelines::create_shadow_pipeline(&gpu.device, &shadow_bind_group_layout);
 
-        // Generate world
+        // Generate world using params
         let gen_start = std::time::Instant::now();
-        let mut world = world::World::generate(54321);
-        let gen_elapsed = gen_start.elapsed();
-        log::info!("World generated in {:.2?}", gen_elapsed);
+        let mut world = world::World::generate(&initial_params.terrain_gen);
+        log::info!("World generated in {:.2?}", gen_start.elapsed());
         world.print_debug_stats();
 
-        // Mesh all chunks
         let mesh_start = std::time::Instant::now();
         world.mesh_all_chunks(&gpu.device);
-        let mesh_elapsed = mesh_start.elapsed();
-        log::info!("World meshed in {:.2?}", mesh_elapsed);
+        log::info!("World meshed in {:.2?}", mesh_start.elapsed());
 
         // Vegetation
         let vegetation_pipeline = pipelines::create_vegetation_pipeline(
-            &gpu.device,
-            gpu.surface_format,
-            &bind_group_layout,
+            &gpu.device, gpu.surface_format, &bind_group_layout,
         );
         let veg_start = std::time::Instant::now();
-        let vegetation_pass = VegetationPass::new(&gpu.device, &world);
+        let vegetation_pass = VegetationPass::new(&gpu.device, &world, &initial_params.vegetation);
         log::info!("Vegetation pass in {:.2?}", veg_start.elapsed());
 
         // Water
         let water_pipeline = pipelines::create_water_pipeline(
-            &gpu.device,
-            gpu.surface_format,
-            &bind_group_layout,
+            &gpu.device, gpu.surface_format, &bind_group_layout,
         );
-        let static_water = StaticWater::new(&world);
+        let static_water = StaticWater::new(&world, &initial_params.water, &initial_params.terrain_gen);
         let water_pass = WaterPass::new(&gpu.device, &static_water);
         log::info!("Water simulation initialized");
 
         // Post-processing
-        let post_process = PostProcessPass::new(
-            &gpu.device,
-            gpu.surface_format,
-            &gpu.scene_view,
-        );
+        let post_process = PostProcessPass::new(&gpu.device, gpu.surface_format, &gpu.scene_view);
+
+        // Egui
+        let egui_renderer = ui::EguiRenderer::new(&gpu.device, gpu.surface_format, &window);
+        let ui_state = UiState::new(initial_params, presets_dir);
 
         Self {
             window,
@@ -192,6 +215,9 @@ impl AppState {
             static_water,
             water_pass,
             post_process,
+            egui_renderer,
+            ui_state,
+            frame_counter: FrameCounter::new(),
         }
     }
 
@@ -201,29 +227,33 @@ impl AppState {
         self.last_frame = now;
         self.elapsed += dt;
 
-        self.camera.update(dt);
-        self.time_of_day.update(dt);
-        self.wind.update(dt);
-        self.cloud_shadow
-            .update(dt, &self.wind.wind_vector, self.elapsed);
+        // Frame stats
+        self.frame_counter.tick();
+        self.ui_state.fps = self.frame_counter.fps;
+        self.ui_state.frame_time_ms = dt * 1000.0;
 
-        // Compute light-space matrix
+        // Apply params to systems
+        self.camera.apply_params(&self.ui_state.params.camera);
+        self.camera.update(dt);
+        self.time_of_day.update(dt, &self.ui_state.params.time_control);
+        self.wind.update(dt, &self.ui_state.params.wind);
+        self.cloud_shadow.update(dt, &self.wind.wind_vector, self.elapsed, &self.ui_state.params.cloud);
+
+        // Light-space matrix
         let light_space = self.time_of_day.light_space_matrix();
 
-        // Update shadow uniforms
+        // Shadow uniforms
         let shadow_uniforms = ShadowUniforms {
             light_space_matrix: light_space.to_cols_array_2d(),
         };
         self.gpu.queue.write_buffer(
-            &self.shadow_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[shadow_uniforms]),
+            &self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniforms]),
         );
 
-        // Update main uniforms
+        // Main uniforms
         let sun_dir = self.time_of_day.sun_direction();
-        let sun_color = self.time_of_day.sun_color();
-        let ambient_color = self.time_of_day.ambient_color();
+        let sun_color = self.time_of_day.sun_color(&self.ui_state.params.lighting);
+        let ambient_color = self.time_of_day.ambient_color(&self.ui_state.params.lighting);
 
         let uniforms = GlobalUniforms {
             view_proj: self.camera.view_projection(),
@@ -241,22 +271,29 @@ impl AppState {
             cloud_coverage: self.cloud_shadow.coverage,
             _pad3: 0.0,
         };
+        self.gpu.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-        self.gpu
-            .queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-        // Update post-process uniforms
+        // Post-process uniforms from params
+        let pp = &self.ui_state.params.post_process;
         let (tint_color, tint_strength) = self.time_of_day.warm_tint();
         let pp_uniforms = PostProcessUniforms {
             warm_tint: tint_color.into(),
             warm_tint_strength: tint_strength,
-            desaturation: self.cloud_shadow.coverage * 0.3,
-            vignette_strength: 0.35,
-            exposure: 1.1,
+            desaturation: self.cloud_shadow.coverage * pp.overcast_desaturation_factor,
+            vignette_strength: pp.vignette_strength,
+            exposure: pp.exposure,
             _pad: 0.0,
         };
         self.post_process.update_uniforms(&self.gpu.queue, pp_uniforms);
+
+        // Performance stats
+        let mut total_tris: u64 = 0;
+        for chunk in &self.world.chunks {
+            if let Some(mesh) = &chunk.mesh {
+                total_tris += mesh.index_count as u64 / 3;
+            }
+        }
+        self.ui_state.total_triangles = total_tris;
 
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -266,26 +303,15 @@ impl AppState {
                 self.post_process.rebuild_bind_group(&self.gpu.device, &self.gpu.scene_view);
                 return;
             }
-            Err(wgpu::SurfaceError::Timeout) => {
-                log::warn!("Surface timeout");
-                return;
-            }
-            Err(e) => {
-                log::error!("Surface error: {:?}", e);
-                return;
-            }
+            Err(wgpu::SurfaceError::Timeout) => { log::warn!("Surface timeout"); return; }
+            Err(e) => { log::error!("Surface error: {:?}", e); return; }
         };
 
-        let surface_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render_encoder"),
-            });
+        let mut encoder = self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("render_encoder"),
+        });
 
         // === Shadow pass ===
         {
@@ -303,24 +329,19 @@ impl AppState {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-
             shadow_pass.set_pipeline(&self.shadow_pipeline);
             shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[]);
-
             for chunk in &self.world.chunks {
                 if let Some(mesh) = &chunk.mesh {
                     shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    shadow_pass.set_index_buffer(
-                        mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                    shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     shadow_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
         }
 
-        // === Main pass (render to scene texture) ===
-        let sky = self.time_of_day.ambient_color();
+        // === Main pass ===
+        let sky = ambient_color;
         let sky_brightness = sky.length() / 0.8_f32.sqrt();
         let sky_r = (0.5 * sky_brightness).clamp(0.02, 0.5) as f64;
         let sky_g = (0.65 * sky_brightness).clamp(0.02, 0.65) as f64;
@@ -334,10 +355,7 @@ impl AppState {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: sky_r,
-                            g: sky_g,
-                            b: sky_b,
-                            a: 1.0,
+                            r: sky_r, g: sky_g, b: sky_b, a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -356,14 +374,10 @@ impl AppState {
 
             pass.set_pipeline(&self.terrain_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-
             for chunk in &self.world.chunks {
                 if let Some(mesh) = &chunk.mesh {
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(
-                        mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                 }
             }
@@ -373,30 +387,20 @@ impl AppState {
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vegetation_pass.grass_vertex_buffer.slice(..));
                 pass.set_vertex_buffer(1, self.vegetation_pass.instance_buffer.slice(..));
-                pass.set_index_buffer(
-                    self.vegetation_pass.grass_index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(
-                    0..self.vegetation_pass.grass_index_count,
-                    0,
-                    0..self.vegetation_pass.instance_count,
-                );
+                pass.set_index_buffer(self.vegetation_pass.grass_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.vegetation_pass.grass_index_count, 0, 0..self.vegetation_pass.instance_count);
             }
 
             if self.water_pass.index_count > 0 {
                 pass.set_pipeline(&self.water_pipeline);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.water_pass.vertex_buffer.slice(..));
-                pass.set_index_buffer(
-                    self.water_pass.index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
+                pass.set_index_buffer(self.water_pass.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.water_pass.index_count, 0, 0..1);
             }
         }
 
-        // === Post-processing pass (scene texture -> surface) ===
+        // === Post-processing pass ===
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("post_process_pass"),
@@ -412,14 +416,36 @@ impl AppState {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-
             pass.set_pipeline(&self.post_process.pipeline);
             pass.set_bind_group(0, &self.post_process.bind_group, &[]);
-            pass.draw(0..3, 0..1); // Fullscreen triangle
+            pass.draw(0..3, 0..1);
         }
+
+        // === Egui pass (composited on top of post-processed surface) ===
+        self.egui_renderer.draw(
+            &mut self.ui_state,
+            &self.gpu.device,
+            &self.gpu.queue,
+            &mut encoder,
+            &surface_view,
+            &self.window,
+        );
 
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+
+        // Detect and log parameter changes
+        let change = self.ui_state.change_detector.detect(&self.ui_state.params);
+        match change {
+            ParamChangeKind::RegenerationRequired => {
+                log::info!("Terrain params changed -- regeneration needed (Phase 6)");
+            }
+            ParamChangeKind::MeshInvalidating => {
+                log::info!("Mesh-invalidating param changed (Phase 3)");
+            }
+            _ => {}
+        }
+        self.ui_state.change_detector.snapshot(&self.ui_state.params);
     }
 }
 
@@ -437,17 +463,13 @@ impl ApplicationHandler for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {}
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
+        if self.state.is_some() { return; }
         let attrs = WindowAttributes::default()
             .with_title("Voxulacrum")
             .with_inner_size(winit::dpi::PhysicalSize::new(1280u32, 720u32));
 
         let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("Failed to create window"),
+            event_loop.create_window(attrs).expect("Failed to create window"),
         );
 
         self.state = Some(AppState::new(window));
@@ -460,9 +482,17 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = &mut self.state else {
-            return;
-        };
+        let Some(state) = &mut self.state else { return; };
+
+        // F1 toggle -- always handled
+        if let WindowEvent::KeyboardInput { ref event, .. } = event {
+            if event.state == ElementState::Pressed {
+                if let PhysicalKey::Code(KeyCode::F1) = event.physical_key {
+                    state.egui_renderer.toggle_visibility();
+                    return;
+                }
+            }
+        }
 
         match event {
             WindowEvent::CloseRequested => {
@@ -473,18 +503,25 @@ impl ApplicationHandler for App {
                 state.camera.resize(new_size.width, new_size.height);
                 state.post_process.rebuild_bind_group(&state.gpu.device, &state.gpu.scene_view);
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                state
-                    .camera
-                    .process_keyboard(event.physical_key, event.state);
+            ref e @ WindowEvent::KeyboardInput { ref event, .. } => {
+                let consumed = state.egui_renderer.handle_event(&state.window, e);
+                if !consumed {
+                    state.camera.process_keyboard(event.physical_key, event.state);
+                }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                state.camera.process_scroll(&delta);
+            ref e @ WindowEvent::MouseWheel { ref delta, .. } => {
+                let consumed = state.egui_renderer.handle_event(&state.window, e);
+                if !consumed {
+                    state.camera.process_scroll(delta, &state.ui_state.params.camera);
+                }
             }
             WindowEvent::RedrawRequested => {
                 state.render();
             }
-            _ => {}
+            ref other => {
+                // Forward cursor moves, etc. to egui
+                state.egui_renderer.handle_event(&state.window, other);
+            }
         }
     }
 

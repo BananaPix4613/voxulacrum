@@ -1,6 +1,7 @@
 use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::{GrassInstance, GrassVertex};
+use crate::params::VegetationParams;
 use crate::world::World;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 use crate::world::voxel::MATERIAL_TABLE;
@@ -14,8 +15,8 @@ pub struct VegetationPass {
 }
 
 impl VegetationPass {
-    pub fn new(device: &wgpu::Device, world: &World) -> Self {
-        let (vertices, indices) = create_grass_blade_mesh();
+    pub fn new(device: &wgpu::Device, world: &World, params: &VegetationParams) -> Self {
+        let (vertices, indices) = create_grass_blade_mesh(params);
 
         let grass_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("grass_blade_vertex_buffer"),
@@ -29,7 +30,7 @@ impl VegetationPass {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let instances = collect_grass_instances(world);
+        let instances = collect_grass_instances(world, params);
         let instance_count = instances.len() as u32;
         log::info!("Collected {} grass instances", instance_count);
 
@@ -59,9 +60,9 @@ impl VegetationPass {
 }
 
 /// Grass blade sized for 0.5m voxels.
-fn create_grass_blade_mesh() -> (Vec<GrassVertex>, Vec<u32>) {
-    let hw = 0.08; // half-width of blade
-    let h = 0.6;   // height of blade
+fn create_grass_blade_mesh(params: &VegetationParams) -> (Vec<GrassVertex>, Vec<u32>) {
+    let hw = params.blade_half_width;
+    let h = params.blade_height;
 
     let vertices = vec![
         GrassVertex { position: [-hw, 0.0, 0.0], uv: [0.0, 0.0], _pad: 0.0 },
@@ -152,7 +153,7 @@ fn terrain_slope(world: &World, wx: i32, wy: i32, wz: i32) -> f32 {
 const BLADES_PER_VOXEL: u32 = 3;
 
 /// Scan the world for flora voxels and generate grass instance data.
-fn collect_grass_instances(world: &World) -> Vec<GrassInstance> {
+fn collect_grass_instances(world: &World, params: &VegetationParams) -> Vec<GrassInstance> {
     let mut instances = Vec::new();
     let grass_color = MATERIAL_TABLE[6].color; // MAT_GRASS_SOIL
 
@@ -177,7 +178,7 @@ fn collect_grass_instances(world: &World) -> Vec<GrassInstance> {
                     // Skip steep slopes
                     if terrain_slope(world, wx, wy, wz) > 1.5 { continue; }
 
-                    for blade_idx in 0..BLADES_PER_VOXEL {
+                    for blade_idx in 0..params.blades_per_voxel {
                         let h1 = hash_position_seed(wx, wz, blade_idx * 3);
                         let h2 = hash_position_seed(wx, wz, blade_idx * 3 + 1);
                         let h3 = hash_position_seed(wx, wz, blade_idx * 3 + 2);

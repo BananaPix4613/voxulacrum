@@ -17,10 +17,12 @@ pub struct World {
     pub generator: TerrainGenerator,
 }
 
+use crate::params::TerrainGenParams;
+
 impl World {
-    pub fn generate(seed: i32) -> Self {
-        let generator = TerrainGenerator::new(seed);
-        let chunks = generator.generate_world();
+    pub fn generate(params: &TerrainGenParams) -> Self {
+        let generator = TerrainGenerator::new(params);
+        let chunks = generator.generate_world(params);
 
         Self {
             chunks,

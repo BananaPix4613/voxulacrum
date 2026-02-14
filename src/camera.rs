@@ -2,6 +2,8 @@ use glam::{Mat4, Vec3};
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::params::CameraParams;
+
 pub struct IsometricCamera {
     pub target: Vec3,
     pub zoom: f32,
@@ -15,18 +17,23 @@ pub struct IsometricCamera {
 }
 
 impl IsometricCamera {
-    pub fn new() -> Self {
+    pub fn new(params: &CameraParams) -> Self {
         Self {
             target: Vec3::new(64.0, 32.0, 64.0),
-            zoom: 40.0,
+            zoom: params.initial_zoom,
             rotation: std::f32::consts::FRAC_PI_4,
             aspect: 1.0,
-            pan_speed: 12.0,
+            pan_speed: params.pan_speed,
             forward_pressed: false,
             backward_pressed: false,
             left_pressed: false,
             right_pressed: false,
         }
+    }
+
+    /// Sync mutable fields with current params each frame.
+    pub fn apply_params(&mut self, params: &CameraParams) {
+        self.pan_speed = params.pan_speed;
     }
 
     pub fn view_matrix(&self) -> Mat4 {
@@ -43,14 +50,7 @@ impl IsometricCamera {
     pub fn projection_matrix(&self) -> Mat4 {
         let half_height = self.zoom;
         let half_width = half_height * self.aspect;
-        Mat4::orthographic_rh(
-            -half_width,
-            half_width,
-            -half_height,
-            half_height,
-            0.1,
-            300.0,
-        )
+        Mat4::orthographic_rh(-half_width, half_width, -half_height, half_height, 0.1, 300.0)
     }
 
     pub fn view_projection(&self) -> [[f32; 4]; 4] {
@@ -70,12 +70,12 @@ impl IsometricCamera {
         }
     }
 
-    pub fn process_scroll(&mut self, delta: &MouseScrollDelta) {
+    pub fn process_scroll(&mut self, delta: &MouseScrollDelta, params: &CameraParams) {
         let scroll = match delta {
             MouseScrollDelta::LineDelta(_, y) => *y,
             MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1,
         };
-        self.zoom = (self.zoom - scroll * 2.0).clamp(5.0, 60.0);
+        self.zoom = (self.zoom - scroll * params.scroll_speed).clamp(params.zoom_min, params.zoom_max);
     }
 
     pub fn update(&mut self, dt: f32) {
@@ -83,18 +83,10 @@ impl IsometricCamera {
         let right_dir = Vec3::new(self.rotation.sin(), 0.0, -self.rotation.cos());
 
         let mut move_dir = Vec3::ZERO;
-        if self.forward_pressed {
-            move_dir += forward_dir;
-        }
-        if self.backward_pressed {
-            move_dir -= forward_dir;
-        }
-        if self.left_pressed {
-            move_dir -= right_dir;
-        }
-        if self.right_pressed {
-            move_dir += right_dir;
-        }
+        if self.forward_pressed { move_dir += forward_dir; }
+        if self.backward_pressed { move_dir -= forward_dir; }
+        if self.left_pressed { move_dir -= right_dir; }
+        if self.right_pressed { move_dir += right_dir; }
 
         if move_dir.length_squared() > 0.0 {
             move_dir = move_dir.normalize();
