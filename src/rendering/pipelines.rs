@@ -1,4 +1,6 @@
 use bytemuck::{Pod, Zeroable};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -44,8 +46,8 @@ pub fn create_terrain_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     global_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
 ) -> wgpu::RenderPipeline {
-    let shader_source = include_str!("../../shaders/terrain.wgsl");
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("terrain_shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -105,8 +107,8 @@ pub fn create_terrain_pipeline(
 pub fn create_shadow_pipeline(
     device: &wgpu::Device,
     shadow_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
 ) -> wgpu::RenderPipeline {
-    let shader_source = include_str!("../../shaders/shadow.wgsl");
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("shadow_shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -181,8 +183,8 @@ pub fn create_vegetation_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     global_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
 ) -> wgpu::RenderPipeline {
-    let shader_source = include_str!("../../shaders/vegetation.wgsl");
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("vegetation_shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -330,8 +332,8 @@ pub fn create_water_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     global_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
 ) -> wgpu::RenderPipeline {
-    let shader_source = include_str!("../../shaders/water.wgsl");
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("water_shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -392,8 +394,8 @@ pub fn create_post_process_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     pp_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
 ) -> wgpu::RenderPipeline {
-    let shader_source = include_str!("../../shaders/post_process.wgsl");
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("post_process_shader"),
         source: wgpu::ShaderSource::Wgsl(shader_source.into()),
@@ -442,4 +444,209 @@ pub fn create_post_process_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+// =============================================================================
+// Pipeline Registry for hot-reloading
+// =============================================================================
+
+/// Identifies which pipeline a shader file maps to.
+#[derive(Clone, Copy, Hash, Eq, PartialEq, Debug)]
+pub enum PipelineId {
+    Terrain,
+    Shadow,
+    Vegetation,
+    Water,
+    PostProcess,
+}
+
+/// Resources needed to rebuild pipelines (bind group layouts, surface format).
+pub struct PipelineResources {
+    pub surface_format: wgpu::TextureFormat,
+    pub global_bind_group_layout: wgpu::BindGroupLayout,
+    pub shadow_bind_group_layout: wgpu::BindGroupLayout,
+    pub post_process_bind_group_layout: wgpu::BindGroupLayout,
+}
+
+/// Entry in the pipeline registry tracking one shader->pipeline mapping.
+struct PipelineEntry {
+    pipeline_id: PipelineId,
+    last_good_source: String,
+}
+
+/// Registry mapping shader filenames to the pipelines they affect.
+/// Also holds the live pipeline handles.
+pub struct PipelineRegistry {
+    entries: HashMap<String, PipelineEntry>,
+    pub terrain_pipeline: wgpu::RenderPipeline,
+    pub shadow_pipeline: wgpu::RenderPipeline,
+    pub vegetation_pipeline: wgpu::RenderPipeline,
+    pub water_pipeline: wgpu::RenderPipeline,
+}
+
+/// Result of a hot-reload attempt for a single shader.
+pub struct ReloadResult {
+    pub filename: String,
+    pub success: bool,
+    pub message: String,
+}
+
+impl PipelineRegistry {
+    /// Create the registry, loading all shaders from disk at runtime.
+    pub fn new(
+        device: &wgpu::Device,
+        resources: &PipelineResources,
+        shader_dir: &Path,
+    ) -> Self {
+        let terrain_source = read_shader(shader_dir, "terrain.wgsl");
+        let shadow_source = read_shader(shader_dir, "shadow.wgsl");
+        let vegetation_source = read_shader(shader_dir, "vegetation.wgsl");
+        let water_source = read_shader(shader_dir, "water.wgsl");
+
+        let terrain_pipeline = create_terrain_pipeline(
+            device, resources.surface_format, &resources.global_bind_group_layout,
+            &terrain_source,
+        );
+        let shadow_pipeline = create_shadow_pipeline(
+            device, &resources.shadow_bind_group_layout,
+            &shadow_source,
+        );
+        let vegetation_pipeline = create_vegetation_pipeline(
+            device, resources.surface_format, &resources.global_bind_group_layout,
+            &vegetation_source,
+        );
+        let water_pipeline = create_water_pipeline(
+            device, resources.surface_format, &resources.global_bind_group_layout,
+            &water_source,
+        );
+
+        let mut entries = HashMap::new();
+        entries.insert("terrain.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::Terrain,
+            last_good_source: terrain_source,
+        });
+        entries.insert("shadow.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::Shadow,
+            last_good_source: shadow_source,
+        });
+        entries.insert("vegetation.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::Vegetation,
+            last_good_source: vegetation_source,
+        });
+        entries.insert("water.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::Water,
+            last_good_source: water_source,
+        });
+
+        Self {
+            entries,
+            terrain_pipeline,
+            shadow_pipeline,
+            vegetation_pipeline,
+            water_pipeline,
+        }
+    }
+
+    /// Attempt to hot-reload a shader. Returns a result describing success or failure.
+    /// On failure, the old pipeline is retained.
+    pub fn try_reload(
+        &mut self,
+        device: &wgpu::Device,
+        resources: &PipelineResources,
+        shader_path: &Path,
+    ) -> Option<ReloadResult> {
+        let filename = shader_path.file_name()?.to_str()?.to_string();
+
+        let entry = self.entries.get(&filename)?;
+        let pipeline_id = entry.pipeline_id;
+
+        // Read new source
+        let source = match std::fs::read_to_string(shader_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return Some(ReloadResult {
+                    filename,
+                    success: false,
+                    message: format!("Failed to read file: {}", e),
+                });
+            }
+        };
+
+        // Use error scopes to catch shader compilation errors
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        let result = match pipeline_id {
+            PipelineId::Terrain => {
+                let p = create_terrain_pipeline(
+                    device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source,
+                );
+                Some(p)
+            }
+            PipelineId::Shadow => {
+                let p = create_shadow_pipeline(
+                    device, &resources.shadow_bind_group_layout, &source,
+                );
+                Some(p)
+            }
+            PipelineId::Vegetation => {
+                let p = create_vegetation_pipeline(
+                    device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source,
+                );
+                Some(p)
+            }
+            PipelineId::Water => {
+                let p = create_water_pipeline(
+                    device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source,
+                );
+                Some(p)
+            }
+            PipelineId::PostProcess => None, // Handled separately via PostProcessPass
+        };
+
+        // Check for compilation errors
+        let error = pollster::block_on(device.pop_error_scope());
+
+        if let Some(err) = error {
+            return Some(ReloadResult {
+                filename,
+                success: false,
+                message: format!("Shader compile error: {}", err),
+            });
+        }
+
+        if let Some(new_pipeline) = result {
+            // Swap in the new pipeline
+            match pipeline_id {
+                PipelineId::Terrain => self.terrain_pipeline = new_pipeline,
+                PipelineId::Shadow => self.shadow_pipeline = new_pipeline,
+                PipelineId::Vegetation => self.vegetation_pipeline = new_pipeline,
+                PipelineId::Water => self.water_pipeline = new_pipeline,
+                PipelineId::PostProcess => {}
+            }
+
+            // Update the last good source
+            if let Some(entry) = self.entries.get_mut(&filename) {
+                entry.last_good_source = source;
+            }
+
+            Some(ReloadResult {
+                filename,
+                success: true,
+                message: "Reloaded successfully".to_string(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Read a shader file from the shader directory. Panics if the file cannot be read
+/// (only used during initial startup where failure is unrecoverable).
+fn read_shader(shader_dir: &Path, filename: &str) -> String {
+    let path = shader_dir.join(filename);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Failed to read shader {}: {}", path.display(), e))
 }

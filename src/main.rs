@@ -3,10 +3,12 @@ mod cloud_shadow;
 mod meshing;
 mod params;
 mod rendering;
+mod shader_reload;
 mod simulation;
 mod ui;
 mod world;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
@@ -18,11 +20,12 @@ use camera::IsometricCamera;
 use cloud_shadow::CloudShadowState;
 use params::{EngineParams, ParamChangeKind};
 use rendering::gpu_state::GpuState;
-use rendering::pipelines;
+use rendering::pipelines::{self, PipelineRegistry, PipelineResources};
 use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
 use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
 use rendering::post_process::PostProcessPass;
+use shader_reload::ShaderWatcher;
 use simulation::water::StaticWater;
 use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
@@ -59,8 +62,8 @@ struct AppState {
     window: Arc<Window>,
     gpu: GpuState,
     camera: IsometricCamera,
-    terrain_pipeline: wgpu::RenderPipeline,
-    shadow_pipeline: wgpu::RenderPipeline,
+    pipeline_registry: PipelineRegistry,
+    pipeline_resources: PipelineResources,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     shadow_uniform_buffer: wgpu::Buffer,
@@ -72,15 +75,15 @@ struct AppState {
     wind: WindState,
     cloud_shadow: CloudShadowState,
     elapsed: f32,
-    vegetation_pipeline: wgpu::RenderPipeline,
     vegetation_pass: VegetationPass,
-    water_pipeline: wgpu::RenderPipeline,
     static_water: StaticWater,
     water_pass: WaterPass,
     post_process: PostProcessPass,
     egui_renderer: ui::EguiRenderer,
     ui_state: UiState,
     frame_counter: FrameCounter,
+    shader_watcher: ShaderWatcher,
+    shader_dir: PathBuf,
 }
 
 impl AppState {
@@ -88,7 +91,7 @@ impl AppState {
         let gpu = GpuState::new(window.clone());
 
         // Initialize params (try loading saved, fall back to defaults)
-        let presets_dir = std::path::PathBuf::from("params");
+        let presets_dir = PathBuf::from("params");
         let initial_params = EngineParams::load(&presets_dir.join("default.json"))
             .unwrap_or_default();
 
@@ -121,7 +124,7 @@ impl AppState {
             ..Default::default()
         });
 
-        let bind_group_layout = uniforms::create_bind_group_layout(&gpu.device);
+        let global_bind_group_layout = uniforms::create_bind_group_layout(&gpu.device);
 
         let uniform_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("global_uniform_buffer"),
@@ -134,16 +137,12 @@ impl AppState {
 
         let uniform_bind_group = uniforms::create_bind_group(
             &gpu.device,
-            &bind_group_layout,
+            &global_bind_group_layout,
             &uniform_buffer,
             &cloud_shadow.texture_view,
             &cloud_shadow.sampler,
             &shadow_depth_view,
             &shadow_sampler,
-        );
-
-        let terrain_pipeline = pipelines::create_terrain_pipeline(
-            &gpu.device, gpu.surface_format, &bind_group_layout,
         );
 
         let shadow_bind_group_layout = uniforms::create_shadow_bind_group_layout(&gpu.device);
@@ -156,8 +155,28 @@ impl AppState {
         let shadow_bind_group = uniforms::create_shadow_bind_group(
             &gpu.device, &shadow_bind_group_layout, &shadow_uniform_buffer,
         );
-        let shadow_pipeline =
-            pipelines::create_shadow_pipeline(&gpu.device, &shadow_bind_group_layout);
+
+        // Shader directory and watcher
+        let shader_dir = PathBuf::from("shaders");
+        let shader_watcher = ShaderWatcher::new(&shader_dir);
+
+        // Pipeline resources for hot-reloading
+        let post_process_bind_group_layout =
+            uniforms::create_post_process_bind_group_layout(&gpu.device);
+
+        let pipeline_resources = PipelineResources {
+            surface_format: gpu.surface_format,
+            global_bind_group_layout,
+            shadow_bind_group_layout,
+            post_process_bind_group_layout,
+        };
+
+        // Pipeline registry loads shaders from disk
+        let pipeline_registry = PipelineRegistry::new(
+            &gpu.device,
+            &pipeline_resources,
+            &shader_dir,
+        );
 
         // Generate world using params
         let gen_start = std::time::Instant::now();
@@ -170,23 +189,21 @@ impl AppState {
         log::info!("World meshed in {:.2?}", mesh_start.elapsed());
 
         // Vegetation
-        let vegetation_pipeline = pipelines::create_vegetation_pipeline(
-            &gpu.device, gpu.surface_format, &bind_group_layout,
-        );
         let veg_start = std::time::Instant::now();
         let vegetation_pass = VegetationPass::new(&gpu.device, &world, &initial_params.vegetation);
         log::info!("Vegetation pass in {:.2?}", veg_start.elapsed());
 
         // Water
-        let water_pipeline = pipelines::create_water_pipeline(
-            &gpu.device, gpu.surface_format, &bind_group_layout,
-        );
         let static_water = StaticWater::new(&world, &initial_params.water, &initial_params.terrain_gen);
         let water_pass = WaterPass::new(&gpu.device, &static_water);
         log::info!("Water simulation initialized");
 
-        // Post-processing
-        let post_process = PostProcessPass::new(&gpu.device, gpu.surface_format, &gpu.scene_view);
+        // Post-processing (load shader from disk)
+        let pp_shader_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
+            .expect("Failed to read post_process.wgsl");
+        let post_process = PostProcessPass::new(
+            &gpu.device, gpu.surface_format, &gpu.scene_view, &pp_shader_source,
+        );
 
         // Egui
         let egui_renderer = ui::EguiRenderer::new(&gpu.device, gpu.surface_format, &window);
@@ -196,8 +213,8 @@ impl AppState {
             window,
             gpu,
             camera,
-            terrain_pipeline,
-            shadow_pipeline,
+            pipeline_registry,
+            pipeline_resources,
             uniform_buffer,
             uniform_bind_group,
             shadow_uniform_buffer,
@@ -209,15 +226,78 @@ impl AppState {
             wind: WindState::new(),
             cloud_shadow,
             elapsed: 0.0,
-            vegetation_pipeline,
             vegetation_pass,
-            water_pipeline,
             static_water,
             water_pass,
             post_process,
             egui_renderer,
             ui_state,
             frame_counter: FrameCounter::new(),
+            shader_watcher,
+            shader_dir,
+        }
+    }
+
+    fn check_shader_hot_reload(&mut self) {
+        let changed = self.shader_watcher.poll_changes();
+        for path in changed {
+            let filename = match path.file_name().and_then(|f| f.to_str()) {
+                Some(f) => f.to_string(),
+                None => continue,
+            };
+
+            // Handle post_process.wgsl separately since its pipeline lives in PostProcessPass
+            if filename == "post_process.wgsl" {
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        match self.post_process.try_reload_shader(
+                            &self.gpu.device,
+                            self.gpu.surface_format,
+                            &source,
+                        ) {
+                            Ok(()) => {
+                                log::info!("Reloaded post_process.wgsl");
+                                self.ui_state.push_shader_log(
+                                    "post_process.wgsl reloaded".to_string(),
+                                    false,
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!("post_process.wgsl compile error: {}", e);
+                                self.ui_state.push_shader_log(
+                                    format!("post_process.wgsl: {}", e),
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to read post_process.wgsl: {}", e);
+                        self.ui_state.push_shader_log(
+                            format!("post_process.wgsl read error: {}", e),
+                            true,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // All other shaders go through the pipeline registry
+            if let Some(result) = self.pipeline_registry.try_reload(
+                &self.gpu.device,
+                &self.pipeline_resources,
+                &path,
+            ) {
+                if result.success {
+                    log::info!("Reloaded {}", result.filename);
+                } else {
+                    log::warn!("{}: {}", result.filename, result.message);
+                }
+                self.ui_state.push_shader_log(
+                    format!("{}: {}", result.filename, result.message),
+                    !result.success,
+                );
+            }
         }
     }
 
@@ -231,6 +311,9 @@ impl AppState {
         self.frame_counter.tick();
         self.ui_state.fps = self.frame_counter.fps;
         self.ui_state.frame_time_ms = dt * 1000.0;
+
+        // Check for shader hot-reloads before rendering
+        self.check_shader_hot_reload();
 
         // Apply params to systems
         self.camera.apply_params(&self.ui_state.params.camera);
@@ -329,7 +412,7 @@ impl AppState {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_pipeline(&self.pipeline_registry.shadow_pipeline);
             shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[]);
             for chunk in &self.world.chunks {
                 if let Some(mesh) = &chunk.mesh {
@@ -372,7 +455,7 @@ impl AppState {
                 occlusion_query_set: None,
             });
 
-            pass.set_pipeline(&self.terrain_pipeline);
+            pass.set_pipeline(&self.pipeline_registry.terrain_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             for chunk in &self.world.chunks {
                 if let Some(mesh) = &chunk.mesh {
@@ -383,7 +466,7 @@ impl AppState {
             }
 
             if self.vegetation_pass.instance_count > 0 {
-                pass.set_pipeline(&self.vegetation_pipeline);
+                pass.set_pipeline(&self.pipeline_registry.vegetation_pipeline);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vegetation_pass.grass_vertex_buffer.slice(..));
                 pass.set_vertex_buffer(1, self.vegetation_pass.instance_buffer.slice(..));
@@ -392,7 +475,7 @@ impl AppState {
             }
 
             if self.water_pass.index_count > 0 {
-                pass.set_pipeline(&self.water_pipeline);
+                pass.set_pipeline(&self.pipeline_registry.water_pipeline);
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.water_pass.vertex_buffer.slice(..));
                 pass.set_index_buffer(self.water_pass.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -421,7 +504,7 @@ impl AppState {
             pass.draw(0..3, 0..1);
         }
 
-        // === Egui pass (composited on top of post-processed surface) ===
+        // === Egui pass ===
         self.egui_renderer.draw(
             &mut self.ui_state,
             &self.gpu.device,

@@ -1,5 +1,12 @@
 use crate::params::*;
 use std::path::PathBuf;
+use wgpu::naga::back::spv::Capability::Shader;
+
+pub struct ShaderLogEntry {
+    pub message: String,
+    pub is_error: bool,
+    pub timestamp: std::time::Instant,
+}
 
 /// Transient UI state not persisted in EngineParams.
 pub struct UiState {
@@ -15,6 +22,7 @@ pub struct UiState {
     pub frame_time_ms: f32,
     pub total_vertices: u64,
     pub total_triangles: u64,
+    pub shader_log: Vec<ShaderLogEntry>,
 }
 
 impl UiState {
@@ -34,11 +42,24 @@ impl UiState {
             frame_time_ms: 0.0,
             total_vertices: 0,
             total_triangles: 0,
+            shader_log: Vec::new(),
         }
     }
 
     pub fn refresh_presets(&mut self) {
         self.preset_list = EngineParams::list_presets(&self.presets_dir);
+    }
+    
+    pub fn push_shader_log(&mut self, message: String, is_error: bool) {
+        self.shader_log.push(ShaderLogEntry {
+            message,
+            is_error,
+            timestamp: std::time::Instant::now(),
+        });
+        // Keep last 50 entries
+        if self.shader_log.len() > 50 {
+            self.shader_log.remove(0);
+        }
     }
 }
 
@@ -90,6 +111,8 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 draw_terrain_gen(ui, &mut state.params.terrain_gen);
                 ui.separator();
                 draw_debug(ui, &mut state.params.debug);
+                ui.separator();
+                draw_shader_log(ui, &mut state.shader_log);
                 ui.separator();
                 draw_performance(ui, state);
                 ui.separator();
@@ -249,6 +272,48 @@ fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
         ui.checkbox(&mut p.show_water_debug, "Water debug");
         ui.checkbox(&mut p.show_performance, "Show performance");
         ui.checkbox(&mut p.freeze_culling, "Freeze culling");
+    });
+}
+
+fn draw_shader_log(ui: &mut egui::Ui, log: &mut Vec<ShaderLogEntry>) {
+    ui.collapsing("Shader Log", |ui| {
+        if log.is_empty() {
+            ui.label("No shader reload events.");
+            return;
+        }
+        
+        if ui.button("Clear Log").clicked() {
+            log.clear();
+            return;
+        }
+        
+        egui::ScrollArea::vertical()
+            .max_height(200.0)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for entry in log.iter() {
+                    let elapsed = entry.timestamp.elapsed().as_secs();
+                    let time_str = if elapsed < 60 {
+                        format!("{}s ago", elapsed)
+                    } else {
+                        format!("{}m ago", elapsed / 60)
+                    };
+                    
+                    let color = if entry.is_error {
+                        egui::Color32::from_rgb(255, 100, 100)
+                    } else {
+                        egui::Color32::from_rgb(100, 255, 100)
+                    };
+                    
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(150, 150, 150),
+                            &time_str,
+                        );
+                        ui.colored_label(color, &entry.message);
+                    });
+                }
+            });
     });
 }
 
