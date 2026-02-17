@@ -1,3 +1,4 @@
+pub mod frustum;
 pub mod gpu_state;
 pub mod pipelines;
 pub mod uniforms;

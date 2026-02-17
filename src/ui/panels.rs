@@ -23,6 +23,8 @@ pub struct UiState {
     pub frame_time_ms: f32,
     pub total_vertices: u64,
     pub total_triangles: u64,
+    pub chunks_visible: u32,
+    pub chunks_total: u32,
     pub shader_log: Vec<ShaderLogEntry>,
     pub meshing_stats: MeshingStats,
 }
@@ -44,6 +46,8 @@ impl UiState {
             frame_time_ms: 0.0,
             total_vertices: 0,
             total_triangles: 0,
+            chunks_visible: 0,
+            chunks_total: 0,
             shader_log: Vec::new(),
             meshing_stats: MeshingStats::default(),
         }
@@ -351,6 +355,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &UiState) {
         ui.label(format!("FPS: {:.0}", state.fps));
         ui.label(format!("Frame: {:.1}ms", state.frame_time_ms));
         ui.label(format!("Triangles: {}", state.total_triangles));
+        ui.label(format!("Chunks: {}/{}", state.chunks_visible, state.chunks_total));
     });
 }
 

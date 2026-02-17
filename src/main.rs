@@ -24,6 +24,7 @@ use rendering::pipelines::{self, PipelineRegistry, PipelineResources};
 use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
 use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
+use rendering::frustum::Frustum;
 use rendering::post_process::PostProcessPass;
 use shader_reload::ShaderWatcher;
 use simulation::water::StaticWater;
@@ -88,6 +89,7 @@ struct AppState {
     shader_watcher: ShaderWatcher,
     shader_dir: PathBuf,
     meshing_pipeline: MeshingPipeline,
+    frustum: Frustum,
 }
 
 impl AppState {
@@ -215,6 +217,9 @@ impl AppState {
         let egui_renderer = ui::EguiRenderer::new(&gpu.device, gpu.surface_format, &window);
         let ui_state = UiState::new(initial_params, presets_dir);
 
+        let vp = camera.projection_matrix() * camera.view_matrix();
+        let frustum = Frustum::from_view_projection(vp);
+
         Self {
             window,
             gpu,
@@ -242,6 +247,7 @@ impl AppState {
             shader_watcher,
             shader_dir,
             meshing_pipeline,
+            frustum,
         }
     }
 
@@ -351,6 +357,12 @@ impl AppState {
         self.wind.update(dt, &self.ui_state.params.wind);
         self.cloud_shadow.update(dt, &self.wind.wind_vector, self.elapsed, &self.ui_state.params.cloud);
 
+        // Update frustum for culling (frozen when freeze_culling is enabled)
+        if !self.ui_state.params.debug.freeze_culling {
+            let vp = self.camera.projection_matrix() * self.camera.view_matrix();
+            self.frustum = Frustum::from_view_projection(vp);
+        }
+
         // Light-space matrix
         let light_space = self.time_of_day.light_space_matrix();
 
@@ -398,14 +410,22 @@ impl AppState {
         };
         self.post_process.update_uniforms(&self.gpu.queue, pp_uniforms);
 
-        // Performance stats
+        // Performance stats (count only visible chunks)
         let mut total_tris: u64 = 0;
+        let mut chunks_visible: u32 = 0;
+        let mut chunks_total: u32 = 0;
         for chunk in &self.world.chunks {
-            if let Some(mesh) = &chunk.mesh {
-                total_tris += mesh.index_count as u64 / 3;
+            if chunk.mesh.is_some() {
+                chunks_total += 1;
+                if self.frustum.is_chunk_visible(chunk.position) {
+                    chunks_visible += 1;
+                    total_tris += chunk.mesh.as_ref().unwrap().index_count as u64 / 3;
+                }
             }
         }
         self.ui_state.total_triangles = total_tris;
+        self.ui_state.chunks_visible = chunks_visible;
+        self.ui_state.chunks_total = chunks_total;
 
         let frame = match self.gpu.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -488,9 +508,11 @@ impl AppState {
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             for chunk in &self.world.chunks {
                 if let Some(mesh) = &chunk.mesh {
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    if self.frustum.is_chunk_visible(chunk.position) {
+                        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    }
                 }
             }
 
