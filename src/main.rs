@@ -30,6 +30,9 @@ use simulation::water::StaticWater;
 use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
 use ui::panels::UiState;
+use world::generation::{WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z};
+
+use crate::meshing::MeshingPipeline;
 
 const SHADOW_MAP_SIZE: u32 = 4096;
 
@@ -84,6 +87,7 @@ struct AppState {
     frame_counter: FrameCounter,
     shader_watcher: ShaderWatcher,
     shader_dir: PathBuf,
+    meshing_pipeline: MeshingPipeline,
 }
 
 impl AppState {
@@ -184,9 +188,11 @@ impl AppState {
         log::info!("World generated in {:.2?}", gen_start.elapsed());
         world.print_debug_stats();
 
-        let mesh_start = std::time::Instant::now();
-        world.mesh_all_chunks(&gpu.device);
-        log::info!("World meshed in {:.2?}", mesh_start.elapsed());
+        let mut meshing_pipeline = MeshingPipeline::new(
+            WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z,
+        );
+        meshing_pipeline.submit_all_dirty(&world);
+        log::info!("Submitted {} chunks are async meshing", world.chunks.len());
 
         // Vegetation
         let veg_start = std::time::Instant::now();
@@ -235,6 +241,7 @@ impl AppState {
             frame_counter: FrameCounter::new(),
             shader_watcher,
             shader_dir,
+            meshing_pipeline,
         }
     }
 
@@ -314,6 +321,28 @@ impl AppState {
 
         // Check for shader hot-reloads before rendering
         self.check_shader_hot_reload();
+
+        // Drain pending snapshot submissions (bounded per frame)
+        self.meshing_pipeline.drain_pending_submissions(&self.world);
+
+        // Poll meshing pipeline for completed chunks
+        let completed = self.meshing_pipeline.poll();
+        for result in completed {
+            self.world.upload_mesh_result(
+                result.chunk_index,
+                &result.vertices,
+                &result.indices,
+                &self.gpu.device,
+            );
+        }
+
+        // Update meshing stats for UI
+        self.ui_state.meshing_stats = self.meshing_pipeline.stats.clone();
+
+        // Clear boundary maps when pipeline finishes
+        if self.meshing_pipeline.is_idle() {
+            self.meshing_pipeline.clear_boundary_maps();
+        }
 
         // Apply params to systems
         self.camera.apply_params(&self.ui_state.params.camera);
@@ -524,7 +553,11 @@ impl AppState {
                 log::info!("Terrain params changed -- regeneration needed (Phase 6)");
             }
             ParamChangeKind::MeshInvalidating => {
-                log::info!("Mesh-invalidating param changed (Phase 3)");
+                log::info!("Mesh-invalidating param changed -- resubmitting all chunks");
+                for chunk in &mut self.world.chunks {
+                    chunk.mesh_dirty = true;
+                }
+                self.meshing_pipeline.submit_all_dirty(&self.world);
             }
             _ => {}
         }

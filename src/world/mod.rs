@@ -7,8 +7,6 @@ use generation::{TerrainGenerator, WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_
 use voxel::{MATERIAL_COUNT, MATERIAL_TABLE};
 use wgpu::util::DeviceExt;
 
-use crate::meshing::dual_contouring;
-
 pub struct World {
     pub chunks: Vec<Chunk>,
     pub chunks_x: usize,
@@ -32,106 +30,42 @@ impl World {
             generator,
         }
     }
-
-    /// Mesh all chunks and upload to GPU.
-    pub fn mesh_all_chunks(&mut self, device: &wgpu::Device) {
-        use crate::meshing::dual_contouring::{
-            generate_cell_vertices, generate_faces,
-            BoundaryVertexMap, CellVertexData, NeighborBoundaries,
-        };
-
-        let mut total_vertices: u64 = 0;
-        let mut total_indices: u64 = 0;
-        let mut meshed_count: u32 = 0;
-
-        // Pass 1: Generate cell vertices for all chunks (immutable borrow of self)
-        let mut cell_data_vec: Vec<CellVertexData> = (0..self.chunks.len())
-            .map(|i| {
-                let chunk = &self.chunks[i];
-                let cx = chunk.position.x as usize;
-                let cy = chunk.position.y as usize;
-                let cz = chunk.position.z as usize;
-                let neighbors = self.build_neighbors(cx, cy, cz);
-                generate_cell_vertices(chunk, &neighbors)
-            })
-            .collect();
-
-        // Extract boundary maps for cross-referencing
-        let boundary_maps: Vec<BoundaryVertexMap> = cell_data_vec.iter()
-            .map(|cd| cd.boundary_map.clone())
-            .collect();
-
-        // Pass 2a: Generate faces with stitched boundaries
-        let mut face_indices: Vec<Vec<u32>> = Vec::with_capacity(self.chunks.len());
-        for i in 0..self.chunks.len() {
-            let chunk = &self.chunks[i];
-            let cx = chunk.position.x as usize;
-            let cy = chunk.position.y as usize;
-            let cz = chunk.position.z as usize;
-            let neighbors = self.build_neighbors(cx, cy, cz);
-
-            let mut nb = NeighborBoundaries::empty();
-            for dz in 0u8..=1 {
-                for dy in 0u8..=1 {
-                    for dx in 0u8..=1 {
-                        if dx == 0 && dy == 0 && dz == 0 { continue; }
-                        let nx = cx + dx as usize;
-                        let ny = cy + dy as usize;
-                        let nz = cz + dz as usize;
-                        if nx < self.chunks_x && ny < self.chunks_y && nz < self.chunks_z {
-                            let ni = nx + ny * self.chunks_x + nz * self.chunks_x * self.chunks_y;
-                            let map_idx = dx as usize + (dy as usize) * 2 + (dz as usize) * 4;
-                            nb.maps[map_idx] = Some(&boundary_maps[ni]);
-                        }
-                    }
-                }
-            }
-
-            let indices = generate_faces(&mut cell_data_vec[i], chunk, &neighbors, &nb);
-            face_indices.push(indices);
+    
+    /// Upload a completed mesh result to the GPU for a specific chunk.
+    pub fn upload_mesh_result(
+        &mut self,
+        chunk_index: usize,
+        vertices: &[crate::rendering::pipelines::TerrainVertex],
+        indices: &[u32],
+        device: &wgpu::Device,
+    ) {
+        if vertices.is_empty() || indices.is_empty() {
+            self.chunks[chunk_index].mesh = None;
+            self.chunks[chunk_index].mesh_dirty = false;
+            return;
         }
-
-        // Pass 2b: Upload to GPU (mutable borrow of self.chunks)
-        for (i, indices) in face_indices.into_iter().enumerate() {
-            let cell_data = &cell_data_vec[i];
-
-            if cell_data.vertices.is_empty() || indices.is_empty() {
-                self.chunks[i].mesh = None;
-                self.chunks[i].mesh_dirty = false;
-                continue;
-            }
-
-            total_vertices += cell_data.vertices.len() as u64;
-            total_indices += indices.len() as u64;
-            meshed_count += 1;
-
-            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk_vertex_buffer"),
-                contents: bytemuck::cast_slice(&cell_data.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk_index_buffer"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
-            self.chunks[i].mesh = Some(ChunkMesh {
-                vertex_buffer,
-                index_buffer,
-                index_count: indices.len() as u32,
-            });
-            self.chunks[i].mesh_dirty = false;
-        }
-
-        log::info!(
-            "Meshed {} chunks: {} vertices, {} indices ({} triangles)",
-            meshed_count, total_vertices, total_indices, total_indices / 3
-        );
+        
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk_vertex_buffer"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk_index_buffer"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        
+        self.chunks[chunk_index].mesh = Some(ChunkMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+        });
+        self.chunks[chunk_index].mesh_dirty = false;
     }
 
-    fn build_neighbors(&self, cx: usize, cy: usize, cz: usize) -> ChunkNeighbors {
+    pub fn build_neighbors(&self, cx: usize, cy: usize, cz: usize) -> ChunkNeighbors {
         let mut neighbors = ChunkNeighbors::empty();
         for dz in -1i32..=1 {
             for dy in -1i32..=1 {

@@ -1,4 +1,5 @@
 use crate::params::*;
+use crate::meshing::MeshingStats;
 use std::path::PathBuf;
 use wgpu::naga::back::spv::Capability::Shader;
 
@@ -23,6 +24,7 @@ pub struct UiState {
     pub total_vertices: u64,
     pub total_triangles: u64,
     pub shader_log: Vec<ShaderLogEntry>,
+    pub meshing_stats: MeshingStats,
 }
 
 impl UiState {
@@ -43,6 +45,7 @@ impl UiState {
             total_vertices: 0,
             total_triangles: 0,
             shader_log: Vec::new(),
+            meshing_stats: MeshingStats::default(),
         }
     }
 
@@ -113,6 +116,8 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 draw_debug(ui, &mut state.params.debug);
                 ui.separator();
                 draw_shader_log(ui, &mut state.shader_log);
+                ui.separator();
+                draw_meshing_section(ui, &state.meshing_stats);
                 ui.separator();
                 draw_performance(ui, state);
                 ui.separator();
@@ -314,6 +319,29 @@ fn draw_shader_log(ui: &mut egui::Ui, log: &mut Vec<ShaderLogEntry>) {
                     });
                 }
             });
+    });
+}
+
+fn draw_meshing_section(ui: &mut egui::Ui, stats: &MeshingStats) {
+    ui.collapsing("Meshing Pipeline", |ui| {
+        ui.label(format!("Workers: {}", stats.worker_count));
+        if stats.pending_submissions > 0 {
+            ui.label(format!("Pending: {}", stats.pending_submissions));
+        }
+        ui.label(format!("Phase 1 active: {}", stats.phase1_in_progress));
+        ui.label(format!("Phase 1 waiting: {}", stats.phase1_complete));
+        ui.label(format!("Phase 2 active: {}", stats.phase2_in_progress));
+        ui.label(format!("Total meshed: {}", stats.total_meshed));
+        if stats.last_batch_time_ms > 0.0 {
+            ui.label(format!("Last batch: {:.0}ms", stats.last_batch_time_ms));
+        }
+        let active = stats.phase1_in_progress + stats.phase1_complete + stats.phase2_in_progress;
+        if active > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(80, 200, 80),
+                format!("Meshing... ({} active)", active),
+            );
+        }
     });
 }
 
