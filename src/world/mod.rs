@@ -30,7 +30,18 @@ impl World {
             generator,
         }
     }
-    
+
+    /// Create a World from pre-loaded chunk data (from cache).
+    pub fn from_cached_chunks(chunks: Vec<Chunk>, params: &TerrainGenParams) -> Self {
+        Self {
+            chunks,
+            chunks_x: WORLD_CHUNKS_X,
+            chunks_y: WORLD_CHUNKS_Y,
+            chunks_z: WORLD_CHUNKS_Z,
+            generator: TerrainGenerator::new(params),
+        }
+    }
+
     /// Upload a completed mesh result to the GPU for a specific chunk.
     pub fn upload_mesh_result(
         &mut self,
@@ -44,19 +55,19 @@ impl World {
             self.chunks[chunk_index].mesh_dirty = false;
             return;
         }
-        
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chunk_vertex_buffer"),
             contents: bytemuck::cast_slice(vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        
+
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chunk_index_buffer"),
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        
+
         self.chunks[chunk_index].mesh = Some(ChunkMesh {
             vertex_buffer,
             index_buffer,

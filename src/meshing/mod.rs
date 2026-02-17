@@ -1,7 +1,10 @@
 pub mod dual_contouring;
 pub mod qef;
+pub mod cache;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -11,9 +14,10 @@ use glam::IVec3;
 
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::ChunkSnapshot;
+use cache::AtomicCacheStats;
 use dual_contouring::{
-    BoundaryVertexMap, CellVertexData, OwnedNeighborBoundaries,
-    generate_cell_vertices_from_snapshot, generate_faces_from_snapshot,
+    generate_cell_vertices_from_snapshot, generate_faces_from_snapshot, BoundaryVertexMap,
+    CellVertexData, OwnedNeighborBoundaries,
 };
 
 // ============================================================================
@@ -25,10 +29,23 @@ struct Phase1Request {
     snapshot: ChunkSnapshot,
 }
 
+enum Phase1Outcome {
+    /// Normal Phase 1 completed. Needs Phase 2.
+    Computed {
+        cell_data: CellVertexData,
+        snapshot: ChunkSnapshot,
+        cache_key: u64,
+    },
+    /// Cache hit. Skip Phase 2 entirely.
+    CacheHit {
+        vertices: Vec<TerrainVertex>,
+        indices: Vec<u32>,
+    },
+}
+
 struct Phase1Result {
     chunk_index: usize,
-    cell_data: CellVertexData,
-    snapshot: ChunkSnapshot,
+    outcome: Phase1Outcome,
 }
 
 struct Phase2Request {
@@ -36,6 +53,7 @@ struct Phase2Request {
     cell_data: CellVertexData,
     snapshot: ChunkSnapshot,
     neighbor_boundaries: OwnedNeighborBoundaries,
+    cache_key: u64,
 }
 
 pub struct Phase2Result {
@@ -65,6 +83,22 @@ pub struct MeshingStats {
     pub worker_count: usize,
     pub last_batch_time_ms: f32,
     pub pending_submissions: usize,
+    // Cache stats
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_errors: u64,
+    pub cache_files: u64,
+    pub cache_bytes: u64,
+}
+
+// ============================================================================
+// Shared cache config for workers
+// ============================================================================
+
+struct CacheConfig {
+    cache_dir: PathBuf,
+    sharpness_values: Vec<f32>,
+    stats: Arc<AtomicCacheStats>,
 }
 
 // ============================================================================
@@ -79,7 +113,7 @@ pub struct MeshingPipeline {
     _workers: Vec<JoinHandle<()>>,
 
     chunk_states: Vec<ChunkMeshState>,
-    pending_phase1: HashMap<usize, (CellVertexData, ChunkSnapshot)>,
+    pending_phase1: HashMap<usize, (CellVertexData, ChunkSnapshot, u64)>,
     boundary_maps: HashMap<usize, BoundaryVertexMap>,
 
     chunks_x: usize,
@@ -89,12 +123,32 @@ pub struct MeshingPipeline {
     pub stats: MeshingStats,
     batch_start: Option<Instant>,
     pending_submissions: Vec<usize>,
+
+    // Cache
+    cache_stats: Arc<AtomicCacheStats>,
+    cache_dir: PathBuf,
+    cache_disk_stats_stale: bool,
 }
 
 impl MeshingPipeline {
     pub fn new(chunks_x: usize, chunks_y: usize, chunks_z: usize) -> Self {
         let total_chunks = chunks_x * chunks_y * chunks_z;
         let num_workers = num_cpus::get().saturating_sub(2).max(2);
+
+        // Setup cache directory
+        let cache_dir = PathBuf::from("cache/meshes");
+        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+            log::warn!("Failed to create cache directory: {}", e);
+        }
+
+        let cache_stats = Arc::new(AtomicCacheStats::new());
+        let sharpness_values = cache::extract_sharpness_values();
+
+        let cache_config = Arc::new(CacheConfig {
+            cache_dir: cache_dir.clone(),
+            sharpness_values,
+            stats: cache_stats.clone(),
+        });
 
         let (p1_tx, p1_rx) = mpsc::channel::<Phase1Request>();
         let (p1_result_tx, p1_result_rx) = mpsc::channel::<Phase1Result>();
@@ -110,18 +164,19 @@ impl MeshingPipeline {
             let p1_result_tx = p1_result_tx.clone();
             let p2_rx = p2_rx.clone();
             let p2_result_tx = p2_result_tx.clone();
+            let cache_config = cache_config.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("mesh-worker-{}", i))
                 .spawn(move || {
-                    worker_loop(p1_rx, p1_result_tx, p2_rx, p2_result_tx);
+                    worker_loop(p1_rx, p1_result_tx, p2_rx, p2_result_tx, cache_config);
                 })
                 .expect("Failed to spawn mesh worker thread");
 
             workers.push(handle);
         }
 
-        log::info!("MeshingPipeline: {} worker threads", num_workers);
+        log::info!("MeshingPipeline: {} worker threads, cache at {:?}", num_workers, cache_dir);
 
         Self {
             p1_request_tx: p1_tx,
@@ -141,6 +196,9 @@ impl MeshingPipeline {
             },
             batch_start: None,
             pending_submissions: Vec::new(),
+            cache_stats,
+            cache_dir,
+            cache_disk_stats_stale: true,
         }
     }
 
@@ -200,9 +258,30 @@ impl MeshingPipeline {
         // Drain Phase 1 results
         while let Ok(result) = self.p1_result_rx.try_recv() {
             let idx = result.chunk_index;
-            self.chunk_states[idx] = ChunkMeshState::Phase1Complete;
-            self.boundary_maps.insert(idx, result.cell_data.boundary_map.clone());
-            self.pending_phase1.insert(idx, (result.cell_data, result.snapshot));
+            match result.outcome {
+                Phase1Outcome::CacheHit { vertices, indices } => {
+                    // Cache hit: directly produce a completed result, skip Phase 2
+                    self.chunk_states[idx] = ChunkMeshState::Idle;
+                    self.stats.total_meshed += 1;
+                    completed.push(Phase2Result {
+                        chunk_index: idx,
+                        vertices,
+                        indices,
+                    });
+                }
+                Phase1Outcome::Computed {
+                    cell_data,
+                    snapshot,
+                    cache_key,
+                } => {
+                    // Normal Phase 1 complete -- store for Phase 2 dispatch
+                    self.chunk_states[idx] = ChunkMeshState::Phase1Complete;
+                    self.boundary_maps
+                        .insert(idx, cell_data.boundary_map.clone());
+                    self.pending_phase1
+                        .insert(idx, (cell_data, snapshot, cache_key));
+                }
+            }
         }
 
         // Dispatch Phase 2 for chunks whose neighbors have completed Phase 1
@@ -221,13 +300,35 @@ impl MeshingPipeline {
         }
 
         // Update stats
-        self.stats.phase1_in_progress = self.chunk_states.iter()
-            .filter(|s| **s == ChunkMeshState::Phase1InProgress).count();
-        self.stats.phase1_complete = self.chunk_states.iter()
-            .filter(|s| **s == ChunkMeshState::Phase1Complete).count();
-        self.stats.phase2_in_progress = self.chunk_states.iter()
-            .filter(|s| **s == ChunkMeshState::Phase2InProgress).count();
+        self.stats.phase1_in_progress = self
+            .chunk_states
+            .iter()
+            .filter(|s| **s == ChunkMeshState::Phase1InProgress)
+            .count();
+        self.stats.phase1_complete = self
+            .chunk_states
+            .iter()
+            .filter(|s| **s == ChunkMeshState::Phase1Complete)
+            .count();
+        self.stats.phase2_in_progress = self
+            .chunk_states
+            .iter()
+            .filter(|s| **s == ChunkMeshState::Phase2InProgress)
+            .count();
         self.stats.pending_submissions = self.pending_submissions.len();
+
+        // Cache stats (atomics are cheap to read)
+        self.stats.cache_hits = self.cache_stats.hits.load(Ordering::Relaxed);
+        self.stats.cache_misses = self.cache_stats.misses.load(Ordering::Relaxed);
+        self.stats.cache_errors = self.cache_stats.errors.load(Ordering::Relaxed);
+
+        // Disk stats: only recompute when marked stale (expensive I/O)
+        if self.cache_disk_stats_stale {
+            let (files, bytes) = cache::disk_usage(&self.cache_dir);
+            self.stats.cache_files = files;
+            self.stats.cache_bytes = bytes;
+            self.cache_disk_stats_stale = false;
+        }
 
         // Record batch time when everything finishes
         if !completed.is_empty()
@@ -238,7 +339,13 @@ impl MeshingPipeline {
         {
             if let Some(start) = self.batch_start.take() {
                 self.stats.last_batch_time_ms = start.elapsed().as_secs_f32() * 1000.0;
-                log::info!("Meshing batch complete in {:.0}ms", self.stats.last_batch_time_ms);
+                log::info!(
+                    "Meshing batch complete in {:.0}ms (cache: {} hits, {} misses)",
+                    self.stats.last_batch_time_ms,
+                    self.stats.cache_hits,
+                    self.stats.cache_misses,
+                );
+                self.cache_disk_stats_stale = true;
             }
         }
 
@@ -251,7 +358,9 @@ impl MeshingPipeline {
         for dz in 0u8..=1 {
             for dy in 0u8..=1 {
                 for dx in 0u8..=1 {
-                    if dx == 0 && dy == 0 && dz == 0 { continue; }
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
                     let nx = cx + dx as usize;
                     let ny = cy + dy as usize;
                     let nz = cz + dz as usize;
@@ -274,7 +383,7 @@ impl MeshingPipeline {
     }
 
     fn dispatch_phase2(&mut self, chunk_index: usize) {
-        let (cell_data, snapshot) = match self.pending_phase1.remove(&chunk_index) {
+        let (cell_data, snapshot, cache_key) = match self.pending_phase1.remove(&chunk_index) {
             Some(data) => data,
             None => return,
         };
@@ -285,7 +394,9 @@ impl MeshingPipeline {
         for dz in 0u8..=1 {
             for dy in 0u8..=1 {
                 for dx in 0u8..=1 {
-                    if dx == 0 && dy == 0 && dz == 0 { continue; }
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
                     let nx = cx + dx as usize;
                     let ny = cy + dy as usize;
                     let nz = cz + dz as usize;
@@ -307,6 +418,7 @@ impl MeshingPipeline {
             cell_data,
             snapshot,
             neighbor_boundaries: nb,
+            cache_key,
         });
     }
 
@@ -318,6 +430,16 @@ impl MeshingPipeline {
 
     pub fn clear_boundary_maps(&mut self) {
         self.boundary_maps.clear();
+    }
+
+    /// Clear all cached mesh files from disk and reset cache stats.
+    pub fn clear_cache(&mut self) {
+        match cache::clear_cache(&self.cache_dir) {
+            Ok(count) => log::info!("Cleared {} cache files", count),
+            Err(e) => log::warn!("Failed to clear cache: {}", e),
+        }
+        self.cache_stats.reset();
+        self.cache_disk_stats_stale = true;
     }
 
     fn index_to_coords(&self, index: usize) -> (usize, usize, usize) {
@@ -341,6 +463,7 @@ fn worker_loop(
     p1_result_tx: Sender<Phase1Result>,
     p2_rx: Arc<Mutex<Receiver<Phase2Request>>>,
     p2_result_tx: Sender<Phase2Result>,
+    cache_config: Arc<CacheConfig>,
 ) {
     loop {
         // Try Phase 2 first (higher priority - unblocks GPU upload)
@@ -349,7 +472,27 @@ fn worker_loop(
                 drop(rx);
                 let mut cell_data = req.cell_data;
                 let nb = req.neighbor_boundaries.as_ref();
-                let indices = generate_faces_from_snapshot(&mut cell_data, &req.snapshot, &nb);
+                let indices =
+                    generate_faces_from_snapshot(&mut cell_data, &req.snapshot, &nb);
+
+                // Save to cache (fire-and-forget, errors are non-fatal)
+                let cache_path = cache::cache_file_path(
+                    &cache_config.cache_dir,
+                    req.snapshot.position.x,
+                    req.snapshot.position.y,
+                    req.snapshot.position.z,
+                    req.cache_key,
+                );
+                if let Err(e) =
+                    cache::save_cached_mesh(&cache_path, req.cache_key, &cell_data.vertices, &indices)
+                {
+                    log::warn!("Cache save failed for chunk {}: {}", req.chunk_index, e);
+                    cache_config
+                        .stats
+                        .errors
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+
                 let _ = p2_result_tx.send(Phase2Result {
                     chunk_index: req.chunk_index,
                     vertices: cell_data.vertices,
@@ -364,11 +507,50 @@ fn worker_loop(
             match rx.try_recv() {
                 Ok(req) => {
                     drop(rx);
+
+                    // Compute cache key from snapshot voxel data + sharpness
+                    let cache_key = cache::compute_cache_key(
+                        &req.snapshot,
+                        &cache_config.sharpness_values,
+                    );
+
+                    // Try loading from disk cache
+                    let cache_path = cache::cache_file_path(
+                        &cache_config.cache_dir,
+                        req.snapshot.position.x,
+                        req.snapshot.position.y,
+                        req.snapshot.position.z,
+                        cache_key,
+                    );
+
+                    if let Some((vertices, indices)) =
+                        cache::load_cached_mesh(&cache_path, cache_key)
+                    {
+                        // Cache hit -- skip both phases
+                        cache_config
+                            .stats
+                            .hits
+                            .fetch_add(1, Ordering::Relaxed);
+                        let _ = p1_result_tx.send(Phase1Result {
+                            chunk_index: req.chunk_index,
+                            outcome: Phase1Outcome::CacheHit { vertices, indices },
+                        });
+                        continue;
+                    }
+
+                    // Cache miss -- compute Phase 1 normally
+                    cache_config
+                        .stats
+                        .misses
+                        .fetch_add(1, Ordering::Relaxed);
                     let cell_data = generate_cell_vertices_from_snapshot(&req.snapshot);
                     let _ = p1_result_tx.send(Phase1Result {
                         chunk_index: req.chunk_index,
-                        cell_data,
-                        snapshot: req.snapshot,
+                        outcome: Phase1Outcome::Computed {
+                            cell_data,
+                            snapshot: req.snapshot,
+                            cache_key,
+                        },
                     });
                     continue;
                 }

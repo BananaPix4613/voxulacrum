@@ -11,7 +11,7 @@ pub const MAT_GRAVEL: u16 = 8;
 pub const MATERIAL_COUNT: usize = 9;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Voxel {
     pub material: u16,
     pub density: i8,

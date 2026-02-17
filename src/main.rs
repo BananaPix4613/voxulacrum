@@ -184,10 +184,26 @@ impl AppState {
             &shader_dir,
         );
 
-        // Generate world using params
+        // Generate or load world using params
         let gen_start = std::time::Instant::now();
-        let mut world = world::World::generate(&initial_params.terrain_gen);
-        log::info!("World generated in {:.2?}", gen_start.elapsed());
+        let cache_dir = std::path::PathBuf::from("cache/meshes");
+        let world_key = meshing::cache::compute_world_cache_key(&initial_params.terrain_gen);
+        let world_cache_path = meshing::cache::world_cache_path(&cache_dir, world_key);
+
+        let mut world = if let Some(chunks) = meshing::cache::load_world_cache(&world_cache_path, world_key) {
+            log::info!("Loaded world from cache in {:.2?} ({} chunks)", gen_start.elapsed(), chunks.len());
+            world::World::from_cached_chunks(chunks, &initial_params.terrain_gen)
+        } else {
+            let w = world::World::generate(&initial_params.terrain_gen);
+            log::info!("World generated in {:.2?}", gen_start.elapsed());
+            // Save to cache for next launch
+            if let Err(e) = meshing::cache::save_world_cache(&world_cache_path, world_key, &w) {
+                log::warn!("Failed to save world cache: {}", e);
+            } else {
+                log::info!("World saved to cache");
+            }
+            w
+        };
         world.print_debug_stats();
 
         let mut meshing_pipeline = MeshingPipeline::new(
@@ -344,6 +360,13 @@ impl AppState {
 
         // Update meshing stats for UI
         self.ui_state.meshing_stats = self.meshing_pipeline.stats.clone();
+
+        // Handle cache clear request from UI
+        if self.ui_state.clear_cache_requested {
+            self.ui_state.clear_cache_requested = false;
+            self.meshing_pipeline.clear_cache();
+            log::info!("Cache cleared by user");
+        }
 
         // Clear boundary maps when pipeline finishes
         if self.meshing_pipeline.is_idle() {
@@ -572,10 +595,17 @@ impl AppState {
         let change = self.ui_state.change_detector.detect(&self.ui_state.params);
         match change {
             ParamChangeKind::RegenerationRequired => {
-                log::info!("Terrain params changed -- regeneration needed (Phase 6)");
+                log::info!("Terrain params changed -- regeneration needed");
+                self.meshing_pipeline.clear_cache();
+                // Also clear world generation cache
+                let cache_dir = std::path::PathBuf::from("cache/meshes");
+                if let Err(e) = meshing::cache::clear_world_cache(&cache_dir) {
+                    log::warn!("Failed to clear world cache: {}", e);
+                }
             }
             ParamChangeKind::MeshInvalidating => {
-                log::info!("Mesh-invalidating param changed -- resubmitting all chunks");
+                log::info!("Mesh-invalidating param changed -- clearing cache and resubmitting");
+                self.meshing_pipeline.clear_cache();
                 for chunk in &mut self.world.chunks {
                     chunk.mesh_dirty = true;
                 }

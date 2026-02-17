@@ -1,9 +1,10 @@
 use bytemuck::{Pod, Zeroable};
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TerrainVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],

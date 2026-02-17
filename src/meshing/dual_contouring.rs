@@ -100,9 +100,13 @@ fn sample_material(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z:
 
 /// Get ambient occlusion density, resolving across chunk boundaries.
 fn sample_ao_density(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> f32 {
-    match resolve_voxel(chunk, neighbors, x, y, z) {
+    let cs = CHUNK_SIZE as i32;
+    let cx = x.clamp(-cs, 2 * cs - 1);
+    let cy = y.clamp(-cs, 2 * cs - 1);
+    let cz = z.clamp(-cs, 2 * cs - 1);
+    match resolve_voxel(chunk, neighbors, cx, cy, cz) {
         Some(v) => v.density as f32,
-        None => 1.0,  // Treat out-of-bounds as solid for AO (not air!)
+        None => 0.0,  // Missing neighbor: treat as air (no artificial occlusion)
     }
 }
 
@@ -211,10 +215,10 @@ fn snap_material(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> u16 {
 
 fn snap_ao_density(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> f32 {
     let cs = CHUNK_SIZE as i32;
-    if x < -1 || x > cs || y < -1 || y > cs || z < -1 || z > cs {
-        return 1.0; // Solid for AO, matches current behavior
-    }
-    snap.get_voxel(x, y, z).density as f32
+    let cx = x.clamp(-1, cs);
+    let cy = y.clamp(-1, cs);
+    let cz = z.clamp(-1, cs);
+    snap.get_voxel(cx, cy, cz).density as f32
 }
 
 fn snap_gradient(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> [f32; 3] {
@@ -451,14 +455,14 @@ pub fn generate_faces_from_snapshot(
             }
         }
     }
-    
+
     let mut indices: Vec<u32> = Vec::new();
-    
+
     for z in 0..=CHUNK_SIZE as i32 {
         for y in 0..=CHUNK_SIZE as i32 {
             for x in 0..=CHUNK_SIZE as i32 {
                 let d0 = snap_density(snap, x, y, z);
-                
+
                 // X-edge
                 if x + 1 <= CHUNK_SIZE as i32 {
                     let d1 = snap_density(snap, x + 1, y, z);
@@ -472,7 +476,7 @@ pub fn generate_faces_from_snapshot(
                         emit_quad(&cells, stride, &cell_data.vertex_indices, &mut indices, d0 > 0.0);
                     }
                 }
-                
+
                 // Y-edge
                 if y + 1 <= CHUNK_SIZE as i32 {
                     let d1 = snap_density(snap, x, y + 1, z);
@@ -486,7 +490,7 @@ pub fn generate_faces_from_snapshot(
                         emit_quad(&cells, stride, &cell_data.vertex_indices, &mut indices, d0 > 0.0);
                     }
                 }
-                
+
                 // Z-edge
                 if z + 1 <= CHUNK_SIZE as i32 {
                     let d1 = snap_density(snap, x, y, z + 1);
@@ -503,7 +507,7 @@ pub fn generate_faces_from_snapshot(
             }
         }
     }
-    
+
     indices
 }
 

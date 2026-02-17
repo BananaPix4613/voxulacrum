@@ -1,7 +1,6 @@
 use crate::params::*;
 use crate::meshing::MeshingStats;
 use std::path::PathBuf;
-use wgpu::naga::back::spv::Capability::Shader;
 
 pub struct ShaderLogEntry {
     pub message: String,
@@ -27,6 +26,7 @@ pub struct UiState {
     pub chunks_total: u32,
     pub shader_log: Vec<ShaderLogEntry>,
     pub meshing_stats: MeshingStats,
+    pub clear_cache_requested: bool,
 }
 
 impl UiState {
@@ -50,6 +50,7 @@ impl UiState {
             chunks_total: 0,
             shader_log: Vec::new(),
             meshing_stats: MeshingStats::default(),
+            clear_cache_requested: false,
         }
     }
 
@@ -121,7 +122,7 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_shader_log(ui, &mut state.shader_log);
                 ui.separator();
-                draw_meshing_section(ui, &state.meshing_stats);
+                draw_meshing_section(ui, &state.meshing_stats, &mut state.clear_cache_requested);
                 ui.separator();
                 draw_performance(ui, state);
                 ui.separator();
@@ -326,7 +327,7 @@ fn draw_shader_log(ui: &mut egui::Ui, log: &mut Vec<ShaderLogEntry>) {
     });
 }
 
-fn draw_meshing_section(ui: &mut egui::Ui, stats: &MeshingStats) {
+fn draw_meshing_section(ui: &mut egui::Ui, stats: &MeshingStats, clear_cache: &mut bool) {
     ui.collapsing("Meshing Pipeline", |ui| {
         ui.label(format!("Workers: {}", stats.worker_count));
         if stats.pending_submissions > 0 {
@@ -339,12 +340,44 @@ fn draw_meshing_section(ui: &mut egui::Ui, stats: &MeshingStats) {
         if stats.last_batch_time_ms > 0.0 {
             ui.label(format!("Last batch: {:.0}ms", stats.last_batch_time_ms));
         }
-        let active = stats.phase1_in_progress + stats.phase1_complete + stats.phase2_in_progress;
+        let active =
+            stats.phase1_in_progress + stats.phase1_complete + stats.phase2_in_progress;
         if active > 0 {
             ui.colored_label(
                 egui::Color32::from_rgb(80, 200, 80),
                 format!("Meshing... ({} active)", active),
             );
+        }
+        
+        // Cache stats
+        ui.separator();
+        ui.label("Disk Cache");
+        let total_lookups = stats.cache_hits + stats.cache_misses;
+        if total_lookups > 0 {
+            let hit_rate = stats.cache_hits as f64 / total_lookups as f64 * 100.0;
+            ui.label(format!(
+                "Hits: {} | Misses: {} ({:.0}% hit rate)",
+                stats.cache_hits, stats.cache_misses, hit_rate,
+            ));
+        } else {
+            ui.label(format!(
+                "Hits: {} | Misses: {}",
+                stats.cache_hits, stats.cache_misses,
+            ));
+        }
+        if stats.cache_errors > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 100, 100),
+                format!("Errors: {}", stats.cache_errors),
+            );
+        }
+        ui.label(format!(
+            "On disk: {} files ({:.1} MB)",
+            stats.cache_files,
+            stats.cache_bytes as f64 / (1024.0 * 1024.0),
+        ));
+        if ui.button("Clear Cache").clicked() {
+            *clear_cache = true;
         }
     });
 }
