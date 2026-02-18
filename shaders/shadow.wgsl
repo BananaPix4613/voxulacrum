@@ -10,6 +10,7 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) ao: f32,
+    @location(4) material_id: u32,
 };
 
 @vertex

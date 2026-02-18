@@ -3160,6 +3160,7 @@ dependencies = [
  "notify",
  "num_cpus",
  "pollster",
+ "rayon",
  "seahash",
  "serde",
  "serde_json",

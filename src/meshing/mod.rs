@@ -441,6 +441,45 @@ impl MeshingPipeline {
         self.cache_stats.reset();
         self.cache_disk_stats_stale = true;
     }
+    
+    /// Reset all internal pipeline state for a freshly swapped world.
+    /// 
+    /// Clears chunk tracking, pending data, boundary maps, and drains any
+    /// stale in-flight results from worker threads. Does NOT shut down workers
+    /// or clear the disk cache.
+    pub fn reset_for_new_world(&mut self) {
+        // Reset all chunk states to Idle
+        for state in &mut self.chunk_states {
+            *state = ChunkMeshState::Idle;
+        }
+        
+        // Clear pending Phase 1 data (snapshots/cell data from old world)
+        self.pending_phase1.clear();
+        
+        // Clear boundary maps from old world
+        self.boundary_maps.clear();
+        
+        // Clear pending submissions queue
+        self.pending_submissions.clear();
+        
+        // Reset batch timing
+        self.batch_start = None;
+        
+        // Reset stats counters (preserve worker count)
+        let worker_count = self.stats.worker_count;
+        self.stats = MeshingStats {
+            worker_count,
+            ..Default::default()
+        };
+        
+        // Drain any in-flight results from worker threads to discard stale data.
+        // Workers may still be processing old-world requests; those results will
+        // refer to old voxel data and must not be uploaded after the swap.
+        while self.p1_result_rx.try_recv().is_ok() {}
+        while self.p2_result_rx.try_recv().is_ok() {}
+        
+        log::info!("MeshingPipeline reset for new world");
+    }
 
     fn index_to_coords(&self, index: usize) -> (usize, usize, usize) {
         let cx = index % self.chunks_x;

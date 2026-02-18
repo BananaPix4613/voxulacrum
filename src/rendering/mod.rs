@@ -1,3 +1,4 @@
+pub mod debug_lines;
 pub mod frustum;
 pub mod gpu_state;
 pub mod pipelines;

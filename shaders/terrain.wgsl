@@ -1,5 +1,11 @@
-const AO_MIN: f32 = 0.5;       // minimum brightness in fully occluded areas (0.0=black, 1.0=no AO)
-const AO_STRENGTH: f32 = 0.4;  // how much AO affects ambient light (0.0=no AO, 1.0=full AO)
+const AO_MIN: f32 = 0.5;
+const AO_STRENGTH: f32 = 0.4;
+
+// Debug mode constants
+const DEBUG_NONE: u32 = 0u;
+const DEBUG_MATERIAL_ID: u32 = 1u;
+const DEBUG_AO_ONLY: u32 = 2u;
+const DEBUG_NORMALS: u32 = 3u;
 
 struct GlobalUniforms {
     view_proj: mat4x4<f32>,
@@ -12,7 +18,7 @@ struct GlobalUniforms {
     _pad2: f32,
     wind_vector: vec2<f32>,
     time: f32,
-    _pad_time: f32,
+    debug_mode: u32,
     cloud_shadow_offset: vec2<f32>,
     cloud_coverage: f32,
     _pad3: f32,
@@ -38,6 +44,7 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) ao: f32,
+    @location(4) material_id: u32,
 };
 
 struct VertexOutput {
@@ -46,6 +53,7 @@ struct VertexOutput {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) ao: f32,
+    @location(4) @interpolate(flat) material_id: u32,
 };
 
 @vertex
@@ -56,24 +64,25 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.normal = in.normal;
     out.color = in.color;
     out.ao = in.ao;
+    out.material_id = in.material_id;
     return out;
 }
 
 fn compute_shadow(world_pos: vec3<f32>) -> f32 {
     let light_space_pos = globals.light_space_matrix * vec4<f32>(world_pos, 1.0);
-        let proj_coords = light_space_pos.xyz / light_space_pos.w;
-        let shadow_uv = vec2<f32>(
-            proj_coords.x * 0.5 + 0.5,
-            proj_coords.y * -0.5 + 0.5,
-        );
-        let current_depth = proj_coords.z;
+    let proj_coords = light_space_pos.xyz / light_space_pos.w;
+    let shadow_uv = vec2<f32>(
+        proj_coords.x * 0.5 + 0.5,
+        proj_coords.y * -0.5 + 0.5,
+    );
+    let current_depth = proj_coords.z;
 
-        if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 {
-            return 1.0;
-        }
-        if current_depth > 1.0 || current_depth < 0.0 {
-            return 1.0;
-        }
+    if shadow_uv.x < 0.0 || shadow_uv.x > 1.0 || shadow_uv.y < 0.0 || shadow_uv.y > 1.0 {
+        return 1.0;
+    }
+    if current_depth > 1.0 || current_depth < 0.0 {
+        return 1.0;
+    }
 
     let bias = 0.002;
     let biased_depth = current_depth - bias;
@@ -93,8 +102,41 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
     return shadow_sum / 9.0;
 }
 
+// Debug palette: 9 high-contrast colors for material IDs 0-8
+fn debug_material_color(id: u32) -> vec3<f32> {
+    switch id {
+        case 0u: { return vec3<f32>(0.2, 0.2, 0.2); }   // Air (dark grey)
+        case 1u: { return vec3<f32>(1.0, 0.3, 0.3); }   // Limestone (red)
+        case 2u: { return vec3<f32>(0.3, 1.0, 0.3); }   // Granite (green)
+        case 3u: { return vec3<f32>(0.3, 0.3, 1.0); }   // Soil (blue)
+        case 4u: { return vec3<f32>(1.0, 1.0, 0.3); }   // Clay (yellow)
+        case 5u: { return vec3<f32>(0.3, 1.0, 1.0); }   // Sand (cyan)
+        case 6u: { return vec3<f32>(1.0, 0.3, 1.0); }   // Grass Soil (magenta)
+        case 7u: { return vec3<f32>(1.0, 0.6, 0.2); }   // Water (orange)
+        case 8u: { return vec3<f32>(0.6, 0.2, 1.0); }   // Gravel (purple)
+        default: { return vec3<f32>(1.0, 1.0, 1.0); }   // Unknown (white)
+    }
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // --- Debug: Material ID view ---
+    if globals.debug_mode == DEBUG_MATERIAL_ID {
+        return vec4<f32>(debug_material_color(in.material_id), 1.0);
+    }
+    
+    // --- Debug: AO-only view ---
+    if globals.debug_mode == DEBUG_AO_ONLY {
+        return vec4<f32>(vec3<f32>(in.ao), 1.0);
+    }
+    
+    // --- Debug: Normal view ---
+    if globals.debug_mode == DEBUG_NORMALS {
+        let normal_color = normalize(in.normal) * 0.5 + 0.5;
+        return vec4<f32>(normal_color, 1.0);
+    }
+    
+    // --- Normal rendering ---
     let n = normalize(in.normal);
     let sun_dir = normalize(globals.sun_direction);
     let n_dot_l = max(dot(n, sun_dir), 0.0);

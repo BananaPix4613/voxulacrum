@@ -1,3 +1,5 @@
+use crate::world::chunk::VOXEL_SCALE;
+
 /// QEF (Quadratic Error Function) solver for dual contouring.
 ///
 /// Finds the vertex position that minimizes the sum of squared distances
@@ -232,7 +234,12 @@ impl QefSolver {
             + (clamped[1] - solved[1]).powi(2)
             + (clamped[2] - solved[2]).powi(2);
 
-        let final_pos = if clamp_dist_sq > 1.0 {
+        // If the unclamped solution was far outside the cell, the QEF likely
+        // had degenerate or contradictory constraints. Fall back to the mass
+        // point (average of intersection points) which is always near the
+        // isosurface. Threshold: one cell width squared.
+        const CLAMP_FALLBACK_THRESHOLD: f32 = VOXEL_SCALE * VOXEL_SCALE;
+        let final_pos = if clamp_dist_sq > CLAMP_FALLBACK_THRESHOLD {
             // Fall back to mass point, clamped
             [
                 (mass_point[0] as f32).clamp(cell_min[0], cell_max[0]),

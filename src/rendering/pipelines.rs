@@ -10,6 +10,8 @@ pub struct TerrainVertex {
     pub normal: [f32; 3],
     pub color: [f32; 3],
     pub ao: f32,
+    pub material_id: u32,
+    pub _pad_vert: [u32; 3], // Pad to 64 bytes (16-byte alignment for GPU)
 }
 
 impl TerrainVertex {
@@ -37,6 +39,11 @@ impl TerrainVertex {
                     offset: 36,
                     shader_location: 3,
                     format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Uint32,
                 },
             ],
         }
@@ -86,6 +93,68 @@ pub fn create_terrain_pipeline(
             cull_mode: Some(wgpu::Face::Back),
             unclipped_depth: false,
             polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
+pub fn create_terrain_wireframe_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    global_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
+) -> wgpu::RenderPipeline {
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("terrain_wireframe_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("terrain_wireframe_pipeline_layout"),
+        bind_group_layouts: &[global_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("terrain_wireframe_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader_module,
+            entry_point: Some("vs_main"),
+            buffers: &[TerrainVertex::layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: Some(wgpu::Face::Back),
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Line,
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -480,6 +549,7 @@ struct PipelineEntry {
 pub struct PipelineRegistry {
     entries: HashMap<String, PipelineEntry>,
     pub terrain_pipeline: wgpu::RenderPipeline,
+    pub terrain_wireframe_pipeline: wgpu::RenderPipeline,
     pub shadow_pipeline: wgpu::RenderPipeline,
     pub vegetation_pipeline: wgpu::RenderPipeline,
     pub water_pipeline: wgpu::RenderPipeline,
@@ -505,6 +575,10 @@ impl PipelineRegistry {
         let water_source = read_shader(shader_dir, "water.wgsl");
 
         let terrain_pipeline = create_terrain_pipeline(
+            device, resources.surface_format, &resources.global_bind_group_layout,
+            &terrain_source,
+        );
+        let terrain_wireframe_pipeline = create_terrain_wireframe_pipeline(
             device, resources.surface_format, &resources.global_bind_group_layout,
             &terrain_source,
         );
@@ -542,6 +616,7 @@ impl PipelineRegistry {
         Self {
             entries,
             terrain_pipeline,
+            terrain_wireframe_pipeline,
             shadow_pipeline,
             vegetation_pipeline,
             water_pipeline,
@@ -582,6 +657,12 @@ impl PipelineRegistry {
                     device, resources.surface_format,
                     &resources.global_bind_group_layout, &source,
                 );
+                // Also rebuild wireframe variant
+                let wf = create_terrain_wireframe_pipeline(
+                    device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source,
+                );
+                self.terrain_wireframe_pipeline = wf;
                 Some(p)
             }
             PipelineId::Shadow => {

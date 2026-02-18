@@ -5,8 +5,8 @@ pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 pub const VOXEL_SCALE: f32 = 0.5;
 pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 16.0
-/// Padded snapshot size: CHUNK_SIZE + 2 (one voxel border on each side)
-pub const SNAP_SIZE: usize = CHUNK_SIZE + 2;
+/// Padded snapshot size: CHUNK_SIZE + 4 (two voxel border on each side)
+pub const SNAP_SIZE: usize = CHUNK_SIZE + 4;
 pub const SNAP_VOLUME: usize = SNAP_SIZE * SNAP_SIZE * SNAP_SIZE;
 
 pub struct ChunkMesh {
@@ -80,14 +80,14 @@ impl<'a> ChunkNeighbors<'a> {
 }
 
 /// A self-contained, owned copy of all voxel data needed to mesh one chunk.
-/// Contains CHUNK_SIZE+2 voxels in each dimension: the chunk's own 32^3 voxels
-/// plus a 1-voxel-deep border from neighbors. This allows the DC algorithm to
+/// Contains CHUNK_SIZE+4 voxels in each dimension: the chunk's own 32^3 voxels
+/// plus a 2-voxel-deep border from neighbors. This allows the DC algorithm to
 /// compute density gradients and sample corner densities at chunk boundaries
 /// without referencing the world.
 ///
 /// Coordinate convention: `get_voxel(x, y, z)` uses chunk-local coordinates
-/// where x in -1..=CHUNK_SIZE. Internally stored at offset +1, so snapshot
-/// index = (x+1, y+1, z+1).
+/// where x in -2..=CHUNK_SIZE+1. Internally stored at offset +2, so snapshot
+/// index = (x+2, y+2, z+2).
 pub struct ChunkSnapshot {
     pub position: IVec3,
     pub voxels: Box<[Voxel; SNAP_VOLUME]>,
@@ -102,32 +102,32 @@ impl ChunkSnapshot {
             Box::from_raw(Box::into_raw(boxed_slice) as *mut [Voxel; SNAP_VOLUME])
         };
 
-        // Fill the interior: chunk's own voxels at snapshot coords [1..CHUNK_SIZE+1)
+        // Fill the interior: chunk's own voxels at snapshot coords [2..CHUNK_SIZE+2)
         for z in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
-                    let si = Self::snap_index(x + 1, y + 1, z + 1);
+                    let si = Self::snap_index(x + 2, y + 2, z + 2);
                     voxels[si] = chunk.voxels[Chunk::voxel_index(x, y, z)];
                 }
             }
         }
 
-        // Fill border voxels (cells where at least one coord is 0 or SNAP_SIZE-1)
+        // Fill border voxels (cells where at least one coord is outside the interior)
         for sz in 0..SNAP_SIZE {
             for sy in 0..SNAP_SIZE {
                 for sx in 0..SNAP_SIZE {
-                    // Skip interior (already filled)
-                    if sx >= 1 && sx <= CHUNK_SIZE
-                        && sy >= 1 && sy <= CHUNK_SIZE
-                        && sz >= 1 && sz <= CHUNK_SIZE
+                    // Skip interior (already filled at snapshot coords [2..CHUNK_SIZE+2))
+                    if sx >= 2 && sx < CHUNK_SIZE + 2
+                        && sy >= 2 && sy < CHUNK_SIZE + 2
+                        && sz >= 2 && sz < CHUNK_SIZE + 2
                     {
                         continue;
                     }
 
                     // Convert snapshot coord to chunk-local coord
-                    let cx = sx as i32 - 1;
-                    let cy = sy as i32 - 1;
-                    let cz = sz as i32 - 1;
+                    let cx = sx as i32 - 2;
+                    let cy = sy as i32 - 2;
+                    let cz = sz as i32 - 2;
 
                     voxels[Self::snap_index(sx, sy, sz)] =
                         resolve_voxel_copy(chunk, neighbors, cx, cy, cz);
@@ -146,12 +146,12 @@ impl ChunkSnapshot {
         sx + sy * SNAP_SIZE + sz * SNAP_SIZE * SNAP_SIZE
     }
 
-    /// Sample a voxel at chunk-local coordinates where x in -1..=CHUNK_SIZE.
+    /// Sample a voxel at chunk-local coordinates where x in -2..=CHUNK_SIZE+1.
     #[inline]
     pub fn get_voxel(&self, x: i32, y: i32, z: i32) -> &Voxel {
-        let sx = (x + 1) as usize;
-        let sy = (y + 1) as usize;
-        let sz = (z + 1) as usize;
+        let sx = (x + 2) as usize;
+        let sy = (y + 2) as usize;
+        let sz = (z + 2) as usize;
         debug_assert!(
             sx < SNAP_SIZE && sy < SNAP_SIZE && sz < SNAP_SIZE,
             "ChunkSnapshot::get_voxel out of range: ({}, {}, {})", x, y, z

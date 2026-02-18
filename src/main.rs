@@ -10,6 +10,7 @@ mod world;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use glam::IVec3;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -22,6 +23,7 @@ use params::{EngineParams, ParamChangeKind};
 use rendering::gpu_state::GpuState;
 use rendering::pipelines::{self, PipelineRegistry, PipelineResources};
 use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
+use rendering::debug_lines::DebugLinePass;
 use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
 use rendering::frustum::Frustum;
@@ -32,6 +34,7 @@ use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
 use ui::panels::UiState;
 use world::generation::{WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z};
+use world::WorldManager;
 
 use crate::meshing::MeshingPipeline;
 
@@ -79,6 +82,7 @@ struct AppState {
     wind: WindState,
     cloud_shadow: CloudShadowState,
     elapsed: f32,
+    debug_line_pass: DebugLinePass,
     vegetation_pass: VegetationPass,
     static_water: StaticWater,
     water_pass: WaterPass,
@@ -89,6 +93,7 @@ struct AppState {
     shader_watcher: ShaderWatcher,
     shader_dir: PathBuf,
     meshing_pipeline: MeshingPipeline,
+    world_manager: WorldManager,
     frustum: Frustum,
 }
 
@@ -184,6 +189,15 @@ impl AppState {
             &shader_dir,
         );
 
+        let debug_lines_source = std::fs::read_to_string(shader_dir.join("debug_lines.wgsl"))
+            .expect("Failed to read debug_lines.wgsl");
+        let debug_line_pass = DebugLinePass::new(
+            &gpu.device,
+            gpu.surface_format,
+            &pipeline_resources.global_bind_group_layout,
+            &debug_lines_source,
+        );
+
         // Generate or load world using params
         let gen_start = std::time::Instant::now();
         let cache_dir = std::path::PathBuf::from("cache/meshes");
@@ -253,6 +267,7 @@ impl AppState {
             wind: WindState::new(),
             cloud_shadow,
             elapsed: 0.0,
+            debug_line_pass,
             vegetation_pass,
             static_water,
             water_pass,
@@ -263,6 +278,7 @@ impl AppState {
             shader_watcher,
             shader_dir,
             meshing_pipeline,
+            world_manager: WorldManager::new(),
             frustum,
         }
     }
@@ -402,6 +418,17 @@ impl AppState {
         let sun_color = self.time_of_day.sun_color(&self.ui_state.params.lighting);
         let ambient_color = self.time_of_day.ambient_color(&self.ui_state.params.lighting);
 
+        // Compute debug_mode from DebugParams flags
+        let debug_mode: u32 = if self.ui_state.params.debug.show_material_ids {
+            1 // Material ID view
+        } else if self.ui_state.params.debug.show_ao_only {
+            2 // AO-only view
+        } else if self.ui_state.params.debug.show_normals {
+            3 // Normal view
+        } else {
+            0 // Normal rendering (wireframe is handled by pipeline swap, not shader)
+        };
+
         let uniforms = GlobalUniforms {
             view_proj: self.camera.view_projection(),
             light_space_matrix: light_space.to_cols_array_2d(),
@@ -413,7 +440,7 @@ impl AppState {
             _pad2: 0.0,
             wind_vector: self.wind.wind_vector.into(),
             time: self.elapsed,
-            _pad_time: 0.0,
+            debug_mode,
             cloud_shadow_offset: self.cloud_shadow.offset.into(),
             cloud_coverage: self.cloud_shadow.coverage,
             _pad3: 0.0,
@@ -527,7 +554,14 @@ impl AppState {
                 occlusion_query_set: None,
             });
 
-            pass.set_pipeline(&self.pipeline_registry.terrain_pipeline);
+            // Select terrain pipeline based on wireframe debug flag
+            let terrain_pipeline = if self.ui_state.params.debug.show_wireframe {
+                &self.pipeline_registry.terrain_wireframe_pipeline
+            } else {
+                &self.pipeline_registry.terrain_pipeline
+            };
+
+            pass.set_pipeline(terrain_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             for chunk in &self.world.chunks {
                 if let Some(mesh) = &chunk.mesh {
@@ -554,6 +588,25 @@ impl AppState {
                 pass.set_vertex_buffer(0, self.water_pass.vertex_buffer.slice(..));
                 pass.set_index_buffer(self.water_pass.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..self.water_pass.index_count, 0, 0..1);
+            }
+
+            // Debug: chunk boundary lines
+            if self.ui_state.params.debug.show_chunk_boundaries {
+                let chunk_positions: Vec<IVec3> = self.world.chunks.iter()
+                    .map(|c| c.position)
+                    .collect();
+                self.debug_line_pass.update(
+                    &self.gpu.device,
+                    &chunk_positions,
+                    &self.frustum,
+                );
+
+                if let Some(ref vb) = self.debug_line_pass.vertex_buffer {
+                    pass.set_pipeline(&self.debug_line_pass.pipeline);
+                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    pass.set_vertex_buffer(0, vb.slice(..));
+                    pass.draw(0..self.debug_line_pass.vertex_count, 0..1);
+                }
             }
         }
 
@@ -591,29 +644,86 @@ impl AppState {
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
 
-        // Detect and log parameter changes
-        let change = self.ui_state.change_detector.detect(&self.ui_state.params);
-        match change {
-            ParamChangeKind::RegenerationRequired => {
-                log::info!("Terrain params changed -- regeneration needed");
-                self.meshing_pipeline.clear_cache();
-                // Also clear world generation cache
-                let cache_dir = std::path::PathBuf::from("cache/meshes");
-                if let Err(e) = meshing::cache::clear_world_cache(&cache_dir) {
-                    log::warn!("Failed to clear world cache: {}", e);
-                }
+        // ================================================================
+        // World regeneration management
+        // ================================================================
+
+        // Feed regeneration status to UI
+        self.ui_state.regenerating = self.world_manager.is_regenerating();
+        self.ui_state.regen_progress = self.world_manager.progress();
+
+        // Poll for completed background regeneration
+        if let Some((new_chunks, regen_params)) = self.world_manager.poll_regeneration() {
+            // Swap new voxel data into the world
+            self.world.chunks = new_chunks;
+            self.world.generator =
+                world::generation::TerrainGenerator::new(&regen_params);
+
+            // Reset meshing pipeline (drains stale in-flight results)
+            self.meshing_pipeline.reset_for_new_world();
+
+            // Mark all new chunks dirty and submit for meshing
+            for chunk in &mut self.world.chunks {
+                chunk.mesh_dirty = true;
             }
-            ParamChangeKind::MeshInvalidating => {
-                log::info!("Mesh-invalidating param changed -- clearing cache and resubmitting");
-                self.meshing_pipeline.clear_cache();
-                for chunk in &mut self.world.chunks {
-                    chunk.mesh_dirty = true;
-                }
-                self.meshing_pipeline.submit_all_dirty(&self.world);
+            self.meshing_pipeline.submit_all_dirty(&self.world);
+
+            // Rebuild vegetation pass (scans flora voxels in new world)
+            self.vegetation_pass = VegetationPass::new(
+                &self.gpu.device,
+                &self.world,
+                &self.ui_state.params.vegetation,
+            );
+            log::info!("Vegetation pass rebuilt after regeneration");
+
+            // Rebuild water passes (resamples terrain heights)
+            self.static_water = StaticWater::new(
+                &self.world,
+                &self.ui_state.params.water,
+                &regen_params,
+            );
+            self.water_pass = WaterPass::new(&self.gpu.device, &self.static_water);
+            log::info!("Water passes rebuilt after regeneration");
+
+            // Clear stale caches and save new world
+            let cache_dir = std::path::PathBuf::from("cache/meshes");
+            self.meshing_pipeline.clear_cache();
+            let _ = meshing::cache::clear_world_cache(&cache_dir);
+
+            let world_key =
+                meshing::cache::compute_world_cache_key(&regen_params);
+            let world_cache_path =
+                meshing::cache::world_cache_path(&cache_dir, world_key);
+            if let Err(e) = meshing::cache::save_world_cache(
+                &world_cache_path,
+                world_key,
+                &self.world,
+            ) {
+                log::warn!("Failed to save regenerated world cache: {}", e);
+            } else {
+                log::info!("Regenerated world saved to cache");
             }
-            _ => {}
+
+            // Update UI state
+            self.ui_state.regenerating = false;
+
+            // If the user changed terrain params *during* regeneration, the world
+            // we just built is already stale. Immediately start another regen.
+            if regen_params != self.ui_state.params.terrain_gen {
+                log::info!("Terrain params changed during regeneration, restarting");
+                self.world_manager
+                    .start_regeneration(&self.ui_state.params.terrain_gen);
+            }
         }
-        self.ui_state.change_detector.snapshot(&self.ui_state.params);
+
+        // Handle explicit "Regenerate World" button press
+        if self.ui_state.regenerate_requested {
+            self.ui_state.regenerate_requested = false;
+            if !self.world_manager.is_regenerating() {
+                self.world_manager
+                    .start_regeneration(&self.ui_state.params.terrain_gen);
+            }
+        }
     }
 }
 

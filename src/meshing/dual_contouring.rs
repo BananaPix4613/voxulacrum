@@ -5,6 +5,12 @@ use std::collections::HashMap;
 
 use super::qef::QefSolver;
 
+/// Maxmimum sharpness bias applied to QEF constraint normals.
+/// Higher values distort vertex placement on slopes. The full
+/// material sharpness is still applied to the display normal
+/// for visual edge sharpening.
+const QEF_MAX_SHARPNESS: f32 = 0.3;
+
 /// Map from (cx, cy, cz) local cell coords to the TerrainVertex for boundary cells.
 pub type BoundaryVertexMap = HashMap<(u8, u8, u8), TerrainVertex>;
 
@@ -199,7 +205,7 @@ fn vertex_color_variation(position: [f32; 3]) -> f32 {
 
 fn snap_density(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> f32 {
     let cs = CHUNK_SIZE as i32;
-    if x < -1 || x > cs || y < -1 || y > cs || z < -1 || z > cs {
+    if x < -2 || x > cs + 1 || y < -2 || y > cs + 1 || z < -2 || z > cs + 1 {
         return -1.0;
     }
     snap.get_voxel(x, y, z).density as f32
@@ -207,7 +213,7 @@ fn snap_density(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> f32 {
 
 fn snap_material(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> u16 {
     let cs = CHUNK_SIZE as i32;
-    if x < -1 || x > cs || y < -1 || y > cs || z < -1 || z > cs {
+    if x < -2 || x > cs + 1 || y < -2 || y > cs + 1 || z < -2 || z > cs + 1 {
         return MAT_AIR;
     }
     snap.get_voxel(x, y, z).material
@@ -215,10 +221,18 @@ fn snap_material(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> u16 {
 
 fn snap_ao_density(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> f32 {
     let cs = CHUNK_SIZE as i32;
-    let cx = x.clamp(-1, cs);
-    let cy = y.clamp(-1, cs);
-    let cz = z.clamp(-1, cs);
+    let cx = x.clamp(-2, cs + 1);
+    let cy = y.clamp(-2, cs + 1);
+    let cz = z.clamp(-2, cs + 1);
     snap.get_voxel(cx, cy, cz).density as f32
+}
+
+/// Classify density for sign-change detection. Treats exact zero as
+/// slightly negative (air) to avoid ambiguous crossings at chunk
+/// boundaries where missing neighbors default to density=0.
+#[inline]
+fn classify_density(d: f32) -> f32 {
+    if d == 0.0 { -0.5 } else { d }
 }
 
 fn snap_gradient(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> [f32; 3] {
@@ -288,14 +302,14 @@ pub fn generate_cell_vertices_from_snapshot(snap: &ChunkSnapshot) -> CellVertexD
                 let iz = cz as i32;
 
                 let corners = [
-                    snap_density(snap, ix, iy, iz),
-                    snap_density(snap, ix + 1, iy, iz),
-                    snap_density(snap, ix, iy + 1, iz),
-                    snap_density(snap, ix + 1, iy + 1, iz),
-                    snap_density(snap, ix, iy, iz + 1),
-                    snap_density(snap, ix + 1, iy, iz + 1),
-                    snap_density(snap, ix, iy + 1, iz + 1),
-                    snap_density(snap, ix + 1, iy + 1, iz + 1),
+                    classify_density(snap_density(snap, ix, iy, iz)),
+                    classify_density(snap_density(snap, ix + 1, iy, iz)),
+                    classify_density(snap_density(snap, ix, iy + 1, iz)),
+                    classify_density(snap_density(snap, ix + 1, iy + 1, iz)),
+                    classify_density(snap_density(snap, ix, iy, iz + 1)),
+                    classify_density(snap_density(snap, ix + 1, iy, iz + 1)),
+                    classify_density(snap_density(snap, ix, iy + 1, iz + 1)),
+                    classify_density(snap_density(snap, ix + 1, iy + 1, iz + 1)),
                 ];
 
                 #[rustfmt::skip]
@@ -360,13 +374,19 @@ pub fn generate_cell_vertices_from_snapshot(snap: &ChunkSnapshot) -> CellVertexD
                         0.5
                     };
                     let axis_normal = snap_to_nearest_axis(raw_normal);
-                    let biased_normal = normalize(lerp3(raw_normal, axis_normal, sharpness));
 
-                    qef.add_plane(intersection, biased_normal);
+                    // QEF constraint normal: cap sharpness to avoid distorting vertex placement
+                    let qef_sharpness = sharpness.min(QEF_MAX_SHARPNESS);
+                    let qef_normal = normalize(lerp3(raw_normal, axis_normal, qef_sharpness));
 
-                    normal_sum[0] += biased_normal[0];
-                    normal_sum[1] += biased_normal[1];
-                    normal_sum[2] += biased_normal[2];
+                    // Display normal: full sharpness for visual edge sharpening
+                    let display_normal = normalize(lerp3(raw_normal, axis_normal, sharpness));
+
+                    qef.add_plane(intersection, qef_normal);
+
+                    normal_sum[0] += display_normal[0];
+                    normal_sum[1] += display_normal[1];
+                    normal_sum[2] += display_normal[2];
                 }
 
                 if !has_crossing {
@@ -404,7 +424,14 @@ pub fn generate_cell_vertices_from_snapshot(snap: &ChunkSnapshot) -> CellVertexD
 
                 let vert_idx = vertices.len() as u32;
                 vertex_indices[cell_idx] = vert_idx;
-                let vertex = TerrainVertex { position, normal: avg_normal, color, ao };
+                let vertex = TerrainVertex {
+                    position,
+                    normal: avg_normal,
+                    color,
+                    ao,
+                    material_id: dominant_material as u32,
+                    _pad_vert: [0; 3],
+                };
 
                 if cx == 0 || cy == 0 || cz == 0 {
                     boundary_map.insert((cx as u8, cy as u8, cz as u8), vertex);
@@ -461,11 +488,11 @@ pub fn generate_faces_from_snapshot(
     for z in 0..=CHUNK_SIZE as i32 {
         for y in 0..=CHUNK_SIZE as i32 {
             for x in 0..=CHUNK_SIZE as i32 {
-                let d0 = snap_density(snap, x, y, z);
+                let d0 = classify_density(snap_density(snap, x, y, z));
 
                 // X-edge
                 if x + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = snap_density(snap, x + 1, y, z);
+                    let d1 = classify_density(snap_density(snap, x + 1, y, z));
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             (x as usize, (y - 1) as usize, (z - 1) as usize),
@@ -479,7 +506,7 @@ pub fn generate_faces_from_snapshot(
 
                 // Y-edge
                 if y + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = snap_density(snap, x, y + 1, z);
+                    let d1 = classify_density(snap_density(snap, x, y + 1, z));
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             ((x - 1) as usize, y as usize, (z - 1) as usize),
@@ -493,7 +520,7 @@ pub fn generate_faces_from_snapshot(
 
                 // Z-edge
                 if z + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = snap_density(snap, x, y, z + 1);
+                    let d1 = classify_density(snap_density(snap, x, y, z + 1));
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             ((x - 1) as usize, (y - 1) as usize, z as usize),
@@ -545,14 +572,14 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
                 let iz = cz as i32;
 
                 let corners = [
-                    sample_density(chunk, neighbors, ix, iy, iz),
-                    sample_density(chunk, neighbors, ix + 1, iy, iz),
-                    sample_density(chunk, neighbors, ix, iy + 1, iz),
-                    sample_density(chunk, neighbors, ix + 1, iy + 1, iz),
-                    sample_density(chunk, neighbors, ix, iy, iz + 1),
-                    sample_density(chunk, neighbors, ix + 1, iy, iz + 1),
-                    sample_density(chunk, neighbors, ix, iy + 1, iz + 1),
-                    sample_density(chunk, neighbors, ix + 1, iy + 1, iz + 1),
+                    classify_density(sample_density(chunk, neighbors, ix, iy, iz)),
+                    classify_density(sample_density(chunk, neighbors, ix + 1, iy, iz)),
+                    classify_density(sample_density(chunk, neighbors, ix, iy + 1, iz)),
+                    classify_density(sample_density(chunk, neighbors, ix + 1, iy + 1, iz)),
+                    classify_density(sample_density(chunk, neighbors, ix, iy, iz + 1)),
+                    classify_density(sample_density(chunk, neighbors, ix + 1, iy, iz + 1)),
+                    classify_density(sample_density(chunk, neighbors, ix, iy + 1, iz + 1)),
+                    classify_density(sample_density(chunk, neighbors, ix + 1, iy + 1, iz + 1)),
                 ];
 
                 // Check all 12 edges for sign changes
@@ -626,13 +653,19 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
                         0.5
                     };
                     let axis_normal = snap_to_nearest_axis(raw_normal);
-                    let biased_normal = normalize(lerp3(raw_normal, axis_normal, sharpness));
 
-                    qef.add_plane(intersection, biased_normal);
+                    // QEF constraint normal: cap sharpness to avoid distorting vertex placement
+                    let qef_sharpness = sharpness.min(QEF_MAX_SHARPNESS);
+                    let qef_normal = normalize(lerp3(raw_normal, axis_normal, qef_sharpness));
 
-                    normal_sum[0] += biased_normal[0];
-                    normal_sum[1] += biased_normal[1];
-                    normal_sum[2] += biased_normal[2];
+                    // Display normal: full sharpness for visual edge sharpening
+                    let display_normal = normalize(lerp3(raw_normal, axis_normal, sharpness));
+
+                    qef.add_plane(intersection, qef_normal);
+
+                    normal_sum[0] += display_normal[0];
+                    normal_sum[1] += display_normal[1];
+                    normal_sum[2] += display_normal[2];
                 }
 
                 if !has_crossing {
@@ -674,7 +707,14 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
 
                 let vert_idx = vertices.len() as u32;
                 vertex_indices[cell_idx] = vert_idx;
-                let vertex = TerrainVertex { position, normal: avg_normal, color, ao };
+                let vertex = TerrainVertex {
+                    position,
+                    normal: avg_normal,
+                    color,
+                    ao,
+                    material_id: dominant_material as u32,
+                    _pad_vert: [0; 3],
+                };
 
                 // Record boundary vertices (cells at the low face of the chunk)
                 if cx == 0 || cy == 0 || cz == 0 {
@@ -731,11 +771,11 @@ pub fn generate_faces(
     for z in 0..=CHUNK_SIZE as i32 {
         for y in 0..=CHUNK_SIZE as i32 {
             for x in 0..=CHUNK_SIZE as i32 {
-                let d0 = sample_density(chunk, neighbors, x, y, z);
+                let d0 = classify_density(sample_density(chunk, neighbors, x, y, z));
 
                 // X-edge
                 if x + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = sample_density(chunk, neighbors, x + 1, y, z);
+                    let d1 = classify_density(sample_density(chunk, neighbors, x + 1, y, z));
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             (x as usize, (y - 1) as usize, (z - 1) as usize),
@@ -749,7 +789,7 @@ pub fn generate_faces(
 
                 // Y-edge
                 if y + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = sample_density(chunk, neighbors, x, y + 1, z);
+                    let d1 = classify_density(sample_density(chunk, neighbors, x, y + 1, z));
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             ((x - 1) as usize, y as usize, (z - 1) as usize),
@@ -763,7 +803,7 @@ pub fn generate_faces(
 
                 // Z-edge
                 if z + 1 <= CHUNK_SIZE as i32 {
-                    let d1 = sample_density(chunk, neighbors, x, y, z + 1);
+                    let d1 = classify_density(sample_density(chunk, neighbors, x, y, z + 1));
                     if (d0 > 0.0) != (d1 > 0.0) {
                         let cells = [
                             ((x - 1) as usize, (y - 1) as usize, z as usize),
@@ -800,6 +840,16 @@ fn emit_quad(
             return;
         }
         vis[i] = vi;
+    }
+
+    // Skip degenerate quads where two or more cells share a vertex index.
+    // This happens when QEF clamping collapses neighboring cell vertices
+    // to the same position, producing zero-area triangles.
+    if vis[0] == vis[1] || vis[0] == vis[2] || vis[0] == vis[3]
+        || vis[1] == vis[2] || vis[1] == vis[3]
+        || vis[2] == vis[3]
+    {
+        return;
     }
 
     if solid_first {

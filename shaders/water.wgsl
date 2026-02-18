@@ -9,7 +9,7 @@ struct GlobalUniforms {
     _pad2: f32,
     wind_vector: vec2<f32>,
     time: f32,
-    _pad_time: f32,
+    debug_mode: u32,
     cloud_shadow_offset: vec2<f32>,
     cloud_coverage: f32,
     _pad3: f32,

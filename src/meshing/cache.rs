@@ -9,7 +9,7 @@ use crate::world::voxel::MATERIAL_TABLE;
 
 /// Cache file format version. Increment when TerrainVertex layout or
 /// serialization format changes to automatically invalidate old caches.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 // ============================================================================
 // Cache file format

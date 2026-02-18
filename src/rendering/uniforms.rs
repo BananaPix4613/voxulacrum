@@ -13,7 +13,7 @@ pub struct GlobalUniforms {
     pub _pad2: f32,                        //  4 bytes, offset 172
     pub wind_vector: [f32; 2],             //  8 bytes, offset 176
     pub time: f32,                         //  4 bytes, offset 184
-    pub _pad_time: f32,                    //  4 bytes, offset 188
+    pub debug_mode: u32,                   //  4 bytes, offset 188
     pub cloud_shadow_offset: [f32; 2],     //  8 bytes, offset 192
     pub cloud_coverage: f32,               //  4 bytes, offset 200
     pub _pad3: f32,                        //  4 bytes, offset 204
@@ -43,7 +43,7 @@ impl Default for GlobalUniforms {
             _pad2: 0.0,
             wind_vector: [0.0, 0.0],
             time: 0.0,
-            _pad_time: 0.0,
+            debug_mode: 0,
             cloud_shadow_offset: [0.0, 0.0],
             cloud_coverage: 0.55,
             _pad3: 0.0,

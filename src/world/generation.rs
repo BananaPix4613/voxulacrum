@@ -102,7 +102,7 @@ impl TerrainGenerator {
         chunks
     }
 
-    fn generate_chunk(&self, chunk: &mut Chunk, params: &TerrainGenParams) {
+    pub fn generate_chunk(&self, chunk: &mut Chunk, params: &TerrainGenParams) {
         let chunk_world_x = chunk.position.x as f32 * CHUNK_WORLD_SIZE;
         let chunk_world_y = chunk.position.y as f32 * CHUNK_WORLD_SIZE;
         let chunk_world_z = chunk.position.z as f32 * CHUNK_WORLD_SIZE;

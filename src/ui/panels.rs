@@ -27,6 +27,9 @@ pub struct UiState {
     pub shader_log: Vec<ShaderLogEntry>,
     pub meshing_stats: MeshingStats,
     pub clear_cache_requested: bool,
+    pub regenerate_requested: bool,
+    pub regenerating: bool,
+    pub regen_progress: (u32, u32),
 }
 
 impl UiState {
@@ -51,6 +54,9 @@ impl UiState {
             shader_log: Vec::new(),
             meshing_stats: MeshingStats::default(),
             clear_cache_requested: false,
+            regenerate_requested: false,
+            regenerating: false,
+            regen_progress: (0, 0),
         }
     }
 
@@ -116,7 +122,13 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_vegetation(ui, &mut state.params.vegetation);
                 ui.separator();
-                draw_terrain_gen(ui, &mut state.params.terrain_gen);
+                draw_terrain_gen(
+                    ui,
+                    &mut state.params.terrain_gen,
+                    state.regenerating,
+                    state.regen_progress,
+                    &mut state.regenerate_requested,
+                );
                 ui.separator();
                 draw_debug(ui, &mut state.params.debug);
                 ui.separator();
@@ -254,21 +266,49 @@ fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams) {
     });
 }
 
-fn draw_terrain_gen(ui: &mut egui::Ui, p: &mut TerrainGenParams) {
+fn draw_terrain_gen(
+    ui: &mut egui::Ui,
+    p: &mut TerrainGenParams,
+    regenerating: bool,
+    regen_progress: (u32, u32),
+    regenerate_requested: &mut bool,
+) {
     ui.collapsing("Terrain Generation", |ui| {
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Seed:"); ui.add(egui::DragValue::new(&mut p.seed)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Base height:"); ui.add(egui::Slider::new(&mut p.base_height, 0.0..=64.0)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Cliff threshold:"); ui.add(egui::Slider::new(&mut p.cliff_threshold, 0.5..=5.0)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Hill amplitude:"); ui.add(egui::Slider::new(&mut p.hill_amplitude, 0.0..=50.0)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Hill frequency:"); ui.add(egui::Slider::new(&mut p.hill_frequency, 0.0001..=0.05).logarithmic(true)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge amplitude:"); ui.add(egui::Slider::new(&mut p.ridge_amplitude, 0.0..=30.0)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge frequency:"); ui.add(egui::Slider::new(&mut p.ridge_frequency, 0.001..=0.1).logarithmic(true)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Detail amplitude:"); ui.add(egui::Slider::new(&mut p.detail_amplitude, 0.0..=10.0)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Detail frequency:"); ui.add(egui::Slider::new(&mut p.detail_frequency, 0.001..=0.2).logarithmic(true)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Cave amplitude:"); ui.add(egui::Slider::new(&mut p.cave_amplitude, 0.0..=20.0)); });
-        ui.horizontal(|ui| { dot_red(ui); ui.label("Cave frequency:"); ui.add(egui::Slider::new(&mut p.cave_frequency, 0.001..=0.1).logarithmic(true)); });
+        // Disable param sliders while regenerating (scoped via add_enabled_ui)
+        ui.add_enabled_ui(!regenerating, |ui| {
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Seed:"); ui.add(egui::DragValue::new(&mut p.seed)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Base height:"); ui.add(egui::Slider::new(&mut p.base_height, 0.0..=64.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Cliff threshold:"); ui.add(egui::Slider::new(&mut p.cliff_threshold, 0.5..=5.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Hill amplitude:"); ui.add(egui::Slider::new(&mut p.hill_amplitude, 0.0..=50.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Hill frequency:"); ui.add(egui::Slider::new(&mut p.hill_frequency, 0.0001..=0.05).logarithmic(true)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge amplitude:"); ui.add(egui::Slider::new(&mut p.ridge_amplitude, 0.0..=30.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge frequency:"); ui.add(egui::Slider::new(&mut p.ridge_frequency, 0.001..=0.1).logarithmic(true)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Detail amplitude:"); ui.add(egui::Slider::new(&mut p.detail_amplitude, 0.0..=10.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Detail frequency:"); ui.add(egui::Slider::new(&mut p.detail_frequency, 0.001..=0.2).logarithmic(true)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Cave amplitude:"); ui.add(egui::Slider::new(&mut p.cave_amplitude, 0.0..=20.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Cave frequency:"); ui.add(egui::Slider::new(&mut p.cave_frequency, 0.001..=0.1).logarithmic(true)); });
+        });
+
+        // Button/progress area (always enabled, outside the add_enabled_ui scope)
         ui.add_space(4.0);
-        ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "Changes require world regeneration.");
+
+        if regenerating {
+            let (done, total) = regen_progress;
+            let fraction = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .text(format!("Regenerating... {}/{}", done, total))
+                    .animate(true),
+            );
+        } else {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 60, 60),
+                "Changes require world regeneration.",
+            );
+            if ui.button("Regenerate World").clicked() {
+                *regenerate_requested = true;
+            }
+        }
     });
 }
 
@@ -276,9 +316,24 @@ fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
     ui.collapsing("Debug Overlays", |ui| {
         ui.checkbox(&mut p.show_wireframe, "Wireframe");
         ui.checkbox(&mut p.show_chunk_boundaries, "Chunk boundaries");
-        ui.checkbox(&mut p.show_material_ids, "Material IDs");
-        ui.checkbox(&mut p.show_ao_only, "AO only");
-        ui.checkbox(&mut p.show_normals, "Normals");
+
+        ui.separator();
+        ui.label("Shader debug (mutually exclusive):");
+
+        if ui.checkbox(&mut p.show_material_ids, "Material IDs").changed() && p.show_material_ids {
+            p.show_ao_only = false;
+            p.show_normals = false;
+        }
+        if ui.checkbox(&mut p.show_ao_only, "AO only").changed() && p.show_ao_only {
+            p.show_material_ids = false;
+            p.show_normals = false;
+        }
+        if ui.checkbox(&mut p.show_normals, "Normals").changed() && p.show_normals {
+            p.show_material_ids = false;
+            p.show_ao_only = false;
+        }
+
+        ui.separator();
         ui.checkbox(&mut p.show_water_debug, "Water debug");
         ui.checkbox(&mut p.show_performance, "Show performance");
         ui.checkbox(&mut p.freeze_culling, "Freeze culling");
@@ -348,7 +403,7 @@ fn draw_meshing_section(ui: &mut egui::Ui, stats: &MeshingStats, clear_cache: &m
                 format!("Meshing... ({} active)", active),
             );
         }
-        
+
         // Cache stats
         ui.separator();
         ui.label("Disk Cache");
@@ -387,9 +442,23 @@ fn draw_performance(ui: &mut egui::Ui, state: &UiState) {
     ui.collapsing("Performance", |ui| {
         ui.label(format!("FPS: {:.0}", state.fps));
         ui.label(format!("Frame: {:.1}ms", state.frame_time_ms));
-        ui.label(format!("Triangles: {}", state.total_triangles));
+        ui.label(format!("Triangles: {}", format_number(state.total_triangles)));
         ui.label(format!("Chunks: {}/{}", state.chunks_visible, state.chunks_total));
+        if state.chunks_total > 0 {
+            let cull_pct = (1.0 - state.chunks_visible as f64 / state.chunks_total as f64) * 100.0;
+            ui.label(format!("Culled: {:.0}%", cull_pct));
+        }
     });
+}
+
+fn format_number(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
 }
 
 fn draw_preset_controls(ui: &mut egui::Ui, state: &mut UiState) {
