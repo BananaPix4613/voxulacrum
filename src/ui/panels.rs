@@ -205,7 +205,7 @@ fn draw_materials(ui: &mut egui::Ui, p: &mut MaterialParams, selected: &mut usiz
             });
 
         if let Some(mat) = p.entries.get_mut(*selected) {
-            ui.horizontal(|ui| { dot_green(ui); ui.label("Color:"); ui.color_edit_button_rgb(&mut mat.color); });
+            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Color:"); ui.color_edit_button_rgb(&mut mat.color); });
             ui.horizontal(|ui| { dot_yellow(ui); ui.label("Sharpness:"); ui.add(egui::Slider::new(&mut mat.sharpness, 0.0..=1.0)); });
             ui.horizontal(|ui| { dot_green(ui); ui.label("Hardness:"); ui.add(egui::Slider::new(&mut mat.hardness, 0.0..=1.0)); });
             ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut mat.permeable, "Permeable"); });
@@ -285,8 +285,19 @@ fn draw_terrain_gen(
             ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge frequency:"); ui.add(egui::Slider::new(&mut p.ridge_frequency, 0.001..=0.1).logarithmic(true)); });
             ui.horizontal(|ui| { dot_red(ui); ui.label("Detail amplitude:"); ui.add(egui::Slider::new(&mut p.detail_amplitude, 0.0..=10.0)); });
             ui.horizontal(|ui| { dot_red(ui); ui.label("Detail frequency:"); ui.add(egui::Slider::new(&mut p.detail_frequency, 0.001..=0.2).logarithmic(true)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cave amplitude:"); ui.add(egui::Slider::new(&mut p.cave_amplitude, 0.0..=20.0)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cave frequency:"); ui.add(egui::Slider::new(&mut p.cave_frequency, 0.001..=0.1).logarithmic(true)); });
+            ui.separator();
+            ui.label("Cave System");
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Caves enabled:"); ui.add(egui::Checkbox::without_text(&mut p.cave_enabled)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Spaghetti freq:"); ui.add(egui::Slider::new(&mut p.cave_spaghetti_freq, 0.005..=0.1).logarithmic(true)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Spaghetti thickness:"); ui.add(egui::Slider::new(&mut p.cave_spaghetti_thickness, 0.01..=0.3)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Noodle freq:"); ui.add(egui::Slider::new(&mut p.cave_noodle_freq, 0.001..=0.2).logarithmic(true)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Noodle thickness:"); ui.add(egui::Slider::new(&mut p.cave_noodle_thickness, 0.01..=0.5)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Cheese freq:"); ui.add(egui::Slider::new(&mut p.cave_cheese_freq, 0.002..=0.03).logarithmic(true)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Cheese threshold:"); ui.add(egui::Slider::new(&mut p.cave_cheese_threshold, 0.1..=0.9)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Warp amplitude:"); ui.add(egui::Slider::new(&mut p.cave_warp_amp, 0.0..=80.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Surface margin:"); ui.add(egui::Slider::new(&mut p.cave_surface_margin, 0.1..=10.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Y squash:"); ui.add(egui::Slider::new(&mut p.cave_y_squash, 0.1..=2.0)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Water level (gen):"); ui.add(egui::Slider::new(&mut p.water_level, 0.0..=64.0)); });
         });
 
         // Button/progress area (always enabled, outside the add_enabled_ui scope)

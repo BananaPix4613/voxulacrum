@@ -30,6 +30,19 @@ impl MaterialParams {
             .zip(other.entries.iter())
             .any(|(a, b)| (a.sharpness - b.sharpness).abs() > f32::EPSILON)
     }
+
+    pub fn materials_changed(&self, other: &MaterialParams) -> bool {
+        if self.entries.len() != other.entries.len() {
+            return true;
+        }
+        self.entries
+            .iter()
+            .zip(other.entries.iter())
+            .any(|(a, b)| {
+            (a.sharpness - b.sharpness).abs() > f32::EPSILON
+                || a.color != b.color
+            })
+    }
 }
 
 impl Default for MaterialParams {
@@ -255,6 +268,7 @@ impl Default for CameraParams {
 // ============================================================================
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct TerrainGenParams {
     pub base_height: f32,
     pub cliff_threshold: f32,
@@ -264,8 +278,18 @@ pub struct TerrainGenParams {
     pub ridge_frequency: f32,
     pub detail_amplitude: f32,
     pub detail_frequency: f32,
-    pub cave_amplitude: f32,
-    pub cave_frequency: f32,
+    // Cave system
+    pub cave_enabled: bool,
+    pub cave_spaghetti_freq: f32,      // Frequency for main tunnel noise (default: 0.02)
+    pub cave_spaghetti_thickness: f32, // Threshold width - higher = wider tunnels (default: 0.12)
+    pub cave_noodle_freq: f32,         // Frequency for thin passages (default: 0.04)
+    pub cave_noodle_thickness: f32,    // Threshold for thin passages (default: 0.06)
+    pub cave_cheese_freq: f32,         // Frequency for large chambers (default: 0.008)
+    pub cave_cheese_threshold: f32,    // Threshold - how much noise must exceed to carve (default: 0.6)
+    pub cave_warp_amp: f32,            // Domain warp amplitude for organic shapes (default: 30.0)
+    pub cave_surface_margin: f32,      // Depth below surface before caves begin (default: 4.0)
+    pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
+    pub water_level: f32,
     pub seed: i32,
 }
 
@@ -280,8 +304,17 @@ impl Default for TerrainGenParams {
             ridge_frequency: 0.01,
             detail_amplitude: 2.0,
             detail_frequency: 0.05,
-            cave_amplitude: 4.0,
-            cave_frequency: 0.015,
+            cave_enabled: true,
+            cave_spaghetti_freq: 0.01,
+            cave_spaghetti_thickness: 0.25,
+            cave_noodle_freq: 0.015,
+            cave_noodle_thickness: 0.2,
+            cave_cheese_freq: 0.008,
+            cave_cheese_threshold: 0.6,
+            cave_warp_amp: 15.0,
+            cave_surface_margin: 2.0,
+            cave_y_squash: 0.5,
+            water_level: 30.0,
             seed: 54321,
         }
     }
@@ -419,7 +452,7 @@ impl ParamChangeDetector {
         if current.terrain_gen != self.previous.terrain_gen {
             return ParamChangeKind::RegenerationRequired;
         }
-        if current.materials.sharpness_changed(&self.previous.materials) {
+        if current.materials.materials_changed(&self.previous.materials) {
             return ParamChangeKind::MeshInvalidating;
         }
         if current != &self.previous {

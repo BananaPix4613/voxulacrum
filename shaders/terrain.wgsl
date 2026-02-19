@@ -1,5 +1,5 @@
-const AO_MIN: f32 = 0.5;
-const AO_STRENGTH: f32 = 0.4;
+const AO_MIN: f32 = 0.3;
+const AO_STRENGTH: f32 = 3.5;
 
 // Debug mode constants
 const DEBUG_NONE: u32 = 0u;
@@ -104,7 +104,7 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
 
 // Debug palette: 9 high-contrast colors for material IDs 0-8
 fn debug_material_color(id: u32) -> vec3<f32> {
-    switch id {
+    switch (id) {
         case 0u: { return vec3<f32>(0.2, 0.2, 0.2); }   // Air (dark grey)
         case 1u: { return vec3<f32>(1.0, 0.3, 0.3); }   // Limestone (red)
         case 2u: { return vec3<f32>(0.3, 1.0, 0.3); }   // Granite (green)
@@ -124,18 +124,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if globals.debug_mode == DEBUG_MATERIAL_ID {
         return vec4<f32>(debug_material_color(in.material_id), 1.0);
     }
-    
+
     // --- Debug: AO-only view ---
     if globals.debug_mode == DEBUG_AO_ONLY {
         return vec4<f32>(vec3<f32>(in.ao), 1.0);
     }
-    
+
     // --- Debug: Normal view ---
     if globals.debug_mode == DEBUG_NORMALS {
         let normal_color = normalize(in.normal) * 0.5 + 0.5;
         return vec4<f32>(normal_color, 1.0);
     }
-    
+
     // --- Normal rendering ---
     let n = normalize(in.normal);
     let sun_dir = normalize(globals.sun_direction);

@@ -1,9 +1,10 @@
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::{Chunk, ChunkNeighbors, ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
-use crate::world::voxel::{Voxel, MATERIAL_TABLE, MAT_AIR};
+use crate::world::voxel::{Voxel, MAT_AIR};
 use std::collections::HashMap;
 
 use super::qef::QefSolver;
+use super::MaterialConfig;
 
 /// Maxmimum sharpness bias applied to QEF constraint normals.
 /// Higher values distort vertex placement on slopes. The full
@@ -193,12 +194,6 @@ fn compute_ao(chunk: &Chunk, neighbors: &ChunkNeighbors, pos: [f32; 3], chunk_of
     (1.0 - occlusion * 0.5).clamp(0.5, 1.0)
 }
 
-/// Deterministic per-vertex color variation based on world position.
-fn vertex_color_variation(position: [f32; 3]) -> f32 {
-    let hash = (position[0] * 7.3 + position[1] * 13.7 + position[2] * 5.1).sin() * 43758.5453;
-    (hash.fract() - 0.5) * 0.08 // +/- 4% brightness variation
-}
-
 // ============================================================================
 // Snapshot-based sampling functions (for threaded meshing)
 // ============================================================================
@@ -279,7 +274,7 @@ fn snap_compute_ao(snap: &ChunkSnapshot, pos: [f32; 3], chunk_offset: [f32; 3]) 
 /// Generate cell vertices from a ChunkSnapshot. Phase 1 worker function.
 /// Produces identical output to generate_cell_vertices() but operates on
 /// owned snapshot data instead of borrowed chunk + neighbors.
-pub fn generate_cell_vertices_from_snapshot(snap: &ChunkSnapshot) -> CellVertexData {
+pub fn generate_cell_vertices_from_snapshot(snap: &ChunkSnapshot, materials: &MaterialConfig) -> CellVertexData {
     let chunk_offset = [
         snap.position.x as f32 * CHUNK_WORLD_SIZE,
         snap.position.y as f32 * CHUNK_WORLD_SIZE,
@@ -368,8 +363,8 @@ pub fn generate_cell_vertices_from_snapshot(snap: &ChunkSnapshot) -> CellVertexD
                         dominant_material = mat;
                     }
 
-                    let sharpness = if (mat as usize) < MATERIAL_TABLE.len() {
-                        MATERIAL_TABLE[mat as usize].sharpness
+                    let sharpness = if (mat as usize) < materials.sharpness.len() {
+                        materials.sharpness[mat as usize]
                     } else {
                         0.5
                     };
@@ -408,17 +403,12 @@ pub fn generate_cell_vertices_from_snapshot(snap: &ChunkSnapshot) -> CellVertexD
 
                 let avg_normal = normalize(normal_sum);
 
-                let base_color = if (dominant_material as usize) < MATERIAL_TABLE.len() {
-                    MATERIAL_TABLE[dominant_material as usize].color
+                let base_color = if (dominant_material as usize) < materials.colors.len() {
+                    materials.colors[dominant_material as usize]
                 } else {
                     [0.5, 0.5, 0.5]
                 };
-                let variation = vertex_color_variation(position);
-                let color = [
-                    (base_color[0] + variation).clamp(0.0, 1.0),
-                    (base_color[1] + variation * 0.8).clamp(0.0, 1.0),
-                    (base_color[2] + variation * 0.6).clamp(0.0, 1.0),
-                ];
+                let color = base_color;
 
                 let ao = snap_compute_ao(snap, position, chunk_offset);
 
@@ -539,14 +529,14 @@ pub fn generate_faces_from_snapshot(
 }
 
 /// Generate mesh data for a single chunk using dual contouring.
-pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors) -> ChunkMeshData {
-    let mut cell_data = generate_cell_vertices(chunk, neighbors);
+pub fn mesh_chunk(chunk: &Chunk, neighbors: &ChunkNeighbors, materials: &MaterialConfig) -> ChunkMeshData {
+    let mut cell_data = generate_cell_vertices(chunk, neighbors, materials);
     let nb = NeighborBoundaries::empty();
     let indices = generate_faces(&mut cell_data, chunk, neighbors, &nb);
     ChunkMeshData { vertices: cell_data.vertices, indices }
 }
 
-pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> CellVertexData {
+pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors, materials: &MaterialConfig) -> CellVertexData {
     let chunk_offset = [
         chunk.position.x as f32 * CHUNK_WORLD_SIZE,
         chunk.position.y as f32 * CHUNK_WORLD_SIZE,
@@ -647,8 +637,8 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
                     }
 
                     // Apply material sharpness bias
-                    let sharpness = if (mat as usize) < MATERIAL_TABLE.len() {
-                        MATERIAL_TABLE[mat as usize].sharpness
+                    let sharpness = if (mat as usize) < materials.sharpness.len() {
+                        materials.sharpness[mat as usize]
                     } else {
                         0.5
                     };
@@ -690,17 +680,12 @@ pub fn generate_cell_vertices(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Cell
                 let avg_normal = normalize(normal_sum);
 
                 // Material color with per-vertex variation
-                let base_color = if (dominant_material as usize) < MATERIAL_TABLE.len() {
-                    MATERIAL_TABLE[dominant_material as usize].color
+                let base_color = if (dominant_material as usize) < materials.colors.len() {
+                    materials.colors[dominant_material as usize]
                 } else {
                     [0.5, 0.5, 0.5]
                 };
-                let variation = vertex_color_variation(position);
-                let color = [
-                    (base_color[0] + variation).clamp(0.0, 1.0),
-                    (base_color[1] + variation * 0.8).clamp(0.0, 1.0),
-                    (base_color[2] + variation * 0.6).clamp(0.0, 1.0),
-                ];
+                let color = base_color;
 
                 // AO
                 let ao = compute_ao(chunk, neighbors, position, chunk_offset);

@@ -96,7 +96,7 @@ impl EguiRenderer {
             .update_buffers(device, queue, encoder, &tris, &screen_descriptor);
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: output_view,

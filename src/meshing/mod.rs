@@ -9,9 +9,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
+use std::sync::RwLock;
 
-use glam::IVec3;
-
+use crate::params::MaterialParams;
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::ChunkSnapshot;
 use cache::AtomicCacheStats;
@@ -97,8 +97,23 @@ pub struct MeshingStats {
 
 struct CacheConfig {
     cache_dir: PathBuf,
-    sharpness_values: Vec<f32>,
     stats: Arc<AtomicCacheStats>,
+}
+
+/// Runtime material properties shared with worker threads.
+/// Updated from the main thread when material params change.
+pub struct MaterialConfig {
+    pub colors: Vec<[f32; 3]>,
+    pub sharpness: Vec<f32>,
+}
+
+impl MaterialConfig {
+    pub fn from_params(params: &MaterialParams) -> Self {
+        Self {
+            colors: params.entries.iter().map(|e| e.color).collect(),
+            sharpness: params.entries.iter().map(|e| e.sharpness).collect(),
+        }
+    }
 }
 
 // ============================================================================
@@ -115,6 +130,7 @@ pub struct MeshingPipeline {
     chunk_states: Vec<ChunkMeshState>,
     pending_phase1: HashMap<usize, (CellVertexData, ChunkSnapshot, u64)>,
     boundary_maps: HashMap<usize, BoundaryVertexMap>,
+    material_config: Arc<RwLock<MaterialConfig>>,
 
     chunks_x: usize,
     chunks_y: usize,
@@ -131,7 +147,7 @@ pub struct MeshingPipeline {
 }
 
 impl MeshingPipeline {
-    pub fn new(chunks_x: usize, chunks_y: usize, chunks_z: usize) -> Self {
+    pub fn new(chunks_x: usize, chunks_y: usize, chunks_z: usize, materials: &MaterialParams) -> Self {
         let total_chunks = chunks_x * chunks_y * chunks_z;
         let num_workers = num_cpus::get().saturating_sub(2).max(2);
 
@@ -142,11 +158,10 @@ impl MeshingPipeline {
         }
 
         let cache_stats = Arc::new(AtomicCacheStats::new());
-        let sharpness_values = cache::extract_sharpness_values();
+        let material_config = Arc::new(RwLock::new(MaterialConfig::from_params(materials)));
 
         let cache_config = Arc::new(CacheConfig {
             cache_dir: cache_dir.clone(),
-            sharpness_values,
             stats: cache_stats.clone(),
         });
 
@@ -165,11 +180,12 @@ impl MeshingPipeline {
             let p2_rx = p2_rx.clone();
             let p2_result_tx = p2_result_tx.clone();
             let cache_config = cache_config.clone();
+            let mat_config = material_config.clone();
 
             let handle = thread::Builder::new()
                 .name(format!("mesh-worker-{}", i))
                 .spawn(move || {
-                    worker_loop(p1_rx, p1_result_tx, p2_rx, p2_result_tx, cache_config);
+                    worker_loop(p1_rx, p1_result_tx, p2_rx, p2_result_tx, cache_config, mat_config);
                 })
                 .expect("Failed to spawn mesh worker thread");
 
@@ -187,6 +203,7 @@ impl MeshingPipeline {
             chunk_states: vec![ChunkMeshState::Idle; total_chunks],
             pending_phase1: HashMap::new(),
             boundary_maps: HashMap::new(),
+            material_config,
             chunks_x,
             chunks_y,
             chunks_z,
@@ -441,9 +458,17 @@ impl MeshingPipeline {
         self.cache_stats.reset();
         self.cache_disk_stats_stale = true;
     }
-    
+
+    /// Update runtime material properties. Workers will pick up the new values
+    /// on their next mesh computation.
+    pub fn update_material_config(&self, params: &MaterialParams) {
+        if let Ok(mut config) = self.material_config.write() {
+            *config = MaterialConfig::from_params(params);
+        }
+    }
+
     /// Reset all internal pipeline state for a freshly swapped world.
-    /// 
+    ///
     /// Clears chunk tracking, pending data, boundary maps, and drains any
     /// stale in-flight results from worker threads. Does NOT shut down workers
     /// or clear the disk cache.
@@ -452,32 +477,32 @@ impl MeshingPipeline {
         for state in &mut self.chunk_states {
             *state = ChunkMeshState::Idle;
         }
-        
+
         // Clear pending Phase 1 data (snapshots/cell data from old world)
         self.pending_phase1.clear();
-        
+
         // Clear boundary maps from old world
         self.boundary_maps.clear();
-        
+
         // Clear pending submissions queue
         self.pending_submissions.clear();
-        
+
         // Reset batch timing
         self.batch_start = None;
-        
+
         // Reset stats counters (preserve worker count)
         let worker_count = self.stats.worker_count;
         self.stats = MeshingStats {
             worker_count,
             ..Default::default()
         };
-        
+
         // Drain any in-flight results from worker threads to discard stale data.
         // Workers may still be processing old-world requests; those results will
         // refer to old voxel data and must not be uploaded after the swap.
         while self.p1_result_rx.try_recv().is_ok() {}
         while self.p2_result_rx.try_recv().is_ok() {}
-        
+
         log::info!("MeshingPipeline reset for new world");
     }
 
@@ -503,6 +528,7 @@ fn worker_loop(
     p2_rx: Arc<Mutex<Receiver<Phase2Request>>>,
     p2_result_tx: Sender<Phase2Result>,
     cache_config: Arc<CacheConfig>,
+    material_config: Arc<RwLock<MaterialConfig>>,
 ) {
     loop {
         // Try Phase 2 first (higher priority - unblocks GPU upload)
@@ -547,10 +573,14 @@ fn worker_loop(
                 Ok(req) => {
                     drop(rx);
 
-                    // Compute cache key from snapshot voxel data + sharpness
+                    // Read current material config (snapshot for this computation)
+                    let mat_config = material_config.read().unwrap();
+
+                    // Compute cache key from snapshot voxel data + material properties
                     let cache_key = cache::compute_cache_key(
                         &req.snapshot,
-                        &cache_config.sharpness_values,
+                        &mat_config.sharpness,
+                        &mat_config.colors,
                     );
 
                     // Try loading from disk cache
@@ -577,12 +607,17 @@ fn worker_loop(
                         continue;
                     }
 
-                    // Cache miss -- compute Phase 1 normally
+                    // Cache miss -- compute Phase 1 with current material config
                     cache_config
                         .stats
                         .misses
                         .fetch_add(1, Ordering::Relaxed);
-                    let cell_data = generate_cell_vertices_from_snapshot(&req.snapshot);
+                    let cell_data = generate_cell_vertices_from_snapshot(
+                        &req.snapshot,
+                        &mat_config,
+                    );
+                    drop(mat_config); // Release lock
+
                     let _ = p1_result_tx.send(Phase1Result {
                         chunk_index: req.chunk_index,
                         outcome: Phase1Outcome::Computed {

@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::ChunkSnapshot;
-use crate::world::voxel::MATERIAL_TABLE;
 
 /// Cache file format version. Increment when TerrainVertex layout or
 /// serialization format changes to automatically invalidate old caches.
@@ -72,7 +71,7 @@ pub struct CacheStats {
 /// - Sharpness values from MATERIAL_TABLE (affects normal biasing in meshing)
 ///
 /// Uses SeaHash for fast, portable, non-cryptographic hasing.
-pub fn compute_cache_key(snapshot: &ChunkSnapshot, sharpness_values: &[f32]) -> u64 {
+pub fn compute_cache_key(snapshot: &ChunkSnapshot, sharpness_values: &[f32], colors: &[[f32; 3]]) -> u64 {
     use seahash::SeaHasher;
     use std::hash::Hasher;
 
@@ -90,12 +89,14 @@ pub fn compute_cache_key(snapshot: &ChunkSnapshot, sharpness_values: &[f32]) -> 
         hasher.write(&s.to_le_bytes());
     }
 
-    hasher.finish()
-}
+    // Hash material colors (affect vertex color output).
+    for color in colors {
+        for &c in color {
+            hasher.write(&c.to_le_bytes());
+        }
+    }
 
-/// Extract sharpness values from the static MATERIAL_TABLE.
-pub fn extract_sharpness_values() -> Vec<f32> {
-    MATERIAL_TABLE.iter().map(|m| m.sharpness).collect()
+    hasher.finish()
 }
 
 // ============================================================================
@@ -224,8 +225,17 @@ pub fn compute_world_cache_key(params: &crate::params::TerrainGenParams) -> u64 
     hasher.write(&params.ridge_frequency.to_le_bytes());
     hasher.write(&params.detail_amplitude.to_le_bytes());
     hasher.write(&params.detail_frequency.to_le_bytes());
-    hasher.write(&params.cave_amplitude.to_le_bytes());
-    hasher.write(&params.cave_frequency.to_le_bytes());
+    hasher.write(&(params.cave_enabled as u8).to_le_bytes());
+    hasher.write(&params.cave_spaghetti_freq.to_le_bytes());
+    hasher.write(&params.cave_spaghetti_thickness.to_le_bytes());
+    hasher.write(&params.cave_noodle_freq.to_le_bytes());
+    hasher.write(&params.cave_noodle_thickness.to_le_bytes());
+    hasher.write(&params.cave_cheese_freq.to_le_bytes());
+    hasher.write(&params.cave_cheese_threshold.to_le_bytes());
+    hasher.write(&params.cave_warp_amp.to_le_bytes());
+    hasher.write(&params.cave_surface_margin.to_le_bytes());
+    hasher.write(&params.cave_y_squash.to_le_bytes());
+    hasher.write(&params.water_level.to_le_bytes());
     hasher.write_i32(params.seed);
     hasher.finish()
 }

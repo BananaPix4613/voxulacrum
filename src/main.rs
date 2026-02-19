@@ -19,9 +19,9 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use camera::IsometricCamera;
 use cloud_shadow::CloudShadowState;
-use params::{EngineParams, ParamChangeKind};
+use params::{EngineParams};
 use rendering::gpu_state::GpuState;
-use rendering::pipelines::{self, PipelineRegistry, PipelineResources};
+use rendering::pipelines::{PipelineRegistry, PipelineResources};
 use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
 use rendering::debug_lines::DebugLinePass;
 use rendering::vegetation_pass::VegetationPass;
@@ -33,7 +33,6 @@ use simulation::water::StaticWater;
 use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
 use ui::panels::UiState;
-use world::generation::{WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z};
 use world::WorldManager;
 
 use crate::meshing::MeshingPipeline;
@@ -204,7 +203,7 @@ impl AppState {
         let world_key = meshing::cache::compute_world_cache_key(&initial_params.terrain_gen);
         let world_cache_path = meshing::cache::world_cache_path(&cache_dir, world_key);
 
-        let mut world = if let Some(chunks) = meshing::cache::load_world_cache(&world_cache_path, world_key) {
+        let world = if let Some(chunks) = meshing::cache::load_world_cache(&world_cache_path, world_key) {
             log::info!("Loaded world from cache in {:.2?} ({} chunks)", gen_start.elapsed(), chunks.len());
             world::World::from_cached_chunks(chunks, &initial_params.terrain_gen)
         } else {
@@ -219,12 +218,6 @@ impl AppState {
             w
         };
         world.print_debug_stats();
-
-        let mut meshing_pipeline = MeshingPipeline::new(
-            WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z,
-        );
-        meshing_pipeline.submit_all_dirty(&world);
-        log::info!("Submitted {} chunks are async meshing", world.chunks.len());
 
         // Vegetation
         let veg_start = std::time::Instant::now();
@@ -249,6 +242,13 @@ impl AppState {
 
         let vp = camera.projection_matrix() * camera.view_matrix();
         let frustum = Frustum::from_view_projection(vp);
+
+        let mut meshing_pipeline = MeshingPipeline::new(
+            world.chunks_x, world.chunks_y, world.chunks_z,
+            &ui_state.params.materials,
+        );
+        meshing_pipeline.submit_all_dirty(&world);
+        log::info!("Submitted {} chunks are async meshing", world.chunks.len());
 
         Self {
             window,
@@ -395,6 +395,19 @@ impl AppState {
         self.time_of_day.update(dt, &self.ui_state.params.time_control);
         self.wind.update(dt, &self.ui_state.params.wind);
         self.cloud_shadow.update(dt, &self.wind.wind_vector, self.elapsed, &self.ui_state.params.cloud);
+
+        // Detect material parameter changes and trigger remeshing
+        let change_kind = self.ui_state.change_detector.detect(&self.ui_state.params);
+        if change_kind == params::ParamChangeKind::MeshInvalidating {
+            log::info!("Material params changed, triggering remesh");
+            self.meshing_pipeline.update_material_config(&self.ui_state.params.materials);
+            self.meshing_pipeline.reset_for_new_world();
+            for chunk in &mut self.world.chunks {
+                chunk.mesh_dirty = true;
+            }
+            self.meshing_pipeline.submit_all_dirty(&self.world);
+        }
+        self.ui_state.change_detector.snapshot(&self.ui_state.params);
 
         // Update frustum for culling (frozen when freeze_culling is enabled)
         if !self.ui_state.params.debug.freeze_culling {
