@@ -256,6 +256,62 @@ fn classify_density(d: f32) -> f32 {
 }
 
 // ============================================================================
+// Ambient occlusion
+// ============================================================================
+
+/// Compute ambient occlusion for a vertex by sampling nearby voxel occupancy.
+///
+/// Uses a distance-weighted 5x5x5 sampling kernel centered on the vertex
+/// position (converted to voxel-local coordinates). Voxels that are solid
+/// contribute occlusion inversely proportional to their squared distance.
+///
+/// Returns a value in [0.5, 1.0] where 1.0 = fully lit, 0.5 = maximally occluded.
+fn compute_ao(snap: &ChunkSnapshot, position: [f32; 3], chunk_offset: [f32; 3]) -> f32 {
+    // Convert world position to chunk-local voxel coordinates
+    let lx = (position[0] - chunk_offset[0]) / VOXEL_SCALE;
+    let ly = (position[1] - chunk_offset[1]) / VOXEL_SCALE;
+    let lz = (position[2] - chunk_offset[2]) / VOXEL_SCALE;
+
+    let cx = lx.round() as i32;
+    let cy = ly.round() as i32;
+    let cz = lz.round() as i32;
+
+    let radius: i32 = 2;
+    let mut weighted_solid = 0.0_f32;
+    let mut total_weight = 0.0_f32;
+
+    for dz in -radius..=radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
+                let weight = 1.0 / dist_sq;
+                total_weight += weight;
+
+                let sx = cx + dx;
+                let sy = cy + dy;
+                let sz = cz + dz;
+
+                // Clamp to snapshot bounds to avoid out-of-range access
+                let cs = CHUNK_SIZE as i32;
+                let vx = sx.clamp(-2, cs + 1);
+                let vy = sy.clamp(-2, cs + 1);
+                let vz = sz.clamp(-2, cs + 1);
+
+                if snap.get_voxel(vx, vy, vz).density > 0 {
+                    weighted_solid += weight;
+                }
+            }
+        }
+    }
+
+    let occlusion = weighted_solid / total_weight;
+    (1.0 - occlusion * 0.5).clamp(0.5, 1.0)
+}
+
+// ============================================================================
 // Vector math helpers
 // ============================================================================
 
@@ -377,6 +433,85 @@ fn corner_local_coords(cx: usize, cy: usize, cz: usize, corner: usize) -> (i32, 
     )
 }
 
+/// Determine the material for an entire MC cell by tracing upward from the cell
+/// center to find the nearest surface voxel (first solid voxel from above).
+///
+/// On slopes, the MC cells that produce the visible surface geometry sit deeper
+/// in the terrain than the grass layer. Their own corners are all well below the
+/// surface, so sampling corners directly would always pick soil/rock. By tracing
+/// upward we find the actual surface material (e.g. grass) that should be visible.
+///
+/// Falls back to the lowest-density solid corner if the upward trace fails.
+fn determine_cell_material(
+    snap: &ChunkSnapshot,
+    cx: usize, cy: usize, cz: usize,
+    corners: &[f32; 8],
+) -> u16 {
+    // Cell center in chunk-local voxel coordinates (integer, rounded)
+    let center_x = cx as i32;
+    let center_z = cz as i32;
+
+    // Start from the top of the cell (cy + 1) and trace upward to find the
+    // first solid voxel when coming down from above — i.e. the surface voxel.
+    let cs = CHUNK_SIZE as i32;
+    let max_y = cs + 1; // snapshot upper bound
+
+    // Scan upward from cell center to find the surface: the first air voxel
+    // tells us that the voxel just below it is the surface voxel.
+    // Limit the search to a few voxels so cave ceilings deep underground
+    // don't get overwritten with surface materials.
+    let start_y = cy as i32;
+    let max_trace = (start_y + 4).min(max_y); // at most 4 voxels above cell
+    let mut surface_mat = MAT_AIR;
+
+    for y in start_y..=max_trace {
+        let density = snap_density(snap, center_x, y, center_z);
+        if density <= 0.0 {
+            // Found air — the voxel at y-1 is the surface voxel
+            let surface_y = y - 1;
+            if surface_y >= -2 {
+                surface_mat = snap_material(snap, center_x, surface_y, center_z);
+            }
+            break;
+        }
+    }
+
+    // If we found a valid surface material, use it
+    if surface_mat != MAT_AIR {
+        return surface_mat;
+    }
+
+    // Fallback: lowest-density solid corner (original approach)
+    let mut best_mat = MAT_AIR;
+    let mut best_density = f32::MAX;
+
+    for i in 0..8 {
+        if corners[i] > 0.0 && corners[i] < best_density {
+            let (mx, my, mz) = corner_local_coords(cx, cy, cz, i);
+            let mat = snap_material(snap, mx, my, mz);
+            if mat != MAT_AIR {
+                best_density = corners[i];
+                best_mat = mat;
+            }
+        }
+    }
+
+    // Fallback: if no solid non-air corner found, try any solid corner
+    if best_mat == MAT_AIR {
+        for i in 0..8 {
+            if corners[i] > 0.0 {
+                let (mx, my, mz) = corner_local_coords(cx, cy, cz, i);
+                let mat = snap_material(snap, mx, my, mz);
+                if mat != MAT_AIR {
+                    return mat;
+                }
+            }
+        }
+    }
+
+    best_mat
+}
+
 /// Compute the edge vertex for a given MC edge within a cell.
 fn compute_edge_vertex(
     snap: &ChunkSnapshot,
@@ -397,10 +532,29 @@ fn compute_edge_vertex(
     let pos_b = corner_world_position(cx, cy, cz, ci_b, chunk_offset);
     let position = lerp3(pos_a, pos_b, t);
 
-    // Material: use the solid side's material
-    let solid_corner = if da > 0.0 { ci_a } else { ci_b };
-    let (mx, my, mz) = corner_local_coords(cx, cy, cz, solid_corner);
-    let mat = snap_material(snap, mx, my, mz);
+    // Material: sample at vertex position offset into the solid interior,
+    // then round to nearest voxel grid point. Rounding (not flooring) ensures
+    // that all vertices near the same voxel sample the same material,
+    // eliminating sub-voxel jitter at material boundaries.
+    let solid_pos = if da > 0.0 { pos_a } else { pos_b };
+    let toward_solid = normalize3(sub3(solid_pos, position));
+    let sample_pos = [
+        position[0] + toward_solid[0] * VOXEL_SCALE * 0.5,
+        position[1] + toward_solid[1] * VOXEL_SCALE * 0.5,
+        position[2] + toward_solid[2] * VOXEL_SCALE * 0.5,
+    ];
+    // Round to nearest voxel center (not floor) for grid-aligned material lookup
+    let vx = ((sample_pos[0] - chunk_offset[0]) / VOXEL_SCALE).round() as i32;
+    let vy = ((sample_pos[1] - chunk_offset[1]) / VOXEL_SCALE).round() as i32;
+    let vz = ((sample_pos[2] - chunk_offset[2]) / VOXEL_SCALE).round() as i32;
+    let mut mat = snap_material(snap, vx, vy, vz);
+
+    // Fallback: if we sample air, use the solid corner directly
+    if mat == MAT_AIR {
+        let solid_corner = if da > 0.0 { ci_a } else { ci_b };
+        let (mx, my, mz) = corner_local_coords(cx, cy, cz, solid_corner);
+        mat = snap_material(snap, mx, my, mz);
+    }
 
     let color = if (mat as usize) < materials.colors.len() {
         materials.colors[mat as usize]
@@ -410,7 +564,7 @@ fn compute_edge_vertex(
 
     TerrainVertex {
         position,
-        normal: [0.0, 1.0, 0.0], // placeholder - set during flatten_mesh
+        normal: [0.0, 1.0, 0.0],
         color,
         ao: 1.0,
         material_id: mat as u32,
@@ -424,11 +578,15 @@ fn compute_edge_vertex(
 // ============================================================================
 
 /// Duplicate shared vertices per-triangle so each face gets its own snapped
-/// normal. THis produces flat-shaded geometry where every triangle has a single
-/// uniform normal from the allowed set.
+/// normal, and compute per-vertex ambient occlusion, and assign uniform per-frace
+/// material via majority vote.
 fn flatten_mesh(
     shared_vertices: &[TerrainVertex],
     shared_indices: &[u32],
+    tri_materials: &[u32],
+    snap: &ChunkSnapshot,
+    chunk_offset: [f32; 3],
+    materials: &MaterialConfig,
 ) -> (Vec<TerrainVertex>, Vec<u32>) {
     let tri_count = shared_indices.len() / 3;
     let mut vertices = Vec::with_capacity(tri_count * 3);
@@ -448,7 +606,7 @@ fn flatten_mesh(
         let e2 = sub3(v2.position, v0.position);
         let raw_cross = cross3(e1, e2);
 
-        // Skip degenerate triangles (zero-area from coincidient snapped vertices)
+        // Skip degenerate triangles
         if length_sq3(raw_cross) < 1e-12 {
             continue;
         }
@@ -456,10 +614,30 @@ fn flatten_mesh(
         let raw_normal = normalize3(raw_cross);
         let snapped = snap_normal(raw_normal);
 
+        // Per-vertex AO
+        let ao0 = compute_ao(snap, v0.position, chunk_offset);
+        let ao1 = compute_ao(snap, v1.position, chunk_offset);
+        let ao2 = compute_ao(snap, v2.position, chunk_offset);
+
+        // Per-face material: use the cell's material (all triangles from
+        // the same MC cell share one material, eliminating zigzag artifacts)
+        let face_mat = tri_materials[tri];
+        let face_color = if (face_mat as usize) < materials.colors.len() {
+            materials.colors[face_mat as usize]
+        } else {
+            [0.5, 0.5, 0.5]
+        };
+
         let base = vertices.len() as u32;
-        vertices.push(TerrainVertex { normal: snapped, ..v0 });
-        vertices.push(TerrainVertex { normal: snapped, ..v1 });
-        vertices.push(TerrainVertex { normal: snapped, ..v2 });
+        vertices.push(TerrainVertex {
+            normal: snapped, ao: ao0, color: face_color, material_id: face_mat, ..v0
+        });
+        vertices.push(TerrainVertex {
+            normal: snapped, ao: ao1, color: face_color, material_id: face_mat, ..v1
+        });
+        vertices.push(TerrainVertex {
+            normal: snapped, ao: ao2, color: face_color, material_id: face_mat, ..v2
+        });
 
         indices.push(base);
         indices.push(base + 1);
@@ -493,6 +671,7 @@ pub fn generate_cell_vertices_from_snapshot(
 
     let mut shared_vertices: Vec<TerrainVertex> = Vec::new();
     let mut shared_indices: Vec<u32> = Vec::new();
+    let mut tri_materials: Vec<u32> = Vec::new();
     let mut edge_cache: HashMap<EdgeId, u32> =
         HashMap::with_capacity(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * 3);
 
@@ -506,6 +685,9 @@ pub fn generate_cell_vertices_from_snapshot(
                 if edge_bits == 0 {
                     continue; // entirely inside or outside
                 }
+
+                // Determine cell material once for all triangles in this cell
+                let cell_material = determine_cell_material(snap, cx, cy, cz, &corners);
 
                 // Compute edge vertices for all active edges
                 for edge_num in 0..12u32 {
@@ -541,6 +723,8 @@ pub fn generate_cell_vertices_from_snapshot(
                     shared_indices.push(vi2);
                     shared_indices.push(vi1);
 
+                    tri_materials.push(cell_material as u32);
+
                     i += 3;
                 }
             }
@@ -548,7 +732,10 @@ pub fn generate_cell_vertices_from_snapshot(
     }
 
     // Flatten for flat shading with snapped normals
-    let (flat_vertices, flat_indices) = flatten_mesh(&shared_vertices, &shared_indices);
+    let (flat_vertices, flat_indices) = flatten_mesh(
+        &shared_vertices, &shared_indices, &tri_materials,
+        snap, chunk_offset, materials,
+    );
 
     // Build CellVertexData matching pipeline contract.
     // MC doesn't use vertex_indices, cell_classes, or boundary_map - these exist

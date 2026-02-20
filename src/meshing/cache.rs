@@ -8,7 +8,7 @@ use crate::world::chunk::ChunkSnapshot;
 
 /// Cache file format version. Increment when TerrainVertex layout or
 /// serialization format changes to automatically invalidate old caches.
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 
 // ============================================================================
 // Cache file format
