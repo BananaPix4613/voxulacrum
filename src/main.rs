@@ -245,7 +245,7 @@ impl AppState {
 
         let mut meshing_pipeline = MeshingPipeline::new(
             world.chunks_x, world.chunks_y, world.chunks_z,
-            &ui_state.params.materials,
+            &ui_state.params.materials, &ui_state.params.meshing,
         );
         meshing_pipeline.submit_all_dirty(&world);
         log::info!("Submitted {} chunks are async meshing", world.chunks.len());
@@ -400,7 +400,7 @@ impl AppState {
         let change_kind = self.ui_state.change_detector.detect(&self.ui_state.params);
         if change_kind == params::ParamChangeKind::MeshInvalidating {
             log::info!("Material params changed, triggering remesh");
-            self.meshing_pipeline.update_material_config(&self.ui_state.params.materials);
+            self.meshing_pipeline.update_material_config(&self.ui_state.params.materials, &self.ui_state.params.meshing);
             self.meshing_pipeline.reset_for_new_world();
             for chunk in &mut self.world.chunks {
                 chunk.mesh_dirty = true;
@@ -438,6 +438,8 @@ impl AppState {
             2 // AO-only view
         } else if self.ui_state.params.debug.show_normals {
             3 // Normal view
+        } else if self.ui_state.params.debug.show_greedy_debug {
+            4 // Greedy view
         } else {
             0 // Normal rendering (wireframe is handled by pipeline swap, not shader)
         };
@@ -456,7 +458,13 @@ impl AppState {
             debug_mode,
             cloud_shadow_offset: self.cloud_shadow.offset.into(),
             cloud_coverage: self.cloud_shadow.coverage,
-            _pad3: 0.0,
+            edge_strength: self.ui_state.params.meshing.edge_strength,
+            ortho_ao_strength: if self.ui_state.params.meshing.ortho_ao_enabled {
+                self.ui_state.params.meshing.ortho_ao_strength
+            } else {
+                0.0
+            },
+            _pad3: [0.0; 3],
         };
         self.gpu.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 

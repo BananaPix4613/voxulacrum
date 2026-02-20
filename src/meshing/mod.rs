@@ -1,6 +1,6 @@
-pub mod dual_contouring;
-pub mod qef;
 pub mod cache;
+mod marching_cubes;
+mod mc_tables;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use crate::params::MaterialParams;
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::ChunkSnapshot;
 use cache::AtomicCacheStats;
-use dual_contouring::{
+use marching_cubes::{
     generate_cell_vertices_from_snapshot, generate_faces_from_snapshot, BoundaryVertexMap,
     CellVertexData, OwnedNeighborBoundaries,
 };
@@ -105,13 +105,19 @@ struct CacheConfig {
 pub struct MaterialConfig {
     pub colors: Vec<[f32; 3]>,
     pub sharpness: Vec<f32>,
+    pub greedy_merge_enabled: bool,
+    pub flat_threshold_error: f32,
+    pub flat_normal_threshold: f32,
 }
 
 impl MaterialConfig {
-    pub fn from_params(params: &MaterialParams) -> Self {
+    pub fn from_params(mat_params: &MaterialParams, mesh_params: &crate::params::MeshingParams) -> Self {
         Self {
-            colors: params.entries.iter().map(|e| e.color).collect(),
-            sharpness: params.entries.iter().map(|e| e.sharpness).collect(),
+            colors: mat_params.entries.iter().map(|e| e.color).collect(),
+            sharpness: mat_params.entries.iter().map(|e| e.sharpness).collect(),
+            greedy_merge_enabled: mesh_params.greedy_merge_enabled,
+            flat_threshold_error: mesh_params.flat_threshold_error,
+            flat_normal_threshold: mesh_params.flat_normal_threshold,
         }
     }
 }
@@ -147,7 +153,7 @@ pub struct MeshingPipeline {
 }
 
 impl MeshingPipeline {
-    pub fn new(chunks_x: usize, chunks_y: usize, chunks_z: usize, materials: &MaterialParams) -> Self {
+    pub fn new(chunks_x: usize, chunks_y: usize, chunks_z: usize, materials: &MaterialParams, meshing: &crate::params::MeshingParams) -> Self {
         let total_chunks = chunks_x * chunks_y * chunks_z;
         let num_workers = num_cpus::get().saturating_sub(2).max(2);
 
@@ -158,7 +164,7 @@ impl MeshingPipeline {
         }
 
         let cache_stats = Arc::new(AtomicCacheStats::new());
-        let material_config = Arc::new(RwLock::new(MaterialConfig::from_params(materials)));
+        let material_config = Arc::new(RwLock::new(MaterialConfig::from_params(materials, meshing)));
 
         let cache_config = Arc::new(CacheConfig {
             cache_dir: cache_dir.clone(),
@@ -461,9 +467,9 @@ impl MeshingPipeline {
 
     /// Update runtime material properties. Workers will pick up the new values
     /// on their next mesh computation.
-    pub fn update_material_config(&self, params: &MaterialParams) {
+    pub fn update_material_config(&self, mat_params: &MaterialParams, mesh_params: &crate::params::MeshingParams) {
         if let Ok(mut config) = self.material_config.write() {
-            *config = MaterialConfig::from_params(params);
+            *config = MaterialConfig::from_params(mat_params, mesh_params);
         }
     }
 
@@ -576,11 +582,14 @@ fn worker_loop(
                     // Read current material config (snapshot for this computation)
                     let mat_config = material_config.read().unwrap();
 
-                    // Compute cache key from snapshot voxel data + material properties
+                    // Compute cache key from snapshot voxel data + material + meshing properties
                     let cache_key = cache::compute_cache_key(
                         &req.snapshot,
                         &mat_config.sharpness,
                         &mat_config.colors,
+                        mat_config.greedy_merge_enabled,
+                        mat_config.flat_threshold_error,
+                        mat_config.flat_normal_threshold,
                     );
 
                     // Try loading from disk cache

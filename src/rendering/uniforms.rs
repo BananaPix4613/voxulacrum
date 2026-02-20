@@ -16,25 +16,17 @@ pub struct GlobalUniforms {
     pub debug_mode: u32,                   //  4 bytes, offset 188
     pub cloud_shadow_offset: [f32; 2],     //  8 bytes, offset 192
     pub cloud_coverage: f32,               //  4 bytes, offset 200
-    pub _pad3: f32,                        //  4 bytes, offset 204
+    pub edge_strength: f32,                //  4 bytes, offset 204
+    pub ortho_ao_strength: f32,            //  4 bytes, offset 208
+    pub _pad3: [f32; 3],                   // 12 bytes, offset 212
 }
-// Total: 208 bytes (16-byte aligned: 208 / 16 = 13)
+// Total: 224 bytes (16-byte aligned: 224 / 16 = 14)
 
 impl Default for GlobalUniforms {
     fn default() -> Self {
         Self {
-            view_proj: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            light_space_matrix: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
+            view_proj: [[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0],[0.0,0.0,1.0,0.0],[0.0,0.0,0.0,1.0]],
+            light_space_matrix: [[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0],[0.0,0.0,1.0,0.0],[0.0,0.0,0.0,1.0]],
             sun_direction: [0.5, 0.8, 0.3],
             _pad0: 0.0,
             sun_color: [1.0, 0.98, 0.92],
@@ -46,7 +38,9 @@ impl Default for GlobalUniforms {
             debug_mode: 0,
             cloud_shadow_offset: [0.0, 0.0],
             cloud_coverage: 0.55,
-            _pad3: 0.0,
+            edge_strength: 0.15,
+            ortho_ao_strength: 0.3,
+            _pad3: [0.0; 3],
         }
     }
 }

@@ -8,7 +8,7 @@ use crate::world::chunk::ChunkSnapshot;
 
 /// Cache file format version. Increment when TerrainVertex layout or
 /// serialization format changes to automatically invalidate old caches.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 4;
 
 // ============================================================================
 // Cache file format
@@ -71,30 +71,37 @@ pub struct CacheStats {
 /// - Sharpness values from MATERIAL_TABLE (affects normal biasing in meshing)
 ///
 /// Uses SeaHash for fast, portable, non-cryptographic hasing.
-pub fn compute_cache_key(snapshot: &ChunkSnapshot, sharpness_values: &[f32], colors: &[[f32; 3]]) -> u64 {
+pub fn compute_cache_key(
+    snapshot: &ChunkSnapshot,
+    sharpness_values: &[f32],
+    colors: &[[f32; 3]],
+    greedy_enabled: bool,
+    flat_error: f32,
+    flat_normal: f32,
+) -> u64 {
     use seahash::SeaHasher;
     use std::hash::Hasher;
 
     let mut hasher = SeaHasher::new();
 
-    // Hash density and material for every voxel in the 34^3 snapshot.
-    // These are the only voxel fields that affect mesh output.
     for voxel in snapshot.voxels.iter() {
         hasher.write_i8(voxel.density);
         hasher.write_u16(voxel.material);
     }
 
-    // Hash material sharpness values (affect QEF normal biasing).
     for &s in sharpness_values {
         hasher.write(&s.to_le_bytes());
     }
 
-    // Hash material colors (affect vertex color output).
     for color in colors {
         for &c in color {
             hasher.write(&c.to_le_bytes());
         }
     }
+
+    hasher.write(&(greedy_enabled as u8).to_le_bytes());
+    hasher.write(&flat_error.to_le_bytes());
+    hasher.write(&flat_normal.to_le_bytes());
 
     hasher.finish()
 }

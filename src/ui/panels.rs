@@ -122,6 +122,8 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_vegetation(ui, &mut state.params.vegetation);
                 ui.separator();
+                draw_meshing_params(ui, &mut state.params.meshing);
+                ui.separator();
                 draw_terrain_gen(
                     ui,
                     &mut state.params.terrain_gen,
@@ -266,6 +268,18 @@ fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams) {
     });
 }
 
+fn draw_meshing_params(ui: &mut egui::Ui, p: &mut MeshingParams) {
+    ui.collapsing("Meshing", |ui| {
+        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Greedy merge:"); ui.add(egui::Checkbox::without_text(&mut p.greedy_merge_enabled)); });
+        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat error threshold:"); ui.add(egui::Slider::new(&mut p.flat_threshold_error, 0.001..=0.1)); });
+        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat normal threshold:"); ui.add(egui::Slider::new(&mut p.flat_normal_threshold, 0.8..=1.0)); });
+        ui.separator();
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Edge strength:"); ui.add(egui::Slider::new(&mut p.edge_strength, 0.0..=0.5)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Ortho AO:"); ui.add(egui::Checkbox::without_text(&mut p.ortho_ao_enabled)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Ortho AO strength:"); ui.add(egui::Slider::new(&mut p.ortho_ao_strength, 0.0..=0.7)); });
+    });
+}
+
 fn draw_terrain_gen(
     ui: &mut egui::Ui,
     p: &mut TerrainGenParams,
@@ -342,6 +356,11 @@ fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
         if ui.checkbox(&mut p.show_normals, "Normals").changed() && p.show_normals {
             p.show_material_ids = false;
             p.show_ao_only = false;
+        }
+        if ui.checkbox(&mut p.show_greedy_debug, "Greedy merge").changed() && p.show_greedy_debug {
+            p.show_material_ids = false;
+            p.show_ao_only = false;
+            p.show_normals = false;
         }
 
         ui.separator();

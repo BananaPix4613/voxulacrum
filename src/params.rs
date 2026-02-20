@@ -216,6 +216,34 @@ impl Default for PostProcessParams {
 }
 
 // ============================================================================
+// Meshing parameters
+// ============================================================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MeshingParams {
+    pub greedy_merge_enabled: bool,
+    pub flat_threshold_error: f32,
+    pub flat_normal_threshold: f32,
+    pub edge_strength: f32,
+    pub ortho_ao_enabled: bool,
+    pub ortho_ao_strength: f32,
+}
+
+impl Default for MeshingParams {
+    fn default() -> Self {
+        Self {
+            greedy_merge_enabled: true,
+            flat_threshold_error: 0.025,
+            flat_normal_threshold: 0.95,
+            edge_strength: 0.15,
+            ortho_ao_enabled: true,
+            ortho_ao_strength: 0.3,
+        }
+    }
+}
+
+// ============================================================================
 // Time control parameters
 // ============================================================================
 
@@ -331,6 +359,7 @@ pub struct DebugParams {
     pub show_material_ids: bool,
     pub show_ao_only: bool,
     pub show_normals: bool,
+    pub show_greedy_debug: bool,
     pub show_water_debug: bool,
     pub show_performance: bool,
     pub freeze_culling: bool,
@@ -344,6 +373,7 @@ impl Default for DebugParams {
             show_material_ids: false,
             show_ao_only: false,
             show_normals: false,
+            show_greedy_debug: false,
             show_water_debug: false,
             show_performance: true,
             freeze_culling: false,
@@ -368,6 +398,7 @@ pub struct EngineParams {
     pub camera: CameraParams,
     pub terrain_gen: TerrainGenParams,
     pub debug: DebugParams,
+    pub meshing: MeshingParams,
 }
 
 impl Default for EngineParams {
@@ -384,6 +415,7 @@ impl Default for EngineParams {
             camera: CameraParams::default(),
             terrain_gen: TerrainGenParams::default(),
             debug: DebugParams::default(),
+            meshing: MeshingParams::default(),
         }
     }
 }
@@ -453,6 +485,12 @@ impl ParamChangeDetector {
             return ParamChangeKind::RegenerationRequired;
         }
         if current.materials.materials_changed(&self.previous.materials) {
+            return ParamChangeKind::MeshInvalidating;
+        }
+        if current.meshing.greedy_merge_enabled != self.previous.meshing.greedy_merge_enabled
+            || current.meshing.flat_threshold_error != self.previous.meshing.flat_threshold_error
+            || current.meshing.flat_normal_threshold != self.previous.meshing.flat_normal_threshold
+        {
             return ParamChangeKind::MeshInvalidating;
         }
         if current != &self.previous {

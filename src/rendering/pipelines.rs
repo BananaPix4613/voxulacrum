@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Serialize, Deserialize)]
@@ -11,7 +11,8 @@ pub struct TerrainVertex {
     pub color: [f32; 3],
     pub ao: f32,
     pub material_id: u32,
-    pub _pad_vert: [u32; 3], // Pad to 64 bytes (16-byte alignment for GPU)
+    pub cell_flags: u32,
+    pub _pad_vert: [u32; 2], // Pad to 64 bytes (16-byte alignment for GPU)
 }
 
 impl TerrainVertex {
@@ -20,31 +21,12 @@ impl TerrainVertex {
             array_stride: std::mem::size_of::<TerrainVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 12,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 24,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 36,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32,
-                },
-                wgpu::VertexAttribute {
-                    offset: 40,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Uint32,
-                },
+                wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 36, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                wgpu::VertexAttribute { offset: 40, shader_location: 4, format: wgpu::VertexFormat::Uint32 },
+                wgpu::VertexAttribute { offset: 44, shader_location: 5, format: wgpu::VertexFormat::Uint32 },
             ],
         }
     }

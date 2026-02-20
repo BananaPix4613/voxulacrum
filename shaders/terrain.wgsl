@@ -6,6 +6,7 @@ const DEBUG_NONE: u32 = 0u;
 const DEBUG_MATERIAL_ID: u32 = 1u;
 const DEBUG_AO_ONLY: u32 = 2u;
 const DEBUG_NORMALS: u32 = 3u;
+const DEBUG_GREEDY: u32 = 4u;
 
 struct GlobalUniforms {
     view_proj: mat4x4<f32>,
@@ -21,7 +22,11 @@ struct GlobalUniforms {
     debug_mode: u32,
     cloud_shadow_offset: vec2<f32>,
     cloud_coverage: f32,
-    _pad3: f32,
+    edge_strength: f32,
+    ortho_ao_strength: f32,
+    _pad3a: f32,
+    _pad3b: f32,
+    _pad3c: f32,
 };
 
 @group(0) @binding(0)
@@ -45,6 +50,7 @@ struct VertexInput {
     @location(2) color: vec3<f32>,
     @location(3) ao: f32,
     @location(4) material_id: u32,
+    @location(5) cell_flags: u32,
 };
 
 struct VertexOutput {
@@ -54,6 +60,7 @@ struct VertexOutput {
     @location(2) color: vec3<f32>,
     @location(3) ao: f32,
     @location(4) @interpolate(flat) material_id: u32,
+    @location(6) @interpolate(flat) cell_flags: u32,
 };
 
 @vertex
@@ -65,6 +72,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.color = in.color;
     out.ao = in.ao;
     out.material_id = in.material_id;
+    out.cell_flags = in.cell_flags;
     return out;
 }
 
@@ -136,6 +144,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(normal_color, 1.0);
     }
 
+    // --- Debug: Greedy view ---
+    if globals.debug_mode == DEBUG_GREEDY {
+        if (in.cell_flags & 1u) == 1u {
+            return vec4<f32>(0.2, 0.8, 0.2, 1.0);
+        } else {
+            return vec4<f32>(0.2, 0.2, 0.8, 1.0);
+        }
+    }
+
     // --- Normal rendering ---
     let n = normalize(in.normal);
     let sun_dir = normalize(globals.sun_direction);
@@ -159,5 +176,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let shadow = compute_shadow(in.world_position);
 
     let lit_color = in.color * (diffuse * shadow * cloud_factor + ambient * ao_factor * AO_STRENGTH + ambient * (1.0 - AO_STRENGTH));
+
+    // Edge detection
+    let normal_ddx = dpdx(in.normal);
+    let normal_ddy = dpdy(in.normal);
+    let normal_edge = length(normal_ddx) + length(normal_ddy);
+    let edge_n = smoothstep(0.3, 1.0, normal_edge);
+    let depth_ddx = dpdx(in.clip_position.z);
+    let depth_ddy = dpdy(in.clip_position.z);
+    let depth_edge = abs(depth_ddx) + abs(depth_ddy);
+    let edge_d = smoothstep(0.001, 0.01, depth_edge);
+    let edge = max(edge_n, edge_d);
+    var final_color = mix(lit_color, vec3<f32>(0.0, 0.0, 0.0), edge * globals.edge_strength);
+
+    // Directional AO for orthographic depth
+    let view_alignment = dot(n, vec3<f32>(0.0, 1.0, 0.0));
+    let ortho_ao = mix(1.0 - globals.ortho_ao_strength, 1.0, view_alignment * 0.5 + 0.5);
+    final_color = final_color * ortho_ao;
+
     return vec4<f32>(lit_color, 1.0);
 }
