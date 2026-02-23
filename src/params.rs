@@ -250,12 +250,18 @@ impl Default for MeshingParams {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct RenderPipelineParams {
-    pub pixel_scale: u32,
+    pub world_pixel_density: f32,
+    pub camera_snap_enabled: bool,
+    pub sky_color: [f32; 3],
 }
 
 impl Default for RenderPipelineParams {
     fn default() -> Self {
-        Self { pixel_scale: 4 }
+        Self {
+            world_pixel_density: 8.0,
+            camera_snap_enabled: true,
+            sky_color: [0.5, 0.65, 0.8],
+        }
     }
 }
 
@@ -402,6 +408,7 @@ impl Default for DebugParams {
 // ============================================================================
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct EngineParams {
     pub materials: MaterialParams,
     pub lighting: LightingParams,
@@ -511,7 +518,8 @@ impl ParamChangeDetector {
         {
             return ParamChangeKind::MeshInvalidating;
         }
-        if current.render_pipeline.pixel_scale != self.previous.render_pipeline.pixel_scale {
+        if (current.render_pipeline.world_pixel_density
+            - self.previous.render_pipeline.world_pixel_density).abs() > f32::EPSILON {
             return ParamChangeKind::UniformOnly;
         }
         if current != &self.previous {

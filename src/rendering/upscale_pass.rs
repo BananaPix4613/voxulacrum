@@ -1,8 +1,20 @@
+use bytemuck::{Pod, Zeroable};
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct UpscaleUniforms {
+    pub subpixel_offset: [f32; 2],
+    pub render_resolution: [f32; 2],
+    pub window_resolution: [f32; 2],
+    pub _pad: [f32; 2],
+}
+
 pub struct UpscalePass {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
+    pub uniform_buffer: wgpu::Buffer,
 }
 
 impl UpscalePass {
@@ -36,6 +48,16 @@ impl UpscalePass {
                         ),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -49,8 +71,20 @@ impl UpscalePass {
             ..Default::default()
         });
 
-        let bind_group =
-            Self::create_bind_group(device, &bind_group_layout, source_view, &sampler);
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("upscale_uniform_buffer"),
+            size: std::mem::size_of::<UpscaleUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = Self::create_bind_group(
+            device,
+            &bind_group_layout,
+            source_view,
+            &sampler,
+            &uniform_buffer,
+        );
 
         let pipeline = Self::create_pipeline(
             device,
@@ -64,6 +98,7 @@ impl UpscalePass {
             bind_group,
             bind_group_layout,
             sampler,
+            uniform_buffer,
         }
     }
 
@@ -72,6 +107,7 @@ impl UpscalePass {
         layout: &wgpu::BindGroupLayout,
         source_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("upscale_bind_group"),
@@ -84,6 +120,10 @@ impl UpscalePass {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
                 },
             ],
         })
@@ -157,6 +197,15 @@ impl UpscalePass {
             &self.bind_group_layout,
             source_view,
             &self.sampler,
+            &self.uniform_buffer,
+        );
+    }
+    
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, uniforms: UpscaleUniforms) {
+        queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
         );
     }
 }

@@ -1,18 +1,21 @@
 struct GlobalUniforms {
     view_proj: mat4x4<f32>,
-        light_space_matrix: mat4x4<f32>,
-        sun_direction: vec3<f32>,
-        _pad0: f32,
-        sun_color: vec3<f32>,
-        _pad1: f32,
-        ambient_color: vec3<f32>,
-        _pad2: f32,
-        wind_vector: vec2<f32>,
-        time: f32,
-        debug_mode: u32,
-        cloud_shadow_offset: vec2<f32>,
-        cloud_coverage: f32,
-        _pad3: f32,
+    light_space_matrix: mat4x4<f32>,
+    sun_direction: vec3<f32>,
+    _pad0: f32,
+    sun_color: vec3<f32>,
+    _pad1: f32,
+    ambient_color: vec3<f32>,
+    _pad2: f32,
+    wind_vector: vec2<f32>,
+    time: f32,
+    debug_mode: u32,
+    cloud_shadow_offset: vec2<f32>,
+    cloud_coverage: f32,
+    edge_strength: f32,
+    ortho_ao_strength: f32,
+    _pad3: f32,
+    _pad4: vec2<f32>,
 };
 
 @group(0) @binding(0)
@@ -137,12 +140,7 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Grass color from terrain, lighter at tips
-    let base_color = mix(
-        in.terrain_color,
-        in.terrain_color * 1.3,
-        in.uv.y * 0.5
-    );
+    let base_color = mix(in.terrain_color, in.terrain_color * 1.3, in.uv.y * 0.5);
 
     let n = normalize(in.normal);
     let sun_dir = normalize(globals.sun_direction);
@@ -152,15 +150,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let cloud_uv = in.world_position.xz * 0.015 + globals.cloud_shadow_offset;
     let cloud_sample = textureSample(cloud_texture, cloud_sampler, cloud_uv).r;
-    let cloud_threshold = smoothstep(
-        globals.cloud_coverage - 0.15,
-        globals.cloud_coverage + 0.15,
-        cloud_sample
-    );
+    let cloud_threshold = smoothstep(globals.cloud_coverage - 0.15, globals.cloud_coverage + 0.15, cloud_sample);
     let cloud_factor = mix(0.45, 1.0, cloud_threshold);
 
     let shadow = compute_shadow(in.world_position);
 
     let lit_color = base_color * (diffuse * shadow * cloud_factor + ambient);
+
     return vec4<f32>(lit_color, 1.0);
 }

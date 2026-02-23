@@ -117,11 +117,13 @@ impl DebugLinePass {
             fragment: Some(wgpu::FragmentState {
                 module: &shader_module,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {

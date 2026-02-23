@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec2, Vec4Swizzles};
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -14,6 +14,17 @@ pub struct IsometricCamera {
     backward_pressed: bool,
     left_pressed: bool,
     right_pressed: bool,
+}
+
+/// Result of camera snapping: a texel-aligned VP matrix and a sub-pixel
+/// correction to apply during the upscale blit.
+pub struct SnappedCamera {
+    /// View-projection matrix with the projection translated so that the
+    /// camera target falls exactly on a texel center.
+    pub view_proj: [[f32; 4]; 4],
+    /// Sub-pixel offset in **native-resolution pixels**.  The upscale shader
+    /// shifts its UV by this amount to restore smooth apparent motion.
+    pub subpixel_offset: [f32; 2],
 }
 
 impl IsometricCamera {
@@ -98,6 +109,63 @@ impl IsometricCamera {
     pub fn resize(&mut self, width: u32, height: u32) {
         if height > 0 {
             self.aspect = width as f32 / height as f32;
+        }
+    }
+
+    /// Compute a texel-snapped view-projection matrix.
+    ///
+    /// The idea: project the camera target into clip space, round to the
+    /// nearest texel of the low-res render target, then nudge the projection
+    /// matrix by the rounding error.  This guarantees that world-space voxel
+    /// edges land on the same texel boundaries every frame, eliminating the
+    /// "pixel swimming" artifact at low resolution.
+    ///
+    /// `pixel_scale` is needed to convert the snap error back into
+    /// native-resolution pixels for the upscale sub-pixel correction.
+    pub fn snap_camera(
+        &self,
+        render_width: u32,
+        render_height: u32,
+        pixel_scale: f32,
+    ) -> SnappedCamera {
+        let view = self.view_matrix();
+        let proj = self.projection_matrix();
+        let vp = proj * view;
+        
+        // Project camera target into NDC (clip space, [-1, 1]).
+        let target_clip = vp.project_point3(self.target);
+        
+        // Convert NDC to texel coordinates in the low-res target.
+        let half_w = render_width as f32 * 0.5;
+        let half_h = render_height as f32 * 0.5;
+        let pixel_x = target_clip.x * half_w;
+        let pixel_y = target_clip.y * half_h;
+        
+        // Snap to nearest texel center.
+        let snapped_x = pixel_x.round();
+        let snapped_y = pixel_y.round();
+        
+        // Error in NDC units.
+        let error_x = (pixel_x - snapped_x) / half_w;
+        let error_y = (pixel_y - snapped_y) / half_h;
+        
+        // Nudge the projection so the target lands on the snapped texel.
+        let mut snapped_proj = proj;
+        // Column-major: w_axis is column 3 (the translation column).
+        snapped_proj.w_axis.x -= error_x;
+        snapped_proj.w_axis.y -= error_y;
+        
+        let snapped_vp = snapped_proj * view;
+        
+        // Sub-pixel offset for the upscale blit, in native-resolution pixels.
+        let subpixel_offset = [
+            (pixel_x - snapped_x) * pixel_scale,
+            (pixel_y - snapped_y) * pixel_scale,
+        ];
+        
+        SnappedCamera {
+            view_proj: snapped_vp.to_cols_array_2d(),
+            subpixel_offset,
         }
     }
 }

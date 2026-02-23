@@ -61,11 +61,13 @@ pub fn create_terrain_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader_module,
             entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -123,11 +125,13 @@ pub fn create_terrain_wireframe_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader_module,
             entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -313,11 +317,13 @@ pub fn create_vegetation_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader_module,
             entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -409,11 +415,13 @@ pub fn create_water_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader_module,
             entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {

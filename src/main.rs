@@ -25,7 +25,7 @@ use rendering::pipelines::{PipelineRegistry, PipelineResources};
 use rendering::render_targets::RenderTargets;
 use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
 use rendering::debug_lines::DebugLinePass;
-use rendering::upscale_pass::UpscalePass;
+use rendering::upscale_pass::{UpscalePass, UpscaleUniforms};
 use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
 use rendering::frustum::Frustum;
@@ -113,12 +113,12 @@ impl AppState {
         camera.resize(gpu.surface_config.width, gpu.surface_config.height);
 
         // Low-res render targets
+        let (rw, rh, eff_scale) = compute_render_dimensions(
+            gpu.surface_config.width, gpu.surface_config.height,
+            camera.zoom, initial_params.render_pipeline.world_pixel_density,
+        );
         let render_targets = RenderTargets::new(
-            &gpu.device,
-            gpu.surface_config.width,
-            gpu.surface_config.height,
-            initial_params.render_pipeline.pixel_scale,
-            gpu.surface_format,
+            &gpu.device, rw, rh, eff_scale, gpu.surface_format,
         );
 
         // Shadow map
@@ -305,7 +305,6 @@ impl AppState {
             meshing_pipeline,
             world_manager: WorldManager::new(),
             frustum,
-
         }
     }
 
@@ -387,26 +386,18 @@ impl AppState {
         self.check_shader_hot_reload();
 
         // Detect pixel_scale changes requiring render target recreation
-        if self.render_targets.needs_recreate(
+        let (rw, rh, eff_scale) = compute_render_dimensions(
             self.gpu.surface_config.width,
             self.gpu.surface_config.height,
-            self.ui_state.params.render_pipeline.pixel_scale,
-        ) {
+            self.camera.zoom,
+            self.ui_state.params.render_pipeline.world_pixel_density,
+        );
+        if self.render_targets.needs_recreate(rw, rh) {
             self.render_targets = RenderTargets::new(
-                &self.gpu.device,
-                self.gpu.surface_config.width,
-                self.gpu.surface_config.height,
-                self.ui_state.params.render_pipeline.pixel_scale,
-                self.gpu.surface_format,
+                &self.gpu.device, rw, rh, eff_scale, self.gpu.surface_format,
             );
-            self.post_process.rebuild_bind_group(
-                &self.gpu.device,
-                &self.render_targets.scene_view,
-            );
-            self.upscale_pass.rebuild_bind_group(
-                &self.gpu.device,
-                &self.render_targets.processed_view,
-            );
+            self.post_process.rebuild_bind_group(&self.gpu.device, &self.render_targets.scene_view);
+            self.upscale_pass.rebuild_bind_group(&self.gpu.device, &self.render_targets.processed_view);
         }
 
         // Drain pending snapshot submissions (bounded per frame)
@@ -441,6 +432,21 @@ impl AppState {
         // Apply params to systems
         self.camera.apply_params(&self.ui_state.params.camera);
         self.camera.update(dt);
+
+        // Camera snapping
+        let snapped = if self.ui_state.params.render_pipeline.camera_snap_enabled {
+            self.camera.snap_camera(
+                self.render_targets.render_width,
+                self.render_targets.render_height,
+                self.render_targets.effective_pixel_scale,
+            )
+        } else {
+            camera::SnappedCamera {
+                view_proj: self.camera.view_projection(),
+                subpixel_offset: [0.0; 2],
+            }
+        };
+
         self.time_of_day.update(dt, &self.ui_state.params.time_control);
         self.wind.update(dt, &self.ui_state.params.wind);
         self.cloud_shadow.update(dt, &self.wind.wind_vector, self.elapsed, &self.ui_state.params.cloud);
@@ -494,7 +500,7 @@ impl AppState {
         };
 
         let uniforms = GlobalUniforms {
-            view_proj: self.camera.view_projection(),
+            view_proj: snapped.view_proj,
             light_space_matrix: light_space.to_cols_array_2d(),
             sun_direction: sun_dir.into(),
             _pad0: 0.0,
@@ -513,7 +519,8 @@ impl AppState {
             } else {
                 0.0
             },
-            _pad3: [0.0; 3],
+            _pad3: 0.0,
+            _pad4: [0.0; 2],
         };
         self.gpu.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
@@ -529,6 +536,21 @@ impl AppState {
             _pad: 0.0,
         };
         self.post_process.update_uniforms(&self.gpu.queue, pp_uniforms);
+
+        // Upscaling uniforms
+        let upscale_uniforms = UpscaleUniforms {
+            subpixel_offset: snapped.subpixel_offset,
+            render_resolution: [
+                self.render_targets.render_width as f32,
+                self.render_targets.render_height as f32,
+            ],
+            window_resolution: [
+                self.gpu.surface_config.width as f32,
+                self.gpu.surface_config.height as f32,
+            ],
+            _pad: [0.0; 2],
+        };
+        self.upscale_pass.update_uniforms(&self.gpu.queue, upscale_uniforms);
 
         // Performance stats (count only visible chunks)
         let mut total_tris: u64 = 0;
@@ -552,12 +574,12 @@ impl AppState {
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 let size = self.window.inner_size();
                 self.gpu.resize(size.width, size.height);
+                let (rw, rh, eff_scale) = compute_render_dimensions(
+                    size.width, size.height,
+                    self.camera.zoom, self.ui_state.params.render_pipeline.world_pixel_density,
+                );
                 self.render_targets = RenderTargets::new(
-                    &self.gpu.device,
-                    size.width,
-                    size.height,
-                    self.ui_state.params.render_pipeline.pixel_scale,
-                    self.gpu.surface_format,
+                    &self.gpu.device, rw, rh, eff_scale, self.gpu.surface_format,
                 );
                 self.post_process.rebuild_bind_group(
                     &self.gpu.device,
@@ -607,25 +629,24 @@ impl AppState {
         }
 
         // === Main pass ===
-        let sky = ambient_color;
-        let sky_brightness = sky.length() / 0.8_f32.sqrt();
-        let sky_r = (0.5 * sky_brightness).clamp(0.02, 0.5) as f64;
-        let sky_g = (0.65 * sky_brightness).clamp(0.02, 0.65) as f64;
-        let sky_b = (0.8 * sky_brightness).clamp(0.05, 0.8) as f64;
+        let sky_cfg = self.ui_state.params.render_pipeline.sky_color;
+        let sky_r = sky_cfg[0] as f64;
+        let sky_g = sky_cfg[1] as f64;
+        let sky_b = sky_cfg[2] as f64;
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.render_targets.scene_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: sky_r, g: sky_g, b: sky_b, a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.render_targets.scene_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: sky_r, g: sky_g, b: sky_b, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.render_targets.depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -832,6 +853,23 @@ impl AppState {
     }
 }
 
+fn compute_render_dimensions(
+    window_width: u32,
+    window_height: u32,
+    zoom: f32,
+    target_voxel_pixels: f32,
+) -> (u32, u32, f32) {
+    let wh = window_height.max(1) as f32;
+    let ww = window_width.max(1) as f32;
+    // Each voxel covers (wh / 2*zoom) screen pixels.
+    // We want that to equal target_voxel_pixels, so:
+    //   pixel_scale = (wh / (2*zoom)) / target_voxel_pixels
+    let pixel_scale = (wh / (2.0 * zoom) / target_voxel_pixels).max(1.0);
+    let render_w = (ww / pixel_scale).max(1.0) as u32;
+    let render_h = (wh / pixel_scale).max(1.0) as u32;
+    (render_w, render_h, pixel_scale)
+}
+
 struct App {
     state: Option<AppState>,
 }
@@ -884,12 +922,12 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(new_size) => {
                 state.gpu.resize(new_size.width, new_size.height);
                 state.camera.resize(new_size.width, new_size.height);
+                let (rw, rh, eff_scale) = compute_render_dimensions(
+                    new_size.width, new_size.height,
+                    state.camera.zoom, state.ui_state.params.render_pipeline.world_pixel_density,
+                );
                 state.render_targets = RenderTargets::new(
-                    &state.gpu.device,
-                    new_size.width,
-                    new_size.height,
-                    state.ui_state.params.render_pipeline.pixel_scale,
-                    state.gpu.surface_format,
+                    &state.gpu.device, rw, rh, eff_scale, state.gpu.surface_format,
                 );
                 state.post_process.rebuild_bind_group(
                     &state.gpu.device,

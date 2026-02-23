@@ -251,13 +251,20 @@ fn draw_render_pipeline(ui: &mut egui::Ui, p: &mut RenderPipelineParams) {
     ui.collapsing("Render Pipeline", |ui| {
         ui.horizontal(|ui| {
             dot_green(ui);
-            ui.label("Pixel scale:");
-            ui.add(egui::Slider::new(&mut p.pixel_scale, 1..=8));
+            ui.label("World pixel density:");
+            ui.add(egui::Slider::new(&mut p.world_pixel_density, 2.0..=20.0));
         });
-        ui.label(format!(
-            "Render at 1/{} resolution",
-            p.pixel_scale
-        ));
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.label("Camera snap:");
+            ui.add(egui::Checkbox::without_text(&mut p.camera_snap_enabled));
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.label("Sky color:");
+            ui.color_edit_button_rgb(&mut p.sky_color);
+        });
     });
 }
 

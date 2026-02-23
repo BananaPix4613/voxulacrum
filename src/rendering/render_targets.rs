@@ -15,39 +15,25 @@ pub struct RenderTargets {
     pub depth_view: wgpu::TextureView,
     pub render_width: u32,
     pub render_height: u32,
-    pub pixel_scale: u32,
+    pub effective_pixel_scale: f32
 }
 
 impl RenderTargets {
     pub fn new(
         device: &wgpu::Device,
-        window_width: u32,
-        window_height: u32,
-        pixel_scale: u32,
+        render_width: u32,
+        render_height: u32,
+        effective_pixel_scale: f32,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let pixel_scale = pixel_scale.max(1);
-        let render_width = (window_width / pixel_scale).max(1);
-        let render_height = (window_height / pixel_scale).max(1);
+        let render_width = render_width.max(1);
+        let render_height = render_height.max(1);
 
-        let scene = Self::create_color_texture(
-            device,
-            render_width,
-            render_height,
-            surface_format,
-            "lowres_scene",
-        );
+        let scene = Self::create_color_texture(device, render_width, render_height, surface_format, "lowres_scene");
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let processed = Self::create_color_texture(
-            device,
-            render_width,
-            render_height,
-            surface_format,
-            "lowres_processed",
-        );
-        let processed_view =
-            processed.create_view(&wgpu::TextureViewDescriptor::default());
+        let processed = Self::create_color_texture(device, render_width, render_height, surface_format, "lowres_processed");
+        let processed_view = processed.create_view(&wgpu::TextureViewDescriptor::default());
 
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lowres_depth"),
@@ -67,15 +53,10 @@ impl RenderTargets {
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
         Self {
-            scene,
-            scene_view,
-            processed,
-            processed_view,
-            depth,
-            depth_view,
-            render_width,
-            render_height,
-            pixel_scale,
+            scene, scene_view,
+            processed, processed_view,
+            depth, depth_view,
+            render_width, render_height, effective_pixel_scale,
         }
     }
 
@@ -103,17 +84,7 @@ impl RenderTargets {
         })
     }
 
-    pub fn needs_recreate(
-        &self,
-        window_width: u32,
-        window_height: u32,
-        pixel_scale: u32,
-    ) -> bool {
-        let pixel_scale = pixel_scale.max(1);
-        let expected_w = (window_width / pixel_scale).max(1);
-        let expected_h = (window_height / pixel_scale).max(1);
-        self.render_width != expected_w
-            || self.render_height != expected_h
-            || self.pixel_scale != pixel_scale
+    pub fn needs_recreate(&self, render_width: u32, render_height: u32) -> bool {
+        self.render_width != render_width || self.render_height != render_height
     }
 }

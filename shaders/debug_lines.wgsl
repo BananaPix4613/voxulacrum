@@ -12,7 +12,10 @@ struct GlobalUniforms {
     debug_mode: u32,
     cloud_shadow_offset: vec2<f32>,
     cloud_coverage: f32,
+    edge_strength: f32,
+    ortho_ao_strength: f32,
     _pad3: f32,
+    _pad4: vec2<f32>,
 };
 
 @group(0) @binding(0)

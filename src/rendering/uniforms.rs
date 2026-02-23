@@ -18,9 +18,10 @@ pub struct GlobalUniforms {
     pub cloud_coverage: f32,               //  4 bytes, offset 200
     pub edge_strength: f32,                //  4 bytes, offset 204
     pub ortho_ao_strength: f32,            //  4 bytes, offset 208
-    pub _pad3: [f32; 3],                   // 12 bytes, offset 212
+    pub _pad3: f32,                        //  4 bytes, offset 212
+    pub _pad4: [f32; 2],                   //  8 bytes, offset 216
 }
-// Total: 224 bytes (16-byte aligned: 224 / 16 = 14)
+// Total: 224 bytes (14 * 16), satisfies WGSL struct alignment
 
 impl Default for GlobalUniforms {
     fn default() -> Self {
@@ -40,7 +41,8 @@ impl Default for GlobalUniforms {
             cloud_coverage: 0.55,
             edge_strength: 0.15,
             ortho_ao_strength: 0.3,
-            _pad3: [0.0; 3],
+            _pad3: 0.0,
+            _pad4: [0.0; 2],
         }
     }
 }

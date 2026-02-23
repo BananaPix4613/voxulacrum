@@ -12,7 +12,10 @@ struct GlobalUniforms {
     debug_mode: u32,
     cloud_shadow_offset: vec2<f32>,
     cloud_coverage: f32,
+    edge_strength: f32,
+    ortho_ao_strength: f32,
     _pad3: f32,
+    _pad4: vec2<f32>,
 };
 
 @group(0) @binding(0)
@@ -95,7 +98,6 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Base water color
     let deep_color = vec3<f32>(0.12, 0.25, 0.40);
     let shallow_color = vec3<f32>(0.25, 0.45, 0.55);
     let depth_t = clamp((in.depth - 1.0) * 0.2, 0.0, 1.0);
@@ -110,36 +112,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let nz = ripple2 + ripple3 * 0.5;
     let perturbed_normal = normalize(vec3<f32>(nx, 1.0, nz));
 
-    // Lighting
     let sun_dir = normalize(globals.sun_direction);
     let n_dot_l = max(dot(perturbed_normal, sun_dir), 0.0);
     let diffuse = globals.sun_color * n_dot_l * 0.6;
     let ambient = globals.ambient_color * 0.5;
 
-    // Specular highlight from sun
-    // Approximate view direction for isometric camera (looking down at ~35.26 degrees)
     let view_dir = normalize(vec3<f32>(0.577, 0.577, 0.577));
     let reflect_dir = reflect(-sun_dir, perturbed_normal);
     let spec = pow(max(dot(reflect_dir, view_dir), 0.0), 32.0);
-    let specular = globals.sun_color * spec * 0.4;
+    let spec_cel = step(0.5, spec);
+    let specular = globals.sun_color * spec_cel * 0.4;
 
-    // Shadow
     let shadow = compute_shadow(in.world_position);
 
-    // Cloud shadow
     let cloud_uv = in.world_position.xz * 0.03 + globals.cloud_shadow_offset;
     let cloud_sample = textureSample(cloud_texture, cloud_sampler, cloud_uv).r;
-    let cloud_threshold = smoothstep(
-        globals.cloud_coverage - 0.20,
-        globals.cloud_coverage + 0.20,
-        cloud_sample
-    );
+    let cloud_threshold = smoothstep(globals.cloud_coverage - 0.20, globals.cloud_coverage + 0.20, cloud_sample);
     let cloud_factor = mix(0.45, 1.0, cloud_threshold);
 
-    // Combine lighting
     let lit_color = base_color * (diffuse * shadow * cloud_factor + ambient) + specular * shadow * cloud_factor;
-
-    // Depth-based opacity
     let final_alpha = mix(0.4, 0.85, depth_t);
 
     return vec4<f32>(lit_color, final_alpha);
