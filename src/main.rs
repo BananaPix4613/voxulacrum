@@ -7,6 +7,7 @@ mod shader_reload;
 mod simulation;
 mod ui;
 mod world;
+mod palette;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +31,8 @@ use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
 use rendering::frustum::Frustum;
 use rendering::post_process::PostProcessPass;
+use rendering::palette_pass::PalettePass;
+use palette::Palette;
 use shader_reload::ShaderWatcher;
 use simulation::water::StaticWater;
 use simulation::time_of_day::TimeOfDay;
@@ -90,6 +93,8 @@ struct AppState {
     static_water: StaticWater,
     water_pass: WaterPass,
     post_process: PostProcessPass,
+    palette_pass: PalettePass,
+    loaded_palette: Option<Palette>,
     egui_renderer: ui::EguiRenderer,
     ui_state: UiState,
     frame_counter: FrameCounter,
@@ -249,13 +254,20 @@ impl AppState {
             &gpu.device, gpu.surface_format, &render_targets.scene_view, &pp_shader_source,
         );
 
+        // Palette quantization pass
+        let palette_shader_source = std::fs::read_to_string(shader_dir.join("palette.wgsl"))
+            .expect("Failed to read palette.wgsl");
+        let palette_pass = PalettePass::new(
+            &gpu.device, gpu.surface_format, &render_targets.scene_view, &palette_shader_source,
+        );
+
         // Upscaling
         let upscale_shader_source = std::fs::read_to_string(shader_dir.join("upscale.wgsl"))
             .expect("Failed to read upscale.wgsl");
         let upscale_pass = UpscalePass::new(
             &gpu.device,
             gpu.surface_format,
-            &render_targets.processed_view,
+            &render_targets.scene_view,
             &upscale_shader_source,
         );
 
@@ -297,6 +309,8 @@ impl AppState {
             static_water,
             water_pass,
             post_process,
+            palette_pass,
+            loaded_palette: None,
             egui_renderer,
             ui_state,
             frame_counter: FrameCounter::new(),
@@ -352,6 +366,42 @@ impl AppState {
                 continue;
             }
 
+            // Handle palette.wgsl separately since its pipeline lives in PalettePass
+            if filename == "palette.wgsl" {
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        match self.palette_pass.try_reload_shader(
+                            &self.gpu.device,
+                            self.gpu.surface_format,
+                            &source,
+                        ) {
+                            Ok(()) => {
+                                log::info!("Reloaded palette.wgsl");
+                                self.ui_state.push_shader_log(
+                                    "palette.wgsl reloaded".to_string(),
+                                    false,
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!("palette.wgsl compile error: {}", e);
+                                self.ui_state.push_shader_log(
+                                    format!("palette.wgsl: {}", e),
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to read palette.wgsl: {}", e);
+                        self.ui_state.push_shader_log(
+                            format!("palette.wgsl read error: {}", e),
+                            true,
+                        );
+                    }
+                }
+                continue;
+            }
+
             // All other shaders go through the pipeline registry
             if let Some(result) = self.pipeline_registry.try_reload(
                 &self.gpu.device,
@@ -397,7 +447,8 @@ impl AppState {
                 &self.gpu.device, rw, rh, eff_scale, self.gpu.surface_format,
             );
             self.post_process.rebuild_bind_group(&self.gpu.device, &self.render_targets.scene_view);
-            self.upscale_pass.rebuild_bind_group(&self.gpu.device, &self.render_targets.processed_view);
+            self.palette_pass.rebuild_bind_group(&self.gpu.device, &self.render_targets.processed_view);
+            self.upscale_pass.rebuild_bind_group(&self.gpu.device, &self.render_targets.scene_view);
         }
 
         // Drain pending snapshot submissions (bounded per frame)
@@ -422,6 +473,30 @@ impl AppState {
             self.ui_state.clear_cache_requested = false;
             self.meshing_pipeline.clear_cache();
             log::info!("Cache cleared by user");
+        }
+
+        // Handle palette load request from UI
+        if self.ui_state.palette_load_requested {
+            self.ui_state.palette_load_requested = false;
+            let name = &self.ui_state.params.palette.selected_palette;
+            if !name.is_empty() {
+                let path = PathBuf::from("palettes").join(format!("{}.json", name));
+                match palette::load_palette(&path) {
+                    Ok(pal) => {
+                        log::info!("Loaded palette: {}", pal.name);
+                        self.ui_state.loaded_palette_preview = pal.colors_srgb.clone();
+                        self.loaded_palette = Some(pal);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load palette {}: {}", name, e);
+                        self.loaded_palette = None;
+                        self.ui_state.loaded_palette_preview.clear();
+                    }
+                }
+            } else {
+                self.loaded_palette = None;
+                self.ui_state.loaded_palette_preview.clear();
+            }
         }
 
         // Clear boundary maps when pipeline finishes
@@ -536,6 +611,20 @@ impl AppState {
             _pad: 0.0,
         };
         self.post_process.update_uniforms(&self.gpu.queue, pp_uniforms);
+
+        // Palette uniforms
+        let palette_uniforms = if self.ui_state.params.palette.mode == 0 {
+            // Palette lookup mode
+            if let Some(ref pal) = self.loaded_palette {
+                palette::palette_to_uniforms(pal, &self.ui_state.params.palette)
+            } else {
+                palette::stepping_uniforms(&self.ui_state.params.palette)
+            }
+        } else {
+            // Color stepping mode (no palette data needed)
+            palette::stepping_uniforms(&self.ui_state.params.palette)
+        };
+        self.palette_pass.update_uniforms(&self.gpu.queue, palette_uniforms);
 
         // Upscaling uniforms
         let upscale_uniforms = UpscaleUniforms {
@@ -733,6 +822,27 @@ impl AppState {
             });
             pass.set_pipeline(&self.post_process.pipeline);
             pass.set_bind_group(0, &self.post_process.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // === Palette quantization pass ===
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("palette_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.render_targets.scene_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.palette_pass.pipeline);
+            pass.set_bind_group(0, &self.palette_pass.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 

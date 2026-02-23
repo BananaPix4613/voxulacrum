@@ -216,6 +216,32 @@ impl Default for PostProcessParams {
 }
 
 // ============================================================================
+// Palette parameters
+// ============================================================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PaletteParams {
+    pub enabled: bool,
+    pub mode: u32,
+    pub selected_palette: String,
+    pub l_levels: u32,
+    pub ab_levels: u32,
+}
+
+impl Default for PaletteParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: 1,
+            selected_palette: String::new(),
+            l_levels: 8,
+            ab_levels: 8,
+        }
+    }
+}
+
+// ============================================================================
 // Meshing parameters
 // ============================================================================
 
@@ -417,6 +443,7 @@ pub struct EngineParams {
     pub water: WaterVisualParams,
     pub vegetation: VegetationParams,
     pub post_process: PostProcessParams,
+    pub palette: PaletteParams,
     pub time_control: TimeControlParams,
     pub camera: CameraParams,
     pub terrain_gen: TerrainGenParams,
@@ -435,6 +462,7 @@ impl Default for EngineParams {
             water: WaterVisualParams::default(),
             vegetation: VegetationParams::default(),
             post_process: PostProcessParams::default(),
+            palette: PaletteParams::default(),
             time_control: TimeControlParams::default(),
             camera: CameraParams::default(),
             terrain_gen: TerrainGenParams::default(),

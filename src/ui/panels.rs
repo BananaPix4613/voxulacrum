@@ -30,6 +30,9 @@ pub struct UiState {
     pub regenerate_requested: bool,
     pub regenerating: bool,
     pub regen_progress: (u32, u32),
+    pub palette_list: Vec<String>,
+    pub palette_load_requested: bool,
+    pub loaded_palette_preview: Vec<[f32; 3]>,
 }
 
 impl UiState {
@@ -57,6 +60,9 @@ impl UiState {
             regenerate_requested: false,
             regenerating: false,
             regen_progress: (0, 0),
+            palette_list: crate::palette::list_palettes(&std::path::PathBuf::from("palettes")),
+            palette_load_requested: false,
+            loaded_palette_preview: Vec::new(),
         }
     }
 
@@ -115,6 +121,9 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 draw_cloud(ui, &mut state.params.cloud);
                 ui.separator();
                 draw_post_process(ui, &mut state.params.post_process);
+                ui.separator();
+                draw_palette(ui, &mut state.params.palette, &state.palette_list,
+                             &state.loaded_palette_preview, &mut state.palette_load_requested);
                 ui.separator();
                 draw_render_pipeline(ui, &mut state.params.render_pipeline);
                 ui.separator();
@@ -247,12 +256,101 @@ fn draw_post_process(ui: &mut egui::Ui, p: &mut PostProcessParams) {
     });
 }
 
+fn draw_palette(
+    ui: &mut egui::Ui,
+    p: &mut PaletteParams,
+    palette_list: &[String],
+    preview_colors: &[[f32; 3]],
+    load_requested: &mut bool,
+) {
+    ui.collapsing("Palette", |ui| {
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.checkbox(&mut p.enabled, "Enabled");
+        });
+
+        // Mode selector
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.label("Mode:");
+            ui.selectable_value(&mut p.mode, 0, "Palette");
+            ui.selectable_value(&mut p.mode, 1, "Stepping");
+        });
+
+        if p.mode == 0 {
+            // Palette lookup mode
+            if !palette_list.is_empty() {
+                ui.horizontal(|ui| {
+                    dot_green(ui);
+                    ui.label("Palette:");
+                    let prev = p.selected_palette.clone();
+                    egui::ComboBox::from_id_salt("palette_select")
+                        .selected_text(if p.selected_palette.is_empty() {
+                            "(none)"
+                        } else {
+                            &p.selected_palette
+                        })
+                        .show_ui(ui, |ui| {
+                            for name in palette_list {
+                                ui.selectable_value(
+                                    &mut p.selected_palette,
+                                    name.clone(),
+                                    name,
+                                );
+                            }
+                        });
+                    if p.selected_palette != prev {
+                        *load_requested = true;
+                    }
+                });
+            } else {
+                ui.label("No palettes in palettes/");
+            }
+
+            if !preview_colors.is_empty() {
+                ui.add_space(4.0);
+                ui.label(format!("{} colors:", preview_colors.len()));
+                ui.horizontal_wrapped(|ui| {
+                    for &color in preview_colors {
+                        let c = egui::Color32::from_rgb(
+                            (color[0] * 255.0) as u8,
+                            (color[1] * 255.0) as u8,
+                            (color[2] * 255.0) as u8,
+                        );
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(16.0, 16.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 2.0, c);
+                    }
+                });
+            }
+        } else {
+            // Color stepping mode
+            let mut l = p.l_levels as i32;
+            let mut ab = p.ab_levels as i32;
+            ui.horizontal(|ui| {
+                dot_green(ui);
+                ui.label("L levels:");
+                ui.add(egui::Slider::new(&mut l, 2..=128));
+            });
+            ui.horizontal(|ui| {
+                dot_green(ui);
+                ui.label("ab levels:");
+                ui.add(egui::Slider::new(&mut ab, 2..=128));
+            });
+            p.l_levels = l as u32;
+            p.ab_levels = ab as u32;
+        }
+    });
+}
+
 fn draw_render_pipeline(ui: &mut egui::Ui, p: &mut RenderPipelineParams) {
     ui.collapsing("Render Pipeline", |ui| {
         ui.horizontal(|ui| {
             dot_green(ui);
-            ui.label("World pixel density:");
-            ui.add(egui::Slider::new(&mut p.world_pixel_density, 2.0..=20.0));
+            ui.label("Pixel scale:");
+            ui.add(egui::Slider::new(&mut p.world_pixel_density, 1.0..=20.0));
         });
         ui.horizontal(|ui| {
             dot_green(ui);

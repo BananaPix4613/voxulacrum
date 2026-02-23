@@ -9,3 +9,4 @@ pub mod upscale_pass;
 pub mod vegetation_pass;
 pub mod water_pass;
 pub mod post_process;
+pub(crate) mod palette_pass;
