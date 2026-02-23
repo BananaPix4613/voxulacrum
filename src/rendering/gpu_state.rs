@@ -7,11 +7,7 @@ pub struct GpuState {
     pub queue: wgpu::Queue,
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
-    pub depth_texture: wgpu::Texture,
-    pub depth_view: wgpu::TextureView,
     pub surface_format: TextureFormat,
-    pub scene_texture: wgpu::Texture,
-    pub scene_view: wgpu::TextureView,
 }
 
 impl GpuState {
@@ -58,22 +54,12 @@ impl GpuState {
         };
         surface.configure(&device, &surface_config);
 
-        let (depth_texture, depth_view) =
-            Self::create_depth_texture(&device, surface_config.width, surface_config.height);
-
-        let (scene_texture, scene_view) =
-            Self::create_scene_texture(&device, surface_config.width, surface_config.height, surface_format);
-
         Self {
             device,
             queue,
             surface,
             surface_config,
-            depth_texture,
-            depth_view,
             surface_format,
-            scene_texture,
-            scene_view,
         }
     }
 
@@ -84,61 +70,6 @@ impl GpuState {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
-        let (tex, view) = Self::create_depth_texture(&self.device, width, height);
-        self.depth_texture = tex;
-        self.depth_view = view;
-        let (scene_tex, scene_v) = Self::create_scene_texture(&self.device, width, height, self.surface_format);
-        self.scene_texture = scene_tex;
-        self.scene_view = scene_v;
-    }
-
-    fn create_depth_texture(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth_texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
-    }
-
-    fn create_scene_texture(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-        format: wgpu::TextureFormat,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scene_texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
     }
 
     pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;

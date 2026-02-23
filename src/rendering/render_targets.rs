@@ -1,0 +1,119 @@
+/// Low-resolution render targets for the stylized pixel-art pipeline.
+///
+/// Owns three textures:
+/// - `scene` / `scene_view`: Main pass writes color here.
+/// - `processed` / `processed_view`: Post-process reads scene, writes here.
+/// - `depth` / `depth_view`: Main pass depth buffer.
+///
+/// The upscale blit reads from `processed_view` and writes to the swap chain.
+pub struct RenderTargets {
+    pub scene: wgpu::Texture,
+    pub scene_view: wgpu::TextureView,
+    pub processed: wgpu::Texture,
+    pub processed_view: wgpu::TextureView,
+    pub depth: wgpu::Texture,
+    pub depth_view: wgpu::TextureView,
+    pub render_width: u32,
+    pub render_height: u32,
+    pub pixel_scale: u32,
+}
+
+impl RenderTargets {
+    pub fn new(
+        device: &wgpu::Device,
+        window_width: u32,
+        window_height: u32,
+        pixel_scale: u32,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let pixel_scale = pixel_scale.max(1);
+        let render_width = (window_width / pixel_scale).max(1);
+        let render_height = (window_height / pixel_scale).max(1);
+
+        let scene = Self::create_color_texture(
+            device,
+            render_width,
+            render_height,
+            surface_format,
+            "lowres_scene",
+        );
+        let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let processed = Self::create_color_texture(
+            device,
+            render_width,
+            render_height,
+            surface_format,
+            "lowres_processed",
+        );
+        let processed_view =
+            processed.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lowres_depth"),
+            size: wgpu::Extent3d {
+                width: render_width,
+                height: render_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self {
+            scene,
+            scene_view,
+            processed,
+            processed_view,
+            depth,
+            depth_view,
+            render_width,
+            render_height,
+            pixel_scale,
+        }
+    }
+
+    fn create_color_texture(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        label: &str,
+    ) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    }
+
+    pub fn needs_recreate(
+        &self,
+        window_width: u32,
+        window_height: u32,
+        pixel_scale: u32,
+    ) -> bool {
+        let pixel_scale = pixel_scale.max(1);
+        let expected_w = (window_width / pixel_scale).max(1);
+        let expected_h = (window_height / pixel_scale).max(1);
+        self.render_width != expected_w
+            || self.render_height != expected_h
+            || self.pixel_scale != pixel_scale
+    }
+}

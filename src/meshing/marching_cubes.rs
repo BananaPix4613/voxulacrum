@@ -11,7 +11,7 @@
 //! - Flat faces at controlled angles for clean cel-shaded light bands
 //! - No QEF, no SVD, no numerical instability
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::{ChunkMesh, ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
@@ -93,6 +93,26 @@ impl OwnedNeighborBoundaries {
             ],
         }
     }
+}
+
+// ============================================================================
+// Greedy face merging — data structures
+// ============================================================================
+
+/// Canonical edge between two quantized vertex positions.
+/// Used for adjacency detection between coplanar triangles.
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+struct PositionEdge {
+    a: u64,
+    b: u64,
+}
+
+/// Key for grouping coplanar, same-material faces.
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct PlaneGroupKey {
+    normal_index: u8,
+    material_id: u32,
+    plane_distance_quantized: i32,
 }
 
 // ============================================================================
@@ -309,6 +329,101 @@ fn compute_ao(snap: &ChunkSnapshot, position: [f32; 3], chunk_offset: [f32; 3]) 
 
     let occlusion = weighted_solid / total_weight;
     (1.0 - occlusion * 0.5).clamp(0.5, 1.0)
+}
+
+// ============================================================================
+// Greedy face merging — helpers
+// ============================================================================
+
+/// Pack a vertex position into a u64 key for edge hashing and deduplication.
+///
+/// With VOXEL_SCALE=0.5 and quarter-voxel snapping, vertex coordinates are
+/// multiples of 0.125. Multiplying by 8192 (power of 2) and rounding gives
+/// integer keys with no collisions. Each axis gets 21 bits, supporting
+/// positions from -128 to +128 world units - sufficient for the 64x32x64
+/// world (8x4x8 chunks x 16 world units each).
+fn pack_position_key(pos: [f32; 3]) -> u64 {
+    const SCALE: f32 = 8192.0;
+    let x = ((pos[0] * SCALE).round() as i32 as u64) & 0x1FFFFF;
+    let y = ((pos[1] * SCALE).round() as i32 as u64) & 0x1FFFFF;
+    let z = ((pos[2] * SCALE).round() as i32 as u64) & 0x1FFFFF;
+    x | (y << 21) | (z << 42)
+}
+
+/// Create a canonical (order-independent) edge from two position keys.
+fn make_edge(key_a: u64, key_b: u64) -> PositionEdge {
+    if key_a <= key_b {
+        PositionEdge { a: key_a, b: key_b }
+    } else {
+        PositionEdge { a: key_b, b: key_a }
+    }
+}
+
+/// Find which ALLOWED_NORMALS index a snapped normal corresponds to.
+/// Returns 0 as fallback (should not happen with properly snapped normals.
+fn find_normal_index(normal: [f32; 3]) -> u8 {
+    let mut best = 0u8;
+    let mut best_dot = dot3(normal, ALLOWED_NORMALS[0]);
+    for (i, &candidate) in ALLOWED_NORMALS.iter().enumerate().skip(1) {
+        let d = dot3(normal, candidate);
+        if d > best_dot {
+            best = i as u8;
+            best_dot = d;
+        }
+    }
+    best
+}
+
+/// Quantize the plane distance for coplanarity grouping.
+/// Two faces are considered coplanar if their plane distances fall in the
+/// same quantization bin (width = flat_threshold_error).
+fn quantize_plane_distance(position: [f32; 3], normal: [f32; 3], threshold: f32) -> i32 {
+    let d = dot3(position, normal);
+    (d / threshold).round() as i32
+}
+
+/// Compute two orthonormal basis vectors for the plane perpendicular to `normal`.
+/// Used to project 3D polygon vertices into 2D for ear clipping.
+fn compute_plane_basis(normal: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let hint = if normal[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let u = normalize3(cross3(normal, hint));
+    let v = cross3(normal, u);
+    (u, v)
+}
+
+/// Project a 3D position onto a 2D plane defined by basis vectors.
+#[inline]
+fn project_2d(pos: [f32; 3], u: [f32; 3], v: [f32; 3]) -> [f32; 2] {
+    [dot3(pos, u), dot3(pos, v)]
+}
+
+/// 2D cross product (z-component of the 3D cross product of 2D vectors).
+#[inline]
+fn cross_2d(a: [f32; 2], b: [f32; 2]) -> f32 {
+    a[0] * b[1] - a[1] * b[0]
+}
+
+/// 2D vector subtraction.
+#[inline]
+fn sub_2d(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+/// Test whether point `p` lies inside triangle (a, b, c) in 2D.
+/// Uses barycentric sign tests. Returns true for interior and edge points.
+fn point_in_triangle_2d(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> bool {
+    let d1 = cross_2d(sub_2d(b, a), sub_2d(p, a));
+    let d2 = cross_2d(sub_2d(c, b), sub_2d(p, b));
+    let d3 = cross_2d(sub_2d(a, c), sub_2d(p, c));
+
+    let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+
+    !(has_neg && has_pos)
 }
 
 // ============================================================================
@@ -578,7 +693,7 @@ fn compute_edge_vertex(
 // ============================================================================
 
 /// Duplicate shared vertices per-triangle so each face gets its own snapped
-/// normal, and compute per-vertex ambient occlusion, and assign uniform per-frace
+/// normal, and compute per-vertex ambient occlusion, and assign uniform per-face
 /// material via majority vote.
 fn flatten_mesh(
     shared_vertices: &[TerrainVertex],
@@ -645,6 +760,490 @@ fn flatten_mesh(
     }
 
     (vertices, indices)
+}
+
+// ============================================================================
+// Greedy face merging — adjacency and connected components
+// ============================================================================
+
+/// Build edge adjacency within a coplanar group and find connected components
+/// via flood fill.
+///
+/// Returns:
+/// - Edge-to-triangles map (for boundary extraction)
+/// - List of connected components (each is a Vec of triangle indices)
+fn find_connected_components(
+    tri_list: &[usize],
+    vertices: &[TerrainVertex],
+    indices: &[u32],
+) -> (HashMap<PositionEdge, Vec<usize>>, Vec<Vec<usize>>) {
+    // Build edge -> triangles map
+    let mut edge_to_tris: HashMap<PositionEdge, Vec<usize>> = HashMap::new();
+
+    for &tri_idx in tri_list {
+        let base = tri_idx * 3;
+        let vi = [
+            indices[base] as usize,
+            indices[base + 1] as usize,
+            indices[base + 2] as usize,
+        ];
+        for &(i, j) in &[(0, 1), (1, 2), (2, 0)] {
+            let edge = make_edge(
+                pack_position_key(vertices[vi[i]].position),
+                pack_position_key(vertices[vi[j]].position),
+            );
+            edge_to_tris.entry(edge).or_default().push(tri_idx);
+        }
+    }
+
+    // Build adjacency list: triangles connected by shared edges
+    let tri_set: HashSet<usize> = tri_list.iter().copied().collect();
+    let mut adjacency: HashMap<usize, Vec<usize>> = HashMap::new();
+
+    for tris in edge_to_tris.values() {
+        if tris.len() == 2 && tri_set.contains(&tris[0]) && tri_set.contains(&tris[1]) {
+            adjacency.entry(tris[0]).or_default().push(tris[1]);
+            adjacency.entry(tris[1]).or_default().push(tris[0]);
+        }
+    }
+
+    // Flood fill to find connected components
+    let mut visited: HashSet<usize> = HashSet::with_capacity(tri_list.len());
+    let mut components: Vec<Vec<usize>> = Vec::new();
+
+    for &tri_idx in tri_list {
+        if visited.contains(&tri_idx) {
+            continue;
+        }
+
+        let mut component = Vec::new();
+        let mut stack = vec![tri_idx];
+
+        while let Some(t) = stack.pop() {
+            if !visited.insert(t) {
+                continue;
+            }
+            component.push(t);
+            if let Some(neighbors) = adjacency.get(&t) {
+                for &n in neighbors {
+                    if !visited.contains(&n) {
+                        stack.push(n);
+                    }
+                }
+            }
+        }
+
+        components.push(component);
+    }
+
+    (edge_to_tris, components)
+}
+
+// ============================================================================
+// Greedy face merging — boundary extraction
+// ============================================================================
+
+/// Extract the ordered boundary polygon of a connected component of coplanar
+/// triangles.
+///
+/// A boundary half-edge is a directed edge (a->b) whose canonical undirected
+/// edge belongs to exactly one triangle in the component. The boundary forms
+/// a closed loop. Returns `None` if the boundary is not a single simple loop
+/// (e.g., multiple disconnected loops indicating a hole, or malformed data).
+///
+/// Returns vertex buffer indices (not position keys) so that per-vertex AO
+/// values are preserved in the output.
+fn extract_boundary(
+    component: &[usize],
+    vertices: &[TerrainVertex],
+    indices: &[u32],
+    edge_to_tris: &HashMap<PositionEdge, Vec<usize>>,
+) -> Option<Vec<u32>> {
+    let component_set: HashSet<usize> = component.iter().copied().collect();
+
+    // Collect boundary directed half-edges: from_pos_key -> (to_pos_key, from_vertex_index).
+    // A half-edge a->b is boundary if the canonical edge {a,b} has exactly 1 triangle
+    // in this component.
+    let mut half_edges: HashMap<u64, (u64, u32)> = HashMap::new();
+
+    for &tri_idx in component {
+        let base = tri_idx * 3;
+        let vi = [
+            indices[base] as usize,
+            indices[base + 1] as usize,
+            indices[base + 2] as usize,
+        ];
+
+        for &(i, j) in &[(0, 1), (1, 2), (2, 0)] {
+            let key_a = pack_position_key(vertices[vi[i]].position);
+            let key_b = pack_position_key(vertices[vi[j]].position);
+            let canonical = make_edge(key_a, key_b);
+
+            let count_in_component = edge_to_tris
+                .get(&canonical)
+                .map_or(0, |tris| tris.iter().filter(|t| component_set.contains(t)).count());
+
+            if count_in_component == 1 {
+                half_edges.insert(key_a, (key_b, vi[i] as u32));
+            }
+        }
+    }
+
+    if half_edges.is_empty() {
+        return None;
+    }
+
+    // Walk the boundary loop
+    let &start_key = half_edges.keys().next()?;
+    let mut boundary = Vec::with_capacity(half_edges.len());
+    let mut current_key = start_key;
+
+    loop {
+        let &(next_key, vertex_idx) = half_edges.get(&current_key)?;
+        boundary.push(vertex_idx);
+        current_key = next_key;
+
+        if current_key == start_key {
+            break;
+        }
+
+        // Guard against infinite loops from malformed data
+        if boundary.len() > half_edges.len() {
+            return None;
+        }
+    }
+
+    // Must form a valid polygon
+    if boundary.len() < 3 {
+        return None;
+    }
+
+    // Verify we consumed all boundary edges (single loop, no holes)
+    if boundary.len() != half_edges.len() {
+        return None;
+    }
+
+    Some(boundary)
+}
+
+// ============================================================================
+// Greedy face merging — collinear vertex removal
+// ============================================================================
+
+/// Remove collinear vertices from a boundary polygon. Three consecutive
+/// vertices where the middle one lies on the line between the other two
+/// can be removed without changing the polygon shape. This reduces the
+/// final triangle count after ear clipping.
+fn remove_collinear_vertices(boundary: &mut Vec<u32>, vertices: &[TerrainVertex]) {
+    if boundary.len() <= 3 {
+        return;
+    }
+
+    let mut i = 0;
+    let mut iterations = 0;
+    let max_iterations = boundary.len() * 2; // Safety bound
+
+    while boundary.len() > 3 && iterations < max_iterations {
+        iterations += 1;
+        let n = boundary.len();
+        let prev = boundary[(i + n - 1) % n] as usize;
+        let curr = boundary[i % n] as usize;
+        let next = boundary[(i + 1) % n] as usize;
+
+        let edge1 = sub3(vertices[curr].position, vertices[prev].position);
+        let edge2 = sub3(vertices[next].position, vertices[curr].position);
+        let cross = cross3(edge1, edge2);
+
+        if length_sq3(cross) < 1e-10 {
+            boundary.remove(i % boundary.len());
+            // After removal, the current index now points to what was `next`.
+            // Recheck from the previous vertex since it may now be collinear
+            // with its new neighbors.
+            if i > 0 {
+                i -= 1;
+            }
+        } else {
+            i += 1;
+        }
+
+        if i >= boundary.len() {
+            break;
+        }
+    }
+}
+
+// ============================================================================
+// Greedy face merging — ear clipping triangulation
+// ============================================================================
+
+/// Triangulate a planar polygon using the ear clipping algorithm.
+///
+/// The polygon is defined by `boundary` (ordered vertex indices, CCW winding
+/// when viewed from the direction of `normal`). All vertices are coplanar.
+///
+/// Returns a list of triangle index triples referencing the original vertex
+/// buffer.
+fn ear_clip_triangulate(
+    boundary: &[u32],
+    vertices: &[TerrainVertex],
+    normal: [f32; 3],
+) -> Vec<[u32; 3]> {
+    let n = boundary.len();
+    if n < 3 {
+        return vec![];
+    }
+    if n == 3 {
+        return vec![[boundary[0], boundary[1], boundary[2]]];
+    }
+    if n == 4 {
+        // Quad fast-path: split along the shorter diagonal
+        let p0 = vertices[boundary[0] as usize].position;
+        let p1 = vertices[boundary[1] as usize].position;
+        let p2 = vertices[boundary[2] as usize].position;
+        let p3 = vertices[boundary[3] as usize].position;
+        let diag02 = length_sq3(sub3(p2, p0));
+        let diag13 = length_sq3(sub3(p3, p1));
+        if diag02 <= diag13 {
+            return vec![
+                [boundary[0], boundary[1], boundary[2]],
+                [boundary[0], boundary[2], boundary[3]],
+            ];
+        } else {
+            return vec![
+                [boundary[0], boundary[1], boundary[3]],
+                [boundary[1], boundary[2], boundary[3]],
+            ];
+        }
+    }
+
+    // General ear clipping
+    let (u_axis, v_axis) = compute_plane_basis(normal);
+
+    // Project all boundary vertices to 2D
+    let pts_2d: Vec<[f32; 2]> = boundary
+        .iter()
+        .map(|&vi| project_2d(vertices[vi as usize].position, u_axis, v_axis))
+        .collect();
+
+    let mut remaining: Vec<usize> = (0..n).collect();
+    let mut triangles = Vec::with_capacity(n - 2);
+
+    let mut safety = 0;
+    let max_safety = n * n; // 0(n^2) worst case
+
+    while remaining.len() > 3 && safety < max_safety {
+        safety += 1;
+        let rn = remaining.len();
+        let mut found_ear = false;
+
+        for idx in 0..rn {
+            let pi = remaining[(idx + rn - 1) % rn];
+            let ci = remaining[idx];
+            let ni = remaining[(idx + 1) % rn];
+
+            let p0 = pts_2d[pi];
+            let p1 = pts_2d[ci];
+            let p2 = pts_2d[ni];
+
+            // Check convexity (positive cross product = CCW = convex ear)
+            if cross_2d(sub_2d(p1, p0), sub_2d(p2, p1)) <= 1e-10 {
+                continue; // Reflex or degenerate vertex
+            }
+
+            // Check that no other remaining vertex falls inside this triangle
+            let mut is_ear = true;
+            for (j, &ri) in remaining.iter().enumerate() {
+                if j == (idx + rn - 1) % rn || j == idx || j == (idx + 1) % rn {
+                    continue;
+                }
+                if point_in_triangle_2d(pts_2d[ri], p0, p1, p2) {
+                    is_ear = false;
+                    break;
+                }
+            }
+
+            if is_ear {
+                triangles.push([boundary[pi], boundary[ci], boundary[ni]]);
+                remaining.remove(idx);
+                found_ear = true;
+                break;
+            }
+        }
+
+        if !found_ear {
+            // Degenerate polygon - cannot find an ear. This should not happen
+            // with well-formed MC output. Fall back: emit nothing and let the
+            // caller use original triangles.
+            return vec![];
+        }
+    }
+
+    // Last triangle
+    if remaining.len() == 3 {
+        triangles.push([
+            boundary[remaining[0]],
+            boundary[remaining[1]],
+            boundary[remaining[2]],
+        ]);
+    }
+
+    triangles
+}
+
+// ============================================================================
+// Greedy face merging — top-level orchestrator
+// ============================================================================
+
+/// Merge coplanar adjacent triangles into larger polygons and re-triangulate.
+///
+/// Groups flat-shaded triangles by (snapped normal, material, plane distance),
+/// finds connected components of adjacent triangles within each group, extracts
+/// boundary polygons, removes collinear vertices, and re-triangulate via ear
+/// clipping.
+///
+/// Falls back to emitting original triangles for any group/component where
+/// merging fails (non-simple boundary, holes, degenerate geometry).
+///
+/// AO is preserved: boundary vertices retain their original per-vertex AO values
+/// computed during flatten_mesh. Interior vertex AO is interpolated by the GPU.
+fn greedy_merge(
+    flat_vertices: &[TerrainVertex],
+    flat_indices: &[u32],
+    flat_threshold_error: f32,
+) -> (Vec<TerrainVertex>, Vec<u32>) {
+    let tri_count = flat_indices.len() / 3;
+    if tri_count == 0 {
+        return (Vec::new(), Vec::new());
+    }
+
+    // Stage 1: Group triangles by coplanar plane + material
+    let mut plane_groups: HashMap<PlaneGroupKey, Vec<usize>> = HashMap::new();
+
+    for tri_idx in 0..tri_count {
+        let vi0 = flat_indices[tri_idx * 3] as usize;
+        let normal = flat_vertices[vi0].normal;
+        let material_id = flat_vertices[vi0].material_id;
+        let normal_index = find_normal_index(normal);
+        let plane_dist = quantize_plane_distance(
+            flat_vertices[vi0].position,
+            normal,
+            flat_threshold_error,
+        );
+
+        let key = PlaneGroupKey {
+            normal_index,
+            material_id,
+            plane_distance_quantized: plane_dist,
+        };
+
+        plane_groups.entry(key).or_default().push(tri_idx);
+    }
+
+    let mut out_vertices: Vec<TerrainVertex> = Vec::with_capacity(flat_vertices.len() / 2);
+    let mut out_indices: Vec<u32> = Vec::with_capacity(flat_indices.len() / 2);
+
+    // Per-group vertex dedup map. Within a single PlaneGroupKey, all vertices
+    // share the same normal and material, so dedup by position alone is safe.
+    // We clear and reuse this map per group to prevent cross-group collisions
+    // that would incorrectly merge vertices with different materials or normals.
+    let mut vertex_map: HashMap<u64, u32> = HashMap::new();
+
+    for (key, tri_list) in &plane_groups {
+        // Clear the dedup map for each group — this is the critical fix that
+        // prevents vertices from different materials/normals from being merged.
+        vertex_map.clear();
+
+        // Single triangle — emit directly, no merging overhead
+        if tri_list.len() == 1 {
+            let base = tri_list[0] * 3;
+            for offset in 0..3 {
+                let vi = flat_indices[base + offset] as usize;
+                let v = &flat_vertices[vi];
+                let pos_key = pack_position_key(v.position);
+                let idx = vertex_map.entry(pos_key).or_insert_with(|| {
+                    let i = out_vertices.len() as u32;
+                    out_vertices.push(*v);
+                    i
+                });
+                out_indices.push(*idx);
+            }
+            continue;
+        }
+
+        // Stage 2: Build adjacency and find connected components
+        let (edge_to_tris, components) =
+            find_connected_components(tri_list, flat_vertices, flat_indices);
+
+        let normal = ALLOWED_NORMALS[key.normal_index as usize];
+
+        for component in &components {
+            if component.len() == 1 {
+                let base = component[0] * 3;
+                for offset in 0..3 {
+                    let vi = flat_indices[base + offset] as usize;
+                    let v = &flat_vertices[vi];
+                    let pos_key = pack_position_key(v.position);
+                    let idx = vertex_map.entry(pos_key).or_insert_with(|| {
+                        let i = out_vertices.len() as u32;
+                        out_vertices.push(*v);
+                        i
+                    });
+                    out_indices.push(*idx);
+                }
+                continue;
+            }
+
+            // Extract boundary polygon
+            let merged = extract_boundary(component, flat_vertices, flat_indices, &edge_to_tris)
+                .and_then(|mut boundary| {
+                    remove_collinear_vertices(&mut boundary, flat_vertices);
+                    if boundary.len() < 3 {
+                        return None;
+                    }
+                    let triangles = ear_clip_triangulate(&boundary, flat_vertices, normal);
+                    if triangles.is_empty() {
+                        return None;
+                    }
+                    Some(triangles)
+                });
+
+            match merged {
+                Some(triangles) => {
+                    for tri in &triangles {
+                        for &vi in tri {
+                            let v = &flat_vertices[vi as usize];
+                            let pos_key = pack_position_key(v.position);
+                            let idx = vertex_map.entry(pos_key).or_insert_with(|| {
+                                let i = out_vertices.len() as u32;
+                                out_vertices.push(*v);
+                                i
+                            });
+                            out_indices.push(*idx);
+                        }
+                    }
+                }
+                None => {
+                    // Fallback: emit original triangles unmodified
+                    for &tri_idx in component {
+                        let base = tri_idx * 3;
+                        for offset in 0..3 {
+                            let vi = flat_indices[base + offset] as usize;
+                            let v = &flat_vertices[vi];
+                            let pos_key = pack_position_key(v.position);
+                            let idx = vertex_map.entry(pos_key).or_insert_with(|| {
+                                let i = out_vertices.len() as u32;
+                                out_vertices.push(*v);
+                                i
+                            });
+                            out_indices.push(*idx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (out_vertices, out_indices)
 }
 
 // ============================================================================
@@ -737,18 +1336,23 @@ pub fn generate_cell_vertices_from_snapshot(
         snap, chunk_offset, materials,
     );
 
+    // Greedy face merging: reduce triangle count by merging coplanar faces
+    let (final_vertices, final_indices) = if materials.greedy_merge_enabled {
+        greedy_merge(&flat_vertices, &flat_indices, materials.flat_threshold_error)
+    } else {
+        (flat_vertices, flat_indices)
+    };
+
     // Build CellVertexData matching pipeline contract.
-    // MC doesn't use vertex_indices, cell_classes, or boundary_map - these exist
-    // solely to satisfy the Phase 2 interface in mod.rs.
     let stride = CHUNK_SIZE + 1;
     let total_cells = stride * stride * stride;
 
     CellVertexData {
-        vertices: flat_vertices,
+        vertices: final_vertices,
         vertex_indices: vec![u32::MAX; total_cells],
         boundary_map: BoundaryVertexMap::new(),
         cell_classes: vec![CellClass::Empty; total_cells],
-        greedy_indices: flat_indices,
+        greedy_indices: final_indices,
     }
 }
 

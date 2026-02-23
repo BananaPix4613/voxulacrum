@@ -244,6 +244,22 @@ impl Default for MeshingParams {
 }
 
 // ============================================================================
+// Render pipeline parameters
+// ============================================================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RenderPipelineParams {
+    pub pixel_scale: u32,
+}
+
+impl Default for RenderPipelineParams {
+    fn default() -> Self {
+        Self { pixel_scale: 4 }
+    }
+}
+
+// ============================================================================
 // Time control parameters
 // ============================================================================
 
@@ -399,6 +415,7 @@ pub struct EngineParams {
     pub terrain_gen: TerrainGenParams,
     pub debug: DebugParams,
     pub meshing: MeshingParams,
+    pub render_pipeline: RenderPipelineParams,
 }
 
 impl Default for EngineParams {
@@ -416,6 +433,7 @@ impl Default for EngineParams {
             terrain_gen: TerrainGenParams::default(),
             debug: DebugParams::default(),
             meshing: MeshingParams::default(),
+            render_pipeline: RenderPipelineParams::default(),
         }
     }
 }
@@ -492,6 +510,9 @@ impl ParamChangeDetector {
             || current.meshing.flat_normal_threshold != self.previous.meshing.flat_normal_threshold
         {
             return ParamChangeKind::MeshInvalidating;
+        }
+        if current.render_pipeline.pixel_scale != self.previous.render_pipeline.pixel_scale {
+            return ParamChangeKind::UniformOnly;
         }
         if current != &self.previous {
             return ParamChangeKind::UniformOnly;

@@ -1,0 +1,162 @@
+pub struct UpscalePass {
+    pub pipeline: wgpu::RenderPipeline,
+    pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub sampler: wgpu::Sampler,
+}
+
+impl UpscalePass {
+    pub fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        source_view: &wgpu::TextureView,
+        shader_source: &str,
+    ) -> Self {
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("upscale_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float {
+                                filterable: true,
+                            },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(
+                            wgpu::SamplerBindingType::Filtering,
+                        ),
+                        count: None,
+                    },
+                ],
+            });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("upscale_point_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        let bind_group =
+            Self::create_bind_group(device, &bind_group_layout, source_view, &sampler);
+
+        let pipeline = Self::create_pipeline(
+            device,
+            surface_format,
+            &bind_group_layout,
+            shader_source,
+        );
+
+        Self {
+            pipeline,
+            bind_group,
+            bind_group_layout,
+            sampler,
+        }
+    }
+
+    fn create_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        source_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("upscale_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    }
+
+    fn create_pipeline(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        shader_source: &str,
+    ) -> wgpu::RenderPipeline {
+        let shader_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("upscale_shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+
+        let pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("upscale_pipeline_layout"),
+                bind_group_layouts: &[bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("upscale_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    pub fn rebuild_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        source_view: &wgpu::TextureView,
+    ) {
+        self.bind_group = Self::create_bind_group(
+            device,
+            &self.bind_group_layout,
+            source_view,
+            &self.sampler,
+        );
+    }
+}

@@ -116,6 +116,8 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_post_process(ui, &mut state.params.post_process);
                 ui.separator();
+                draw_render_pipeline(ui, &mut state.params.render_pipeline);
+                ui.separator();
                 draw_camera(ui, &mut state.params.camera);
                 ui.separator();
                 draw_water(ui, &mut state.params.water);
@@ -242,6 +244,20 @@ fn draw_post_process(ui: &mut egui::Ui, p: &mut PostProcessParams) {
         ui.horizontal(|ui| { dot_green(ui); ui.label("Vignette:"); ui.add(egui::Slider::new(&mut p.vignette_strength, 0.0..=1.0)); });
         ui.horizontal(|ui| { dot_green(ui); ui.label("Exposure:"); ui.add(egui::Slider::new(&mut p.exposure, 0.1..=3.0)); });
         ui.horizontal(|ui| { dot_green(ui); ui.label("Overcast desat:"); ui.add(egui::Slider::new(&mut p.overcast_desaturation_factor, 0.0..=1.0)); });
+    });
+}
+
+fn draw_render_pipeline(ui: &mut egui::Ui, p: &mut RenderPipelineParams) {
+    ui.collapsing("Render Pipeline", |ui| {
+        ui.horizontal(|ui| {
+            dot_green(ui);
+            ui.label("Pixel scale:");
+            ui.add(egui::Slider::new(&mut p.pixel_scale, 1..=8));
+        });
+        ui.label(format!(
+            "Render at 1/{} resolution",
+            p.pixel_scale
+        ));
     });
 }
 

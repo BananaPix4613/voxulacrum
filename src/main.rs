@@ -22,8 +22,10 @@ use cloud_shadow::CloudShadowState;
 use params::{EngineParams};
 use rendering::gpu_state::GpuState;
 use rendering::pipelines::{PipelineRegistry, PipelineResources};
+use rendering::render_targets::RenderTargets;
 use rendering::uniforms::{self, GlobalUniforms, PostProcessUniforms, ShadowUniforms};
 use rendering::debug_lines::DebugLinePass;
+use rendering::upscale_pass::UpscalePass;
 use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
 use rendering::frustum::Frustum;
@@ -70,6 +72,7 @@ struct AppState {
     camera: IsometricCamera,
     pipeline_registry: PipelineRegistry,
     pipeline_resources: PipelineResources,
+    render_targets: RenderTargets,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     shadow_uniform_buffer: wgpu::Buffer,
@@ -82,6 +85,7 @@ struct AppState {
     cloud_shadow: CloudShadowState,
     elapsed: f32,
     debug_line_pass: DebugLinePass,
+    upscale_pass: UpscalePass,
     vegetation_pass: VegetationPass,
     static_water: StaticWater,
     water_pass: WaterPass,
@@ -107,6 +111,15 @@ impl AppState {
 
         let mut camera = IsometricCamera::new(&initial_params.camera);
         camera.resize(gpu.surface_config.width, gpu.surface_config.height);
+
+        // Low-res render targets
+        let render_targets = RenderTargets::new(
+            &gpu.device,
+            gpu.surface_config.width,
+            gpu.surface_config.height,
+            initial_params.render_pipeline.pixel_scale,
+            gpu.surface_format,
+        );
 
         // Shadow map
         let shadow_depth_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -233,7 +246,17 @@ impl AppState {
         let pp_shader_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
             .expect("Failed to read post_process.wgsl");
         let post_process = PostProcessPass::new(
-            &gpu.device, gpu.surface_format, &gpu.scene_view, &pp_shader_source,
+            &gpu.device, gpu.surface_format, &render_targets.scene_view, &pp_shader_source,
+        );
+
+        // Upscaling
+        let upscale_shader_source = std::fs::read_to_string(shader_dir.join("upscale.wgsl"))
+            .expect("Failed to read upscale.wgsl");
+        let upscale_pass = UpscalePass::new(
+            &gpu.device,
+            gpu.surface_format,
+            &render_targets.processed_view,
+            &upscale_shader_source,
         );
 
         // Egui
@@ -256,6 +279,7 @@ impl AppState {
             camera,
             pipeline_registry,
             pipeline_resources,
+            render_targets,
             uniform_buffer,
             uniform_bind_group,
             shadow_uniform_buffer,
@@ -268,6 +292,7 @@ impl AppState {
             cloud_shadow,
             elapsed: 0.0,
             debug_line_pass,
+            upscale_pass,
             vegetation_pass,
             static_water,
             water_pass,
@@ -280,6 +305,7 @@ impl AppState {
             meshing_pipeline,
             world_manager: WorldManager::new(),
             frustum,
+
         }
     }
 
@@ -359,6 +385,29 @@ impl AppState {
 
         // Check for shader hot-reloads before rendering
         self.check_shader_hot_reload();
+
+        // Detect pixel_scale changes requiring render target recreation
+        if self.render_targets.needs_recreate(
+            self.gpu.surface_config.width,
+            self.gpu.surface_config.height,
+            self.ui_state.params.render_pipeline.pixel_scale,
+        ) {
+            self.render_targets = RenderTargets::new(
+                &self.gpu.device,
+                self.gpu.surface_config.width,
+                self.gpu.surface_config.height,
+                self.ui_state.params.render_pipeline.pixel_scale,
+                self.gpu.surface_format,
+            );
+            self.post_process.rebuild_bind_group(
+                &self.gpu.device,
+                &self.render_targets.scene_view,
+            );
+            self.upscale_pass.rebuild_bind_group(
+                &self.gpu.device,
+                &self.render_targets.processed_view,
+            );
+        }
 
         // Drain pending snapshot submissions (bounded per frame)
         self.meshing_pipeline.drain_pending_submissions(&self.world);
@@ -503,7 +552,21 @@ impl AppState {
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 let size = self.window.inner_size();
                 self.gpu.resize(size.width, size.height);
-                self.post_process.rebuild_bind_group(&self.gpu.device, &self.gpu.scene_view);
+                self.render_targets = RenderTargets::new(
+                    &self.gpu.device,
+                    size.width,
+                    size.height,
+                    self.ui_state.params.render_pipeline.pixel_scale,
+                    self.gpu.surface_format,
+                );
+                self.post_process.rebuild_bind_group(
+                    &self.gpu.device,
+                    &self.render_targets.scene_view,
+                );
+                self.upscale_pass.rebuild_bind_group(
+                    &self.gpu.device,
+                    &self.render_targets.processed_view,
+                );
                 return;
             }
             Err(wgpu::SurfaceError::Timeout) => { log::warn!("Surface timeout"); return; }
@@ -554,7 +617,7 @@ impl AppState {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.gpu.scene_view,
+                    view: &self.render_targets.scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -564,7 +627,7 @@ impl AppState {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.gpu.depth_view,
+                    view: &self.render_targets.depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -636,7 +699,7 @@ impl AppState {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("post_process_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
+                    view: &self.render_targets.processed_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -649,6 +712,27 @@ impl AppState {
             });
             pass.set_pipeline(&self.post_process.pipeline);
             pass.set_bind_group(0, &self.post_process.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // === Upscale blit pass ===
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("upscale_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.upscale_pass.pipeline);
+            pass.set_bind_group(0, &self.upscale_pass.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -800,7 +884,21 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(new_size) => {
                 state.gpu.resize(new_size.width, new_size.height);
                 state.camera.resize(new_size.width, new_size.height);
-                state.post_process.rebuild_bind_group(&state.gpu.device, &state.gpu.scene_view);
+                state.render_targets = RenderTargets::new(
+                    &state.gpu.device,
+                    new_size.width,
+                    new_size.height,
+                    state.ui_state.params.render_pipeline.pixel_scale,
+                    state.gpu.surface_format,
+                );
+                state.post_process.rebuild_bind_group(
+                    &state.gpu.device,
+                    &state.render_targets.scene_view,
+                );
+                state.upscale_pass.rebuild_bind_group(
+                    &state.gpu.device,
+                    &state.render_targets.processed_view,
+                );
             }
             ref e @ WindowEvent::KeyboardInput { ref event, .. } => {
                 let consumed = state.egui_renderer.handle_event(&state.window, e);
