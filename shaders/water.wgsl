@@ -96,8 +96,13 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
     return shadow_sum / 9.0;
 }
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> FragmentOutput {
     let deep_color = vec3<f32>(0.12, 0.25, 0.40);
     let shallow_color = vec3<f32>(0.25, 0.45, 0.55);
     let depth_t = clamp((in.depth - 1.0) * 0.2, 0.0, 1.0);
@@ -133,5 +138,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lit_color = base_color * (diffuse * shadow * cloud_factor + ambient) + specular * shadow * cloud_factor;
     let final_alpha = mix(0.4, 0.85, depth_t);
 
-    return vec4<f32>(lit_color, final_alpha);
+    return FragmentOutput(vec4<f32>(lit_color, final_alpha), vec4<f32>(perturbed_normal, final_alpha));
 }

@@ -1,11 +1,20 @@
 /// Low-resolution render targets for the stylized pixel-art pipeline.
 ///
-/// Owns three textures:
+/// Owns four textures:
 /// - `scene` / `scene_view`: Main pass writes color here.
-/// - `processed` / `processed_view`: Post-process reads scene, writes here.
+/// - `normal` / `normal_view`: Main pass writes world-space normals here (MRT).
+/// - `processed` / `processed_view`: Intermediate ping-pong buffer.
 /// - `depth` / `depth_view`: Main pass depth buffer.
 ///
-/// The upscale blit reads from `processed_view` and writes to the swap chain.
+/// The pipeline chain is:
+///   Main -> scene + depth + normal
+///   Outline -> reads scene+depth+normal -> writes processed
+///   PostProcess -> reads processed -> writes scene
+///   Palette -> reads scene -> writes processed
+///   Upscale -> reads processed -> writes swap chain
+
+pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 pub struct RenderTargets {
     pub scene: wgpu::Texture,
     pub scene_view: wgpu::TextureView,
@@ -13,6 +22,8 @@ pub struct RenderTargets {
     pub processed_view: wgpu::TextureView,
     pub depth: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
+    pub normal: wgpu::Texture,
+    pub normal_view: wgpu::TextureView,
     pub render_width: u32,
     pub render_height: u32,
     pub effective_pixel_scale: f32
@@ -52,10 +63,14 @@ impl RenderTargets {
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let normal = Self::create_color_texture(device, render_width, render_height, NORMAL_FORMAT, "lowres_normal");
+        let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
+
         Self {
             scene, scene_view,
             processed, processed_view,
             depth, depth_view,
+            normal, normal_view,
             render_width, render_height, effective_pixel_scale,
         }
     }

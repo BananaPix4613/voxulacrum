@@ -242,6 +242,36 @@ impl Default for PaletteParams {
 }
 
 // ============================================================================
+// Outline parameters
+// ============================================================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OutlineParams {
+    pub enabled: bool,
+    pub depth_threshold: f32,
+    pub depth_strength: f32,
+    pub normal_threshold: f32,
+    pub normal_strength: f32,
+    pub darken_strength: f32,
+    pub brighten_strength: f32,
+}
+
+impl Default for OutlineParams {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            depth_threshold: 0.005,
+            depth_strength: 1.0,
+            normal_threshold: 0.3,
+            normal_strength: 0.8,
+            darken_strength: 0.4,
+            brighten_strength: 0.3,
+        }
+    }
+}
+
+// ============================================================================
 // Meshing parameters
 // ============================================================================
 
@@ -450,6 +480,7 @@ pub struct EngineParams {
     pub debug: DebugParams,
     pub meshing: MeshingParams,
     pub render_pipeline: RenderPipelineParams,
+    pub outline: OutlineParams,
 }
 
 impl Default for EngineParams {
@@ -469,6 +500,7 @@ impl Default for EngineParams {
             debug: DebugParams::default(),
             meshing: MeshingParams::default(),
             render_pipeline: RenderPipelineParams::default(),
+            outline: OutlineParams::default(),
         }
     }
 }

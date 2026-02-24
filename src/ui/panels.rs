@@ -122,6 +122,8 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_post_process(ui, &mut state.params.post_process);
                 ui.separator();
+                draw_outline(ui, &mut state.params.outline);
+                ui.separator();
                 draw_palette(ui, &mut state.params.palette, &state.palette_list,
                              &state.loaded_palette_preview, &mut state.palette_load_requested);
                 ui.separator();
@@ -253,6 +255,22 @@ fn draw_post_process(ui: &mut egui::Ui, p: &mut PostProcessParams) {
         ui.horizontal(|ui| { dot_green(ui); ui.label("Vignette:"); ui.add(egui::Slider::new(&mut p.vignette_strength, 0.0..=1.0)); });
         ui.horizontal(|ui| { dot_green(ui); ui.label("Exposure:"); ui.add(egui::Slider::new(&mut p.exposure, 0.1..=3.0)); });
         ui.horizontal(|ui| { dot_green(ui); ui.label("Overcast desat:"); ui.add(egui::Slider::new(&mut p.overcast_desaturation_factor, 0.0..=1.0)); });
+    });
+}
+
+fn draw_outline(ui: &mut egui::Ui, p: &mut OutlineParams) {
+    ui.collapsing("Outline", |ui| {
+        ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut p.enabled, "Enabled"); });
+        ui.separator();
+        ui.label("Edge Detection");
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Depth threshold:"); ui.add(egui::Slider::new(&mut p.depth_threshold, 0.0..=0.1)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Depth strength:"); ui.add(egui::Slider::new(&mut p.depth_strength, 0.0..=2.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Normal threshold:"); ui.add(egui::Slider::new(&mut p.normal_threshold, 0.0..=1.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Normal strength:"); ui.add(egui::Slider::new(&mut p.normal_strength, 0.0..=2.0)); });
+        ui.separator();
+        ui.label("Shading");
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Darken strength:"); ui.add(egui::Slider::new(&mut p.darken_strength, 0.0..=1.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Brighten strength:"); ui.add(egui::Slider::new(&mut p.brighten_strength, 0.0..=1.0)); });
     });
 }
 

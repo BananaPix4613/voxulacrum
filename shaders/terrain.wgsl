@@ -125,26 +125,31 @@ fn debug_material_color(id: u32) -> vec3<f32> {
     }
 }
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> FragmentOutput {
     let n = normalize(in.normal);
 
     // --- Debug modes ---
     if globals.debug_mode == DEBUG_MATERIAL_ID {
-        return vec4<f32>(debug_material_color(in.material_id), 1.0);
+        return FragmentOutput(vec4<f32>(debug_material_color(in.material_id), 1.0), vec4<f32>(n, 1.0));
     }
     if globals.debug_mode == DEBUG_AO_ONLY {
-        return vec4<f32>(vec3<f32>(in.ao), 1.0);
+        return FragmentOutput(vec4<f32>(vec3<f32>(in.ao), 1.0), vec4<f32>(n, 1.0));
     }
     if globals.debug_mode == DEBUG_NORMALS {
-        let normal_color = normalize(in.normal) * 0.5 + 0.5;
-        return vec4<f32>(normal_color, 1.0);
+        let normal_color = n * 0.5 + 0.5;
+        return FragmentOutput(vec4<f32>(normal_color, 1.0), vec4<f32>(n, 1.0));
     }
     if globals.debug_mode == DEBUG_GREEDY {
         if (in.cell_flags & 1u) == 1u {
-            return vec4<f32>(0.2, 0.8, 0.2, 1.0);
+            return FragmentOutput(vec4<f32>(0.2, 0.8, 0.2, 1.0), vec4<f32>(n, 1.0));
         } else {
-            return vec4<f32>(0.2, 0.2, 0.8, 1.0);
+            return FragmentOutput(vec4<f32>(0.2, 0.2, 0.8, 1.0), vec4<f32>(n, 1.0));
         }
     }
 
@@ -162,24 +167,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let shadow = compute_shadow(in.world_position);
 
-    let lit_color = in.color * (diffuse * shadow * cloud_factor + ambient * ao_factor * AO_STRENGTH + ambient * (1.0 - AO_STRENGTH));
-
-    // Per-pixel edge detection
-    let normal_ddx = dpdx(in.normal);
-    let normal_ddy = dpdy(in.normal);
-    let normal_edge = length(normal_ddx) + length(normal_ddy);
-    let edge_n = smoothstep(0.3, 1.0, normal_edge);
-    let depth_ddx = dpdx(in.clip_position.z);
-    let depth_ddy = dpdy(in.clip_position.z);
-    let depth_edge = abs(depth_ddx) + abs(depth_ddy);
-    let edge_d = smoothstep(0.001, 0.01, depth_edge);
-    let edge = max(edge_n, edge_d);
-    var final_color = mix(lit_color, vec3<f32>(0.0, 0.0, 0.0), edge * globals.edge_strength);
+    var final_color = in.color * (diffuse * shadow * cloud_factor + ambient * ao_factor * AO_STRENGTH + ambient * (1.0 - AO_STRENGTH));
 
     // Directional AO
     let view_alignment = dot(n, vec3<f32>(0.0, 1.0, 0.0));
     let ortho_ao = mix(1.0 - globals.ortho_ao_strength, 1.0, view_alignment * 0.5 + 0.5);
     final_color = final_color * ortho_ao;
 
-    return vec4<f32>(final_color, 1.0);
+    return FragmentOutput(vec4<f32>(final_color, 1.0), vec4<f32>(n, 1.0));
 }

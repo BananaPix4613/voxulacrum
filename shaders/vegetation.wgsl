@@ -138,8 +138,13 @@ fn compute_shadow(world_pos: vec3<f32>) -> f32 {
     return shadow_sum / 9.0;
 }
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> FragmentOutput {
     let base_color = mix(in.terrain_color, in.terrain_color * 1.3, in.uv.y * 0.5);
 
     let n = normalize(in.normal);
@@ -157,5 +162,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let lit_color = base_color * (diffuse * shadow * cloud_factor + ambient);
 
-    return vec4<f32>(lit_color, 1.0);
+    // normal.w = 0.5 flags this pixel as vegetation so the outline pass can skip it
+    return FragmentOutput(vec4<f32>(lit_color, 1.0), vec4<f32>(n, 0.5));
 }

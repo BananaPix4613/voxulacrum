@@ -31,6 +31,8 @@ use rendering::vegetation_pass::VegetationPass;
 use rendering::water_pass::WaterPass;
 use rendering::frustum::Frustum;
 use rendering::post_process::PostProcessPass;
+use rendering::outline_pass::OutlinePass;
+use rendering::uniforms::OutlineUniforms;
 use rendering::palette_pass::PalettePass;
 use palette::Palette;
 use shader_reload::ShaderWatcher;
@@ -93,6 +95,7 @@ struct AppState {
     static_water: StaticWater,
     water_pass: WaterPass,
     post_process: PostProcessPass,
+    outline_pass: OutlinePass,
     palette_pass: PalettePass,
     loaded_palette: Option<Palette>,
     egui_renderer: ui::EguiRenderer,
@@ -251,7 +254,19 @@ impl AppState {
         let pp_shader_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
             .expect("Failed to read post_process.wgsl");
         let post_process = PostProcessPass::new(
-            &gpu.device, gpu.surface_format, &render_targets.scene_view, &pp_shader_source,
+            &gpu.device, gpu.surface_format, &render_targets.processed_view, &pp_shader_source,
+        );
+
+        // Outline pass
+        let outline_shader_source = std::fs::read_to_string(shader_dir.join("outline.wgsl"))
+            .expect("Failed to read outline.wgsl");
+        let outline_pass = OutlinePass::new(
+            &gpu.device,
+            gpu.surface_format,
+            &render_targets.scene_view,
+            &render_targets.depth_view,
+            &render_targets.normal_view,
+            &outline_shader_source,
         );
 
         // Palette quantization pass
@@ -267,7 +282,7 @@ impl AppState {
         let upscale_pass = UpscalePass::new(
             &gpu.device,
             gpu.surface_format,
-            &render_targets.scene_view,
+            &render_targets.processed_view,
             &upscale_shader_source,
         );
 
@@ -309,6 +324,7 @@ impl AppState {
             static_water,
             water_pass,
             post_process,
+            outline_pass,
             palette_pass,
             loaded_palette: None,
             egui_renderer,
@@ -359,6 +375,42 @@ impl AppState {
                         log::warn!("Failed to read post_process.wgsl: {}", e);
                         self.ui_state.push_shader_log(
                             format!("post_process.wgsl read error: {}", e),
+                            true,
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // Handle outline.wgsl separately since its pipeline lives in OutlinePass
+            if filename == "outline.wgsl" {
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        match self.outline_pass.try_reload_shader(
+                            &self.gpu.device,
+                            self.gpu.surface_format,
+                            &source,
+                        ) {
+                            Ok(()) => {
+                                log::info!("Reloaded outline.wgsl");
+                                self.ui_state.push_shader_log(
+                                    "outline.wgsl reloaded".to_string(),
+                                    false,
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!("outline.wgsl compile error: {}", e);
+                                self.ui_state.push_shader_log(
+                                    format!("outline.wgsl: {}", e),
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to read outline.wgsl: {}", e);
+                        self.ui_state.push_shader_log(
+                            format!("outline.wgsl read error: {}", e),
                             true,
                         );
                     }
@@ -446,9 +498,24 @@ impl AppState {
             self.render_targets = RenderTargets::new(
                 &self.gpu.device, rw, rh, eff_scale, self.gpu.surface_format,
             );
-            self.post_process.rebuild_bind_group(&self.gpu.device, &self.render_targets.scene_view);
-            self.palette_pass.rebuild_bind_group(&self.gpu.device, &self.render_targets.processed_view);
-            self.upscale_pass.rebuild_bind_group(&self.gpu.device, &self.render_targets.scene_view);
+            self.outline_pass.rebuild_bind_group(
+                &self.gpu.device,
+                &self.render_targets.scene_view,
+                &self.render_targets.depth_view,
+                &self.render_targets.normal_view,
+            );
+            self.post_process.rebuild_bind_group(
+                &self.gpu.device,
+                &self.render_targets.processed_view
+            );
+            self.palette_pass.rebuild_bind_group(
+                &self.gpu.device,
+                &self.render_targets.scene_view
+            );
+            self.upscale_pass.rebuild_bind_group(
+                &self.gpu.device,
+                &self.render_targets.processed_view
+            );
         }
 
         // Drain pending snapshot submissions (bounded per frame)
@@ -612,6 +679,23 @@ impl AppState {
         };
         self.post_process.update_uniforms(&self.gpu.queue, pp_uniforms);
 
+        // Outline uniforms
+        let op = &self.ui_state.params.outline;
+        self.outline_pass.update_uniforms(&self.gpu.queue, OutlineUniforms {
+            texel_size: [
+                1.0 / self.render_targets.render_width as f32,
+                1.0 / self.render_targets.render_height as f32,
+            ],
+            depth_threshold: op.depth_threshold,
+            depth_strength: op.depth_strength,
+            normal_threshold: op.normal_threshold,
+            normal_strength: op.normal_strength,
+            darken_strength: op.darken_strength,
+            brighten_strength: op.brighten_strength,
+            enabled: if op.enabled { 1 } else { 0 },
+            _pad: [0; 3],
+        });
+
         // Palette uniforms
         let palette_uniforms = if self.ui_state.params.palette.mode == 0 {
             // Palette lookup mode
@@ -670,13 +754,23 @@ impl AppState {
                 self.render_targets = RenderTargets::new(
                     &self.gpu.device, rw, rh, eff_scale, self.gpu.surface_format,
                 );
-                self.post_process.rebuild_bind_group(
+                self.outline_pass.rebuild_bind_group(
                     &self.gpu.device,
                     &self.render_targets.scene_view,
+                    &self.render_targets.depth_view,
+                    &self.render_targets.normal_view,
+                );
+                self.post_process.rebuild_bind_group(
+                    &self.gpu.device,
+                    &self.render_targets.processed_view,
+                );
+                self.palette_pass.rebuild_bind_group(
+                    &self.gpu.device,
+                    &self.render_targets.scene_view
                 );
                 self.upscale_pass.rebuild_bind_group(
                     &self.gpu.device,
-                    &self.render_targets.processed_view,
+                    &self.render_targets.scene_view,
                 );
                 return;
             }
@@ -732,6 +826,14 @@ impl AppState {
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color { r: sky_r, g: sky_g, b: sky_b, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.render_targets.normal_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
                             store: wgpu::StoreOp::Store,
                         },
                     }),
@@ -804,12 +906,33 @@ impl AppState {
             }
         }
 
+        // === Outline pass ===
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("outline_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.render_targets.processed_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.outline_pass.pipeline);
+            pass.set_bind_group(0, &self.outline_pass.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         // === Post-processing pass ===
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("post_process_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.render_targets.processed_view,
+                    view: &self.render_targets.scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -830,7 +953,7 @@ impl AppState {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("palette_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.render_targets.scene_view,
+                    view: &self.render_targets.processed_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -1039,13 +1162,23 @@ impl ApplicationHandler for App {
                 state.render_targets = RenderTargets::new(
                     &state.gpu.device, rw, rh, eff_scale, state.gpu.surface_format,
                 );
-                state.post_process.rebuild_bind_group(
+                state.outline_pass.rebuild_bind_group(
                     &state.gpu.device,
                     &state.render_targets.scene_view,
+                    &state.render_targets.depth_view,
+                    &state.render_targets.normal_view,
+                );
+                state.post_process.rebuild_bind_group(
+                    &state.gpu.device,
+                    &state.render_targets.processed_view,
+                );
+                state.palette_pass.rebuild_bind_group(
+                    &state.gpu.device,
+                    &state.render_targets.scene_view
                 );
                 state.upscale_pass.rebuild_bind_group(
                     &state.gpu.device,
-                    &state.render_targets.processed_view,
+                    &state.render_targets.scene_view,
                 );
             }
             ref e @ WindowEvent::KeyboardInput { ref event, .. } => {

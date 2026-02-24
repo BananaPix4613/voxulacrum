@@ -79,6 +79,22 @@ impl Default for PostProcessUniforms {
     }
 }
 
+/// Outline pass uniforms (48 bytes, 16-byte aligned)
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct OutlineUniforms {
+    pub texel_size: [f32; 2],          //  8 bytes, offset  0
+    pub depth_threshold: f32,          //  4 bytes, offset  8
+    pub depth_strength: f32,           //  4 bytes, offset 12
+    pub normal_threshold: f32,         //  4 bytes, offset 16
+    pub normal_strength: f32,          //  4 bytes, offset 20
+    pub darken_strength: f32,          //  4 bytes, offset 24
+    pub brighten_strength: f32,        //  4 bytes, offset 28
+    pub enabled: u32,                  //  4 bytes, offset 32
+    pub _pad: [u32; 3],                // 12 bytes, offset 36
+}
+// Total: 48 bytes = 3 × 16
+
 pub fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("global_uniforms_bind_group_layout"),

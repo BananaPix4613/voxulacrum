@@ -49,7 +49,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 0.8);
+fn fs_main(in: VertexOutput) -> FragmentOutput {
+    var out: FragmentOutput;
+    out.color = vec4<f32>(in.color, 0.8);
+    out.normal = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    return out;
 }
