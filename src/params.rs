@@ -227,6 +227,7 @@ pub struct PaletteParams {
     pub selected_palette: String,
     pub l_levels: u32,
     pub ab_levels: u32,
+    pub l_gamma: f32,
 }
 
 impl Default for PaletteParams {
@@ -235,8 +236,9 @@ impl Default for PaletteParams {
             enabled: false,
             mode: 1,
             selected_palette: String::new(),
-            l_levels: 8,
-            ab_levels: 8,
+            l_levels: 64,
+            ab_levels: 64,
+            l_gamma: 0.5,
         }
     }
 }
@@ -314,7 +316,7 @@ pub struct RenderPipelineParams {
 impl Default for RenderPipelineParams {
     fn default() -> Self {
         Self {
-            world_pixel_density: 8.0,
+            world_pixel_density: 16.0,
             camera_snap_enabled: true,
             sky_color: [0.5, 0.65, 0.8],
         }

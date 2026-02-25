@@ -170,9 +170,9 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     var final_color = in.color * (diffuse * shadow * cloud_factor + ambient * ao_factor * AO_STRENGTH + ambient * (1.0 - AO_STRENGTH));
 
     // Directional AO
-    let view_alignment = dot(n, vec3<f32>(0.0, 1.0, 0.0));
-    let ortho_ao = mix(1.0 - globals.ortho_ao_strength, 1.0, view_alignment * 0.5 + 0.5);
-    final_color = final_color * ortho_ao;
+    // let view_alignment = dot(n, vec3<f32>(0.0, 1.0, 0.0));
+    // let ortho_ao = mix(1.0 - globals.ortho_ao_strength, 1.0, view_alignment * 0.5 + 0.5);
+    // final_color = final_color * ortho_ao;
 
     return FragmentOutput(vec4<f32>(final_color, 1.0), vec4<f32>(n, 1.0));
 }

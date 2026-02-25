@@ -6,7 +6,7 @@ struct PaletteUniforms {
     mode: u32,
     l_levels: u32,
     ab_levels: u32,
-    _pad1: u32,
+    l_gamma: f32,
     _pad2: u32,
     _pad3: u32,
 };
@@ -196,8 +196,13 @@ fn oklab_to_srgb(oklab: vec3<f32>) -> vec3<f32> {
 fn quantize_stepping(color: vec3<f32>, l_levels: f32, ab_levels: f32) -> vec3<f32> {
     let oklab = srgb_to_oklab(color);
 
-    // Quantize L in [0, 1]
-    let l_q = round(oklab.x * (l_levels - 1.0)) / (l_levels - 1.0);
+    // Quantize L with gamma warp to bias more steps toward dark values.
+    // pow(L, l_gamma) compresses the dark end, giving it more quantization steps.
+    // l_gamma = 1.0 is uniform (no warp); l_gamma = 0.5 doubles dark-range resolution.
+    let l_clamped  = clamp(oklab.x, 0.0, 1.0);
+    let l_warped   = pow(l_clamped, palette.l_gamma);
+    let l_q_warped = round(l_warped * (l_levels - 1.0)) / (l_levels - 1.0);
+    let l_q        = pow(l_q_warped, 1.0 / palette.l_gamma);
 
     // Convert a,b to polar (chroma, hue) to preserve hue identity
     let C = sqrt(oklab.y * oklab.y + oklab.z * oklab.z);

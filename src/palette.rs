@@ -139,6 +139,7 @@ pub fn palette_to_uniforms(palette: &Palette, params: &crate::params::PalettePar
     uniforms.mode = params.mode;
     uniforms.l_levels = params.l_levels;
     uniforms.ab_levels = params.ab_levels;
+    uniforms.l_gamma = params.l_gamma;
     uniforms
 }
 
@@ -148,5 +149,6 @@ pub fn stepping_uniforms(params: &crate::params::PaletteParams) -> PaletteUnifor
     uniforms.mode = params.mode;
     uniforms.l_levels = params.l_levels;
     uniforms.ab_levels = params.ab_levels;
+    uniforms.l_gamma = params.l_gamma;
     uniforms
 }

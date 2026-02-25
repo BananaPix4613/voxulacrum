@@ -306,6 +306,9 @@ fn compute_ao(snap: &ChunkSnapshot, position: [f32; 3], chunk_offset: [f32; 3]) 
                 if dx == 0 && dy == 0 && dz == 0 {
                     continue;
                 }
+                if dy < 0 {
+                    continue; // Skip terrain body below the surface — it never blocks sky light
+                }
                 let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
                 let weight = 1.0 / dist_sq;
                 total_weight += weight;
@@ -729,7 +732,8 @@ fn flatten_mesh(
         let raw_normal = normalize3(raw_cross);
         let snapped = snap_normal(raw_normal);
 
-        // Per-vertex AO
+        // Per-vertex AO — same world position always produces the same AO value,
+        // so deduplication in greedy_merge stays consistent.
         let ao0 = compute_ao(snap, v0.position, chunk_offset);
         let ao1 = compute_ao(snap, v1.position, chunk_offset);
         let ao2 = compute_ao(snap, v2.position, chunk_offset);
@@ -996,19 +1000,25 @@ fn ear_clip_triangulate(
         return vec![[boundary[0], boundary[1], boundary[2]]];
     }
     if n == 4 {
-        // Quad fast-path: split along the shorter diagonal
-        let p0 = vertices[boundary[0] as usize].position;
-        let p1 = vertices[boundary[1] as usize].position;
-        let p2 = vertices[boundary[2] as usize].position;
-        let p3 = vertices[boundary[3] as usize].position;
-        let diag02 = length_sq3(sub3(p2, p0));
-        let diag13 = length_sq3(sub3(p3, p1));
-        if diag02 <= diag13 {
+        // Quad fast-path: AO-optimal diagonal.
+        // Place the diagonal through the vertex pair with LARGER AO contrast —
+        // the off-diagonal pair (which produces the visible seam) will then have
+        // the SMALLER contrast, minimising the brightness difference between the
+        // two triangles.
+        //   diagonal 0-2: off-diagonal pair is (1,3), seam ∝ |ao1-ao3|
+        //   diagonal 1-3: off-diagonal pair is (0,2), seam ∝ |ao0-ao2|
+        let ao0 = vertices[boundary[0] as usize].ao;
+        let ao1 = vertices[boundary[1] as usize].ao;
+        let ao2 = vertices[boundary[2] as usize].ao;
+        let ao3 = vertices[boundary[3] as usize].ao;
+        if (ao0 - ao2).abs() >= (ao1 - ao3).abs() {
+            // diagonal 0-2 has larger contrast → use it; off-diagonal (1,3) is smaller
             return vec![
                 [boundary[0], boundary[1], boundary[2]],
                 [boundary[0], boundary[2], boundary[3]],
             ];
         } else {
+            // diagonal 1-3 has larger contrast → use it; off-diagonal (0,2) is smaller
             return vec![
                 [boundary[0], boundary[1], boundary[3]],
                 [boundary[1], boundary[2], boundary[3]],
@@ -1194,31 +1204,108 @@ fn greedy_merge(
             }
 
             // Extract boundary polygon
-            let merged = extract_boundary(component, flat_vertices, flat_indices, &edge_to_tris)
+            let boundary_opt = extract_boundary(component, flat_vertices, flat_indices, &edge_to_tris)
                 .and_then(|mut boundary| {
                     remove_collinear_vertices(&mut boundary, flat_vertices);
-                    if boundary.len() < 3 {
-                        return None;
-                    }
-                    let triangles = ear_clip_triangulate(&boundary, flat_vertices, normal);
-                    if triangles.is_empty() {
-                        return None;
-                    }
-                    Some(triangles)
+                    if boundary.len() < 3 { return None; }
+                    Some(boundary)
                 });
 
-            match merged {
-                Some(triangles) => {
-                    for tri in &triangles {
-                        for &vi in tri {
-                            let v = &flat_vertices[vi as usize];
-                            let pos_key = pack_position_key(v.position);
-                            let idx = vertex_map.entry(pos_key).or_insert_with(|| {
-                                let i = out_vertices.len() as u32;
-                                out_vertices.push(*v);
-                                i
-                            });
-                            out_indices.push(*idx);
+            match boundary_opt {
+                Some(boundary) => {
+                    let nb = boundary.len();
+
+                    // Compute centroid position and AO.
+                    let mut cx = 0.0f32; let mut cy = 0.0f32; let mut cz = 0.0f32;
+                    let mut ao_sum = 0.0f32;
+                    for &vi in &boundary {
+                        let v = &flat_vertices[vi as usize];
+                        cx += v.position[0]; cy += v.position[1]; cz += v.position[2];
+                        ao_sum += v.ao;
+                    }
+                    let inv = 1.0 / nb as f32;
+                    let centroid_pos = [cx * inv, cy * inv, cz * inv];
+                    let centroid_ao  = ao_sum * inv;
+
+                    // Check that the centroid lies inside the polygon (i.e., every fan
+                    // triangle has the same winding as the polygon's normal). Fails for
+                    // concave polygons where the centroid is outside.
+                    let fan_valid = (0..nb).all(|i| {
+                        let pi = flat_vertices[boundary[i] as usize].position;
+                        let ni = flat_vertices[boundary[(i + 1) % nb] as usize].position;
+                        let ea = [pi[0] - centroid_pos[0], pi[1] - centroid_pos[1], pi[2] - centroid_pos[2]];
+                        let eb = [ni[0] - centroid_pos[0], ni[1] - centroid_pos[1], ni[2] - centroid_pos[2]];
+                        let cross = [
+                            ea[1] * eb[2] - ea[2] * eb[1],
+                            ea[2] * eb[0] - ea[0] * eb[2],
+                            ea[0] * eb[1] - ea[1] * eb[0],
+                        ];
+                        cross[0] * normal[0] + cross[1] * normal[1] + cross[2] * normal[2] > 0.0
+                    });
+
+                    if fan_valid {
+                        // Fan-from-centroid: all fan triangles share the centroid vertex,
+                        // so adjacent triangles agree on every shared vertex's AO → no seam.
+                        // Boundary vertices keep their original per-vertex AO → gradients preserved.
+                        let first_v = &flat_vertices[boundary[0] as usize];
+                        let centroid_v = TerrainVertex {
+                            position: centroid_pos,
+                            ao: centroid_ao,
+                            ..*first_v  // normal, color, material_id, cell_flags from any boundary vert
+                        };
+                        let centroid_idx = out_vertices.len() as u32;
+                        out_vertices.push(centroid_v);
+
+                        for i in 0..nb {
+                            let vi0 = boundary[i] as usize;
+                            let vi1 = boundary[(i + 1) % nb] as usize;
+
+                            out_indices.push(centroid_idx);
+
+                            for vi in [vi0, vi1] {
+                                let v = &flat_vertices[vi];
+                                let pos_key = pack_position_key(v.position);
+                                let idx = *vertex_map.entry(pos_key).or_insert_with(|| {
+                                    let j = out_vertices.len() as u32;
+                                    out_vertices.push(*v);
+                                    j
+                                });
+                                out_indices.push(idx);
+                            }
+                        }
+                    } else {
+                        // Concave polygon: fall back to ear-clipping (original behaviour).
+                        let triangles = ear_clip_triangulate(&boundary, flat_vertices, normal);
+                        let tris_to_emit: &[_] = &triangles;
+                        if tris_to_emit.is_empty() {
+                            // ear-clip also failed — emit original triangles
+                            for &tri_idx in component {
+                                let base = tri_idx * 3;
+                                for offset in 0..3 {
+                                    let vi = flat_indices[base + offset] as usize;
+                                    let v = &flat_vertices[vi];
+                                    let pos_key = pack_position_key(v.position);
+                                    let idx = *vertex_map.entry(pos_key).or_insert_with(|| {
+                                        let i = out_vertices.len() as u32;
+                                        out_vertices.push(*v);
+                                        i
+                                    });
+                                    out_indices.push(idx);
+                                }
+                            }
+                        } else {
+                            for tri in tris_to_emit {
+                                for &vi in tri {
+                                    let v = &flat_vertices[vi as usize];
+                                    let pos_key = pack_position_key(v.position);
+                                    let idx = *vertex_map.entry(pos_key).or_insert_with(|| {
+                                        let i = out_vertices.len() as u32;
+                                        out_vertices.push(*v);
+                                        i
+                                    });
+                                    out_indices.push(idx);
+                                }
+                            }
                         }
                     }
                 }
@@ -1230,12 +1317,12 @@ fn greedy_merge(
                             let vi = flat_indices[base + offset] as usize;
                             let v = &flat_vertices[vi];
                             let pos_key = pack_position_key(v.position);
-                            let idx = vertex_map.entry(pos_key).or_insert_with(|| {
+                            let idx = *vertex_map.entry(pos_key).or_insert_with(|| {
                                 let i = out_vertices.len() as u32;
                                 out_vertices.push(*v);
                                 i
                             });
-                            out_indices.push(*idx);
+                            out_indices.push(idx);
                         }
                     }
                 }

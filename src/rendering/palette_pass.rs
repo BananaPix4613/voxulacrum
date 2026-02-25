@@ -12,7 +12,8 @@ pub struct PaletteUniforms {
     pub mode: u32,
     pub l_levels: u32,
     pub ab_levels: u32,
-    pub _padding: [u32; 3],
+    pub l_gamma: f32,
+    pub _padding: [u32; 2],
 }
 
 impl Default for PaletteUniforms {
@@ -25,7 +26,8 @@ impl Default for PaletteUniforms {
             mode: 0,
             l_levels: 8,
             ab_levels: 8,
-            _padding: [0; 3],
+            l_gamma: 1.0,
+            _padding: [0; 2],
         }
     }
 }

@@ -359,6 +359,11 @@ fn draw_palette(
             });
             p.l_levels = l as u32;
             p.ab_levels = ab as u32;
+            ui.horizontal(|ui| {
+                dot_green(ui);
+                ui.label("L gamma:");
+                ui.add(egui::Slider::new(&mut p.l_gamma, 0.1..=1.0));
+            });
         }
     });
 }
