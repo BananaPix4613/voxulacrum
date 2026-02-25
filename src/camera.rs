@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec3, Vec2, Vec4Swizzles};
+use glam::{Mat4, Vec3};
 use winit::event::{ElementState, MouseScrollDelta};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -6,10 +6,15 @@ use crate::params::CameraParams;
 
 pub struct IsometricCamera {
     pub target: Vec3,
+    /// Smoothed render position — exponentially follows `target`.
+    /// All rendering (view matrix, snap) uses this, keeping the
+    /// sub-pixel offset continuous and eliminating pixel jitter.
+    pub smooth_target: Vec3,
     pub zoom: f32,
     pub rotation: f32,
     pub aspect: f32,
     pan_speed: f32,
+    smooth_speed: f32,
     forward_pressed: bool,
     backward_pressed: bool,
     left_pressed: bool,
@@ -29,12 +34,15 @@ pub struct SnappedCamera {
 
 impl IsometricCamera {
     pub fn new(params: &CameraParams) -> Self {
+        let initial = Vec3::new(64.0, 32.0, 64.0);
         Self {
-            target: Vec3::new(64.0, 32.0, 64.0),
+            target: initial,
+            smooth_target: initial,
             zoom: params.initial_zoom,
             rotation: std::f32::consts::FRAC_PI_4,
             aspect: 1.0,
             pan_speed: params.pan_speed,
+            smooth_speed: params.smooth_speed,
             forward_pressed: false,
             backward_pressed: false,
             left_pressed: false,
@@ -45,17 +53,22 @@ impl IsometricCamera {
     /// Sync mutable fields with current params each frame.
     pub fn apply_params(&mut self, params: &CameraParams) {
         self.pan_speed = params.pan_speed;
+        self.smooth_speed = params.smooth_speed;
     }
 
-    pub fn view_matrix(&self) -> Mat4 {
+    fn view_matrix_for(&self, target: Vec3) -> Mat4 {
         let pitch = (1.0_f32 / 2.0_f32.sqrt()).atan();
         let direction = Vec3::new(
             self.rotation.cos() * pitch.cos(),
             pitch.sin(),
             self.rotation.sin() * pitch.cos(),
         );
-        let eye = self.target + direction * 150.0;
-        Mat4::look_at_rh(eye, self.target, Vec3::Y)
+        let eye = target + direction * 150.0;
+        Mat4::look_at_rh(eye, target, Vec3::Y)
+    }
+
+    pub fn view_matrix(&self) -> Mat4 {
+        self.view_matrix_for(self.smooth_target)
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
@@ -104,6 +117,11 @@ impl IsometricCamera {
         }
 
         self.target += move_dir * self.pan_speed * dt;
+
+        // Exponentially smooth the render position toward the logical target.
+        // alpha approaches 1 as dt grows, clamped so it never overshoots.
+        let alpha = (self.smooth_speed * dt).exp().recip().mul_add(-1.0, 1.0).clamp(0.0, 1.0);
+        self.smooth_target = self.smooth_target.lerp(self.target, alpha);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -114,55 +132,69 @@ impl IsometricCamera {
 
     /// Compute a texel-snapped view-projection matrix.
     ///
-    /// The idea: project the camera target into clip space, round to the
-    /// nearest texel of the low-res render target, then nudge the projection
-    /// matrix by the rounding error.  This guarantees that world-space voxel
-    /// edges land on the same texel boundaries every frame, eliminating the
-    /// "pixel swimming" artifact at low resolution.
+    /// Projects a fixed world reference point (the origin) into texel space,
+    /// computes the fractional offset from the nearest texel center, and nudges
+    /// the projection matrix to cancel that fraction.  This locks the world-space
+    /// grid to the texel grid so voxel edges land on stable texel boundaries
+    /// every frame, eliminating "pixel swimming" at low resolution.
     ///
-    /// `pixel_scale` is needed to convert the snap error back into
-    /// native-resolution pixels for the upscale sub-pixel correction.
+    /// The previous approach projected the camera *target* through its own VP,
+    /// which always lands at clip-space (0,0) in an orthographic projection —
+    /// making the snap a no-op.  Using a fixed reference point that actually
+    /// moves in clip space as the camera pans is what makes this work.
     pub fn snap_camera(
         &self,
         render_width: u32,
         render_height: u32,
         pixel_scale: f32,
     ) -> SnappedCamera {
-        let view = self.view_matrix();
-        let proj = self.projection_matrix();
+        let content_w = render_width as f32;
+        let content_h = render_height as f32;
+        let tex_w = content_w + 2.0;  // 1-texel border each side
+        let tex_h = content_h + 2.0;
+
+        // Expand the orthographic projection to fill the border area.
+        let mut proj = self.projection_matrix();
+        proj.x_axis.x *= content_w / tex_w;
+        proj.y_axis.y *= content_h / tex_h;
+
+        let view = self.view_matrix(); // centered on smooth_target
         let vp = proj * view;
-        
-        // Project camera target into NDC (clip space, [-1, 1]).
-        let target_clip = vp.project_point3(self.target);
-        
-        // Convert NDC to texel coordinates in the low-res target.
-        let half_w = render_width as f32 * 0.5;
-        let half_h = render_height as f32 * 0.5;
-        let pixel_x = target_clip.x * half_w;
-        let pixel_y = target_clip.y * half_h;
-        
-        // Snap to nearest texel center.
-        let snapped_x = pixel_x.round();
-        let snapped_y = pixel_y.round();
-        
-        // Error in NDC units.
-        let error_x = (pixel_x - snapped_x) / half_w;
-        let error_y = (pixel_y - snapped_y) / half_h;
-        
-        // Nudge the projection so the target lands on the snapped texel.
+
+        // Project the world origin into texel space.
+        // NDC [-1,+1] spans tex_w texels with the expanded projection.
+        let origin_clip = vp.project_point3(Vec3::ZERO);
+        let tex_half_w = tex_w * 0.5;
+        let tex_half_h = tex_h * 0.5;
+        let texel_x = origin_clip.x * tex_half_w;
+        let texel_y = origin_clip.y * tex_half_h;
+
+        // Fractional offset from the nearest texel center.
+        let frac_x = texel_x - texel_x.round();
+        let frac_y = texel_y - texel_y.round();
+
+        // Nudge the projection to cancel the fractional offset.
+        // This shifts clip space so the origin (and every integer world
+        // coordinate) lands exactly on a texel center.
         let mut snapped_proj = proj;
-        // Column-major: w_axis is column 3 (the translation column).
-        snapped_proj.w_axis.x -= error_x;
-        snapped_proj.w_axis.y -= error_y;
-        
+        snapped_proj.w_axis.x -= frac_x / tex_half_w;
+        snapped_proj.w_axis.y -= frac_y / tex_half_h;
+
         let snapped_vp = snapped_proj * view;
-        
-        // Sub-pixel offset for the upscale blit, in native-resolution pixels.
+
+        // Sub-pixel offset in native window pixels, expressed in the upscale
+        // shader's UV coordinate system (X = right, Y = down).
+        //
+        // The snap operates in clip/NDC space (X = right, Y = UP), but the
+        // shader compensates in UV space (X = right, Y = DOWN).  Y is flipped
+        // between the two, so frac_y's sign naturally inverts when the shader
+        // adds the offset.  X shares orientation, so we negate frac_x here to
+        // make `texel_coord + texel_shift` correct on both axes.
         let subpixel_offset = [
-            (pixel_x - snapped_x) * pixel_scale,
-            (pixel_y - snapped_y) * pixel_scale,
+            -frac_x * pixel_scale,
+            frac_y * pixel_scale,
         ];
-        
+
         SnappedCamera {
             view_proj: snapped_vp.to_cols_array_2d(),
             subpixel_offset,

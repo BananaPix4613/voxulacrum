@@ -28,7 +28,10 @@ pub struct UiState {
     pub meshing_stats: MeshingStats,
     pub clear_cache_requested: bool,
     pub regenerate_requested: bool,
+    pub remesh_requested: bool,
+    pub mesh_params_pending: bool,
     pub regenerating: bool,
+    pub remeshing: bool,
     pub regen_progress: (u32, u32),
     pub palette_list: Vec<String>,
     pub palette_load_requested: bool,
@@ -58,7 +61,10 @@ impl UiState {
             meshing_stats: MeshingStats::default(),
             clear_cache_requested: false,
             regenerate_requested: false,
+            remesh_requested: false,
+            mesh_params_pending: false,
             regenerating: false,
+            remeshing: false,
             regen_progress: (0, 0),
             palette_list: crate::palette::list_palettes(&std::path::PathBuf::from("palettes")),
             palette_load_requested: false,
@@ -114,7 +120,7 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_lighting(ui, &mut state.params.lighting, &mut state.selected_keyframe);
                 ui.separator();
-                draw_materials(ui, &mut state.params.materials, &mut state.selected_material);
+                draw_materials(ui, &mut state.params.materials, &mut state.selected_material, state.remeshing, state.mesh_params_pending);
                 ui.separator();
                 draw_wind(ui, &mut state.params.wind);
                 ui.separator();
@@ -133,9 +139,9 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_water(ui, &mut state.params.water);
                 ui.separator();
-                draw_vegetation(ui, &mut state.params.vegetation);
+                draw_vegetation(ui, &mut state.params.vegetation, state.mesh_params_pending);
                 ui.separator();
-                draw_meshing_params(ui, &mut state.params.meshing);
+                draw_meshing_params(ui, &mut state.params.meshing, state.remeshing, state.mesh_params_pending);
                 ui.separator();
                 draw_terrain_gen(
                     ui,
@@ -149,7 +155,14 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_shader_log(ui, &mut state.shader_log);
                 ui.separator();
-                draw_meshing_section(ui, &state.meshing_stats, &mut state.clear_cache_requested);
+                draw_meshing_section(
+                    ui,
+                    &state.meshing_stats,
+                    &mut state.clear_cache_requested,
+                    &mut state.remesh_requested,
+                    state.mesh_params_pending,
+                    state.remeshing,
+                );
                 ui.separator();
                 draw_performance(ui, state);
                 ui.separator();
@@ -207,7 +220,7 @@ fn draw_lighting(ui: &mut egui::Ui, p: &mut LightingParams, selected: &mut usize
     });
 }
 
-fn draw_materials(ui: &mut egui::Ui, p: &mut MaterialParams, selected: &mut usize) {
+fn draw_materials(ui: &mut egui::Ui, p: &mut MaterialParams, selected: &mut usize, remeshing: bool, mesh_params_pending: bool) {
     ui.collapsing("Materials", |ui| {
         let names: Vec<String> = p.entries.iter().map(|e| e.name.clone()).collect();
 
@@ -220,11 +233,17 @@ fn draw_materials(ui: &mut egui::Ui, p: &mut MaterialParams, selected: &mut usiz
             });
 
         if let Some(mat) = p.entries.get_mut(*selected) {
-            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Color:"); ui.color_edit_button_rgb(&mut mat.color); });
-            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Sharpness:"); ui.add(egui::Slider::new(&mut mat.sharpness, 0.0..=1.0)); });
-            ui.horizontal(|ui| { dot_green(ui); ui.label("Hardness:"); ui.add(egui::Slider::new(&mut mat.hardness, 0.0..=1.0)); });
+            ui.add_enabled_ui(!remeshing, |ui| {
+                ui.horizontal(|ui| { dot_yellow(ui); ui.label("Color:"); ui.color_edit_button_rgb(&mut mat.color); });
+                ui.horizontal(|ui| { dot_yellow(ui); ui.label("Sharpness:"); ui.add(egui::Slider::new(&mut mat.sharpness, 0.0..=1.0)); });
+            });
+            // Green-dot params stay always-enabled
+            ui.horizontal(|ui| { dot_green(ui); ui.label("Hardness:"); 0.0..=1.0 });
             ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut mat.permeable, "Permeable"); });
             ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut mat.supports_flora, "Supports flora"); });
+        }
+        if mesh_params_pending {
+            ui.colored_label(egui::Color32::from_rgb(220, 200, 60), "Remesh required.");
         }
     });
 }
@@ -395,6 +414,7 @@ fn draw_camera(ui: &mut egui::Ui, p: &mut CameraParams) {
         ui.horizontal(|ui| { dot_green(ui); ui.label("Scroll speed:"); ui.add(egui::Slider::new(&mut p.scroll_speed, 0.5..=10.0)); });
         ui.horizontal(|ui| { dot_green(ui); ui.label("Zoom min:"); ui.add(egui::DragValue::new(&mut p.zoom_min).speed(0.5).range(1.0..=p.zoom_max)); });
         ui.horizontal(|ui| { dot_green(ui); ui.label("Zoom max:"); ui.add(egui::DragValue::new(&mut p.zoom_max).speed(0.5).range(p.zoom_min..=200.0)); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Smooth speed:"); ui.add(egui::Slider::new(&mut p.smooth_speed, 1.0..=120.0).suffix(" /s")); });
     });
 }
 
@@ -404,23 +424,38 @@ fn draw_water(ui: &mut egui::Ui, p: &mut WaterVisualParams) {
     });
 }
 
-fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams) {
+fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams, mesh_params_pending: bool) {
     ui.collapsing("Vegetation", |ui| {
         ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blade half-width:"); ui.add(egui::Slider::new(&mut p.blade_half_width, 0.01..=0.3)); });
         ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blade height:"); ui.add(egui::Slider::new(&mut p.blade_height, 0.1..=2.0)); });
         ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blades/voxel:"); ui.add(egui::DragValue::new(&mut p.blades_per_voxel).range(1..=10)); });
+        if mesh_params_pending {
+            ui.colored_label(egui::Color32::from_rgb(220, 200, 60), "Remesh required.");
+        }
     });
 }
 
-fn draw_meshing_params(ui: &mut egui::Ui, p: &mut MeshingParams) {
+fn draw_meshing_params(ui: &mut egui::Ui, p: &mut MeshingParams, remeshing: bool, mesh_params_pending: bool) {
     ui.collapsing("Meshing", |ui| {
-        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Greedy merge:"); ui.add(egui::Checkbox::without_text(&mut p.greedy_merge_enabled)); });
-        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat error threshold:"); ui.add(egui::Slider::new(&mut p.flat_threshold_error, 0.001..=0.1)); });
-        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat normal threshold:"); ui.add(egui::Slider::new(&mut p.flat_normal_threshold, 0.8..=1.0)); });
+        ui.add_enabled_ui(!remeshing, |ui| {
+            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Greedy merge:"); ui.add(egui::Checkbox::without_text(&mut p.greedy_merge_enabled)); });
+            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat error threshold:"); ui.add(egui::Slider::new(&mut p.flat_threshold_error, 0.001..=0.1)); });
+            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat normal threshold:"); ui.add(egui::Slider::new(&mut p.flat_normal_threshold, 0.8..=1.0)); });
+        });
+        if mesh_params_pending {
+            ui.colored_label(egui::Color32::from_rgb(220, 200, 60), "Remesh required.");
+        }
+        if remeshing {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 200, 60),
+                "Remeshing in progress...",
+            );
+        }
         ui.separator();
-        ui.horizontal(|ui| { dot_green(ui); ui.label("Edge strength:"); ui.add(egui::Slider::new(&mut p.edge_strength, 0.0..=0.5)); });
-        ui.horizontal(|ui| { dot_green(ui); ui.label("Ortho AO:"); ui.add(egui::Checkbox::without_text(&mut p.ortho_ao_enabled)); });
-        ui.horizontal(|ui| { dot_green(ui); ui.label("Ortho AO strength:"); ui.add(egui::Slider::new(&mut p.ortho_ao_strength, 0.0..=0.7)); });
+        // Green-dot params stay always-enabled
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Edge strength:"); 0.0..=0.5 });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Ortho AO:"); });
+        ui.horizontal(|ui| { dot_green(ui); ui.label("Ortho AO strength:"); 0.0..=0.7 });
     });
 }
 
@@ -556,7 +591,14 @@ fn draw_shader_log(ui: &mut egui::Ui, log: &mut Vec<ShaderLogEntry>) {
     });
 }
 
-fn draw_meshing_section(ui: &mut egui::Ui, stats: &MeshingStats, clear_cache: &mut bool) {
+fn draw_meshing_section(
+    ui: &mut egui::Ui,
+    stats: &MeshingStats,
+    clear_cache: &mut bool,
+    remesh_requested: &mut bool,
+    mesh_params_pending: bool,
+    remeshing: bool,
+) {
     ui.collapsing("Meshing Pipeline", |ui| {
         ui.label(format!("Workers: {}", stats.worker_count));
         if stats.pending_submissions > 0 {
@@ -577,6 +619,20 @@ fn draw_meshing_section(ui: &mut egui::Ui, stats: &MeshingStats, clear_cache: &m
                 format!("Meshing... ({} active)", active),
             );
         }
+
+        // Remesh controls
+        ui.separator();
+        if mesh_params_pending {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 200, 60),
+                "Mesh parameters changed — remesh required.",
+            );
+        }
+        ui.add_enabled_ui(!remeshing, |ui| {
+            if ui.button("Remesh").clicked() {
+                *remesh_requested = true;
+            }
+        });
 
         // Cache stats
         ui.separator();
@@ -652,18 +708,20 @@ fn draw_preset_controls(ui: &mut egui::Ui, state: &mut UiState) {
                     });
             });
 
-            if ui.button("Load Selected").clicked() {
-                if let Some(name) = state.preset_list.get(state.selected_preset) {
-                    let path = state.presets_dir.join(format!("{}.json", name));
-                    match EngineParams::load(&path) {
-                        Ok(loaded) => {
-                            state.params = loaded;
-                            log::info!("Loaded preset: {}", name);
+            ui.add_enabled_ui(!state.remeshing, |ui| {
+                if ui.button("Load Selected").clicked() {
+                    if let Some(name) = state.preset_list.get(state.selected_preset) {
+                        let path = state.presets_dir.join(format!("{}.json", name));
+                        match EngineParams::load(&path) {
+                            Ok(loaded) => {
+                                state.params = loaded;
+                                log::info!("Loaded preset: {}", name);
+                            }
+                            Err(e) => log::error!("Failed to load preset {}: {}", name, e),
                         }
-                        Err(e) => log::error!("Failed to load preset {}: {}", name, e),
                     }
                 }
-            }
+            });
         }
 
         ui.add_space(4.0);

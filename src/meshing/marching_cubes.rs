@@ -11,7 +11,7 @@
 //! - Flat faces at controlled angles for clean cel-shaded light bands
 //! - No QEF, no SVD, no numerical instability
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::{ChunkMesh, ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
@@ -108,7 +108,7 @@ struct PositionEdge {
 }
 
 /// Key for grouping coplanar, same-material faces.
-#[derive(Hash, Eq, PartialEq, Clone)]
+#[derive(Hash, Eq, PartialEq, Ord, PartialOrd, Clone)]
 struct PlaneGroupKey {
     normal_index: u8,
     material_id: u32,
@@ -307,7 +307,7 @@ fn compute_ao(snap: &ChunkSnapshot, position: [f32; 3], chunk_offset: [f32; 3]) 
                     continue;
                 }
                 if dy < 0 {
-                    continue; // Skip terrain body below the surface — it never blocks sky light
+                    continue; // Skip terrain body below the surface — it never blocks skylight
                 }
                 let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
                 let weight = 1.0 / dist_sq;
@@ -363,7 +363,7 @@ fn make_edge(key_a: u64, key_b: u64) -> PositionEdge {
 }
 
 /// Find which ALLOWED_NORMALS index a snapped normal corresponds to.
-/// Returns 0 as fallback (should not happen with properly snapped normals.
+/// Returns 0 as fallback (should not happen with properly snapped normals).
 fn find_normal_index(normal: [f32; 3]) -> u8 {
     let mut best = 0u8;
     let mut best_dot = dot3(normal, ALLOWED_NORMALS[0]);
@@ -868,7 +868,7 @@ fn extract_boundary(
     // Collect boundary directed half-edges: from_pos_key -> (to_pos_key, from_vertex_index).
     // A half-edge a->b is boundary if the canonical edge {a,b} has exactly 1 triangle
     // in this component.
-    let mut half_edges: HashMap<u64, (u64, u32)> = HashMap::new();
+    let mut half_edges: BTreeMap<u64, (u64, u32)> = BTreeMap::new();
 
     for &tri_idx in component {
         let base = tri_idx * 3;
@@ -1003,7 +1003,7 @@ fn ear_clip_triangulate(
         // Quad fast-path: AO-optimal diagonal.
         // Place the diagonal through the vertex pair with LARGER AO contrast —
         // the off-diagonal pair (which produces the visible seam) will then have
-        // the SMALLER contrast, minimising the brightness difference between the
+        // the SMALLER contrast, minimizing the brightness difference between the
         // two triangles.
         //   diagonal 0-2: off-diagonal pair is (1,3), seam ∝ |ao1-ao3|
         //   diagonal 1-3: off-diagonal pair is (0,2), seam ∝ |ao0-ao2|
@@ -1127,7 +1127,7 @@ fn greedy_merge(
     }
 
     // Stage 1: Group triangles by coplanar plane + material
-    let mut plane_groups: HashMap<PlaneGroupKey, Vec<usize>> = HashMap::new();
+    let mut plane_groups: BTreeMap<PlaneGroupKey, Vec<usize>> = BTreeMap::new();
 
     for tri_idx in 0..tri_count {
         let vi0 = flat_indices[tri_idx * 3] as usize;

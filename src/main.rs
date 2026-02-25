@@ -534,6 +534,7 @@ impl AppState {
 
         // Update meshing stats for UI
         self.ui_state.meshing_stats = self.meshing_pipeline.stats.clone();
+        self.ui_state.remeshing = !self.meshing_pipeline.is_idle();
 
         // Handle cache clear request from UI
         if self.ui_state.clear_cache_requested {
@@ -593,10 +594,18 @@ impl AppState {
         self.wind.update(dt, &self.ui_state.params.wind);
         self.cloud_shadow.update(dt, &self.wind.wind_vector, self.elapsed, &self.ui_state.params.cloud);
 
-        // Detect material parameter changes and trigger remeshing
+        // Detect material parameter changes — flag as pending but do NOT auto-remesh
         let change_kind = self.ui_state.change_detector.detect(&self.ui_state.params);
         if change_kind == params::ParamChangeKind::MeshInvalidating {
-            log::info!("Material params changed, triggering remesh");
+            self.ui_state.mesh_params_pending = true;
+        }
+        self.ui_state.change_detector.snapshot(&self.ui_state.params);
+
+        // Handle explicit "Remesh" button press
+        if self.ui_state.remesh_requested {
+            self.ui_state.remesh_requested = false;
+            self.ui_state.mesh_params_pending = false;
+            log::info!("Remesh requested by user");
             self.meshing_pipeline.update_material_config(&self.ui_state.params.materials, &self.ui_state.params.meshing);
             self.meshing_pipeline.reset_for_new_world();
             for chunk in &mut self.world.chunks {
@@ -604,7 +613,6 @@ impl AppState {
             }
             self.meshing_pipeline.submit_all_dirty(&self.world);
         }
-        self.ui_state.change_detector.snapshot(&self.ui_state.params);
 
         // Update frustum for culling (frozen when freeze_culling is enabled)
         if !self.ui_state.params.debug.freeze_culling {
@@ -683,8 +691,8 @@ impl AppState {
         let op = &self.ui_state.params.outline;
         self.outline_pass.update_uniforms(&self.gpu.queue, OutlineUniforms {
             texel_size: [
-                1.0 / self.render_targets.render_width as f32,
-                1.0 / self.render_targets.render_height as f32,
+                1.0 / self.render_targets.tex_width as f32,
+                1.0 / self.render_targets.tex_height as f32,
             ],
             depth_threshold: op.depth_threshold,
             depth_strength: op.depth_strength,
@@ -721,7 +729,10 @@ impl AppState {
                 self.gpu.surface_config.width as f32,
                 self.gpu.surface_config.height as f32,
             ],
-            _pad: [0.0; 2],
+            tex_resolution: [
+                self.render_targets.tex_width as f32,
+                self.render_targets.tex_height as f32,
+            ],
         };
         self.upscale_pass.update_uniforms(&self.gpu.queue, upscale_uniforms);
 
@@ -1097,9 +1108,18 @@ fn compute_render_dimensions(
     // Each voxel covers (wh / 2*zoom) screen pixels.
     // We want that to equal target_voxel_pixels, so:
     //   pixel_scale = (wh / (2*zoom)) / target_voxel_pixels
-    let pixel_scale = (wh / (2.0 * zoom) / target_voxel_pixels).max(1.0);
-    let render_w = (ww / pixel_scale).max(1.0) as u32;
-    let render_h = (wh / pixel_scale).max(1.0) as u32;
+    //
+    // Round to the nearest integer so every render texel maps to exactly N
+    // window pixels. A noninteger scale causes some texels to cover 1 pixel
+    // and others 2 (or N and N+1 at higher scales), and the assignment shifts
+    // as the sub-pixel offset changes during camera movement — producing the
+    // "2 2 1 2 → 1 2 2 2" pattern-change artifact.  Integer pixel_scale
+    // guarantees a uniform upscale grid that is invariant to the sub-pixel
+    // offset, so patterns never change between frames.
+    let ideal = (wh / (2.0 * zoom) / target_voxel_pixels).max(1.0);
+    let pixel_scale = ideal.round().max(1.0);
+    let render_w = ((ww / pixel_scale).floor() as u32).max(1);
+    let render_h = ((wh / pixel_scale).floor() as u32).max(1);
     (render_w, render_h, pixel_scale)
 }
 

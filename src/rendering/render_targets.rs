@@ -26,7 +26,9 @@ pub struct RenderTargets {
     pub normal_view: wgpu::TextureView,
     pub render_width: u32,
     pub render_height: u32,
-    pub effective_pixel_scale: f32
+    pub tex_width: u32,
+    pub tex_height: u32,
+    pub effective_pixel_scale: f32,
 }
 
 impl RenderTargets {
@@ -40,17 +42,20 @@ impl RenderTargets {
         let render_width = render_width.max(1);
         let render_height = render_height.max(1);
 
-        let scene = Self::create_color_texture(device, render_width, render_height, surface_format, "lowres_scene");
+        let tex_width = render_width + 2;
+        let tex_height = render_height + 2;
+
+        let scene = Self::create_color_texture(device, tex_width, tex_height, surface_format, "lowres_scene");
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let processed = Self::create_color_texture(device, render_width, render_height, surface_format, "lowres_processed");
+        let processed = Self::create_color_texture(device, tex_width, tex_height, surface_format, "lowres_processed");
         let processed_view = processed.create_view(&wgpu::TextureViewDescriptor::default());
 
         let depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lowres_depth"),
             size: wgpu::Extent3d {
-                width: render_width,
-                height: render_height,
+                width: tex_width,
+                height: tex_height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -63,7 +68,7 @@ impl RenderTargets {
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let normal = Self::create_color_texture(device, render_width, render_height, NORMAL_FORMAT, "lowres_normal");
+        let normal = Self::create_color_texture(device, tex_width, tex_height, NORMAL_FORMAT, "lowres_normal");
         let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
 
         Self {
@@ -71,7 +76,9 @@ impl RenderTargets {
             processed, processed_view,
             depth, depth_view,
             normal, normal_view,
-            render_width, render_height, effective_pixel_scale,
+            render_width, render_height,
+            tex_width, tex_height,
+            effective_pixel_scale,
         }
     }
 

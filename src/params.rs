@@ -233,8 +233,8 @@ pub struct PaletteParams {
 impl Default for PaletteParams {
     fn default() -> Self {
         Self {
-            enabled: false,
-            mode: 1,
+            enabled: true,
+            mode: 2,
             selected_palette: String::new(),
             l_levels: 64,
             ab_levels: 64,
@@ -351,12 +351,16 @@ impl Default for TimeControlParams {
 // ============================================================================
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct CameraParams {
     pub zoom_min: f32,
     pub zoom_max: f32,
     pub scroll_speed: f32,
     pub pan_speed: f32,
     pub initial_zoom: f32,
+    /// Exponential smoothing speed (s⁻¹) applied to the render target.
+    /// Higher = snappier but more jitter; lower = smoother but more lag.
+    pub smooth_speed: f32,
 }
 
 impl Default for CameraParams {
@@ -367,6 +371,7 @@ impl Default for CameraParams {
             scroll_speed: 2.0,
             pan_speed: 12.0,
             initial_zoom: 40.0,
+            smooth_speed: 20.0,
         }
     }
 }

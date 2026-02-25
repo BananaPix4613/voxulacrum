@@ -127,9 +127,9 @@ impl MaterialConfig {
 // ============================================================================
 
 pub struct MeshingPipeline {
-    p1_request_tx: Sender<Phase1Request>,
+    p1_request_tx: mpsc::SyncSender<Phase1Request>,
     p1_result_rx: Receiver<Phase1Result>,
-    p2_request_tx: Sender<Phase2Request>,
+    p2_request_tx: mpsc::SyncSender<Phase2Request>,
     p2_result_rx: Receiver<Phase2Result>,
     _workers: Vec<JoinHandle<()>>,
 
@@ -171,9 +171,9 @@ impl MeshingPipeline {
             stats: cache_stats.clone(),
         });
 
-        let (p1_tx, p1_rx) = mpsc::channel::<Phase1Request>();
+        let (p1_tx, p1_rx) = mpsc::sync_channel::<Phase1Request>(256);
         let (p1_result_tx, p1_result_rx) = mpsc::channel::<Phase1Result>();
-        let (p2_tx, p2_rx) = mpsc::channel::<Phase2Request>();
+        let (p2_tx, p2_rx) = mpsc::sync_channel::<Phase2Request>(256);
         let (p2_result_tx, p2_result_rx) = mpsc::channel::<Phase2Result>();
 
         let p1_rx = Arc::new(Mutex::new(p1_rx));
@@ -266,11 +266,21 @@ impl MeshingPipeline {
             let neighbors = world.build_neighbors(cx, cy, cz);
             let snapshot = ChunkSnapshot::extract(chunk, &neighbors);
 
-            self.chunk_states[i] = ChunkMeshState::Phase1InProgress;
-            let _ = self.p1_request_tx.send(Phase1Request {
+            match self.p1_request_tx.try_send(Phase1Request {
                 chunk_index: i,
                 snapshot,
-            });
+            }) {
+                Ok(()) => {
+                    self.chunk_states[i] = ChunkMeshState::Phase1InProgress;
+                }
+                Err(mpsc::TrySendError::Full(_)) => {
+                    // Channel full - re-queue for next frame
+                    self.pending_submissions.push(i);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    log::error!("Phase 1 request channel disconnected");
+                }
+            }
         }
     }
 
@@ -434,15 +444,25 @@ impl MeshingPipeline {
             }
         }
 
-        self.chunk_states[chunk_index] = ChunkMeshState::Phase2InProgress;
-
-        let _ = self.p2_request_tx.send(Phase2Request {
+        match self.p2_request_tx.try_send(Phase2Request {
             chunk_index,
             cell_data,
             snapshot,
             neighbor_boundaries: nb,
             cache_key,
-        });
+        }) {
+            Ok(()) => {
+                self.chunk_states[chunk_index] = ChunkMeshState::Phase2InProgress;
+            }
+            Err(mpsc::TrySendError::Full(req)) => {
+                // Re-insert for retry next frame
+                self.pending_phase1.insert(chunk_index, (req.cell_data, req.snapshot, req.cache_key));
+                // State stays Phase1Complete
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                log::error!("Phase 2 request channel disconnected");
+            }
+        }
     }
 
     pub fn is_idle(&self) -> bool {

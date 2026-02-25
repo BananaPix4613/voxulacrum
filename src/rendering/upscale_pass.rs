@@ -6,7 +6,7 @@ pub struct UpscaleUniforms {
     pub subpixel_offset: [f32; 2],
     pub render_resolution: [f32; 2],
     pub window_resolution: [f32; 2],
-    pub _pad: [f32; 2],
+    pub tex_resolution: [f32; 2],
 }
 
 pub struct UpscalePass {
@@ -62,9 +62,9 @@ impl UpscalePass {
             });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("upscale_point_sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            label: Some("upscale_bilinear_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::FilterMode::Nearest,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
