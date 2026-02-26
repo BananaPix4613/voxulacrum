@@ -11,3 +11,4 @@ pub mod water_pass;
 pub mod post_process;
 pub mod palette_pass;
 pub mod outline_pass;
+pub mod cap_pass;

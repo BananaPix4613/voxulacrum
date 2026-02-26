@@ -195,7 +195,12 @@ pub fn create_shadow_pipeline(
             buffers: &[TerrainVertex::layout()],
             compilation_options: Default::default(),
         },
-        fragment: None,
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,

@@ -18,10 +18,14 @@ pub struct GlobalUniforms {
     pub cloud_coverage: f32,               //  4 bytes, offset 200
     pub edge_strength: f32,                //  4 bytes, offset 204
     pub ortho_ao_strength: f32,            //  4 bytes, offset 208
-    pub _pad3: f32,                        //  4 bytes, offset 212
-    pub _pad4: [f32; 2],                   //  8 bytes, offset 216
+    pub clip_enabled: u32,                 //  4 bytes, offset 212
+    pub _pad_a: [f32; 2],                  //  8 bytes, offset 216 (aligns clip_min to 224)
+    pub clip_min: [f32; 3],                // 12 bytes, offset 224
+    pub _pad3: f32,                        //  4 bytes, offset 236
+    pub clip_max: [f32; 3],                // 12 bytes, offset 240
+    pub _pad4: f32,                        //  4 bytes, offset 252
 }
-// Total: 224 bytes (14 * 16), satisfies WGSL struct alignment
+// Total: 256 bytes (16 * 16). WGSL vec3 alignment satisfied: clip_min at 224, clip_max at 240.
 
 impl Default for GlobalUniforms {
     fn default() -> Self {
@@ -41,8 +45,12 @@ impl Default for GlobalUniforms {
             cloud_coverage: 0.55,
             edge_strength: 0.15,
             ortho_ao_strength: 0.3,
+            clip_enabled: 0,
+            _pad_a: [0.0; 2],
+            clip_min: [-10000.0; 3],
             _pad3: 0.0,
-            _pad4: [0.0; 2],
+            clip_max: [10000.0; 3],
+            _pad4: 0.0,
         }
     }
 }
@@ -51,20 +59,35 @@ impl Default for GlobalUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct ShadowUniforms {
-    pub light_space_matrix: [[f32; 4]; 4],
+    pub light_space_matrix: [[f32; 4]; 4], // 64 bytes, offset 0
+    pub clip_min: [f32; 3],                // 12 bytes, offset 64
+    pub clip_enabled: u32,                 //  4 bytes, offset 76
+    pub clip_max: [f32; 3],                // 12 bytes, offset 80
+    pub _pad: f32,                         //  4 bytes, offset 92
 }
+// Total: 96 bytes (6 * 16)
 
 /// Post-processing uniforms
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct PostProcessUniforms {
-    pub warm_tint: [f32; 3],
-    pub warm_tint_strength: f32,
-    pub desaturation: f32,
-    pub vignette_strength: f32,
-    pub exposure: f32,
-    pub _pad: f32,
+    pub warm_tint: [f32; 3],               // 12 bytes, offset  0
+    pub warm_tint_strength: f32,           //  4 bytes, offset 12
+    pub desaturation: f32,                 //  4 bytes, offset 16
+    pub vignette_strength: f32,            //  4 bytes, offset 20
+    pub exposure: f32,                     //  4 bytes, offset 24
+    pub clip_fog_enabled: u32,             //  4 bytes, offset 28
+    pub fog_color: [f32; 3],               // 12 bytes, offset 32
+    pub fog_density: f32,                  //  4 bytes, offset 44
+    pub clip_max: [f32; 3],                // 12 bytes, offset 48
+    pub _pad0: f32,                        //  4 bytes, offset 60
+    pub clip_min: [f32; 3],                // 12 bytes, offset 64
+    pub _pad1: f32,                        //  4 bytes, offset 76
+    pub inv_view_proj: [[f32; 4]; 4],      // 64 bytes, offset 80
+    pub render_resolution: [f32; 2],       //  8 bytes, offset 144
+    pub _pad2: [f32; 2],                   //  8 bytes, offset 152
 }
+// Total: 160 bytes (10 * 16)
 
 impl Default for PostProcessUniforms {
     fn default() -> Self {
@@ -74,7 +97,16 @@ impl Default for PostProcessUniforms {
             desaturation: 0.0,
             vignette_strength: 0.35,
             exposure: 1.1,
-            _pad: 0.0,
+            clip_fog_enabled: 0,
+            fog_color: [0.4, 0.35, 0.3],
+            fog_density: 2.0,
+            clip_max: [10000.0; 3],
+            _pad0: 0.0,
+            clip_min: [-10000.0; 3],
+            _pad1: 0.0,
+            inv_view_proj: [[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0],[0.0,0.0,1.0,0.0],[0.0,0.0,0.0,1.0]],
+            render_resolution: [1.0, 1.0],
+            _pad2: [0.0; 2],
         }
     }
 }
@@ -187,13 +219,14 @@ pub fn create_bind_group(
     })
 }
 
-/// Bind group layout for the shadow depth pass (just a uniform buffer)
+/// Bind group layout for the shadow depth pass (uniform buffer, visible to vertex + fragment
+/// so the fragment stage can read clip bounds for cross-section discard)
 pub fn create_shadow_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("shadow_bind_group_layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -249,6 +282,17 @@ pub fn create_post_process_bind_group_layout(device: &wgpu::Device) -> wgpu::Bin
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            // binding 3: depth texture for cross-section fog world-position reconstruction
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     })
 }
@@ -259,6 +303,7 @@ pub fn create_post_process_bind_group(
     uniform_buffer: &wgpu::Buffer,
     scene_view: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    depth_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("post_process_bind_group"),
@@ -275,6 +320,10 @@ pub fn create_post_process_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(depth_view),
             },
         ],
     })

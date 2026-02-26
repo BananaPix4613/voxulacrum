@@ -154,17 +154,55 @@ pub fn load_cached_mesh(
     Some((file.vertices, file.indices))
 }
 
-/// Save a mesh to the disk cache. Errors are non-fatal (caller should log and
+/// Remove stale cache files for a chunk position, keeping only the file that
+/// matches `current_key`.  Called before saving so that parameter changes don't
+/// leave orphaned files with the old hash on disk.
+fn remove_stale_for_chunk(
+    cache_dir: &Path,
+    chunk_x: i32,
+    chunk_y: i32,
+    chunk_z: i32,
+    current_key: u64,
+) {
+    let prefix = format!("{}_{}_{}_{}", chunk_x, chunk_y, chunk_z, "");
+    // ^ e.g. "0_5_-2_"
+    let current_name = format!("{}_{}_{}_{:016x}.bin", chunk_x, chunk_y, chunk_z, current_key);
+
+    let entries = match std::fs::read_dir(cache_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(&prefix)
+            && name_str.ends_with(".bin")
+            && *name_str != current_name
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Save a mesh to the disk cache. Removes any stale cache files for the same
+/// chunk position before writing.  Errors are non-fatal (caller should log and
 /// continue).
 pub fn save_cached_mesh(
-    path: &Path,
+    cache_dir: &Path,
+    chunk_x: i32,
+    chunk_y: i32,
+    chunk_z: i32,
     key: u64,
     vertices: &[TerrainVertex],
     indices: &[u32],
 ) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    std::fs::create_dir_all(cache_dir)?;
+
+    // Clean up old files for this chunk before writing the new one.
+    remove_stale_for_chunk(cache_dir, chunk_x, chunk_y, chunk_z, key);
+
+    let path = cache_file_path(cache_dir, chunk_x, chunk_y, chunk_z, key);
 
     let file = CacheFile {
         version: CACHE_VERSION,

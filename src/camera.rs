@@ -12,6 +12,7 @@ pub struct IsometricCamera {
     pub smooth_target: Vec3,
     pub zoom: f32,
     pub rotation: f32,
+    pub target_rotation: f32,
     pub aspect: f32,
     pan_speed: f32,
     smooth_speed: f32,
@@ -19,6 +20,8 @@ pub struct IsometricCamera {
     backward_pressed: bool,
     left_pressed: bool,
     right_pressed: bool,
+    rotate_left_pressed: bool,
+    rotate_right_pressed: bool,
 }
 
 /// Result of camera snapping: a texel-aligned VP matrix and a sub-pixel
@@ -40,6 +43,7 @@ impl IsometricCamera {
             smooth_target: initial,
             zoom: params.initial_zoom,
             rotation: std::f32::consts::FRAC_PI_4,
+            target_rotation: std::f32::consts::FRAC_PI_4,
             aspect: 1.0,
             pan_speed: params.pan_speed,
             smooth_speed: params.smooth_speed,
@@ -47,6 +51,8 @@ impl IsometricCamera {
             backward_pressed: false,
             left_pressed: false,
             right_pressed: false,
+            rotate_left_pressed: false,
+            rotate_right_pressed: false,
         }
     }
 
@@ -89,6 +95,18 @@ impl IsometricCamera {
                 KeyCode::KeyS | KeyCode::ArrowDown => self.backward_pressed = pressed,
                 KeyCode::KeyA | KeyCode::ArrowLeft => self.left_pressed = pressed,
                 KeyCode::KeyD | KeyCode::ArrowRight => self.right_pressed = pressed,
+                KeyCode::KeyQ => {
+                    if pressed && !self.rotate_left_pressed {
+                        self.target_rotation += std::f32::consts::FRAC_PI_2;
+                    }
+                    self.rotate_left_pressed = pressed;
+                }
+                KeyCode::KeyE => {
+                    if pressed && !self.rotate_right_pressed {
+                        self.target_rotation -= std::f32::consts::FRAC_PI_2;
+                    }
+                    self.rotate_right_pressed = pressed;
+                }
                 _ => {}
             }
         }
@@ -122,6 +140,13 @@ impl IsometricCamera {
         // alpha approaches 1 as dt grows, clamped so it never overshoots.
         let alpha = (self.smooth_speed * dt).exp().recip().mul_add(-1.0, 1.0).clamp(0.0, 1.0);
         self.smooth_target = self.smooth_target.lerp(self.target, alpha);
+
+        // Smooth rotation toward target (shortest path via angle wrapping)
+        use std::f32::consts::{PI, TAU};
+        let rot_alpha = (self.smooth_speed * dt).exp().recip().mul_add(-1.0, 1.0).clamp(0.0, 1.0);
+        let mut delta = self.target_rotation - self.rotation;
+        delta = (delta + PI).rem_euclid(TAU) - PI;
+        self.rotation += delta * rot_alpha;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

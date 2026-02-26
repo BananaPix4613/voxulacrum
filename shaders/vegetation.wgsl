@@ -14,8 +14,12 @@ struct GlobalUniforms {
     cloud_coverage: f32,
     edge_strength: f32,
     ortho_ao_strength: f32,
+    clip_enabled: u32,
+    _pad_a: vec2<f32>,
+    clip_min: vec3<f32>,
     _pad3: f32,
-    _pad4: vec2<f32>,
+    clip_max: vec3<f32>,
+    _pad4: f32,
 };
 
 @group(0) @binding(0)
@@ -145,6 +149,15 @@ struct FragmentOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
+    // Cross-section clipping
+    if globals.clip_enabled != 0u {
+        let wp = in.world_position;
+        if wp.x > globals.clip_max.x || wp.y > globals.clip_max.y || wp.z > globals.clip_max.z
+        || wp.x < globals.clip_min.x || wp.y < globals.clip_min.y || wp.z < globals.clip_min.z {
+            discard;
+        }
+    }
+
     let base_color = mix(in.terrain_color, in.terrain_color * 1.3, in.uv.y * 0.5);
 
     let n = normalize(in.normal);

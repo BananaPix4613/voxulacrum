@@ -14,6 +14,7 @@ impl PostProcessPass {
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         scene_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
         shader_source: &str,
     ) -> Self {
         let bind_group_layout = uniforms::create_post_process_bind_group_layout(device);
@@ -45,6 +46,7 @@ impl PostProcessPass {
             &uniform_buffer,
             scene_view,
             &sampler,
+            depth_view,
         );
 
         Self {
@@ -56,11 +58,12 @@ impl PostProcessPass {
         }
     }
 
-    /// Recreate bind group when scene texture changes (e.g. on resize).
+    /// Recreate bind group when scene/depth texture changes (e.g. on resize).
     pub fn rebuild_bind_group(
         &mut self,
         device: &wgpu::Device,
         scene_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
     ) {
         self.bind_group = uniforms::create_post_process_bind_group(
             device,
@@ -68,6 +71,7 @@ impl PostProcessPass {
             &self.uniform_buffer,
             scene_view,
             &self.sampler,
+            depth_view,
         );
     }
 

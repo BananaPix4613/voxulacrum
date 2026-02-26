@@ -291,7 +291,7 @@ pub struct MeshingParams {
 impl Default for MeshingParams {
     fn default() -> Self {
         Self {
-            greedy_merge_enabled: true,
+            greedy_merge_enabled: false,
             flat_threshold_error: 0.025,
             flat_normal_threshold: 0.95,
             edge_strength: 0.15,
@@ -467,6 +467,40 @@ impl Default for DebugParams {
 }
 
 // ============================================================================
+// Cross-section Params
+// ============================================================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CrossSectionParams {
+    pub enabled: bool,
+    /// Per-axis offset from camera center into the visible volume.
+    /// Positive = plane moves inward (clips more). Default 0.0 = no clipping.
+    /// Range: 0.0 (disabled) to ~half-world-size
+    pub x_offset: f32,  // clips on the +X side of camera
+    pub y_offset: f32,  // clips on the +Y (top) side of camera
+    pub z_offset: f32,  // clips on the +Z side of camera
+    /// Fog applied at clip boundary to show terrain interior
+    pub fog_density: f32,    // how quickly fog reaches full opacity (default: 2.0)
+    pub fog_color: [f32; 3], // default: [0.4, 0.35, 0.3] earthy fog
+    pub show_edges: bool,    // debug: highlight clip plane edge in color
+}
+
+impl Default for CrossSectionParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            z_offset: 0.0,
+            fog_density: 0.5,
+            fog_color: [0.235, 0.216, 0.2],
+            show_edges: false,
+        }
+    }
+}
+
+// ============================================================================
 // Top-level EngineParams
 // ============================================================================
 
@@ -488,6 +522,7 @@ pub struct EngineParams {
     pub meshing: MeshingParams,
     pub render_pipeline: RenderPipelineParams,
     pub outline: OutlineParams,
+    pub cross_section: CrossSectionParams,
 }
 
 impl Default for EngineParams {
@@ -508,6 +543,7 @@ impl Default for EngineParams {
             meshing: MeshingParams::default(),
             render_pipeline: RenderPipelineParams::default(),
             outline: OutlineParams::default(),
+            cross_section: CrossSectionParams::default(),
         }
     }
 }

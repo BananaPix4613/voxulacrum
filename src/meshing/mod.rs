@@ -567,15 +567,15 @@ fn worker_loop(
                     generate_faces_from_snapshot(&mut cell_data, &req.snapshot, &nb);
 
                 // Save to cache (fire-and-forget, errors are non-fatal)
-                let cache_path = cache::cache_file_path(
+                if let Err(e) = cache::save_cached_mesh(
                     &cache_config.cache_dir,
                     req.snapshot.position.x,
                     req.snapshot.position.y,
                     req.snapshot.position.z,
                     req.cache_key,
-                );
-                if let Err(e) =
-                    cache::save_cached_mesh(&cache_path, req.cache_key, &cell_data.vertices, &indices)
+                    &cell_data.vertices,
+                    &indices,
+                )
                 {
                     log::warn!("Cache save failed for chunk {}: {}", req.chunk_index, e);
                     cache_config

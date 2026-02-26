@@ -34,6 +34,7 @@ use rendering::post_process::PostProcessPass;
 use rendering::outline_pass::OutlinePass;
 use rendering::uniforms::OutlineUniforms;
 use rendering::palette_pass::PalettePass;
+use rendering::cap_pass::CapPass;
 use palette::Palette;
 use shader_reload::ShaderWatcher;
 use simulation::water::StaticWater;
@@ -41,6 +42,7 @@ use simulation::time_of_day::TimeOfDay;
 use simulation::wind::WindState;
 use ui::panels::UiState;
 use world::WorldManager;
+use world::chunk::VOXEL_SCALE;
 
 use crate::meshing::MeshingPipeline;
 
@@ -106,6 +108,7 @@ struct AppState {
     meshing_pipeline: MeshingPipeline,
     world_manager: WorldManager,
     frustum: Frustum,
+    cap_pass: CapPass,
 }
 
 impl AppState {
@@ -218,6 +221,15 @@ impl AppState {
             &debug_lines_source,
         );
 
+        let cap_source = std::fs::read_to_string(shader_dir.join("cap.wgsl"))
+            .expect("Failed to read cap.wgsl");
+        let cap_pass = CapPass::new(
+            &gpu.device,
+            gpu.surface_format,
+            &pipeline_resources.global_bind_group_layout,
+            &cap_source,
+        );
+
         // Generate or load world using params
         let gen_start = std::time::Instant::now();
         let cache_dir = std::path::PathBuf::from("cache/meshes");
@@ -254,7 +266,8 @@ impl AppState {
         let pp_shader_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
             .expect("Failed to read post_process.wgsl");
         let post_process = PostProcessPass::new(
-            &gpu.device, gpu.surface_format, &render_targets.processed_view, &pp_shader_source,
+            &gpu.device, gpu.surface_format, &render_targets.processed_view,
+            &render_targets.depth_view, &pp_shader_source,
         );
 
         // Outline pass
@@ -335,6 +348,7 @@ impl AppState {
             meshing_pipeline,
             world_manager: WorldManager::new(),
             frustum,
+            cap_pass,
         }
     }
 
@@ -454,6 +468,43 @@ impl AppState {
                 continue;
             }
 
+            // Handle cap.wgsl separately since its pipeline lives in CapPass
+            if filename == "cap.wgsl" {
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        match self.cap_pass.try_reload_shader(
+                            &self.gpu.device,
+                            self.gpu.surface_format,
+                            &self.pipeline_resources.global_bind_group_layout,
+                            &source,
+                        ) {
+                            Ok(()) => {
+                                log::info!("Reloaded cap.wgsl");
+                                self.ui_state.push_shader_log(
+                                    "cap.wgsl reloaded".to_string(),
+                                    false,
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!("cap.wgsl compile error: {}", e);
+                                self.ui_state.push_shader_log(
+                                    format!("cap.wgsl: {}", e),
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to read cap.wgsl: {}", e);
+                        self.ui_state.push_shader_log(
+                            format!("cap.wgsl read error: {}", e),
+                            true,
+                        );
+                    }
+                }
+                continue;
+            }
+
             // All other shaders go through the pipeline registry
             if let Some(result) = self.pipeline_registry.try_reload(
                 &self.gpu.device,
@@ -506,7 +557,8 @@ impl AppState {
             );
             self.post_process.rebuild_bind_group(
                 &self.gpu.device,
-                &self.render_targets.processed_view
+                &self.render_targets.processed_view,
+                &self.render_targets.depth_view,
             );
             self.palette_pass.rebuild_bind_group(
                 &self.gpu.device,
@@ -623,9 +675,60 @@ impl AppState {
         // Light-space matrix
         let light_space = self.time_of_day.light_space_matrix();
 
+        // Cross-section clip bounds (camera-direction-aware)
+        // Use target_rotation (discrete 90° steps) so clip side flips instantly on Q/E.
+        let cos_r = self.camera.target_rotation.cos();
+        let sin_r = self.camera.target_rotation.sin();
+
+        let (clip_min, clip_max, clip_enabled) = if self.ui_state.params.cross_section.enabled {
+            let cs = &self.ui_state.params.cross_section;
+            let cam = self.camera.smooth_target;
+            let half = self.ui_state.params.camera.zoom_max;
+
+            // X axis: clip direction follows camera facing
+            let (clip_min_x, clip_max_x) = if cs.x_offset > 0.0 {
+                if cos_r >= 0.0 {
+                    let raw = cam.x + half - cs.x_offset;
+                    (-10000.0, (raw / VOXEL_SCALE).floor() * VOXEL_SCALE)
+                } else {
+                    let raw = cam.x - half + cs.x_offset;
+                    ((raw / VOXEL_SCALE).ceil() * VOXEL_SCALE, 10000.0)
+                }
+            } else { (-10000.0, 10000.0) };
+
+            // Y axis: always clip from above
+            let (clip_min_y, clip_max_y) = if cs.y_offset > 0.0 {
+                let raw = cam.y + half - cs.y_offset;
+                (-10000.0, (raw / VOXEL_SCALE).floor() * VOXEL_SCALE)
+            } else { (-10000.0, 10000.0) };
+
+            // Z axis: clip direction follows camera facing
+            let (clip_min_z, clip_max_z) = if cs.z_offset > 0.0 {
+                if sin_r >= 0.0 {
+                    let raw = cam.z + half - cs.z_offset;
+                    (-10000.0, (raw / VOXEL_SCALE).floor() * VOXEL_SCALE)
+                } else {
+                    let raw = cam.z - half + cs.z_offset;
+                    ((raw / VOXEL_SCALE).ceil() * VOXEL_SCALE, 10000.0)
+                }
+            } else { (-10000.0, 10000.0) };
+
+            (
+                [clip_min_x, clip_min_y, clip_min_z],
+                [clip_max_x, clip_max_y, clip_max_z],
+                1u32,
+            )
+        } else {
+            ([-10000.0_f32; 3], [10000.0_f32; 3], 0u32)
+        };
+
         // Shadow uniforms
         let shadow_uniforms = ShadowUniforms {
             light_space_matrix: light_space.to_cols_array_2d(),
+            clip_min,
+            clip_enabled,
+            clip_max,
+            _pad: 0.0,
         };
         self.gpu.queue.write_buffer(
             &self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniforms]),
@@ -669,21 +772,49 @@ impl AppState {
             } else {
                 0.0
             },
+            clip_enabled,
+            _pad_a: [0.0; 2],
+            clip_min,
             _pad3: 0.0,
-            _pad4: [0.0; 2],
+            clip_max,
+            _pad4: 0.0,
         };
         self.gpu.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
         // Post-process uniforms from params
         let pp = &self.ui_state.params.post_process;
+        let cs = &self.ui_state.params.cross_section;
         let (tint_color, tint_strength) = self.time_of_day.warm_tint();
+
+        // Inverse view-projection for world-position reconstruction in post-process fog
+        let vp_mat = glam::Mat4::from_cols_array_2d(&snapped.view_proj);
+        let inv_vp = vp_mat.inverse().to_cols_array_2d();
+
+        let clip_fog_enabled: u32 = if cs.enabled {
+            if cs.show_edges { 2 } else { 1 }
+        } else {
+            0
+        };
+
         let pp_uniforms = PostProcessUniforms {
             warm_tint: tint_color.into(),
             warm_tint_strength: tint_strength,
             desaturation: self.cloud_shadow.coverage * pp.overcast_desaturation_factor,
             vignette_strength: pp.vignette_strength,
             exposure: pp.exposure,
-            _pad: 0.0,
+            clip_fog_enabled,
+            fog_color: cs.fog_color,
+            fog_density: cs.fog_density,
+            clip_max,
+            _pad0: 0.0,
+            clip_min,
+            _pad1: 0.0,
+            inv_view_proj: inv_vp,
+            render_resolution: [
+                self.render_targets.render_width as f32,
+                self.render_targets.render_height as f32,
+            ],
+            _pad2: [0.0; 2],
         };
         self.post_process.update_uniforms(&self.gpu.queue, pp_uniforms);
 
@@ -774,6 +905,7 @@ impl AppState {
                 self.post_process.rebuild_bind_group(
                     &self.gpu.device,
                     &self.render_targets.processed_view,
+                    &self.render_targets.depth_view,
                 );
                 self.palette_pass.rebuild_bind_group(
                     &self.gpu.device,
@@ -877,6 +1009,37 @@ impl AppState {
                         pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     }
+                }
+            }
+
+            // Cross-section cap mesh: solid fill at clip plane boundaries
+            if self.ui_state.params.cross_section.enabled && clip_enabled != 0 {
+                let clip_dirs: [f32; 3] = [
+                    if cos_r >= 0.0 { 1.0 } else { -1.0 },
+                    1.0,
+                    if sin_r >= 0.0 { 1.0 } else { -1.0 },
+                ];
+                let clip_pos = [
+                    if clip_dirs[0] > 0.0 { clip_max[0] } else { clip_min[0] },
+                    clip_max[1],
+                    if clip_dirs[2] > 0.0 { clip_max[2] } else { clip_min[2] },
+                ];
+                self.cap_pass.maybe_rebuild(
+                    &self.gpu.device,
+                    &self.world,
+                    &self.ui_state.params.cross_section,
+                    clip_pos,
+                    clip_dirs,
+                );
+                if self.cap_pass.index_count > 0 {
+                    pass.set_pipeline(&self.cap_pass.pipeline);
+                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.cap_pass.vertex_buffer.as_ref().unwrap().slice(..));
+                    pass.set_index_buffer(
+                        self.cap_pass.index_buffer.as_ref().unwrap().slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..self.cap_pass.index_count, 0, 0..1);
                 }
             }
 
@@ -1191,6 +1354,7 @@ impl ApplicationHandler for App {
                 state.post_process.rebuild_bind_group(
                     &state.gpu.device,
                     &state.render_targets.processed_view,
+                    &state.render_targets.depth_view,
                 );
                 state.palette_pass.rebuild_bind_group(
                     &state.gpu.device,

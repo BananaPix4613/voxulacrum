@@ -91,6 +91,10 @@ impl<'a> ChunkNeighbors<'a> {
 pub struct ChunkSnapshot {
     pub position: IVec3,
     pub voxels: Box<[Voxel; SNAP_VOLUME]>,
+    /// True per axis if this chunk is at the negative world border (position == 0).
+    /// The MC mesher extends its iteration to cell -1 on these axes to generate
+    /// boundary faces that would otherwise be missing (no neighbor chunk to cover them).
+    pub border_min: [bool; 3],
 }
 
 impl ChunkSnapshot {
@@ -135,8 +139,15 @@ impl ChunkSnapshot {
             }
         }
 
+        let border_min = [
+            chunk.position.x == 0,
+            chunk.position.y == 0,
+            chunk.position.z == 0,
+        ];
+
         Self {
             position: chunk.position,
+            border_min,
             voxels,
         }
     }

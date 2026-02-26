@@ -173,7 +173,7 @@ struct EdgeId {
 ///
 /// The canonical form uses the minimum-coordinate endpoint of the edge and the
 /// axis direction, so shared edges between adjacent cells always hash identically.
-fn canonical_edge_id(cx: usize, cy: usize, cz: usize, edge_num: usize) -> EdgeId {
+fn canonical_edge_id(cx: i32, cy: i32, cz: i32, edge_num: usize) -> EdgeId {
     match edge_num {
         0  => EdgeId { x: cx as u16,       y: cy as u16,       z: cz as u16,       axis: 0 },
         1  => EdgeId { x: (cx + 1) as u16, y: cy as u16,       z: cz as u16,       axis: 1 },
@@ -499,19 +499,16 @@ fn compute_raw_t(density_a: f32, density_b: f32) -> f32 {
 }
 
 /// Sample the 8 corner densities for a cell at (cx, cy, cz).
-fn sample_corners(snap: &ChunkSnapshot, cx: usize, cy: usize, cz: usize) -> [f32; 8] {
-    let x = cx as i32;
-    let y = cy as i32;
-    let z = cz as i32;
+fn sample_corners(snap: &ChunkSnapshot, cx: i32, cy: i32, cz: i32) -> [f32; 8] {
     [
-        classify_density(snap_density(snap, x,     y,     z    )),
-        classify_density(snap_density(snap, x + 1, y,     z    )),
-        classify_density(snap_density(snap, x + 1, y + 1, z    )),
-        classify_density(snap_density(snap, x,     y + 1, z    )),
-        classify_density(snap_density(snap, x,     y,     z + 1)),
-        classify_density(snap_density(snap, x + 1, y,     z + 1)),
-        classify_density(snap_density(snap, x + 1, y + 1, z + 1)),
-        classify_density(snap_density(snap, x,     y + 1, z + 1)),
+        classify_density(snap_density(snap, cx,     cy,     cz    )),
+        classify_density(snap_density(snap, cx + 1, cy,     cz    )),
+        classify_density(snap_density(snap, cx + 1, cy + 1, cz    )),
+        classify_density(snap_density(snap, cx,     cy + 1, cz    )),
+        classify_density(snap_density(snap, cx,     cy,     cz + 1)),
+        classify_density(snap_density(snap, cx + 1, cy,     cz + 1)),
+        classify_density(snap_density(snap, cx + 1, cy + 1, cz + 1)),
+        classify_density(snap_density(snap, cx,     cy + 1, cz + 1)),
     ]
 }
 
@@ -529,25 +526,25 @@ fn compute_case_index(corners: &[f32; 8]) -> usize {
 
 /// Compute the world-space position of a cell corner.
 fn corner_world_position(
-    cx: usize, cy: usize, cz: usize,
+    cx: i32, cy: i32, cz: i32,
     corner: usize,
     chunk_offset: [f32; 3],
 ) -> [f32; 3] {
     let off = CORNER_OFFSETS[corner];
     [
-        (cx + off[0]) as f32 * VOXEL_SCALE + chunk_offset[0],
-        (cy + off[1]) as f32 * VOXEL_SCALE + chunk_offset[1],
-        (cz + off[2]) as f32 * VOXEL_SCALE + chunk_offset[2],
+        (cx + off[0] as i32) as f32 * VOXEL_SCALE + chunk_offset[0],
+        (cy + off[1] as i32) as f32 * VOXEL_SCALE + chunk_offset[1],
+        (cz + off[2] as i32) as f32 * VOXEL_SCALE + chunk_offset[2],
     ]
 }
 
 /// Get chunk-local voxel coordinates for a cell corner (for material lookup).
-fn corner_local_coords(cx: usize, cy: usize, cz: usize, corner: usize) -> (i32, i32, i32) {
+fn corner_local_coords(cx: i32, cy: i32, cz: i32, corner: usize) -> (i32, i32, i32) {
     let off = CORNER_OFFSETS[corner];
     (
-        (cx + off[0]) as i32,
-        (cy + off[1]) as i32,
-        (cz + off[2]) as i32,
+        cx + off[0] as i32,
+        cy + off[1] as i32,
+        cz + off[2] as i32,
     )
 }
 
@@ -562,12 +559,12 @@ fn corner_local_coords(cx: usize, cy: usize, cz: usize, corner: usize) -> (i32, 
 /// Falls back to the lowest-density solid corner if the upward trace fails.
 fn determine_cell_material(
     snap: &ChunkSnapshot,
-    cx: usize, cy: usize, cz: usize,
+    cx: i32, cy: i32, cz: i32,
     corners: &[f32; 8],
 ) -> u16 {
     // Cell center in chunk-local voxel coordinates (integer, rounded)
-    let center_x = cx as i32;
-    let center_z = cz as i32;
+    let center_x = cx;
+    let center_z = cz;
 
     // Start from the top of the cell (cy + 1) and trace upward to find the
     // first solid voxel when coming down from above — i.e. the surface voxel.
@@ -578,7 +575,7 @@ fn determine_cell_material(
     // tells us that the voxel just below it is the surface voxel.
     // Limit the search to a few voxels so cave ceilings deep underground
     // don't get overwritten with surface materials.
-    let start_y = cy as i32;
+    let start_y = cy;
     let max_trace = (start_y + 4).min(max_y); // at most 4 voxels above cell
     let mut surface_mat = MAT_AIR;
 
@@ -634,7 +631,7 @@ fn determine_cell_material(
 fn compute_edge_vertex(
     snap: &ChunkSnapshot,
     materials: &MaterialConfig,
-    cx: usize, cy: usize, cz: usize,
+    cx: i32, cy: i32, cz: i32,
     edge_num: usize,
     corners: &[f32; 8],
     chunk_offset: [f32; 3],
@@ -1361,9 +1358,16 @@ pub fn generate_cell_vertices_from_snapshot(
     let mut edge_cache: HashMap<EdgeId, u32> =
         HashMap::with_capacity(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE * 3);
 
-    for cz in 0..CHUNK_SIZE {
-        for cy in 0..CHUNK_SIZE {
-            for cx in 0..CHUNK_SIZE {
+    // Extend iteration to cell -1 on axes where this chunk is at the negative
+    // world border. Normally cell -1 is covered by the neighbor chunk's cell 31,
+    // but at the world edge there is no neighbor.
+    let start_x = if snap.border_min[0] { -1i32 } else { 0 };
+    let start_y = if snap.border_min[1] { -1i32 } else { 0 };
+    let start_z = if snap.border_min[2] { -1i32 } else { 0 };
+
+    for cz in start_z..(CHUNK_SIZE as i32) {
+        for cy in start_y..(CHUNK_SIZE as i32) {
+            for cx in start_x..(CHUNK_SIZE as i32) {
                 let corners = sample_corners(snap, cx, cy, cz);
                 let case_index = compute_case_index(&corners);
 
