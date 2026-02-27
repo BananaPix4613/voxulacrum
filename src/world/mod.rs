@@ -1,6 +1,7 @@
 pub mod voxel;
 pub mod chunk;
 pub mod generation;
+pub mod regen;
 
 use chunk::{Chunk, ChunkMesh, ChunkNeighbors, CHUNK_VOLUME};
 use generation::{TerrainGenerator, WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z};
@@ -34,7 +35,7 @@ impl World {
         }
     }
 
-    /// Create a World from pre-loaded chunk data (from cache).
+    /// Create a World from preloaded chunk data (from cache).
     pub fn from_cached_chunks(chunks: Vec<Chunk>, params: &TerrainGenParams) -> Self {
         Self {
             chunks,

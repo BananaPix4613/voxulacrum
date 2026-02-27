@@ -1,13 +1,5 @@
-use bytemuck::{Pod, Zeroable};
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct UpscaleUniforms {
-    pub subpixel_offset: [f32; 2],
-    pub render_resolution: [f32; 2],
-    pub window_resolution: [f32; 2],
-    pub tex_resolution: [f32; 2],
-}
+use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::rendering::uniforms::UpscaleUniforms;
 
 pub struct UpscalePass {
     pub pipeline: wgpu::RenderPipeline,
@@ -207,5 +199,35 @@ impl UpscalePass {
             0,
             bytemuck::cast_slice(&[uniforms]),
         );
+    }
+}
+
+impl RenderPassNode for UpscalePass {
+    fn declaration(&self) -> PassDecl {
+        PassDecl {
+            name: "upscale",
+            reads: &[ResourceId::PROCESSED],
+            writes: &[ResourceId::SURFACE],
+        }
+    }
+
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("upscale_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: resources.get(ResourceId::SURFACE),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 }

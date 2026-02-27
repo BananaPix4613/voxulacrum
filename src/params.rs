@@ -366,8 +366,8 @@ pub struct CameraParams {
 impl Default for CameraParams {
     fn default() -> Self {
         Self {
-            zoom_min: 5.0,
-            zoom_max: 60.0,
+            zoom_min: 1.0,
+            zoom_max: 100.0,
             scroll_speed: 2.0,
             pan_speed: 12.0,
             initial_zoom: 40.0,

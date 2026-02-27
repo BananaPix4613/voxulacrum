@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod coordinator;
 mod marching_cubes;
 mod mc_tables;
 

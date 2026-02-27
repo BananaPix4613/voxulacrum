@@ -12,3 +12,7 @@ pub mod post_process;
 pub mod palette_pass;
 pub mod outline_pass;
 pub mod cap_pass;
+pub mod render_graph;
+pub mod shadow_pass;
+pub mod main_scene_pass;
+pub mod uniform_writer;

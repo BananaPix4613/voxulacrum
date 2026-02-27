@@ -426,15 +426,15 @@ fn draw_cross_section(ui: &mut egui::Ui, p: &mut CrossSectionParams) {
         if p.enabled {
             ui.horizontal(|ui| {
                 dot_green(ui); ui.label("X clip:");
-                ui.add(egui::Slider::new(&mut p.x_offset, 0.0..=100.0));
+                ui.add(egui::Slider::new(&mut p.x_offset, 0.0..=250.0));
             });
             ui.horizontal(|ui| {
                 dot_green(ui); ui.label("Y clip:");
-                ui.add(egui::Slider::new(&mut p.y_offset, 0.0..=100.0));
+                ui.add(egui::Slider::new(&mut p.y_offset, 0.0..=250.0));
             });
             ui.horizontal(|ui| {
                 dot_green(ui); ui.label("Z clip:");
-                ui.add(egui::Slider::new(&mut p.z_offset, 0.0..=100.0));
+                ui.add(egui::Slider::new(&mut p.z_offset, 0.0..=250.0));
             });
             ui.separator();
             ui.horizontal(|ui| {

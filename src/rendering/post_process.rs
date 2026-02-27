@@ -1,3 +1,4 @@
+use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::pipelines;
 use crate::rendering::uniforms::{self, PostProcessUniforms};
 
@@ -103,5 +104,35 @@ impl PostProcessPass {
 
     pub fn update_uniforms(&self, queue: &wgpu::Queue, uniforms: PostProcessUniforms) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+    }
+}
+
+impl RenderPassNode for PostProcessPass {
+    fn declaration(&self) -> PassDecl {
+        PassDecl {
+            name: "post_process",
+            reads: &[ResourceId::PROCESSED, ResourceId::DEPTH],
+            writes: &[ResourceId::SCENE],
+        }
+    }
+
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("post_process_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: resources.get(ResourceId::SCENE),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
     }
 }

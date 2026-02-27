@@ -252,6 +252,17 @@ pub fn create_shadow_bind_group(
     })
 }
 
+/// Upscale pass uniforms (32 bytes, 16-byte aligned)
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct UpscaleUniforms {
+    pub subpixel_offset: [f32; 2],
+    pub render_resolution: [f32; 2],
+    pub window_resolution: [f32; 2],
+    pub tex_resolution: [f32; 2],
+}
+// Total: 32 bytes = 2 × 16
+
 pub fn create_post_process_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("post_process_bind_group_layout"),
