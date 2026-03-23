@@ -22,6 +22,7 @@ use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::vegetation_pass::VegetationPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::shader_reload::ShaderWatcher;
+use crate::input::InputState;
 use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::simulation::water::StaticWater;
 use crate::ui;
@@ -175,9 +176,10 @@ pub fn simulation_tick_system(
     mut sim: ResMut<SimulationManager>,
     ui: Res<UiState>,
     render_targets: Res<RenderTargets>,
+    input: Res<InputState>,
     mut commands: Commands,
 ) {
-    let frame = sim.tick(&ui.params, &render_targets);
+    let frame = sim.tick(&ui.params, &render_targets, &input);
     commands.insert_resource(frame);
 }
 

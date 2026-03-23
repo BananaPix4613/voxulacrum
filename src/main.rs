@@ -9,6 +9,7 @@ mod simulation;
 mod ui;
 mod world;
 mod palette;
+mod input;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use bevy_ecs::event::Events;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use rendering::render_targets::RenderTargets;
@@ -46,8 +47,8 @@ use ui::panels::UiState;
 
 use ecs::resources::*;
 use ecs::events::*;
-use ecs::schedule::{FrameStage, build_frame_schedule};
-use ecs::systems;
+use ecs::schedule::build_frame_schedule;
+use input::{RawInputBuffer, RawInputEvent, InputMap, InputState};
 
 const SHADOW_MAP_SIZE: u32 = 4096;
 
@@ -406,6 +407,9 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(WorldRegenCoordinator::new());
     ecs.insert_resource(ui_state);
     ecs.insert_resource(FrameCounter::new());
+    ecs.insert_resource(RawInputBuffer::default());
+    ecs.insert_resource(InputMap::default());
+    ecs.insert_resource(InputState::new());
 
     // EguiRenderer — NonSend because egui_winit::State may be !Send
     ecs.insert_non_send_resource(egui_renderer);
@@ -444,41 +448,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Build the schedule
     // -----------------------------------------------------------------------
 
-    let mut schedule = build_frame_schedule();
-
-    // Input stage
-    schedule.add_systems((
-        systems::frame_counter_system.in_set(FrameStage::Input),
-        systems::shader_hot_reload_system.in_set(FrameStage::Input),
-    ));
-
-    // Simulation stage
-    schedule.add_systems((
-        systems::simulation_tick_system.in_set(FrameStage::Simulation),
-        systems::param_change_detection_system.in_set(FrameStage::Simulation),
-        systems::palette_load_system.in_set(FrameStage::Simulation),
-    ));
-
-    // Meshing stage
-    schedule.add_systems(
-        systems::meshing_tick_system.in_set(FrameStage::Meshing),
-    );
-
-    // UniformWrite stage
-    schedule.add_systems((
-        systems::write_uniforms_system.in_set(FrameStage::UniformWrite),
-        systems::compute_stats_system.in_set(FrameStage::UniformWrite),
-    ));
-
-    // Render stage — exclusive system
-    schedule.add_systems(
-        systems::render_present_system.in_set(FrameStage::Render),
-    );
-
-    // PostFrame stage
-    schedule.add_systems(
-        systems::world_regen_system.in_set(FrameStage::PostFrame),
-    );
+    let schedule = build_frame_schedule();
 
     (ecs, schedule)
 }
@@ -533,17 +503,6 @@ impl ApplicationHandler for App {
     ) {
         let Some(ecs) = &mut self.ecs_world else { return; };
 
-        // F1 toggle -- always handled, bypass ECS
-        if let WindowEvent::KeyboardInput { ref event, .. } = event {
-            if event.state == ElementState::Pressed {
-                if let PhysicalKey::Code(KeyCode::F1) = event.physical_key {
-                    ecs.non_send_resource_mut::<ui::EguiRenderer>()
-                        .toggle_visibility();
-                    return;
-                }
-            }
-        }
-
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -595,32 +554,43 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::KeyboardInput { ref event, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                let consumed = ecs
-                    .non_send_resource_mut::<ui::EguiRenderer>()
-                    .handle_event(&window, e);
-                if !consumed {
-                    ecs.resource_mut::<SimulationManager>()
-                        .camera
-                        .process_keyboard(event.physical_key, event.state);
+               ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                   .handle_event(&window, e);
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    let raw = if event.state == ElementState::Pressed {
+                        RawInputEvent::KeyPressed(code)
+                    } else {
+                        RawInputEvent::KeyReleased(code)
+                    };
+                    ecs.resource_mut::<RawInputBuffer>().events.push(raw);
                 }
             }
 
             ref e @ WindowEvent::MouseWheel { ref delta, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                let consumed = ecs
-                    .non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiRenderer>()
                     .handle_event(&window, e);
-                if !consumed {
-                    let cam_params =
-                        ecs.resource::<UiState>().params.camera.clone();
-                    ecs.resource_mut::<SimulationManager>()
-                        .camera
-                        .process_scroll(delta, &cam_params);
+                let scroll = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1,
+                };
+                if scroll.abs() > f32::EPSILON {
+                    ecs.resource_mut::<RawInputBuffer>()
+                        .events
+                        .push(RawInputEvent::Scroll(scroll));
                 }
             }
 
             WindowEvent::RedrawRequested => {
-                // Run the frame schedule
+                // Update egui consumption flags before the frame schedule.
+                {
+                    let egui = ecs.non_send_resource::<ui::EguiRenderer>();
+                    let wants_kb = egui.ctx.wants_keyboard_input();
+                    let wants_ptr = egui.ctx.wants_pointer_input();
+                    let mut buf = ecs.resource_mut::<RawInputBuffer>();
+                    buf.egui_wants_keyboard = wants_kb;
+                    buf.egui_wants_pointer = wants_ptr;
+                }
                 self.schedule
                     .as_mut()
                     .unwrap()

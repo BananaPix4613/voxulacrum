@@ -1,12 +1,11 @@
 use glam::{Mat4, Vec3};
-use winit::event::{ElementState, MouseScrollDelta};
-use winit::keyboard::{KeyCode, PhysicalKey};
 
+use crate::input::{GameAction, InputState};
 use crate::params::CameraParams;
 
 pub struct IsometricCamera {
     pub target: Vec3,
-    /// Smoothed render position — exponentially follows `target`.
+    /// Smoothed render position - exponentially follows `target`.
     /// All rendering (view matrix, snap) uses this, keeping the
     /// sub-pixel offset continuous and eliminating pixel jitter.
     pub smooth_target: Vec3,
@@ -16,12 +15,6 @@ pub struct IsometricCamera {
     pub aspect: f32,
     pan_speed: f32,
     smooth_speed: f32,
-    forward_pressed: bool,
-    backward_pressed: bool,
-    left_pressed: bool,
-    right_pressed: bool,
-    rotate_left_pressed: bool,
-    rotate_right_pressed: bool,
 }
 
 /// Result of camera snapping: a texel-aligned VP matrix and a sub-pixel
@@ -47,12 +40,6 @@ impl IsometricCamera {
             aspect: 1.0,
             pan_speed: params.pan_speed,
             smooth_speed: params.smooth_speed,
-            forward_pressed: false,
-            backward_pressed: false,
-            left_pressed: false,
-            right_pressed: false,
-            rotate_left_pressed: false,
-            rotate_right_pressed: false,
         }
     }
 
@@ -87,48 +74,16 @@ impl IsometricCamera {
         (self.projection_matrix() * self.view_matrix()).to_cols_array_2d()
     }
 
-    pub fn process_keyboard(&mut self, key: PhysicalKey, state: ElementState) {
-        let pressed = state == ElementState::Pressed;
-        if let PhysicalKey::Code(code) = key {
-            match code {
-                KeyCode::KeyW | KeyCode::ArrowUp => self.forward_pressed = pressed,
-                KeyCode::KeyS | KeyCode::ArrowDown => self.backward_pressed = pressed,
-                KeyCode::KeyA | KeyCode::ArrowLeft => self.left_pressed = pressed,
-                KeyCode::KeyD | KeyCode::ArrowRight => self.right_pressed = pressed,
-                KeyCode::KeyQ => {
-                    if pressed && !self.rotate_left_pressed {
-                        self.target_rotation += std::f32::consts::FRAC_PI_2;
-                    }
-                    self.rotate_left_pressed = pressed;
-                }
-                KeyCode::KeyE => {
-                    if pressed && !self.rotate_right_pressed {
-                        self.target_rotation -= std::f32::consts::FRAC_PI_2;
-                    }
-                    self.rotate_right_pressed = pressed;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    pub fn process_scroll(&mut self, delta: &MouseScrollDelta, params: &CameraParams) {
-        let scroll = match delta {
-            MouseScrollDelta::LineDelta(_, y) => *y,
-            MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.1,
-        };
-        self.zoom = (self.zoom - scroll * params.scroll_speed).clamp(params.zoom_min, params.zoom_max);
-    }
-
-    pub fn update(&mut self, dt: f32) {
+    /// Advance camera state using abstract input actions.
+    pub fn update(&mut self, dt: f32, input: &InputState, cam_params: &CameraParams) {
         let forward_dir = Vec3::new(-self.rotation.cos(), 0.0, -self.rotation.sin());
         let right_dir = Vec3::new(self.rotation.sin(), 0.0, -self.rotation.cos());
 
         let mut move_dir = Vec3::ZERO;
-        if self.forward_pressed { move_dir += forward_dir; }
-        if self.backward_pressed { move_dir -= forward_dir; }
-        if self.left_pressed { move_dir -= right_dir; }
-        if self.right_pressed { move_dir += right_dir; }
+        if input.pressed(GameAction::CameraPanForward) { move_dir += forward_dir; }
+        if input.pressed(GameAction::CameraPanBackward) { move_dir -= forward_dir; }
+        if input.pressed(GameAction::CameraPanLeft) { move_dir -= right_dir; }
+        if input.pressed(GameAction::CameraPanRight) { move_dir += right_dir; }
 
         if move_dir.length_squared() > 0.0 {
             move_dir = move_dir.normalize();
@@ -136,6 +91,23 @@ impl IsometricCamera {
 
         self.target += move_dir * self.pan_speed * dt;
 
+        // Edge-triggered rotation
+        if input.just_pressed(GameAction::CameraRotateLeft) {
+            self.target_rotation += std::f32::consts::FRAC_PI_2;
+        }
+        if input.just_pressed(GameAction::CameraRotateRight) {
+            self.target_rotation -= std::f32::consts::FRAC_PI_2;
+        }
+        
+        // Scroll zoom
+        let zoom_in = input.value(GameAction::CameraZoomIn);
+        let zoom_out = input.value(GameAction::CameraZoomOut);
+        let scroll = zoom_in - zoom_out;
+        if scroll.abs() > f32::EPSILON {
+            self.zoom = (self.zoom - scroll * cam_params.scroll_speed)
+                .clamp(cam_params.zoom_min, cam_params.zoom_max);
+        }
+        
         // Exponentially smooth the render position toward the logical target.
         // alpha approaches 1 as dt grows, clamped so it never overshoots.
         let alpha = (self.smooth_speed * dt).exp().recip().mul_add(-1.0, 1.0).clamp(0.0, 1.0);

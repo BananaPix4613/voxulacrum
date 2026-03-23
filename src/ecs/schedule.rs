@@ -1,5 +1,6 @@
 use bevy_ecs::schedule::{Schedule, SystemSet, IntoScheduleConfigs};
 use crate::ecs::systems;
+use crate::input;
 
 /// Frame execution stages, run in order each frame.
 ///
@@ -34,6 +35,8 @@ pub fn build_frame_schedule() -> Schedule {
 
     // Input
     schedule.add_systems((
+        input::process_input_system.in_set(FrameStage::Input),
+        input::toggle_ui_system.in_set(FrameStage::Input),
         systems::frame_counter_system.in_set(FrameStage::Input),
         systems::shader_hot_reload_system.in_set(FrameStage::Input),
     ));

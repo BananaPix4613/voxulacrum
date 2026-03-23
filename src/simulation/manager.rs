@@ -3,6 +3,7 @@ use glam::Mat4;
 use bevy_ecs::prelude::Resource;
 
 use crate::camera::{self, IsometricCamera, SnappedCamera};
+use crate::input::InputState;
 use crate::cloud_shadow::CloudShadowState;
 use crate::params::EngineParams;
 use crate::rendering::frustum::Frustum;
@@ -62,7 +63,7 @@ impl SimulationManager {
     }
 
     /// Advance all simulation systems by one frame.
-    pub fn tick(&mut self, params: &EngineParams, rt: &RenderTargets) -> FrameState {
+    pub fn tick(&mut self, params: &EngineParams, rt: &RenderTargets, input: &InputState) -> FrameState {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -70,7 +71,7 @@ impl SimulationManager {
 
         // Camera
         self.camera.apply_params(&params.camera);
-        self.camera.update(dt);
+        self.camera.update(dt, input, &params.camera);
 
         let snapped = if params.render_pipeline.camera_snap_enabled {
             self.camera.snap_camera(
