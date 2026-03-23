@@ -1,0 +1,65 @@
+use bevy_ecs::schedule::{Schedule, SystemSet, IntoScheduleConfigs};
+use crate::ecs::systems;
+
+/// Frame execution stages, run in order each frame.
+///
+/// Input -> Simulation -> Meshing -> UniformWrite -> Render -> PostFrame
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FrameStage {
+    /// Frame counter, shader hot-reload, window resize, input forwarding.
+    Input,
+    /// Camera, time-of-day, wind, frustum, param change detection.
+    Simulation,
+    /// Poll meshing workers, upload completed meshes.
+    Meshing,
+    /// Write uniform buffers to GPU, compute stats.
+    UniformWrite,
+    /// Acquire swapchain, build/execute render graph, egui, present.
+    Render,
+    /// World regen polling.
+    PostFrame,
+}
+
+/// Build the frame schedule with stage ordering configured.
+pub fn build_frame_schedule() -> Schedule {
+    let mut schedule = Schedule::default();
+    schedule.configure_sets((
+        FrameStage::Input,
+        FrameStage::Simulation.after(FrameStage::Input),
+        FrameStage::Meshing.after(FrameStage::Simulation),
+        FrameStage::UniformWrite.after(FrameStage::Meshing),
+        FrameStage::Render.after(FrameStage::UniformWrite),
+        FrameStage::PostFrame.after(FrameStage::Render),
+    ));
+
+    // Input
+    schedule.add_systems((
+        systems::frame_counter_system.in_set(FrameStage::Input),
+        systems::shader_hot_reload_system.in_set(FrameStage::Input),
+    ));
+    // Simulation
+    schedule.add_systems((
+        systems::simulation_tick_system.in_set(FrameStage::Simulation),
+        systems::param_change_detection_system.in_set(FrameStage::Simulation),
+        systems::palette_load_system.in_set(FrameStage::Simulation),
+    ));
+    // Meshing
+    schedule.add_systems(
+        systems::meshing_tick_system.in_set(FrameStage::Meshing),
+    );
+    // UniformWrite
+    schedule.add_systems((
+        systems::write_uniforms_system.in_set(FrameStage::UniformWrite),
+        systems::compute_stats_system.in_set(FrameStage::UniformWrite),
+    ));
+    // Render
+    schedule.add_systems(
+        systems::render_present_system.in_set(FrameStage::Render),
+    );
+    // PostFrame
+    schedule.add_systems(
+        systems::world_regen_system.in_set(FrameStage::PostFrame),
+    );
+
+    schedule
+}

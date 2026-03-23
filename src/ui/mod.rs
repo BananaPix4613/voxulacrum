@@ -2,6 +2,8 @@ pub mod panels;
 
 use egui_wgpu::ScreenDescriptor;
 
+use crate::rendering::render_context::RenderContext;
+
 pub struct EguiRenderer {
     pub ctx: egui::Context,
     pub winit_state: egui_winit::State,
@@ -11,24 +13,23 @@ pub struct EguiRenderer {
 
 impl EguiRenderer {
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        render_ctx: &RenderContext,
         window: &winit::window::Window,
     ) -> Self {
         let ctx = egui::Context::default();
-        
+
         let winit_state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,
             window,
             Some(window.scale_factor() as f32),
             None,
-            Some(device.limits().max_texture_dimension_2d as usize),
+            Some(render_ctx.device.limits().max_texture_dimension_2d as usize),
         );
-        
+
         let renderer = egui_wgpu::Renderer::new(
-            device,
-            surface_format,
+            &render_ctx.device,
+            render_ctx.surface_format,
             None,
             1,
             false,
@@ -60,8 +61,7 @@ impl EguiRenderer {
     pub fn draw(
         &mut self,
         ui_state: &mut panels::UiState,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        ctx: &RenderContext,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
         window: &winit::window::Window,
@@ -89,11 +89,11 @@ impl EguiRenderer {
             .tessellate(full_output.shapes, full_output.pixels_per_point);
         
         for (id, image_delta) in &full_output.textures_delta.set {
-            self.renderer.update_texture(device, queue, *id, image_delta);
+            self.renderer.update_texture(&ctx.device, &ctx.queue, *id, image_delta);
         }
-        
+
         self.renderer
-            .update_buffers(device, queue, encoder, &tris, &screen_descriptor);
+            .update_buffers(&ctx.device, &ctx.queue, encoder, &tris, &screen_descriptor);
 
         {
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

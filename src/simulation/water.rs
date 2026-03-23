@@ -1,3 +1,5 @@
+use bevy_ecs::prelude::Resource;
+
 use crate::params::{WaterVisualParams, TerrainGenParams};
 use crate::world::World;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
@@ -5,6 +7,7 @@ use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 const WORLD_WIDTH: usize = 8 * CHUNK_SIZE;
 const WORLD_DEPTH: usize = 8 * CHUNK_SIZE;
 
+#[derive(Resource)]
 pub struct StaticWater {
     terrain_heights: Vec<f32>,
     water_level_value: f32,

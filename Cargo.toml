@@ -23,3 +23,4 @@ num_cpus = "1"
 bincode = "1"
 seahash = "4"
 rayon = "1"
+bevy_ecs = { version = "0.16", default-features = false }

@@ -1,5 +1,6 @@
 mod camera;
 mod cloud_shadow;
+mod ecs;
 mod meshing;
 mod params;
 mod rendering;
@@ -11,25 +12,18 @@ mod palette;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use glam::IVec3;
+use bevy_ecs::prelude::*;
+use bevy_ecs::event::Events;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use rendering::render_graph::{RenderGraph, ResourceId, ResourceMap};
-use rendering::shadow_pass::ShadowPassNode;
-use rendering::main_scene_pass::{MainScenePassNode, CapConfig};
-use simulation::manager::SimulationManager;
-use meshing::coordinator::MeshingCoordinator;
-use world::regen::WorldRegenCoordinator;
-use camera::IsometricCamera;
-use cloud_shadow::CloudShadowState;
-use params::{EngineParams};
-use rendering::gpu_state::GpuState;
-use rendering::pipelines::{PipelineRegistry, PipelineResources};
 use rendering::render_targets::RenderTargets;
+use rendering::render_context::RenderContext;
+use rendering::surface_state::SurfaceState;
+use rendering::pipelines::{PipelineRegistry, PipelineResources};
 use rendering::uniforms::{self, GlobalUniforms, ShadowUniforms};
 use rendering::debug_lines::DebugLinePass;
 use rendering::upscale_pass::UpscalePass;
@@ -39,18 +33,33 @@ use rendering::post_process::PostProcessPass;
 use rendering::outline_pass::OutlinePass;
 use rendering::palette_pass::PalettePass;
 use rendering::cap_pass::CapPass;
-use palette::Palette;
 use shader_reload::ShaderWatcher;
+use simulation::manager::SimulationManager;
 use simulation::water::StaticWater;
-use ui::panels::UiState;
+use meshing::coordinator::MeshingCoordinator;
 use meshing::MeshingPipeline;
+use world::regen::WorldRegenCoordinator;
+use camera::IsometricCamera;
+use cloud_shadow::CloudShadowState;
+use params::EngineParams;
+use ui::panels::UiState;
+
+use ecs::resources::*;
+use ecs::events::*;
+use ecs::schedule::{FrameStage, build_frame_schedule};
+use ecs::systems;
 
 const SHADOW_MAP_SIZE: u32 = 4096;
 
-struct FrameCounter {
+// ---------------------------------------------------------------------------
+// FrameCounter
+// ---------------------------------------------------------------------------
+
+#[derive(Resource)]
+pub struct FrameCounter {
     last_second: std::time::Instant,
     frames_this_second: u32,
-    fps: f32,
+    pub fps: f32,
 }
 
 impl FrameCounter {
@@ -62,7 +71,7 @@ impl FrameCounter {
         }
     }
 
-    fn tick(&mut self) {
+    pub fn tick(&mut self) {
         self.frames_this_second += 1;
         if self.last_second.elapsed().as_secs_f32() >= 1.0 {
             self.fps = self.frames_this_second as f32;
@@ -72,781 +81,423 @@ impl FrameCounter {
     }
 }
 
-struct AppState {
-    window: Arc<Window>,
-    gpu: GpuState,
-    simulation: SimulationManager,
-    pipeline_registry: PipelineRegistry,
-    pipeline_resources: PipelineResources,
-    render_targets: RenderTargets,
-    uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
-    shadow_uniform_buffer: wgpu::Buffer,
-    shadow_bind_group: wgpu::BindGroup,
-    shadow_depth_view: wgpu::TextureView,
-    world: world::World,
-    debug_line_pass: DebugLinePass,
-    upscale_pass: UpscalePass,
-    vegetation_pass: VegetationPass,
-    static_water: StaticWater,
-    water_pass: WaterPass,
-    post_process: PostProcessPass,
-    outline_pass: OutlinePass,
-    palette_pass: PalettePass,
-    loaded_palette: Option<Palette>,
-    egui_renderer: ui::EguiRenderer,
-    ui_state: UiState,
-    frame_counter: FrameCounter,
-    shader_watcher: ShaderWatcher,
-    shader_dir: PathBuf,
-    meshing: MeshingCoordinator,
-    world_regen: WorldRegenCoordinator,
-    cap_pass: CapPass,
-}
+// ---------------------------------------------------------------------------
+// compute_render_dimensions
+// ---------------------------------------------------------------------------
 
-impl AppState {
-    fn new(window: Arc<Window>) -> Self {
-        let gpu = GpuState::new(window.clone());
-
-        // Initialize params (try loading saved, fall back to defaults)
-        let presets_dir = PathBuf::from("params");
-        let initial_params = EngineParams::load(&presets_dir.join("default.json"))
-            .unwrap_or_default();
-
-        let mut camera = IsometricCamera::new(&initial_params.camera);
-        camera.resize(gpu.surface_config.width, gpu.surface_config.height);
-
-        // Low-res render targets
-        let (rw, rh, eff_scale) = compute_render_dimensions(
-            gpu.surface_config.width, gpu.surface_config.height,
-            camera.zoom, initial_params.render_pipeline.world_pixel_density,
-        );
-        let render_targets = RenderTargets::new(
-            &gpu.device, rw, rh, eff_scale, gpu.surface_format,
-        );
-
-        // Shadow map
-        let shadow_depth_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow_depth_texture"),
-            size: wgpu::Extent3d {
-                width: SHADOW_MAP_SIZE,
-                height: SHADOW_MAP_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let shadow_depth_view =
-            shadow_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let shadow_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("shadow_comparison_sampler"),
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let global_bind_group_layout = uniforms::create_bind_group_layout(&gpu.device);
-
-        let uniform_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("global_uniform_buffer"),
-            size: size_of::<GlobalUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let cloud_shadow = CloudShadowState::new(&gpu.device, &gpu.queue, &initial_params.cloud);
-
-        let uniform_bind_group = uniforms::create_bind_group(
-            &gpu.device,
-            &global_bind_group_layout,
-            &uniform_buffer,
-            &cloud_shadow.texture_view,
-            &cloud_shadow.sampler,
-            &shadow_depth_view,
-            &shadow_sampler,
-        );
-        
-        // Simulation manager
-        let simulation = SimulationManager::new(camera, cloud_shadow);
-
-        let shadow_bind_group_layout = uniforms::create_shadow_bind_group_layout(&gpu.device);
-        let shadow_uniform_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("shadow_uniform_buffer"),
-            size: size_of::<ShadowUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let shadow_bind_group = uniforms::create_shadow_bind_group(
-            &gpu.device, &shadow_bind_group_layout, &shadow_uniform_buffer,
-        );
-
-        // Shader directory and watcher
-        let shader_dir = PathBuf::from("shaders");
-        let shader_watcher = ShaderWatcher::new(&shader_dir);
-
-        // Pipeline resources for hot-reloading
-        let post_process_bind_group_layout =
-            uniforms::create_post_process_bind_group_layout(&gpu.device);
-
-        let pipeline_resources = PipelineResources {
-            surface_format: gpu.surface_format,
-            global_bind_group_layout,
-            shadow_bind_group_layout,
-            post_process_bind_group_layout,
-        };
-
-        // Pipeline registry loads shaders from disk
-        let pipeline_registry = PipelineRegistry::new(
-            &gpu.device,
-            &pipeline_resources,
-            &shader_dir,
-        );
-
-        let debug_lines_source = std::fs::read_to_string(shader_dir.join("debug_lines.wgsl"))
-            .expect("Failed to read debug_lines.wgsl");
-        let debug_line_pass = DebugLinePass::new(
-            &gpu.device,
-            gpu.surface_format,
-            &pipeline_resources.global_bind_group_layout,
-            &debug_lines_source,
-        );
-
-        let cap_source = std::fs::read_to_string(shader_dir.join("cap.wgsl"))
-            .expect("Failed to read cap.wgsl");
-        let cap_pass = CapPass::new(
-            &gpu.device,
-            gpu.surface_format,
-            &pipeline_resources.global_bind_group_layout,
-            &cap_source,
-        );
-
-        // Generate or load world using params
-        let gen_start = std::time::Instant::now();
-        let cache_dir = PathBuf::from("cache/meshes");
-        let world_key = meshing::cache::compute_world_cache_key(&initial_params.terrain_gen);
-        let world_cache_path = meshing::cache::world_cache_path(&cache_dir, world_key);
-
-        let world = if let Some(chunks) = meshing::cache::load_world_cache(&world_cache_path, world_key) {
-            log::info!("Loaded world from cache in {:.2?} ({} chunks)", gen_start.elapsed(), chunks.len());
-            world::World::from_cached_chunks(chunks, &initial_params.terrain_gen)
-        } else {
-            let w = world::World::generate(&initial_params.terrain_gen);
-            log::info!("World generated in {:.2?}", gen_start.elapsed());
-            // Save to cache for next launch
-            if let Err(e) = meshing::cache::save_world_cache(&world_cache_path, world_key, &w) {
-                log::warn!("Failed to save world cache: {}", e);
-            } else {
-                log::info!("World saved to cache");
-            }
-            w
-        };
-        world.print_debug_stats();
-
-        // Vegetation
-        let veg_start = std::time::Instant::now();
-        let vegetation_pass = VegetationPass::new(&gpu.device, &world, &initial_params.vegetation);
-        log::info!("Vegetation pass in {:.2?}", veg_start.elapsed());
-
-        // Water
-        let static_water = StaticWater::new(&world, &initial_params.water, &initial_params.terrain_gen);
-        let water_pass = WaterPass::new(&gpu.device, &static_water);
-        log::info!("Water simulation initialized");
-
-        // Post-processing (load shader from disk)
-        let pp_shader_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
-            .expect("Failed to read post_process.wgsl");
-        let post_process = PostProcessPass::new(
-            &gpu.device, gpu.surface_format, &render_targets.processed_view,
-            &render_targets.depth_view, &pp_shader_source,
-        );
-
-        // Outline pass
-        let outline_shader_source = std::fs::read_to_string(shader_dir.join("outline.wgsl"))
-            .expect("Failed to read outline.wgsl");
-        let outline_pass = OutlinePass::new(
-            &gpu.device,
-            gpu.surface_format,
-            &render_targets.scene_view,
-            &render_targets.depth_view,
-            &render_targets.normal_view,
-            &outline_shader_source,
-        );
-
-        // Palette quantization pass
-        let palette_shader_source = std::fs::read_to_string(shader_dir.join("palette.wgsl"))
-            .expect("Failed to read palette.wgsl");
-        let palette_pass = PalettePass::new(
-            &gpu.device, gpu.surface_format, &render_targets.scene_view, &palette_shader_source,
-        );
-
-        // Upscaling
-        let upscale_shader_source = std::fs::read_to_string(shader_dir.join("upscale.wgsl"))
-            .expect("Failed to read upscale.wgsl");
-        let upscale_pass = UpscalePass::new(
-            &gpu.device,
-            gpu.surface_format,
-            &render_targets.processed_view,
-            &upscale_shader_source,
-        );
-
-        // Egui
-        let egui_renderer = ui::EguiRenderer::new(&gpu.device, gpu.surface_format, &window);
-        let ui_state = UiState::new(initial_params, presets_dir);
-
-        let mut meshing_pipeline = MeshingPipeline::new(
-            world.chunks_x, world.chunks_y, world.chunks_z,
-            &ui_state.params.materials, &ui_state.params.meshing,
-        );
-        meshing_pipeline.submit_all_dirty(&world);
-        let meshing = MeshingCoordinator::new(meshing_pipeline);
-
-        Self {
-            window,
-            gpu,
-            simulation,
-            pipeline_registry,
-            pipeline_resources,
-            render_targets,
-            uniform_buffer,
-            uniform_bind_group,
-            shadow_uniform_buffer,
-            shadow_bind_group,
-            shadow_depth_view,
-            world,
-            debug_line_pass,
-            upscale_pass,
-            vegetation_pass,
-            static_water,
-            water_pass,
-            post_process,
-            outline_pass,
-            palette_pass,
-            loaded_palette: None,
-            egui_renderer,
-            ui_state,
-            frame_counter: FrameCounter::new(),
-            shader_watcher,
-            shader_dir,
-            meshing,
-            world_regen: WorldRegenCoordinator::new(),
-            cap_pass,
-        }
-    }
-
-    fn check_shader_hot_reload(&mut self) {
-        let changed = self.shader_watcher.poll_changes();
-        for path in changed {
-            let filename = match path.file_name().and_then(|f| f.to_str()) {
-                Some(f) => f.to_string(),
-                None => continue,
-            };
-
-            // Handle post_process.wgsl separately since its pipeline lives in PostProcessPass
-            if filename == "post_process.wgsl" {
-                match std::fs::read_to_string(&path) {
-                    Ok(source) => {
-                        match self.post_process.try_reload_shader(
-                            &self.gpu.device,
-                            self.gpu.surface_format,
-                            &source,
-                        ) {
-                            Ok(()) => {
-                                log::info!("Reloaded post_process.wgsl");
-                                self.ui_state.push_shader_log(
-                                    "post_process.wgsl reloaded".to_string(),
-                                    false,
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!("post_process.wgsl compile error: {}", e);
-                                self.ui_state.push_shader_log(
-                                    format!("post_process.wgsl: {}", e),
-                                    true,
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to read post_process.wgsl: {}", e);
-                        self.ui_state.push_shader_log(
-                            format!("post_process.wgsl read error: {}", e),
-                            true,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // Handle outline.wgsl separately since its pipeline lives in OutlinePass
-            if filename == "outline.wgsl" {
-                match std::fs::read_to_string(&path) {
-                    Ok(source) => {
-                        match self.outline_pass.try_reload_shader(
-                            &self.gpu.device,
-                            self.gpu.surface_format,
-                            &source,
-                        ) {
-                            Ok(()) => {
-                                log::info!("Reloaded outline.wgsl");
-                                self.ui_state.push_shader_log(
-                                    "outline.wgsl reloaded".to_string(),
-                                    false,
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!("outline.wgsl compile error: {}", e);
-                                self.ui_state.push_shader_log(
-                                    format!("outline.wgsl: {}", e),
-                                    true,
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to read outline.wgsl: {}", e);
-                        self.ui_state.push_shader_log(
-                            format!("outline.wgsl read error: {}", e),
-                            true,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // Handle palette.wgsl separately since its pipeline lives in PalettePass
-            if filename == "palette.wgsl" {
-                match std::fs::read_to_string(&path) {
-                    Ok(source) => {
-                        match self.palette_pass.try_reload_shader(
-                            &self.gpu.device,
-                            self.gpu.surface_format,
-                            &source,
-                        ) {
-                            Ok(()) => {
-                                log::info!("Reloaded palette.wgsl");
-                                self.ui_state.push_shader_log(
-                                    "palette.wgsl reloaded".to_string(),
-                                    false,
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!("palette.wgsl compile error: {}", e);
-                                self.ui_state.push_shader_log(
-                                    format!("palette.wgsl: {}", e),
-                                    true,
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to read palette.wgsl: {}", e);
-                        self.ui_state.push_shader_log(
-                            format!("palette.wgsl read error: {}", e),
-                            true,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // Handle cap.wgsl separately since its pipeline lives in CapPass
-            if filename == "cap.wgsl" {
-                match std::fs::read_to_string(&path) {
-                    Ok(source) => {
-                        match self.cap_pass.try_reload_shader(
-                            &self.gpu.device,
-                            self.gpu.surface_format,
-                            &self.pipeline_resources.global_bind_group_layout,
-                            &source,
-                        ) {
-                            Ok(()) => {
-                                log::info!("Reloaded cap.wgsl");
-                                self.ui_state.push_shader_log(
-                                    "cap.wgsl reloaded".to_string(),
-                                    false,
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!("cap.wgsl compile error: {}", e);
-                                self.ui_state.push_shader_log(
-                                    format!("cap.wgsl: {}", e),
-                                    true,
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to read cap.wgsl: {}", e);
-                        self.ui_state.push_shader_log(
-                            format!("cap.wgsl read error: {}", e),
-                            true,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // All other shaders go through the pipeline registry
-            if let Some(result) = self.pipeline_registry.try_reload(
-                &self.gpu.device,
-                &self.pipeline_resources,
-                &path,
-            ) {
-                if result.success {
-                    log::info!("Reloaded {}", result.filename);
-                } else {
-                    log::warn!("{}: {}", result.filename, result.message);
-                }
-                self.ui_state.push_shader_log(
-                    format!("{}: {}", result.filename, result.message),
-                    !result.success,
-                );
-            }
-        }
-    }
-
-    fn render(&mut self) {
-        // Frame stats
-        self.frame_counter.tick();
-        self.ui_state.fps = self.frame_counter.fps;
-
-        // Shader hot-reload
-        self.check_shader_hot_reload();
-
-        // Render target resize check
-        let (rw, rh, eff_scale) = compute_render_dimensions(
-            self.gpu.surface_config.width,
-            self.gpu.surface_config.height,
-            self.simulation.camera.zoom,
-            self.ui_state.params.render_pipeline.world_pixel_density,
-        );
-        if self.render_targets.needs_recreate(rw, rh) {
-            self.render_targets = RenderTargets::new(
-                &self.gpu.device, rw, rh, eff_scale, self.gpu.surface_format,
-            );
-            self.outline_pass.rebuild_bind_group(
-                &self.gpu.device,
-                &self.render_targets.scene_view,
-                &self.render_targets.depth_view,
-                &self.render_targets.normal_view,
-            );
-            self.post_process.rebuild_bind_group(
-                &self.gpu.device,
-                &self.render_targets.processed_view,
-                &self.render_targets.depth_view,
-            );
-            self.palette_pass.rebuild_bind_group(
-                &self.gpu.device,
-                &self.render_targets.scene_view
-            );
-            self.upscale_pass.rebuild_bind_group(
-                &self.gpu.device,
-                &self.render_targets.processed_view
-            );
-        }
-
-        // Meshing tick
-        self.meshing.tick(&mut self.world, &self.gpu.device, &mut self.ui_state);
-
-        // Palette load request
-        if self.ui_state.palette_load_requested {
-            self.ui_state.palette_load_requested = false;
-            let name = &self.ui_state.params.palette.selected_palette;
-            if !name.is_empty() {
-                let path = PathBuf::from("palettes").join(format!("{}.json", name));
-                match palette::load_palette(&path) {
-                    Ok(pal) => {
-                        log::info!("Loaded palette: {}", pal.name);
-                        self.ui_state.loaded_palette_preview = pal.colors_srgb.clone();
-                        self.loaded_palette = Some(pal);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to load palette {}: {}", name, e);
-                        self.loaded_palette = None;
-                        self.ui_state.loaded_palette_preview.clear();
-                    }
-                }
-            } else {
-                self.loaded_palette = None;
-                self.ui_state.loaded_palette_preview.clear();
-            }
-        }
-
-        // Simulation tick
-        let frame = self.simulation.tick(&self.ui_state.params, &self.render_targets);
-        self.ui_state.frame_time_ms = frame.dt * 1000.0;
-
-        // Param change detection
-        let change_kind = self.ui_state.change_detector.detect(&self.ui_state.params);
-        if change_kind == params::ParamChangeKind::MeshInvalidating {
-            self.ui_state.mesh_params_pending = true;
-        }
-        self.ui_state.change_detector.snapshot(&self.ui_state.params);
-
-        // Write all uniform buffers
-        rendering::uniform_writer::write_all_uniforms(
-            &self.gpu.queue,
-            &frame,
-            &self.ui_state.params,
-            &self.uniform_buffer,
-            &self.shadow_uniform_buffer,
-            &self.post_process,
-            &self.outline_pass,
-            &self.palette_pass,
-            &self.upscale_pass,
-            &self.render_targets,
-            &self.loaded_palette,
-            self.gpu.surface_config.width,
-            self.gpu.surface_config.height,
-        );
-
-        // Performance stats
-        let mut total_tris: u64 = 0;
-        let mut chunks_visible: u32 = 0;
-        let mut chunks_total: u32 = 0;
-        for chunk in &self.world.chunks {
-            if chunk.mesh.is_some() {
-                chunks_total += 1;
-                if self.simulation.frustum.is_chunk_visible(chunk.position) {
-                    chunks_visible += 1;
-                    total_tris += chunk.mesh.as_ref().unwrap().index_count as u64 / 3;
-                }
-            }
-        }
-        self.ui_state.total_triangles = total_tris;
-        self.ui_state.chunks_visible = chunks_visible;
-        self.ui_state.chunks_total = chunks_total;
-
-        // Acquire swapchain
-        let surface_frame = match self.gpu.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                let size = self.window.inner_size();
-                self.gpu.resize(size.width, size.height);
-                let (rw, rh, eff_scale) = compute_render_dimensions(
-                    size.width, size.height,
-                    self.simulation.camera.zoom,
-                    self.ui_state.params.render_pipeline.world_pixel_density,
-                );
-                self.render_targets = RenderTargets::new(
-                    &self.gpu.device, rw, rh, eff_scale, self.gpu.surface_format,
-                );
-                self.outline_pass.rebuild_bind_group(
-                    &self.gpu.device,
-                    &self.render_targets.scene_view,
-                    &self.render_targets.depth_view,
-                    &self.render_targets.normal_view,
-                );
-                self.post_process.rebuild_bind_group(
-                    &self.gpu.device,
-                    &self.render_targets.processed_view,
-                    &self.render_targets.depth_view,
-                );
-                self.palette_pass.rebuild_bind_group(
-                    &self.gpu.device,
-                    &self.render_targets.scene_view
-                );
-                self.upscale_pass.rebuild_bind_group(
-                    &self.gpu.device,
-                    &self.render_targets.processed_view,
-                );
-                return;
-            }
-            Err(wgpu::SurfaceError::Timeout) => {
-                log::warn!("Surface timeout");
-                return;
-            }
-            Err(e) => {
-                log::error!("Surface error: {:?}", e);
-                return;
-            }
-        };
-
-        let surface_view = surface_frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Pre-pass: update debug lines and cap mesh (need mutable access before graph)
-        if self.ui_state.params.debug.show_chunk_boundaries {
-            let chunk_positions: Vec<IVec3> =
-                self.world.chunks.iter().map(|c| c.position).collect();
-            self.debug_line_pass.update(
-                &self.gpu.device,
-                &chunk_positions,
-                &self.simulation.frustum,
-            );
-        }
-
-        let cap_enabled = self.ui_state.params.cross_section.enabled
-            && frame.clip_enabled != 0;
-        if cap_enabled {
-            let clip_dirs: [f32; 3] = [
-                if frame.cos_r >= 0.0 { 1.0 } else { -1.0 },
-                1.0,
-                if frame.sin_r >= 0.0 { 1.0 } else { -1.0 },
-            ];
-            let clip_pos = [
-                if clip_dirs[0] > 0.0 { frame.clip_max[0] } else { frame.clip_min[0] },
-                frame.clip_max[1],
-                if clip_dirs[2] > 0.0 { frame.clip_max[2] } else { frame.clip_min[2] },
-            ];
-            self.cap_pass.maybe_rebuild(
-                &self.gpu.device,
-                &self.world,
-                &self.ui_state.params.cross_section,
-                clip_pos,
-                clip_dirs,
-            );
-        }
-
-        // Build transient pass nodes
-        let terrain_pipeline = if self.ui_state.params.debug.show_wireframe {
-            &self.pipeline_registry.terrain_wireframe_pipeline
-        } else {
-            &self.pipeline_registry.terrain_pipeline
-        };
-
-        let shadow_node = ShadowPassNode {
-            pipeline: &self.pipeline_registry.shadow_pipeline,
-            bind_group: &self.shadow_bind_group,
-            shadow_depth_view: &self.shadow_depth_view,
-            chunks: &self.world.chunks,
-        };
-
-        let sky = self.ui_state.params.render_pipeline.sky_color;
-        let scene_node = MainScenePassNode {
-            sky_color: wgpu::Color {
-                r: sky[0] as f64,
-                g: sky[1] as f64,
-                b: sky[2] as f64,
-                a: 1.0,
-            },
-            terrain_pipeline,
-            uniform_bind_group: &self.uniform_bind_group,
-            chunks: &self.world.chunks,
-            frustum: &self.simulation.frustum,
-            cap_pass: &self.cap_pass,
-            cap_config: CapConfig {
-                enabled: cap_enabled,
-                clip_dirs: [
-                    if frame.cos_r >= 0.0 { 1.0 } else { -1.0 },
-                    1.0,
-                    if frame.sin_r >= 0.0 { 1.0 } else { -1.0 },
-                ],
-                clip_pos: [0.0; 3], // not needed — cap_pass already rebuilt above
-            },
-            vegetation_pass: &self.vegetation_pass,
-            vegetation_pipeline: &self.pipeline_registry.vegetation_pipeline,
-            water_pass: &self.water_pass,
-            water_pipeline: &self.pipeline_registry.water_pipeline,
-            debug_line_pass: &self.debug_line_pass,
-            show_debug_lines: self.ui_state.params.debug.show_chunk_boundaries,
-        };
-
-        // Build render graph
-        let mut graph = RenderGraph::new();
-        graph.add_pass(&shadow_node);
-        graph.add_pass(&scene_node);
-        graph.add_pass(&self.outline_pass);
-        graph.add_pass(&self.post_process);
-        graph.add_pass(&self.palette_pass);
-        graph.add_pass(&self.upscale_pass);
-
-        #[cfg(debug_assertions)]
-        graph
-            .validate(&[
-                ResourceId::SHADOW_DEPTH,
-                ResourceId::SCENE,
-                ResourceId::NORMAL,
-                ResourceId::DEPTH,
-                ResourceId::PROCESSED,
-                ResourceId::SURFACE,
-            ])
-            .unwrap();
-
-        // Resource map
-        let mut resources = ResourceMap::new();
-        resources.insert(ResourceId::SCENE, &self.render_targets.scene_view);
-        resources.insert(ResourceId::NORMAL, &self.render_targets.normal_view);
-        resources.insert(ResourceId::DEPTH, &self.render_targets.depth_view);
-        resources.insert(ResourceId::PROCESSED, &self.render_targets.processed_view);
-        resources.insert(ResourceId::SHADOW_DEPTH, &self.shadow_depth_view);
-        resources.insert(ResourceId::SURFACE, &surface_view);
-
-        // Execute graph
-        let mut encoder = self.gpu.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
-                label: Some("render_encoder"),
-            },
-        );
-        graph.execute(&mut encoder, &resources);
-
-        // Egui (outside graph - needs &mut self for tessellation)
-        self.egui_renderer.draw(
-            &mut self.ui_state,
-            &self.gpu.device,
-            &self.gpu.queue,
-            &mut encoder,
-            &surface_view,
-            &self.window,
-        );
-
-        // Submit + present
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
-        surface_frame.present();
-
-        // World regeneration
-        self.world_regen.tick(
-            &mut self.world,
-            &mut self.meshing,
-            &mut self.vegetation_pass,
-            &mut self.water_pass,
-            &mut self.static_water,
-            &mut self.ui_state,
-            &self.gpu.device,
-        );
-    }
-}
-
-fn compute_render_dimensions(
-    window_width: u32,
-    window_height: u32,
+pub fn compute_render_dimensions(
+    surface_w: u32,
+    surface_h: u32,
     zoom: f32,
-    target_voxel_pixels: f32,
+    world_pixel_density: f32,
 ) -> (u32, u32, f32) {
-    let wh = window_height.max(1) as f32;
-    let ww = window_width.max(1) as f32;
-    // Each voxel covers (wh / 2*zoom) screen pixels.
-    // We want that to equal target_voxel_pixels, so:
-    //   pixel_scale = (wh / (2*zoom)) / target_voxel_pixels
-    //
-    // Round to the nearest integer so every render texel maps to exactly N
-    // window pixels. A noninteger scale causes some texels to cover 1 pixel
-    // and others 2 (or N and N+1 at higher scales), and the assignment shifts
-    // as the sub-pixel offset changes during camera movement — producing the
-    // "2 2 1 2 → 1 2 2 2" pattern-change artifact.  Integer pixel_scale
-    // guarantees a uniform upscale grid that is invariant to the sub-pixel
-    // offset, so patterns never change between frames.
-    let ideal = (wh / (2.0 * zoom) / target_voxel_pixels).max(1.0);
-    let pixel_scale = ideal.round().max(1.0);
-    let render_w = ((ww / pixel_scale).floor() as u32).max(1);
-    let render_h = ((wh / pixel_scale).floor() as u32).max(1);
-    (render_w, render_h, pixel_scale)
+    let base_scale = (surface_h as f32 / (zoom * 2.0)) / world_pixel_density;
+    let scale = base_scale.max(1.0).round();
+    let rw = ((surface_w as f32 / scale).ceil() as u32).max(1);
+    let rh = ((surface_h as f32 / scale).ceil() as u32).max(1);
+    (rw, rh, scale)
 }
+
+// ---------------------------------------------------------------------------
+// ECS initialization
+// ---------------------------------------------------------------------------
+
+fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
+    let mut ecs = bevy_ecs::world::World::new();
+
+    // --- wgpu initialization ---
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    let surface = instance
+        .create_surface(window.clone())
+        .expect("Failed to create surface");
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+    }))
+    .expect("No suitable GPU adapter found");
+
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("voxulacrum_device"),
+            required_features: wgpu::Features::POLYGON_MODE_LINE,
+            required_limits: wgpu::Limits::default(),
+            memory_hints: Default::default(),
+            trace: wgpu::Trace::Off,
+        },
+    ))
+    .expect("Failed to request device");
+
+    let size = window.inner_size();
+    let surface_caps = surface.get_capabilities(&adapter);
+    let surface_format = surface_caps
+        .formats
+        .iter()
+        .find(|f| f.is_srgb())
+        .copied()
+        .unwrap_or(surface_caps.formats[0]);
+
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: surface_format,
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode: wgpu::PresentMode::Fifo,
+        alpha_mode: surface_caps.alpha_modes[0],
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    };
+    surface.configure(&device, &surface_config);
+
+    let ctx = RenderContext {
+        device,
+        queue,
+        surface_format,
+    };
+
+    let surface_state = SurfaceState {
+        surface,
+        surface_config,
+    };
+
+    // Params
+    let presets_dir = PathBuf::from("params");
+    let initial_params = EngineParams::load(&presets_dir.join("default.json"))
+        .unwrap_or_default();
+
+    let mut camera = IsometricCamera::new(&initial_params.camera);
+    camera.resize(surface_state.surface_config.width, surface_state.surface_config.height);
+
+    // Render targets
+    let (rw, rh, eff_scale) = compute_render_dimensions(
+        surface_state.surface_config.width,
+        surface_state.surface_config.height,
+        camera.zoom,
+        initial_params.render_pipeline.world_pixel_density,
+    );
+    let render_targets = RenderTargets::new(&ctx, rw, rh, eff_scale);
+
+    // Shadow map
+    let shadow_depth_texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow_depth_texture"),
+        size: wgpu::Extent3d {
+            width: SHADOW_MAP_SIZE,
+            height: SHADOW_MAP_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let shadow_depth_view =
+        shadow_depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let shadow_sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("shadow_comparison_sampler"),
+        compare: Some(wgpu::CompareFunction::LessEqual),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    let global_bind_group_layout = uniforms::create_bind_group_layout(&ctx.device);
+
+    let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("global_uniform_buffer"),
+        size: std::mem::size_of::<GlobalUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let cloud_shadow = CloudShadowState::new(&ctx, &initial_params.cloud);
+
+    let uniform_bind_group = uniforms::create_bind_group(
+        &ctx.device,
+        &global_bind_group_layout,
+        &uniform_buffer,
+        &cloud_shadow.texture_view,
+        &cloud_shadow.sampler,
+        &shadow_depth_view,
+        &shadow_sampler,
+    );
+
+    let simulation = SimulationManager::new(camera, cloud_shadow);
+
+    let shadow_bind_group_layout =
+        uniforms::create_shadow_bind_group_layout(&ctx.device);
+    let shadow_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("shadow_uniform_buffer"),
+        size: std::mem::size_of::<ShadowUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let shadow_bind_group = uniforms::create_shadow_bind_group(
+        &ctx.device, &shadow_bind_group_layout, &shadow_uniform_buffer,
+    );
+
+    // Shaders
+    let shader_dir = PathBuf::from("shaders");
+    let shader_watcher = ShaderWatcher::new(&shader_dir);
+
+    let post_process_bind_group_layout =
+        uniforms::create_post_process_bind_group_layout(&ctx.device);
+
+    let pipeline_resources = PipelineResources {
+        surface_format: ctx.surface_format,
+        global_bind_group_layout,
+        shadow_bind_group_layout,
+        post_process_bind_group_layout,
+    };
+
+    let pipeline_registry = PipelineRegistry::new(
+        &ctx, &pipeline_resources, &shader_dir,
+    );
+
+    let debug_lines_source =
+        std::fs::read_to_string(shader_dir.join("debug_lines.wgsl"))
+            .expect("Failed to read debug_lines.wgsl");
+    let debug_line_pass = DebugLinePass::new(
+        &ctx,
+        &pipeline_resources.global_bind_group_layout,
+        &debug_lines_source,
+    );
+
+    let cap_source = std::fs::read_to_string(shader_dir.join("cap.wgsl"))
+        .expect("Failed to read cap.wgsl");
+    let cap_pass = CapPass::new(
+        &ctx,
+        &pipeline_resources.global_bind_group_layout,
+        &cap_source,
+    );
+
+    // World
+    let gen_start = std::time::Instant::now();
+    let cache_dir = PathBuf::from("cache/meshes");
+    let world_key =
+        meshing::cache::compute_world_cache_key(&initial_params.terrain_gen);
+    let world_cache_path =
+        meshing::cache::world_cache_path(&cache_dir, world_key);
+
+    let world = if let Some(chunks) =
+        meshing::cache::load_world_cache(&world_cache_path, world_key)
+    {
+        log::info!(
+            "Loaded world from cache in {:.2?} ({} chunks)",
+            gen_start.elapsed(),
+            chunks.len()
+        );
+        world::World::from_cached_chunks(chunks, &initial_params.terrain_gen)
+    } else {
+        let w = world::World::generate(&initial_params.terrain_gen);
+        log::info!("World generated in {:.2?}", gen_start.elapsed());
+        if let Err(e) =
+            meshing::cache::save_world_cache(&world_cache_path, world_key, &w)
+        {
+            log::warn!("Failed to save world cache: {}", e);
+        } else {
+            log::info!("World saved to cache");
+        }
+        w
+    };
+    world.print_debug_stats();
+
+    // Vegetation + water
+    let vegetation_pass =
+        VegetationPass::new(&ctx, &world, &initial_params.vegetation);
+    let static_water = StaticWater::new(
+        &world, &initial_params.water, &initial_params.terrain_gen,
+    );
+    let water_pass = WaterPass::new(&ctx, &static_water);
+
+    // Post-process pass
+    let pp_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
+        .expect("Failed to read post_process.wgsl");
+    let post_process = PostProcessPass::new(
+        &ctx,
+        &render_targets.processed_view,
+        &render_targets.depth_view,
+        &pp_source,
+    );
+
+    let outline_source =
+        std::fs::read_to_string(shader_dir.join("outline.wgsl"))
+            .expect("Failed to read outline.wgsl");
+    let outline_pass = OutlinePass::new(
+        &ctx,
+        &render_targets.scene_view,
+        &render_targets.depth_view,
+        &render_targets.normal_view,
+        &outline_source,
+    );
+
+    let palette_source =
+        std::fs::read_to_string(shader_dir.join("palette.wgsl"))
+            .expect("Failed to read palette.wgsl");
+    let palette_pass = PalettePass::new(
+        &ctx,
+        &render_targets.scene_view,
+        &palette_source,
+    );
+
+    let upscale_source =
+        std::fs::read_to_string(shader_dir.join("upscale.wgsl"))
+            .expect("Failed to read upscale.wgsl");
+    let upscale_pass = UpscalePass::new(
+        &ctx,
+        &render_targets.processed_view,
+        &upscale_source,
+    );
+
+    // Egui
+    let egui_renderer = ui::EguiRenderer::new(&ctx, &window);
+    let ui_state = UiState::new(initial_params, presets_dir);
+
+    // Meshing
+    let mut meshing_pipeline = MeshingPipeline::new(
+        world.chunks_x,
+        world.chunks_y,
+        world.chunks_z,
+        &ui_state.params.materials,
+        &ui_state.params.meshing,
+    );
+    meshing_pipeline.submit_all_dirty(&world);
+    let meshing = MeshingCoordinator::new(meshing_pipeline);
+
+    // -----------------------------------------------------------------------
+    // Insert all resources into the ECS world
+    // -----------------------------------------------------------------------
+
+    // Newtype wrappers
+    ecs.insert_resource(WindowHandle(window));
+    ecs.insert_resource(GlobalUniformBuffer(uniform_buffer));
+    ecs.insert_resource(GlobalUniformBindGroup(uniform_bind_group));
+    ecs.insert_resource(ShadowUniformBuffer(shadow_uniform_buffer));
+    ecs.insert_resource(ShadowBindGroup(shadow_bind_group));
+    ecs.insert_resource(ShadowDepthView(shadow_depth_view));
+    ecs.insert_resource(ShaderDir(shader_dir));
+    ecs.insert_resource(LoadedPalette(None));
+    ecs.insert_resource(VoxelWorld(world));
+
+    // Direct Resource types
+    ecs.insert_resource(ctx);
+    ecs.insert_resource(surface_state);
+    ecs.insert_resource(simulation);
+    ecs.insert_resource(pipeline_registry);
+    ecs.insert_resource(pipeline_resources);
+    ecs.insert_resource(render_targets);
+    ecs.insert_resource(debug_line_pass);
+    ecs.insert_resource(upscale_pass);
+    ecs.insert_resource(vegetation_pass);
+    ecs.insert_resource(static_water);
+    ecs.insert_resource(water_pass);
+    ecs.insert_resource(post_process);
+    ecs.insert_resource(outline_pass);
+    ecs.insert_resource(palette_pass);
+    ecs.insert_resource(cap_pass);
+    ecs.insert_resource(shader_watcher);
+    ecs.insert_resource(meshing);
+    ecs.insert_resource(WorldRegenCoordinator::new());
+    ecs.insert_resource(ui_state);
+    ecs.insert_resource(FrameCounter::new());
+
+    // EguiRenderer — NonSend because egui_winit::State may be !Send
+    ecs.insert_non_send_resource(egui_renderer);
+
+    // Initialize a default FrameState so systems don't panic on first frame
+    ecs.insert_resource(simulation::manager::FrameState {
+        dt: 0.0,
+        elapsed: 0.0,
+        view_proj: [[0.0; 4]; 4],
+        subpixel_offset: [0.0; 2],
+        light_space: glam::Mat4::IDENTITY,
+        sun_direction: [0.0, 1.0, 0.0],
+        sun_color: [1.0; 3],
+        ambient_color: [0.1; 3],
+        wind_vector: [0.0; 2],
+        cloud_shadow_offset: [0.0; 2],
+        cloud_coverage: 0.0,
+        clip_min: [-10000.0; 3],
+        clip_max: [10000.0; 3],
+        clip_enabled: 0,
+        debug_mode: 0,
+        sky_color: [0.5, 0.7, 1.0],
+        warm_tint_color: [1.0; 3],
+        warm_tint_strength: 0.0,
+        cos_r: 1.0,
+        sin_r: 0.0,
+    });
+
+    // Initialize event queues
+    ecs.init_resource::<Events<RegenerateWorld>>();
+    ecs.init_resource::<Events<RemeshAll>>();
+    ecs.init_resource::<Events<ClearMeshCache>>();
+    ecs.init_resource::<Events<LoadPaletteRequest>>();
+
+    // -----------------------------------------------------------------------
+    // Build the schedule
+    // -----------------------------------------------------------------------
+
+    let mut schedule = build_frame_schedule();
+
+    // Input stage
+    schedule.add_systems((
+        systems::frame_counter_system.in_set(FrameStage::Input),
+        systems::shader_hot_reload_system.in_set(FrameStage::Input),
+    ));
+
+    // Simulation stage
+    schedule.add_systems((
+        systems::simulation_tick_system.in_set(FrameStage::Simulation),
+        systems::param_change_detection_system.in_set(FrameStage::Simulation),
+        systems::palette_load_system.in_set(FrameStage::Simulation),
+    ));
+
+    // Meshing stage
+    schedule.add_systems(
+        systems::meshing_tick_system.in_set(FrameStage::Meshing),
+    );
+
+    // UniformWrite stage
+    schedule.add_systems((
+        systems::write_uniforms_system.in_set(FrameStage::UniformWrite),
+        systems::compute_stats_system.in_set(FrameStage::UniformWrite),
+    ));
+
+    // Render stage — exclusive system
+    schedule.add_systems(
+        systems::render_present_system.in_set(FrameStage::Render),
+    );
+
+    // PostFrame stage
+    schedule.add_systems(
+        systems::world_regen_system.in_set(FrameStage::PostFrame),
+    );
+
+    (ecs, schedule)
+}
+
+// ---------------------------------------------------------------------------
+// App struct + ApplicationHandler
+// ---------------------------------------------------------------------------
 
 struct App {
-    state: Option<AppState>,
+    ecs_world: Option<bevy_ecs::world::World>,
+    schedule: Option<Schedule>,
 }
 
 impl App {
     fn new() -> Self {
-        Self { state: None }
+        Self {
+            ecs_world: None,
+            schedule: None,
+        }
     }
 }
 
@@ -854,17 +505,24 @@ impl ApplicationHandler for App {
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {}
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.ecs_world.is_some() {
+            return;
+        }
+
         let attrs = WindowAttributes::default()
             .with_title("Voxulacrum")
             .with_inner_size(winit::dpi::PhysicalSize::new(1280u32, 720u32));
 
         let window = Arc::new(
-            event_loop.create_window(attrs).expect("Failed to create window"),
+            event_loop
+                .create_window(attrs)
+                .expect("Failed to create window"),
         );
 
-        self.state = Some(AppState::new(window));
-        log::info!("Window and GPU initialized.");
+        let (ecs_world, schedule) = init_ecs(window);
+        self.ecs_world = Some(ecs_world);
+        self.schedule = Some(schedule);
+        log::info!("ECS world initialized.");
     }
 
     fn window_event(
@@ -873,13 +531,14 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = &mut self.state else { return; };
+        let Some(ecs) = &mut self.ecs_world else { return; };
 
-        // F1 toggle -- always handled
+        // F1 toggle -- always handled, bypass ECS
         if let WindowEvent::KeyboardInput { ref event, .. } = event {
             if event.state == ElementState::Pressed {
                 if let PhysicalKey::Code(KeyCode::F1) = event.physical_key {
-                    state.egui_renderer.toggle_visibility();
+                    ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                        .toggle_visibility();
                     return;
                 }
             }
@@ -889,64 +548,103 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
+
             WindowEvent::Resized(new_size) => {
-                state.gpu.resize(new_size.width, new_size.height);
-                state.simulation.camera.resize(new_size.width, new_size.height);
+                // Clone RenderContext (cheap Arc bumps) to avoid borrow conflicts.
+                let ctx = ecs.resource::<RenderContext>().clone();
+
+                ecs.resource_mut::<SurfaceState>()
+                    .resize(&ctx.device, new_size.width, new_size.height);
+                ecs.resource_mut::<SimulationManager>()
+                    .camera
+                    .resize(new_size.width, new_size.height);
+
+                let zoom = ecs.resource::<SimulationManager>().camera.zoom;
+                let density = ecs
+                    .resource::<UiState>()
+                    .params
+                    .render_pipeline
+                    .world_pixel_density;
                 let (rw, rh, eff_scale) = compute_render_dimensions(
-                    new_size.width, new_size.height,
-                    state.simulation.camera.zoom, state.ui_state.params.render_pipeline.world_pixel_density,
+                    new_size.width,
+                    new_size.height,
+                    zoom,
+                    density,
                 );
-                state.render_targets = RenderTargets::new(
-                    &state.gpu.device, rw, rh, eff_scale, state.gpu.surface_format,
+
+                let new_rt = RenderTargets::new(&ctx, rw, rh, eff_scale);
+
+                ecs.resource_mut::<OutlinePass>().rebuild_bind_group(
+                    &ctx,
+                    &new_rt.scene_view,
+                    &new_rt.depth_view,
+                    &new_rt.normal_view,
                 );
-                state.outline_pass.rebuild_bind_group(
-                    &state.gpu.device,
-                    &state.render_targets.scene_view,
-                    &state.render_targets.depth_view,
-                    &state.render_targets.normal_view,
+                ecs.resource_mut::<PostProcessPass>().rebuild_bind_group(
+                    &ctx,
+                    &new_rt.processed_view,
+                    &new_rt.depth_view,
                 );
-                state.post_process.rebuild_bind_group(
-                    &state.gpu.device,
-                    &state.render_targets.processed_view,
-                    &state.render_targets.depth_view,
-                );
-                state.palette_pass.rebuild_bind_group(
-                    &state.gpu.device,
-                    &state.render_targets.scene_view
-                );
-                state.upscale_pass.rebuild_bind_group(
-                    &state.gpu.device,
-                    &state.render_targets.processed_view,
-                );
+                ecs.resource_mut::<PalettePass>()
+                    .rebuild_bind_group(&ctx, &new_rt.scene_view);
+                ecs.resource_mut::<UpscalePass>()
+                    .rebuild_bind_group(&ctx, &new_rt.processed_view);
+
+                *ecs.resource_mut::<RenderTargets>() = new_rt;
             }
+
             ref e @ WindowEvent::KeyboardInput { ref event, .. } => {
-                let consumed = state.egui_renderer.handle_event(&state.window, e);
+                let window = ecs.resource::<WindowHandle>().0.clone();
+                let consumed = ecs
+                    .non_send_resource_mut::<ui::EguiRenderer>()
+                    .handle_event(&window, e);
                 if !consumed {
-                    state.simulation.camera.process_keyboard(event.physical_key, event.state);
+                    ecs.resource_mut::<SimulationManager>()
+                        .camera
+                        .process_keyboard(event.physical_key, event.state);
                 }
             }
+
             ref e @ WindowEvent::MouseWheel { ref delta, .. } => {
-                let consumed = state.egui_renderer.handle_event(&state.window, e);
+                let window = ecs.resource::<WindowHandle>().0.clone();
+                let consumed = ecs
+                    .non_send_resource_mut::<ui::EguiRenderer>()
+                    .handle_event(&window, e);
                 if !consumed {
-                    state.simulation.camera.process_scroll(delta, &state.ui_state.params.camera);
+                    let cam_params =
+                        ecs.resource::<UiState>().params.camera.clone();
+                    ecs.resource_mut::<SimulationManager>()
+                        .camera
+                        .process_scroll(delta, &cam_params);
                 }
             }
+
             WindowEvent::RedrawRequested => {
-                state.render();
+                // Run the frame schedule
+                self.schedule
+                    .as_mut()
+                    .unwrap()
+                    .run(self.ecs_world.as_mut().unwrap());
             }
+
             ref other => {
-                // Forward cursor moves, etc. to egui
-                state.egui_renderer.handle_event(&state.window, other);
+                let window = ecs.resource::<WindowHandle>().0.clone();
+                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                    .handle_event(&window, other);
             }
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = &self.state {
-            state.window.request_redraw();
+        if let Some(ecs) = &self.ecs_world {
+            ecs.resource::<WindowHandle>().0.request_redraw();
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
 
 fn main() {
     env_logger::init();

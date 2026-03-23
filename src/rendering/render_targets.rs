@@ -1,3 +1,7 @@
+use bevy_ecs::prelude::Resource;
+
+use crate::rendering::render_context::RenderContext;
+
 /// Low-resolution render targets for the stylized pixel-art pipeline.
 ///
 /// Owns four textures:
@@ -15,6 +19,7 @@
 
 pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+#[derive(Resource)]
 pub struct RenderTargets {
     pub scene: wgpu::Texture,
     pub scene_view: wgpu::TextureView,
@@ -33,11 +38,10 @@ pub struct RenderTargets {
 
 impl RenderTargets {
     pub fn new(
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         render_width: u32,
         render_height: u32,
         effective_pixel_scale: f32,
-        surface_format: wgpu::TextureFormat,
     ) -> Self {
         let render_width = render_width.max(1);
         let render_height = render_height.max(1);
@@ -45,13 +49,13 @@ impl RenderTargets {
         let tex_width = render_width + 2;
         let tex_height = render_height + 2;
 
-        let scene = Self::create_color_texture(device, tex_width, tex_height, surface_format, "lowres_scene");
+        let scene = Self::create_color_texture(&ctx.device, tex_width, tex_height, ctx.surface_format, "lowres_scene");
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let processed = Self::create_color_texture(device, tex_width, tex_height, surface_format, "lowres_processed");
+        let processed = Self::create_color_texture(&ctx.device, tex_width, tex_height, ctx.surface_format, "lowres_processed");
         let processed_view = processed.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let depth = device.create_texture(&wgpu::TextureDescriptor {
+        let depth = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("lowres_depth"),
             size: wgpu::Extent3d {
                 width: tex_width,
@@ -68,7 +72,7 @@ impl RenderTargets {
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let normal = Self::create_color_texture(device, tex_width, tex_height, NORMAL_FORMAT, "lowres_normal");
+        let normal = Self::create_color_texture(&ctx.device, tex_width, tex_height, NORMAL_FORMAT, "lowres_normal");
         let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
 
         Self {

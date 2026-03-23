@@ -2,6 +2,9 @@ use bytemuck::{Pod, Zeroable};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::path::Path;
+use bevy_ecs::prelude::Resource;
+
+use crate::rendering::render_context::RenderContext;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Serialize, Deserialize)]
@@ -546,6 +549,7 @@ pub enum PipelineId {
 }
 
 /// Resources needed to rebuild pipelines (bind group layouts, surface format).
+#[derive(Resource)]
 pub struct PipelineResources {
     pub surface_format: wgpu::TextureFormat,
     pub global_bind_group_layout: wgpu::BindGroupLayout,
@@ -561,6 +565,7 @@ struct PipelineEntry {
 
 /// Registry mapping shader filenames to the pipelines they affect.
 /// Also holds the live pipeline handles.
+#[derive(Resource)]
 pub struct PipelineRegistry {
     entries: HashMap<String, PipelineEntry>,
     pub terrain_pipeline: wgpu::RenderPipeline,
@@ -580,7 +585,7 @@ pub struct ReloadResult {
 impl PipelineRegistry {
     /// Create the registry, loading all shaders from disk at runtime.
     pub fn new(
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         resources: &PipelineResources,
         shader_dir: &Path,
     ) -> Self {
@@ -590,23 +595,23 @@ impl PipelineRegistry {
         let water_source = read_shader(shader_dir, "water.wgsl");
 
         let terrain_pipeline = create_terrain_pipeline(
-            device, resources.surface_format, &resources.global_bind_group_layout,
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
             &terrain_source,
         );
         let terrain_wireframe_pipeline = create_terrain_wireframe_pipeline(
-            device, resources.surface_format, &resources.global_bind_group_layout,
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
             &terrain_source,
         );
         let shadow_pipeline = create_shadow_pipeline(
-            device, &resources.shadow_bind_group_layout,
+            &ctx.device, &resources.shadow_bind_group_layout,
             &shadow_source,
         );
         let vegetation_pipeline = create_vegetation_pipeline(
-            device, resources.surface_format, &resources.global_bind_group_layout,
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
             &vegetation_source,
         );
         let water_pipeline = create_water_pipeline(
-            device, resources.surface_format, &resources.global_bind_group_layout,
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
             &water_source,
         );
 
@@ -642,7 +647,7 @@ impl PipelineRegistry {
     /// On failure, the old pipeline is retained.
     pub fn try_reload(
         &mut self,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         resources: &PipelineResources,
         shader_path: &Path,
     ) -> Option<ReloadResult> {
@@ -664,17 +669,17 @@ impl PipelineRegistry {
         };
 
         // Use error scopes to catch shader compilation errors
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let result = match pipeline_id {
             PipelineId::Terrain => {
                 let p = create_terrain_pipeline(
-                    device, resources.surface_format,
+                    &ctx.device, resources.surface_format,
                     &resources.global_bind_group_layout, &source,
                 );
                 // Also rebuild wireframe variant
                 let wf = create_terrain_wireframe_pipeline(
-                    device, resources.surface_format,
+                    &ctx.device, resources.surface_format,
                     &resources.global_bind_group_layout, &source,
                 );
                 self.terrain_wireframe_pipeline = wf;
@@ -682,20 +687,20 @@ impl PipelineRegistry {
             }
             PipelineId::Shadow => {
                 let p = create_shadow_pipeline(
-                    device, &resources.shadow_bind_group_layout, &source,
+                    &ctx.device, &resources.shadow_bind_group_layout, &source,
                 );
                 Some(p)
             }
             PipelineId::Vegetation => {
                 let p = create_vegetation_pipeline(
-                    device, resources.surface_format,
+                    &ctx.device, resources.surface_format,
                     &resources.global_bind_group_layout, &source,
                 );
                 Some(p)
             }
             PipelineId::Water => {
                 let p = create_water_pipeline(
-                    device, resources.surface_format,
+                    &ctx.device, resources.surface_format,
                     &resources.global_bind_group_layout, &source,
                 );
                 Some(p)
@@ -704,7 +709,7 @@ impl PipelineRegistry {
         };
 
         // Check for compilation errors
-        let error = pollster::block_on(device.pop_error_scope());
+        let error = pollster::block_on(ctx.device.pop_error_scope());
 
         if let Some(err) = error {
             return Some(ReloadResult {

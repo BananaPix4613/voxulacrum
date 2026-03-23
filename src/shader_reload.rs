@@ -1,9 +1,11 @@
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
+use bevy_ecs::prelude::Resource;
 
+#[derive(Resource)]
 pub struct ShaderWatcher {
-    rx: mpsc::Receiver<notify::Result<Event>>,
+    rx: Mutex<mpsc::Receiver<notify::Result<Event>>>,
     _watcher: notify::RecommendedWatcher,
 }
 
@@ -22,15 +24,16 @@ impl ShaderWatcher {
         log::info!("Watching shader directory: {}", shader_dir.display());
         
         Self {
-            rx,
+            rx: Mutex::new(rx),
             _watcher: watcher,
         }
     }
     
     /// Poll for changed `.wgsl` files. Returns deduplicated list of changed paths.
     pub fn poll_changes(&self) -> Vec<PathBuf> {
+        let rx = self.rx.lock().unwrap();
         let mut changed = Vec::new();
-        while let Ok(Ok(event)) = self.rx.try_recv() {
+        while let Ok(Ok(event)) = rx.try_recv() {
             if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                 for path in event.paths {
                     if path.extension().map_or(false, |ext| ext == "wgsl") {

@@ -1,6 +1,6 @@
 pub mod debug_lines;
 pub mod frustum;
-pub mod gpu_state;
+pub mod surface_state;
 pub mod pipelines;
 pub mod render_targets;
 pub mod uniforms;
@@ -16,3 +16,4 @@ pub mod render_graph;
 pub mod shadow_pass;
 pub mod main_scene_pass;
 pub mod uniform_writer;
+pub mod render_context;

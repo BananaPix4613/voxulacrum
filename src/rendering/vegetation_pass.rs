@@ -1,11 +1,14 @@
 use wgpu::util::DeviceExt;
+use bevy_ecs::prelude::Resource;
 
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::pipelines::{GrassInstance, GrassVertex};
 use crate::params::VegetationParams;
 use crate::world::World;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 use crate::world::voxel::MATERIAL_TABLE;
 
+#[derive(Resource)]
 pub struct VegetationPass {
     pub grass_vertex_buffer: wgpu::Buffer,
     pub grass_index_buffer: wgpu::Buffer,
@@ -15,16 +18,20 @@ pub struct VegetationPass {
 }
 
 impl VegetationPass {
-    pub fn new(device: &wgpu::Device, world: &World, params: &VegetationParams) -> Self {
+    pub fn new(
+        ctx: &RenderContext,
+        world: &World,
+        params: &VegetationParams
+    ) -> Self {
         let (vertices, indices) = create_grass_blade_mesh(params);
 
-        let grass_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let grass_vertex_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("grass_blade_vertex_buffer"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let grass_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let grass_index_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("grass_blade_index_buffer"),
             contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
@@ -35,14 +42,14 @@ impl VegetationPass {
         log::info!("Collected {} grass instances", instance_count);
 
         let instance_buffer = if instances.is_empty() {
-            device.create_buffer(&wgpu::BufferDescriptor {
+            ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("grass_instance_buffer_empty"),
                 size: std::mem::size_of::<GrassInstance>() as u64,
                 usage: wgpu::BufferUsages::VERTEX,
                 mapped_at_creation: false,
             })
         } else {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("grass_instance_buffer"),
                 contents: bytemuck::cast_slice(&instances),
                 usage: wgpu::BufferUsages::VERTEX,

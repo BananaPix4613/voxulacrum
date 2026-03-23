@@ -1,6 +1,8 @@
+use std::path::PathBuf;
+use bevy_ecs::prelude::Resource;
+
 use crate::params::*;
 use crate::meshing::MeshingStats;
-use std::path::PathBuf;
 
 pub struct ShaderLogEntry {
     pub message: String,
@@ -9,6 +11,7 @@ pub struct ShaderLogEntry {
 }
 
 /// Transient UI state not persisted in EngineParams.
+#[derive(Resource)]
 pub struct UiState {
     pub params: EngineParams,
     pub change_detector: ParamChangeDetector,

@@ -1,5 +1,6 @@
 use std::time::Instant;
 use glam::Mat4;
+use bevy_ecs::prelude::Resource;
 
 use crate::camera::{self, IsometricCamera, SnappedCamera};
 use crate::cloud_shadow::CloudShadowState;
@@ -11,6 +12,7 @@ use crate::simulation::wind::WindState;
 use crate::world::chunk::VOXEL_SCALE;
 
 /// All computed per-frame data that rendering needs.
+#[derive(Resource)]
 pub struct FrameState {
     pub dt: f32,
     pub elapsed: f32,
@@ -34,6 +36,7 @@ pub struct FrameState {
     pub sin_r: f32,
 }
 
+#[derive(Resource)]
 pub struct SimulationManager {
     pub camera: IsometricCamera,
     pub time_of_day: TimeOfDay,

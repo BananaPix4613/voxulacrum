@@ -1,7 +1,11 @@
+use bevy_ecs::prelude::Resource;
+
 use crate::meshing::MeshingPipeline;
+use crate::rendering::render_context::RenderContext;
 use crate::ui::panels::UiState;
 use crate::world::World;
 
+#[derive(Resource)]
 pub struct MeshingCoordinator {
     pub pipeline: MeshingPipeline,
 }
@@ -15,7 +19,7 @@ impl MeshingCoordinator {
     pub fn tick(
         &mut self,
         world: &mut World,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         ui_state: &mut UiState,
     ) {
         // Drain pending snapshot submissions (bounded per frame)
@@ -28,7 +32,7 @@ impl MeshingCoordinator {
                 result.chunk_index,
                 &result.vertices,
                 &result.indices,
-                device,
+                &ctx.device,
             );
         }
         

@@ -1,7 +1,11 @@
+use bevy_ecs::prelude::Resource;
+
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::pipelines;
 use crate::rendering::uniforms::{self, PostProcessUniforms};
 
+#[derive(Resource)]
 pub struct PostProcessPass {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
@@ -12,29 +16,28 @@ pub struct PostProcessPass {
 
 impl PostProcessPass {
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         scene_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         shader_source: &str,
     ) -> Self {
-        let bind_group_layout = uniforms::create_post_process_bind_group_layout(device);
+        let bind_group_layout = uniforms::create_post_process_bind_group_layout(&ctx.device);
 
         let pipeline = pipelines::create_post_process_pipeline(
-            device,
-            surface_format,
+            &ctx.device,
+            ctx.surface_format,
             &bind_group_layout,
             shader_source,
         );
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("post_process_uniform_buffer"),
             size: std::mem::size_of::<PostProcessUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("post_process_scene_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -42,7 +45,7 @@ impl PostProcessPass {
         });
 
         let bind_group = uniforms::create_post_process_bind_group(
-            device,
+            &ctx.device,
             &bind_group_layout,
             &uniform_buffer,
             scene_view,
@@ -62,12 +65,12 @@ impl PostProcessPass {
     /// Recreate bind group when scene/depth texture changes (e.g. on resize).
     pub fn rebuild_bind_group(
         &mut self,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         scene_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
     ) {
         self.bind_group = uniforms::create_post_process_bind_group(
-            device,
+            &ctx.device,
             &self.bind_group_layout,
             &self.uniform_buffer,
             scene_view,
@@ -80,20 +83,19 @@ impl PostProcessPass {
     /// On failure, the old pipeline is retained.
     pub fn try_reload_shader(
         &mut self,
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         shader_source: &str,
     ) -> Result<(), String> {
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let new_pipeline = pipelines::create_post_process_pipeline(
-            device,
-            surface_format,
+            &ctx.device,
+            ctx.surface_format,
             &self.bind_group_layout,
             shader_source,
         );
 
-        match pollster::block_on(device.pop_error_scope()) {
+        match pollster::block_on(ctx.device.pop_error_scope()) {
             Some(err) => Err(format!("Shader compile error: {}", err)),
             None => {
                 self.pipeline = new_pipeline;

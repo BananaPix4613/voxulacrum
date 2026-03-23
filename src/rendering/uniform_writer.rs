@@ -3,6 +3,7 @@ use crate::params::EngineParams;
 use crate::rendering::outline_pass::OutlinePass;
 use crate::rendering::palette_pass::PalettePass;
 use crate::rendering::post_process::PostProcessPass;
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::uniforms::{
     GlobalUniforms, OutlineUniforms, PostProcessUniforms, ShadowUniforms, UpscaleUniforms,
@@ -11,7 +12,7 @@ use crate::rendering::upscale_pass::UpscalePass;
 use crate::simulation::manager::FrameState;
 
 pub fn write_all_uniforms(
-    queue: &wgpu::Queue,
+    ctx: &RenderContext,
     frame: &FrameState,
     params: &EngineParams,
     global_buf: &wgpu::Buffer,
@@ -33,7 +34,7 @@ pub fn write_all_uniforms(
         clip_max: frame.clip_max,
         _pad: 0.0,
     };
-    queue.write_buffer(shadow_buf, 0, bytemuck::cast_slice(&[shadow_uniforms]));
+    ctx.queue.write_buffer(shadow_buf, 0, bytemuck::cast_slice(&[shadow_uniforms]));
 
     // Global uniforms
     let uniforms = GlobalUniforms {
@@ -63,7 +64,7 @@ pub fn write_all_uniforms(
         clip_max: frame.clip_max,
         _pad4: 0.0,
     };
-    queue.write_buffer(global_buf, 0, bytemuck::cast_slice(&[uniforms]));
+    ctx.queue.write_buffer(global_buf, 0, bytemuck::cast_slice(&[uniforms]));
 
     // Post-process uniforms
     let pp = &params.post_process;
@@ -98,12 +99,12 @@ pub fn write_all_uniforms(
         ],
         _pad2: [0.0; 2],
     };
-    post_process.update_uniforms(queue, pp_uniforms);
+    post_process.update_uniforms(&ctx.queue, pp_uniforms);
 
     // Outline uniforms
     let op = &params.outline;
     outline.update_uniforms(
-        queue,
+        &ctx.queue,
         OutlineUniforms {
             texel_size: [
                 1.0 / render_targets.tex_width as f32,
@@ -130,7 +131,7 @@ pub fn write_all_uniforms(
     } else {
         palette::stepping_uniforms(&params.palette)
     };
-    palette_pass.update_uniforms(queue, palette_uniforms);
+    palette_pass.update_uniforms(&ctx.queue, palette_uniforms);
 
     // Upscale uniforms
     let upscale_uniforms = UpscaleUniforms {
@@ -145,5 +146,5 @@ pub fn write_all_uniforms(
             render_targets.tex_height as f32,
         ],
     };
-    upscale.update_uniforms(queue, upscale_uniforms);
+    upscale.update_uniforms(&ctx.queue, upscale_uniforms);
 }

@@ -1,14 +1,16 @@
 use std::path::PathBuf;
+use bevy_ecs::prelude::Resource;
 
 use crate::meshing;
 use crate::meshing::coordinator::MeshingCoordinator;
-use crate::params::EngineParams;
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::vegetation_pass::VegetationPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::simulation::water::StaticWater;
 use crate::ui::panels::UiState;
 use crate::world::{World, WorldManager};
 
+#[derive(Resource)]
 pub struct WorldRegenCoordinator {
     pub manager: WorldManager,
 }
@@ -29,7 +31,7 @@ impl WorldRegenCoordinator {
         water_pass: &mut WaterPass,
         static_water: &mut StaticWater,
         ui_state: &mut UiState,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
     ) {
         // Feed regeneration status to UI
         ui_state.regenerating = self.manager.is_regenerating();
@@ -51,19 +53,19 @@ impl WorldRegenCoordinator {
             
             // Rebuild vegetation pass
             *vegetation_pass = VegetationPass::new(
-                device,
+                ctx,
                 world,
                 &ui_state.params.vegetation,
             );
             log::info!("Vegetation pass rebuilt after regeneration");
-            
+
             // Rebuild water passes
             *static_water = StaticWater::new(
                 world,
                 &ui_state.params.water,
                 &regen_params,
             );
-            *water_pass = WaterPass::new(device, static_water);
+            *water_pass = WaterPass::new(ctx, static_water);
             log::info!("Water passes rebuilt after regeneration");
             
             // Clear stale caches and save new world

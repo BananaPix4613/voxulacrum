@@ -3,13 +3,15 @@ pub mod chunk;
 pub mod generation;
 pub mod regen;
 
+use wgpu::util::DeviceExt;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread::JoinHandle;
+use bevy_ecs::prelude::Resource;
+
 use chunk::{Chunk, ChunkMesh, ChunkNeighbors, CHUNK_VOLUME};
 use generation::{TerrainGenerator, WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z};
 use voxel::{MATERIAL_COUNT, MATERIAL_TABLE};
-use wgpu::util::DeviceExt;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread::JoinHandle;
 
 pub struct World {
     pub chunks: Vec<Chunk>,
@@ -193,22 +195,23 @@ impl World {
 /// `Vec<Chunk>` (with `mesh: None`) using rayon for per-chunk parallelism.
 /// The main thread polls `poll_regeneration` each frame: when complete, the
 /// caller swaps the new chunks into the active `World`.
+#[derive(Resource)]
 pub struct WorldManager {
     /// Handle to the background regeneration thread, if active.
-    regen_handle: Option<JoinHandle<Vec<Chunk>>>,
+    regen_handle: Mutex<Option<JoinHandle<Vec<Chunk>>>>,
     /// Shared progress counter: chunks generated so far.
     regen_progress: Arc<AtomicU32>,
     /// Total chunks to generate (for progress bar denominator).
     regen_total: u32,
     /// The terrain params that triggered this regeneration (kep for cache save
     /// and stale-detection after completion).
-    regen_params: Option<crate::params::TerrainGenParams>,
+    regen_params: Option<TerrainGenParams>,
 }
 
 impl WorldManager {
     pub fn new() -> Self {
         Self {
-            regen_handle: None,
+            regen_handle: Mutex::new(None),
             regen_progress: Arc::new(AtomicU32::new(0)),
             regen_total: 0,
             regen_params: None,
@@ -217,12 +220,12 @@ impl WorldManager {
     
     /// Returns true if a background regeneration is currently in progress.
     pub fn is_regenerating(&self) -> bool {
-        self.regen_handle.is_some()
+        self.regen_handle.lock().unwrap().is_some()
     }
     
     /// Returns (chunks_completed, total_chunks) for the progress bar.
     pub fn progress(&self) -> (u32, u32) {
-        if self.regen_handle.is_some() {
+        if self.regen_handle.lock().unwrap().is_some() {
             (self.regen_progress.load(Ordering::Relaxed), self.regen_total)
         } else {
             (0, 0)
@@ -231,7 +234,8 @@ impl WorldManager {
     
     /// Start background regeneration. No-op if one is already in progress.
     pub fn start_regeneration(&mut self, params: &crate::params::TerrainGenParams) {
-        if self.regen_handle.is_some() {
+        let handle = self.regen_handle.get_mut().unwrap();
+        if handle.is_some() {
             log::warn!("Regeneration already in progress, ignoring request");
             return;
         }
@@ -246,12 +250,12 @@ impl WorldManager {
         
         log::info!("Starting background terrain regeneration ({} chunks)", total);
         
-        let handle = std::thread::Builder::new()
+        let new_handle = std::thread::Builder::new()
             .name("terrain-regen".to_string())
             .spawn(move || generate_world_background(&params_clone, &progress))
             .expect("Failed to spawn terrain regeneration thread");
         
-        self.regen_handle = Some(handle);
+        *handle = Some(new_handle);
     }
     
     /// Poll for completion. Returns `Some((chunks, params))` when done.
@@ -259,13 +263,14 @@ impl WorldManager {
     pub fn poll_regeneration(
         &mut self,
     ) -> Option<(Vec<Chunk>, crate::params::TerrainGenParams)> {
-        let handle = self.regen_handle.as_ref()?;
+        let handle_opt = self.regen_handle.get_mut().unwrap();
+        let handle_ref = handle_opt.as_ref()?;
         
-        if !handle.is_finished() {
+        if !handle_ref.is_finished() {
             return None;
         }
         
-        let handle = self.regen_handle.take().unwrap();
+        let handle = handle_opt.take().unwrap();
         let params = self.regen_params.take().unwrap();
         
         match handle.join() {

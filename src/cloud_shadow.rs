@@ -1,6 +1,7 @@
 use glam::Vec2;
 
 use crate::params::CloudParams;
+use crate::rendering::render_context::RenderContext;
 
 pub struct CloudShadowState {
     pub offset: Vec2,
@@ -11,7 +12,7 @@ pub struct CloudShadowState {
 }
 
 impl CloudShadowState {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, params: &CloudParams) -> Self {
+    pub fn new(ctx: &RenderContext, params: &CloudParams) -> Self {
         let size = 512u32;
 
         let mut noise1 = fastnoise_lite::FastNoiseLite::with_seed(42);
@@ -49,7 +50,7 @@ impl CloudShadowState {
             }
         }
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cloud_shadow_texture"),
             size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
             mip_level_count: 1,
@@ -60,7 +61,7 @@ impl CloudShadowState {
             view_formats: &[],
         });
 
-        queue.write_texture(
+        ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
@@ -78,7 +79,7 @@ impl CloudShadowState {
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("cloud_shadow_sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,

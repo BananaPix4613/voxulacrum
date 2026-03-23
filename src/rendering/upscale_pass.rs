@@ -1,6 +1,10 @@
+use bevy_ecs::prelude::Resource;
+
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::uniforms::UpscaleUniforms;
 
+#[derive(Resource)]
 pub struct UpscalePass {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
@@ -11,13 +15,12 @@ pub struct UpscalePass {
 
 impl UpscalePass {
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         source_view: &wgpu::TextureView,
         shader_source: &str,
     ) -> Self {
         let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("upscale_bind_group_layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -53,7 +56,7 @@ impl UpscalePass {
                 ],
             });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("upscale_bilinear_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -63,7 +66,7 @@ impl UpscalePass {
             ..Default::default()
         });
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("upscale_uniform_buffer"),
             size: std::mem::size_of::<UpscaleUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -71,7 +74,7 @@ impl UpscalePass {
         });
 
         let bind_group = Self::create_bind_group(
-            device,
+            &ctx.device,
             &bind_group_layout,
             source_view,
             &sampler,
@@ -79,8 +82,8 @@ impl UpscalePass {
         );
 
         let pipeline = Self::create_pipeline(
-            device,
-            surface_format,
+            &ctx.device,
+            ctx.surface_format,
             &bind_group_layout,
             shader_source,
         );
@@ -181,11 +184,11 @@ impl UpscalePass {
 
     pub fn rebuild_bind_group(
         &mut self,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         source_view: &wgpu::TextureView,
     ) {
         self.bind_group = Self::create_bind_group(
-            device,
+            &ctx.device,
             &self.bind_group_layout,
             source_view,
             &self.sampler,

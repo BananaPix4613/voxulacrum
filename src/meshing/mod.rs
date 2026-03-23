@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 use std::sync::RwLock;
+use bevy_ecs::prelude::Resource;
 
 use crate::params::MaterialParams;
 use crate::rendering::pipelines::TerrainVertex;
@@ -127,12 +128,13 @@ impl MaterialConfig {
 // MeshingPipeline
 // ============================================================================
 
+#[derive(Resource)]
 pub struct MeshingPipeline {
     p1_request_tx: mpsc::SyncSender<Phase1Request>,
-    p1_result_rx: Receiver<Phase1Result>,
+    p1_result_rx: Mutex<Receiver<Phase1Result>>,
     p2_request_tx: mpsc::SyncSender<Phase2Request>,
-    p2_result_rx: Receiver<Phase2Result>,
-    _workers: Vec<JoinHandle<()>>,
+    p2_result_rx: Mutex<Receiver<Phase2Result>>,
+    _workers: Mutex<Vec<JoinHandle<()>>>,
 
     chunk_states: Vec<ChunkMeshState>,
     pending_phase1: HashMap<usize, (CellVertexData, ChunkSnapshot, u64)>,
@@ -203,10 +205,10 @@ impl MeshingPipeline {
 
         Self {
             p1_request_tx: p1_tx,
-            p1_result_rx,
+            p1_result_rx: Mutex::new(p1_result_rx),
             p2_request_tx: p2_tx,
-            p2_result_rx,
-            _workers: workers,
+            p2_result_rx: Mutex::new(p2_result_rx),
+            _workers: Mutex::new(workers),
             chunk_states: vec![ChunkMeshState::Idle; total_chunks],
             pending_phase1: HashMap::new(),
             boundary_maps: HashMap::new(),
@@ -290,7 +292,8 @@ impl MeshingPipeline {
         let mut completed = Vec::new();
 
         // Drain Phase 1 results
-        while let Ok(result) = self.p1_result_rx.try_recv() {
+        let p1_rx = self.p1_result_rx.get_mut().unwrap();
+        while let Ok(result) = p1_rx.try_recv() {
             let idx = result.chunk_index;
             match result.outcome {
                 Phase1Outcome::CacheHit { vertices, indices } => {
@@ -327,7 +330,8 @@ impl MeshingPipeline {
         }
 
         // Drain Phase 2 results
-        while let Ok(result) = self.p2_result_rx.try_recv() {
+        let p2_rx = self.p2_result_rx.get_mut().unwrap();
+        while let Ok(result) = p2_rx.try_recv() {
             self.chunk_states[result.chunk_index] = ChunkMeshState::Idle;
             self.stats.total_meshed += 1;
             completed.push(result);
@@ -525,10 +529,10 @@ impl MeshingPipeline {
         };
 
         // Drain any in-flight results from worker threads to discard stale data.
-        // Workers may still be processing old-world requests; those results will
-        // refer to old voxel data and must not be uploaded after the swap.
-        while self.p1_result_rx.try_recv().is_ok() {}
-        while self.p2_result_rx.try_recv().is_ok() {}
+        let p1_rx = self.p1_result_rx.get_mut().unwrap();
+        let p2_rx = self.p2_result_rx.get_mut().unwrap();
+        while p1_rx.try_recv().is_ok() {}
+        while p2_rx.try_recv().is_ok() {}
 
         log::info!("MeshingPipeline reset for new world");
     }

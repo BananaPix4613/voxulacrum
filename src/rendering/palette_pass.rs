@@ -1,5 +1,8 @@
-use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use bytemuck::{Pod, Zeroable};
+use bevy_ecs::prelude::Resource;
+
+use crate::rendering::render_context::RenderContext;
+use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 
 pub const MAX_PALETTE_COLORS: usize = 32;
 
@@ -33,6 +36,7 @@ impl Default for PaletteUniforms {
     }
 }
 
+#[derive(Resource)]
 pub struct PalettePass {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
@@ -43,13 +47,12 @@ pub struct PalettePass {
 
 impl PalettePass {
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         source_view: &wgpu::TextureView,
         shader_source: &str,
     ) -> Self {
         let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("palette_bind_group_layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
@@ -85,7 +88,7 @@ impl PalettePass {
                 ],
             });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("palette_point_sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
@@ -95,7 +98,7 @@ impl PalettePass {
             ..Default::default()
         });
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("palette_uniform_buffer"),
             size: std::mem::size_of::<PaletteUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -103,7 +106,7 @@ impl PalettePass {
         });
 
         let bind_group = Self::create_bind_group(
-            device,
+            &ctx.device,
             &bind_group_layout,
             &uniform_buffer,
             source_view,
@@ -111,8 +114,8 @@ impl PalettePass {
         );
 
         let pipeline = Self::create_pipeline(
-            device,
-            surface_format,
+            &ctx.device,
+            ctx.surface_format,
             &bind_group_layout,
             shader_source,
         );
@@ -213,11 +216,11 @@ impl PalettePass {
 
     pub fn rebuild_bind_group(
         &mut self,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         source_view: &wgpu::TextureView,
     ) {
         self.bind_group = Self::create_bind_group(
-            device,
+            &ctx.device,
             &self.bind_group_layout,
             &self.uniform_buffer,
             source_view,
@@ -227,20 +230,19 @@ impl PalettePass {
 
     pub fn try_reload_shader(
         &mut self,
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         shader_source: &str,
     ) -> Result<(), String> {
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let new_pipeline = Self::create_pipeline(
-            device,
-            surface_format,
+            &ctx.device,
+            ctx.surface_format,
             &self.bind_group_layout,
             shader_source,
         );
 
-        match pollster::block_on(device.pop_error_scope()) {
+        match pollster::block_on(ctx.device.pop_error_scope()) {
             Some(err) => Err(format!("Shader compile error: {}", err)),
             None => {
                 self.pipeline = new_pipeline;

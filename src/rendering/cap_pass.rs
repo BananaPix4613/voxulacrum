@@ -1,6 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+use bevy_ecs::prelude::Resource;
 
+use crate::rendering::render_context::RenderContext;
 use crate::params::CrossSectionParams;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 use crate::world::World;
@@ -39,6 +41,7 @@ impl CapVertex {
     }
 }
 
+#[derive(Resource)]
 pub struct CapPass {
     pub pipeline: wgpu::RenderPipeline,
     pub vertex_buffer: Option<wgpu::Buffer>,
@@ -53,12 +56,11 @@ pub struct CapPass {
 
 impl CapPass {
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         shader_source: &str,
     ) -> Self {
-        let pipeline = Self::create_pipeline(device, surface_format, global_bind_group_layout, shader_source);
+        let pipeline = Self::create_pipeline(&ctx.device, ctx.surface_format, global_bind_group_layout, shader_source);
         Self {
             pipeline,
             vertex_buffer: None,
@@ -143,17 +145,16 @@ impl CapPass {
     /// Try to hot-reload the cap shader.
     pub fn try_reload_shader(
         &mut self,
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         source: &str,
     ) -> Result<(), String> {
         // Attempt to create module first to catch compile errors
-        let _test_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let _test_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cap_shader_test"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        self.pipeline = Self::create_pipeline(device, surface_format, global_bind_group_layout, source);
+        self.pipeline = Self::create_pipeline(&ctx.device, ctx.surface_format, global_bind_group_layout, source);
         Ok(())
     }
 
@@ -161,7 +162,7 @@ impl CapPass {
     /// or clip direction changed (camera rotation).
     pub fn maybe_rebuild(
         &mut self,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         world: &World,
         cs: &CrossSectionParams,
         clip_pos: [f32; 3],
@@ -216,14 +217,14 @@ impl CapPass {
             self.vertex_buffer = None;
             self.index_buffer = None;
         } else {
-            self.vertex_buffer = Some(device.create_buffer_init(
+            self.vertex_buffer = Some(ctx.device.create_buffer_init(
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("cap_vertex_buffer"),
                     contents: bytemuck::cast_slice(&vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 },
             ));
-            self.index_buffer = Some(device.create_buffer_init(
+            self.index_buffer = Some(ctx.device.create_buffer_init(
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("cap_index_buffer"),
                     contents: bytemuck::cast_slice(&indices),

@@ -1,9 +1,12 @@
 use wgpu::util::DeviceExt;
+use bevy_ecs::prelude::Resource;
 
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::pipelines::WaterVertex;
 use crate::simulation::water::StaticWater;
 use crate::world::chunk::VOXEL_SCALE;
 
+#[derive(Resource)]
 pub struct WaterPass {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
@@ -11,18 +14,18 @@ pub struct WaterPass {
 }
 
 impl WaterPass {
-    pub fn new(device: &wgpu::Device, water: &StaticWater) -> Self {
+    pub fn new(ctx: &RenderContext, water: &StaticWater) -> Self {
         let (vertices, indices) = generate_water_mesh(water);
 
         let vertex_buffer = if vertices.is_empty() {
-            device.create_buffer(&wgpu::BufferDescriptor {
+            ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("water_vertex_buffer_empty"),
                 size: std::mem::size_of::<WaterVertex>() as u64,
                 usage: wgpu::BufferUsages::VERTEX,
                 mapped_at_creation: false,
             })
         } else {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("water_vertex_buffer"),
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
@@ -30,14 +33,14 @@ impl WaterPass {
         };
 
         let index_buffer = if indices.is_empty() {
-            device.create_buffer(&wgpu::BufferDescriptor {
+            ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("water_index_buffer_empty"),
                 size: 4,
                 usage: wgpu::BufferUsages::INDEX,
                 mapped_at_creation: false,
             })
         } else {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("water_index_buffer"),
                 contents: bytemuck::cast_slice(&indices),
                 usage: wgpu::BufferUsages::INDEX,

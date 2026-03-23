@@ -1,7 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, Vec3};
 use wgpu::util::DeviceExt;
+use bevy_ecs::prelude::Resource;
 
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::frustum::Frustum;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
 
@@ -81,6 +83,7 @@ pub fn generate_chunk_boundary_lines(
     lines
 }
 
+#[derive(Resource)]
 pub struct DebugLinePass {
     pub pipeline: wgpu::RenderPipeline,
     pub vertex_buffer: Option<wgpu::Buffer>,
@@ -89,23 +92,22 @@ pub struct DebugLinePass {
 
 impl DebugLinePass {
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         global_bind_group_layout: &wgpu::BindGroupLayout,
         shader_source: &str,
     ) -> Self {
-        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader_module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("debug_lines_shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("debug_lines_pipeline_layout"),
             bind_group_layouts: &[global_bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("debug_lines_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -119,7 +121,7 @@ impl DebugLinePass {
                 entry_point: Some("fs_main"),
                 targets: &[
                     Some(wgpu::ColorTargetState {
-                        format: surface_format,
+                        format: ctx.surface_format,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -165,7 +167,7 @@ impl DebugLinePass {
 
     pub fn update(
         &mut self,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         chunk_positions: &[IVec3],
         frustum: &Frustum,
     ) {
@@ -177,7 +179,7 @@ impl DebugLinePass {
             return;
         }
 
-        self.vertex_buffer = Some(device.create_buffer_init(
+        self.vertex_buffer = Some(ctx.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("debug_lines_vertex_buffer"),
                 contents: bytemuck::cast_slice(&lines),

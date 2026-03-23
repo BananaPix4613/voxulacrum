@@ -1,6 +1,9 @@
+use bevy_ecs::prelude::Resource;
+use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::uniforms::OutlineUniforms;
 
+#[derive(Resource)]
 pub struct OutlinePass {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
@@ -11,16 +14,15 @@ pub struct OutlinePass {
 
 impl OutlinePass {
     pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         scene_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         normal_view: &wgpu::TextureView,
         shader_source: &str,
     ) -> Self {
-        let bind_group_layout = Self::create_bind_group_layout(device);
+        let bind_group_layout = Self::create_bind_group_layout(&ctx.device);
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("outline_point_sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
@@ -30,7 +32,7 @@ impl OutlinePass {
             ..Default::default()
         });
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("outline_uniform_buffer"),
             size: std::mem::size_of::<OutlineUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -38,7 +40,7 @@ impl OutlinePass {
         });
 
         let bind_group = Self::create_bind_group(
-            device,
+            &ctx.device,
             &bind_group_layout,
             &uniform_buffer,
             scene_view,
@@ -48,8 +50,8 @@ impl OutlinePass {
         );
 
         let pipeline = Self::create_pipeline(
-            device,
-            surface_format,
+            &ctx.device,
+            ctx.surface_format,
             &bind_group_layout,
             shader_source,
         );
@@ -217,13 +219,13 @@ impl OutlinePass {
 
     pub fn rebuild_bind_group(
         &mut self,
-        device: &wgpu::Device,
+        ctx: &RenderContext,
         scene_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         normal_view: &wgpu::TextureView,
     ) {
         self.bind_group = Self::create_bind_group(
-            device,
+            &ctx.device,
             &self.bind_group_layout,
             &self.uniform_buffer,
             scene_view,
@@ -235,20 +237,19 @@ impl OutlinePass {
 
     pub fn try_reload_shader(
         &mut self,
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
+        ctx: &RenderContext,
         shader_source: &str,
     ) -> Result<(), String> {
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let new_pipeline = Self::create_pipeline(
-            device,
-            surface_format,
+            &ctx.device,
+            ctx.surface_format,
             &self.bind_group_layout,
             shader_source,
         );
 
-        match pollster::block_on(device.pop_error_scope()) {
+        match pollster::block_on(ctx.device.pop_error_scope()) {
             Some(err) => Err(format!("Shader compile error: {}", err)),
             None => {
                 self.pipeline = new_pipeline;
