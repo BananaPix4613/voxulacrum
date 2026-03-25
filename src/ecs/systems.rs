@@ -29,7 +29,7 @@ use crate::ui::panels::UiState;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::{compute_render_dimensions, palette, FrameCounter};
 use crate::meshing::MeshingPipeline;
-use crate::world::chunk::Chunk;
+use crate::world::chunk::{Chunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
 // ==========================================================================
 // Input stage
@@ -238,16 +238,19 @@ pub fn streaming_tick_system(
     ctx: Res<RenderContext>,
 ) {
     let cam_pos = sim.camera.smooth_target;
+    let cam_cx = (cam_pos.x / CHUNK_WORLD_SIZE).floor() as i32;
+    let cam_cz = (cam_pos.z / CHUNK_WORLD_SIZE).floor() as i32;
     let camera_view = CameraView {
         zoom: sim.camera.zoom,
         aspect: sim.camera.aspect,
         rotation: sim.camera.rotation,
+        camera_chunk: IVec3::new(cam_cx, 0, cam_cz),
+        camera_world_pos: cam_pos,
     };
 
     let tick_result = streaming.tick(
         &mut world.0,
         &mut meshing,
-        [cam_pos.x, cam_pos.y, cam_pos.z],
         &camera_view,
         frame.dt,
     );
@@ -257,7 +260,7 @@ pub fn streaming_tick_system(
         vegetation.remove_chunk_vegetation(*pos);
         water_pass.remove_chunk_water(*pos);
     }
-    
+
     // NOTE: We do NOT add vegetation/water here for inserted chunks.
     // Inserted chunks don't have meshes yet. Vegetation/water are added
     // in meshing_tick_system when the mesh upload completes, so they
@@ -282,14 +285,14 @@ pub fn meshing_tick_system(
 ) {
     // Phase 1: tick meshing with &mut world - collects meshed positions.
     let meshed = meshing.tick(&mut world.0, &ctx, &mut ui);
-    
+
     // Phase 2: for each newly meshed chunk, build per-chunk vegetation
     // and water GPU buffers. world.0 is now borrowed immutably.
     if !meshed.is_empty() {
         let water_level = ui.params.water.water_level;
         let terrain_params = &ui.params.terrain_gen;
         let veg_params = &ui.params.vegetation;
-        
+
         for pos in &meshed {
             vegetation.add_chunk_vegetation(
                 *pos, &world.0, veg_params, &ctx.device,

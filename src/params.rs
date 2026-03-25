@@ -521,8 +521,8 @@ impl Default for StreamingParams {
             unload_distance: 12,
             min_chunk_y: 0,
             max_chunk_y: 4,
-            max_gen_per_frame: 1024,
-            max_mesh_per_frame: 1024,
+            max_gen_per_frame: 64,
+            max_mesh_per_frame: 64,
         }
     }
 }

@@ -1,10 +1,12 @@
-use std::collections::HashSet;
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::collections::{BinaryHeap, HashSet};
+use std::cmp::Reverse;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use bevy_ecs::prelude::Resource;
-use glam::IVec3;
+use glam::{IVec3, Vec3};
 
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::{StreamingParams, TerrainGenParams};
@@ -12,8 +14,25 @@ use crate::world::chunk::CHUNK_WORLD_SIZE;
 use crate::world::generation::TerrainGenerator;
 use crate::world::World;
 
-struct GenRequest {
-    pos: IVec3,
+/// Shared work queue between main thread and generation workers.
+/// The main thread clears and rebuilds this every frame with current
+/// priorities. Workers pop the highest-priority (lowest distance) item.
+struct SharedWorkQueue {
+    /// Min-heap by squared distance from camera. Item: (priority, [x, y, z]).
+    /// IVec3 doesn't implement Ord, so we store as [i32; 3].
+    queue: Mutex<BinaryHeap<Reverse<(i32, [i32; 3])>>>,
+    condvar: Condvar,
+    shutdown: AtomicBool,
+}
+
+impl SharedWorkQueue {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(BinaryHeap::new()),
+            condvar: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        }
+    }
 }
 
 struct GenResult {
@@ -25,29 +44,68 @@ pub struct CameraView {
     pub zoom: f32,
     pub aspect: f32,
     pub rotation: f32,
+    pub camera_chunk: IVec3,
+    pub camera_world_pos: Vec3,
 }
 
 impl CameraView {
-    /// Compute the chunk-space half-extents of the visible ground area
-    /// for an isometric orthographic camera.
-    fn visible_chunk_extents(&self) -> (i32, i32) {
-        // Isometric pitch: θ = atan(1/√2), sin(θ) = 1/√3
+    /// Test if a chunk XZ position falls inside the camera's screen-rectangle
+    /// projected onto the ground plane (a rotated parallelogram in world space).
+    ///
+    /// For rotation `r` and isometric pitch θ = atan(1/√2):
+    ///   right_dir = (sin(r), -cos(r))   — screen X axis on ground
+    ///   up_dir    = (-cos(r), -sin(r))   — screen Y axis on ground (foreshortened)
+    ///
+    /// Half-extents (in chunk space):
+    ///   half_right = zoom * aspect / CHUNK_WORLD_SIZE + margin
+    ///   half_up    = zoom * sin(θ) / CHUNK_WORLD_SIZE + margin
+    ///
+    /// A chunk is inside the view rectangle if BOTH projections are within bounds:
+    ///   |dot(offset, right_dir)| <= half_right  AND  |dot(offset, up_dir)| <= half_up
+    pub fn is_in_view_rect(&self, chunk_x: i32, chunk_z: i32, margin: i32) -> bool {
+        let sin_theta = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
+        let dx = (chunk_x - self.camera_chunk.x) as f32;
+        let dz = (chunk_z - self.camera_chunk.z) as f32;
+
+        let cos_r = self.rotation.cos();
+        let sin_r = self.rotation.sin();
+
+        // Project offset onto camera-local axes on ground plane
+        let local_right = dx * sin_r - dz * cos_r;     // along screen X
+        let local_up    = -dx * cos_r - dz * sin_r;    // along screen Y (ground component)
+
+        let half_right = self.zoom * self.aspect / CHUNK_WORLD_SIZE + margin as f32;
+        let half_up    = self.zoom * sin_theta / CHUNK_WORLD_SIZE + margin as f32;
+
+        // Rectangle test: both projections must be within their half-extent
+        local_right.abs() <= half_right && local_up.abs() <= half_up
+    }
+
+    /// Priority score: lower = more urgent to load.
+    /// Simple Euclidean distance in chunk space from camera_chunk center.
+    /// The diamond test already filters out irrelevant chunks, so
+    /// center-first loading is the main priority need.
+    pub fn priority_score(&self, pos: IVec3) -> f32 {
+        let dx = (pos.x - self.camera_chunk.x) as f32;
+        let dz = (pos.z - self.camera_chunk.z) as f32;
+        (dx * dx + dz * dz).sqrt()
+    }
+
+    /// Bounding Chebyshev radius that fully contains the rotated view rectangle
+    /// + margin. This is the AABB half-extent of the rotated rectangle in
+    /// world-axis-aligned chunk space.
+    pub fn bounding_radius(&self, margin: i32) -> i32 {
         let sin_theta = (1.0_f32 / 3.0).sqrt();
-        let cos_phi = self.rotation.cos().abs();
-        let sin_phi = self.rotation.sin().abs();
+        let half_right = self.zoom * self.aspect / CHUNK_WORLD_SIZE + margin as f32;
+        let half_up    = self.zoom * sin_theta / CHUNK_WORLD_SIZE + margin as f32;
 
-        let hw = self.zoom * self.aspect; // half-width in world units
-        let hh = self.zoom; // half-height in world units
+        let cos_r = self.rotation.cos().abs();
+        let sin_r = self.rotation.sin().abs();
 
-        // Ground footprint AABB half-extents (parallelogram bounding box)
-        let ground_half_x = hw * sin_phi + hh * sin_theta * cos_phi;
-        let ground_half_z = hw * cos_phi + hh * sin_theta * sin_phi;
-
-        // Convert to chunks, ceiling + 1 for safety margin
-        let cx = (ground_half_x / CHUNK_WORLD_SIZE).ceil() as i32 + 1;
-        let cz = (ground_half_z / CHUNK_WORLD_SIZE).ceil() as i32 + 1;
-
-        (cx, cz)
+        // AABB of the rotated rectangle
+        let aabb_half_x = half_right * sin_r + half_up * cos_r;
+        let aabb_half_z = half_right * cos_r + half_up * sin_r;
+        aabb_half_x.max(aabb_half_z).ceil() as i32
     }
 }
 
@@ -61,9 +119,12 @@ pub struct StreamingTickResult {
 pub struct ChunkStreamingManager {
     pub params: StreamingParams,
     last_camera_chunk: Option<IVec3>,
-    gen_request_tx: mpsc::SyncSender<GenRequest>,
-    gen_result_rx: Mutex<Receiver<GenResult>>,
-    pending_gen: HashSet<IVec3>,
+    work_queue: Arc<SharedWorkQueue>,
+    /// Tracks chunks that workers have popped from the queue and are actively
+    /// generating. Main thread removes entries when it receives results.
+    /// This prevents re-queuing chunks that are mid-generation.
+    in_flight: Arc<Mutex<HashSet<IVec3>>>,
+    gen_result_rx: Mutex<mpsc::Receiver<GenResult>>,
     _workers: Vec<JoinHandle<()>>,
 }
 
@@ -74,36 +135,47 @@ impl ChunkStreamingManager {
     ) -> Self {
         let num_workers = 4.min(num_cpus::get().saturating_sub(2).max(1));
 
-        let (gen_tx, gen_rx) = mpsc::sync_channel::<GenRequest>(256);
+        let work_queue = Arc::new(SharedWorkQueue::new());
+        let in_flight: Arc<Mutex<HashSet<IVec3>>> = Arc::new(Mutex::new(HashSet::new()));
         let (result_tx, result_rx) = mpsc::channel::<GenResult>();
 
-        let gen_rx = Arc::new(std::sync::Mutex::new(gen_rx));
         let terrain_params = Arc::new(terrain_params.clone());
 
         let mut workers = Vec::with_capacity(num_workers);
         for i in 0..num_workers {
-            let gen_rx = gen_rx.clone();
-            let result_tx = result_tx.clone();
-            let params = terrain_params.clone();
+            let wq = work_queue.clone();
+            let flight = in_flight.clone();
+            let tx = result_tx.clone();
+            let tp = terrain_params.clone();
 
             let handle = std::thread::Builder::new()
                 .name(format!("chunk-gen-{}", i))
                 .spawn(move || {
-                    let generator = TerrainGenerator::new(&params);
+                    let generator = TerrainGenerator::new(&tp);
                     loop {
-                        let req = {
-                            let rx = gen_rx.lock().unwrap();
-                            match rx.recv() {
-                                Ok(r) => r,
-                                Err(_) => return,
+                        // Pop highest-priority item (lowest squared distance)
+                        let pos = {
+                            let mut q = wq.queue.lock().unwrap();
+                            loop {
+                                if wq.shutdown.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                if let Some(Reverse((_, arr))) = q.pop() {
+                                    break IVec3::new(arr[0], arr[1], arr[2]);
+                                }
+                                // Queue empty - wait for main thread to rebuild it
+                                q = wq.condvar.wait(q).unwrap();
                             }
                         };
 
-                        let mut chunk = crate::world::chunk::Chunk::new(req.pos);
-                        generator.generate_chunk(&mut chunk, &params);
+                        // Mark as in-flight so main thread won't re-queue it
+                        flight.lock().unwrap().insert(pos);
 
-                        if result_tx.send(GenResult { chunk }).is_err() {
-                            return;
+                        let mut chunk = crate::world::chunk::Chunk::new(pos);
+                        generator.generate_chunk(&mut chunk, &tp);
+
+                        if tx.send(GenResult { chunk }).is_err() {
+                            return; // Main thread dropped, shut down
                         }
                     }
                 })
@@ -117,9 +189,9 @@ impl ChunkStreamingManager {
         Self {
             params: params.clone(),
             last_camera_chunk: None,
-            gen_request_tx: gen_tx,
+            work_queue,
+            in_flight,
             gen_result_rx: Mutex::new(result_rx),
-            pending_gen: HashSet::new(),
             _workers: workers,
         }
     }
@@ -138,25 +210,16 @@ impl ChunkStreamingManager {
         &mut self,
         world: &mut World,
         meshing: &mut MeshingCoordinator,
-        camera_world_pos: [f32; 3],
         camera_view: &CameraView,
-        dt: f32,
+        _dt: f32,
     ) -> StreamingTickResult {
         let min_y = self.params.min_chunk_y;
         let max_y = self.params.max_chunk_y;
-
-        // Compute frustum-based load/unload ranges (rectangular, not circular)
-        let (vis_cx, vis_cz) = camera_view.visible_chunk_extents();
         let load_margin = self.params.load_distance as i32;
         let unload_margin = self.params.unload_distance as i32;
-        let load_range_x = vis_cx + load_margin;
-        let load_range_z = vis_cz + load_margin;
-        let unload_range_x = vis_cx + unload_margin;
-        let unload_range_z = vis_cz + unload_margin;
 
-        // Compute camera chunk position (XZ only)
-        let cam_cx = (camera_world_pos[0] / CHUNK_WORLD_SIZE).floor() as i32;
-        let cam_cz = (camera_world_pos[2] / CHUNK_WORLD_SIZE).floor() as i32;
+        let cam_cx = camera_view.camera_chunk.x;
+        let cam_cz = camera_view.camera_chunk.z;
 
         let mut result = StreamingTickResult {
             inserted: Vec::new(),
@@ -164,30 +227,31 @@ impl ChunkStreamingManager {
         };
 
         // --- Poll completed chunk generations ---
-        let rx = self.gen_result_rx.get_mut().unwrap();
-        while let Ok(gen_result) = rx.try_recv() {
-            let pos = gen_result.chunk.position;
-            self.pending_gen.remove(&pos);
+        {
+            let rx = self.gen_result_rx.get_mut().unwrap();
+            let mut flight = self.in_flight.lock().unwrap();
+            while let Ok(gen_result) = rx.try_recv() {
+                let pos = gen_result.chunk.position;
+                flight.remove(&pos);
 
-            // Don't insert if chunk is now outside unload range (camera moved)
-            let dx = (pos.x - cam_cx).abs();
-            let dz = (pos.z - cam_cz).abs();
-            if dx > unload_range_x || dz > unload_range_z {
-                continue;
-            }
+                // Discard if chunk is now outside the view rect (camera moved)
+                if !camera_view.is_in_view_rect(pos.x, pos.z, unload_margin) {
+                    continue;
+                }
 
-            world.insert_chunk(gen_result.chunk);
-            result.inserted.push(pos);
+                world.insert_chunk(gen_result.chunk);
+                result.inserted.push(pos);
 
-            // Mark face-adjacent neighbors for re-meshing (seam fix)
-            for &offset in &[
-                IVec3::X, IVec3::NEG_X,
-                IVec3::Y, IVec3::NEG_Y,
-                IVec3::Z, IVec3::NEG_Z,
-            ] {
-                let neighbor_pos = pos + offset;
-                if let Some(neighbor) = world.chunks.get_mut(&neighbor_pos) {
-                    neighbor.mesh_dirty = true;
+                // Mark face-adjacent neighbors for re-meshing (seam fix)
+                for &offset in &[
+                    IVec3::X, IVec3::NEG_X,
+                    IVec3::Y, IVec3::NEG_Y,
+                    IVec3::Z, IVec3::NEG_Z,
+                ] {
+                    let neighbor_pos = pos + offset;
+                    if let Some(neighbor) = world.chunks.get_mut(&neighbor_pos) {
+                        neighbor.mesh_dirty = true;
+                    }
                 }
             }
         }
@@ -196,66 +260,71 @@ impl ChunkStreamingManager {
             meshing.pipeline.submit_all_dirty(world);
         }
 
-        // --- Check for missing chunks within load range (every frame) ---
+        // --- Rebuild the work queue with current priorities ---
+        // Snapshot in_flight first, then lock queue (consistent lock ordering).
+        let in_flight_snapshot: HashSet<IVec3> = self.in_flight.lock().unwrap().clone();
         {
-            let mut to_generate: Vec<(i32, IVec3)> = Vec::new();
+            let mut q = self.work_queue.queue.lock().unwrap();
+            q.clear();
 
-            for dz in -load_range_z..=load_range_z {
-                for dx in -load_range_x..=load_range_x {
+            let radius = camera_view.bounding_radius(load_margin);
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
                     let cx = cam_cx + dx;
                     let cz = cam_cz + dz;
+                    if !camera_view.is_in_view_rect(cx, cz, load_margin) {
+                        continue;
+                    }
                     for cy in min_y..max_y {
                         let pos = IVec3::new(cx, cy, cz);
-                        if !world.chunks.contains_key(&pos) && !self.pending_gen.contains(&pos) {
-                            // Chebyshev distance for rectangular priority
-                            let dist = dx.abs().max(dz.abs());
-                            to_generate.push((dist, pos));
+                        if !world.chunks.contains_key(&pos)
+                            && !in_flight_snapshot.contains(&pos)
+                        {
+                            let priority = dx * dx + dz * dz;
+                            q.push(Reverse((priority, [cx, cy, cz])));
                         }
                     }
                 }
             }
-
-            to_generate.sort_by_key(|(dist, _)| *dist);
-
-            let max_gen = self.params.max_gen_per_frame as usize;
-            for (_, pos) in to_generate.into_iter().take(max_gen) {
-                if self.gen_request_tx.try_send(GenRequest { pos }).is_ok() {
-                    self.pending_gen.insert(pos);
-                }
-            }
         }
+        // Wake all workers so they grab new high-priority items
+        self.work_queue.condvar.notify_all();
 
-        // --- Unload distant chunks (only check when camera crosses chunk boundary) ---
-        let camera_chunk = IVec3::new(cam_cx, 0, cam_cz);
-        let camera_moved = self.last_camera_chunk != Some(camera_chunk);
-        if camera_moved {
-            self.last_camera_chunk = Some(camera_chunk);
+        // --- Unload chunks outside the view rectangle ---
+        self.last_camera_chunk = Some(IVec3::new(cam_cx, 0, cam_cz));
 
-            let to_unload: Vec<IVec3> = world
-                .chunks
-                .keys()
-                .filter(|pos| {
-                    let dx = (pos.x - cam_cx).abs();
-                    let dz = (pos.z - cam_cz).abs();
-                    dx > unload_range_x || dz > unload_range_z
-                })
-                .copied()
-                .collect();
+        let to_unload: Vec<IVec3> = world
+            .chunks
+            .keys()
+            .filter(|pos| !camera_view.is_in_view_rect(pos.x, pos.z, unload_margin))
+            .copied()
+            .collect();
 
-            for pos in to_unload {
-                if meshing.pipeline.is_chunk_in_flight(pos) {
-                    continue;
-                }
-                meshing.pipeline.remove_chunk_state(pos);
-                world.remove_chunk(pos);
-                result.unloaded.push(pos);
+        for pos in to_unload {
+            if meshing.pipeline.is_chunk_in_flight(pos) {
+                continue;
             }
+            meshing.pipeline.remove_chunk_state(pos);
+            world.remove_chunk(pos);
+            result.unloaded.push(pos);
         }
 
         result
     }
 
     pub fn pending_gen_count(&self) -> usize {
-        self.pending_gen.len()
+        let in_flight = self.in_flight.lock().unwrap().len();
+        let queued = self.work_queue.queue.lock().unwrap().len();
+        in_flight + queued
+    }
+}
+
+impl Drop for ChunkStreamingManager {
+    fn drop(&mut self) {
+        // Signal workers to exit and wake them from condvar wait
+        self.work_queue.shutdown.store(true, Ordering::Relaxed);
+        self.work_queue.condvar.notify_all();
+        // JoinHandles drop here, detaching threads.
+        // Workers will see the shutdown flag and return.
     }
 }
