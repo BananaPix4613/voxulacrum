@@ -1464,8 +1464,10 @@ pub fn mesh_chunk(
     chunk: &crate::world::chunk::Chunk,
     neighbors: &crate::world::chunk::ChunkNeighbors,
     materials: &MaterialConfig,
+    min_chunk_y: i32,
+    max_chunk_y: i32,
 ) -> ChunkMeshData {
-    let snapshot = ChunkSnapshot::extract(chunk, neighbors);
+    let snapshot = ChunkSnapshot::extract(chunk, neighbors, min_chunk_y, max_chunk_y);
     let mut cell_data = generate_cell_vertices_from_snapshot(&snapshot, materials);
     let nb = NeighborBoundaries::empty();
     let indices = generate_faces_from_snapshot(&mut cell_data, &snapshot, &nb);

@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use bevy_ecs::prelude::Resource;
-
+use glam::IVec3;
 use crate::rendering::render_context::RenderContext;
 use crate::params::CrossSectionParams;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
@@ -240,15 +240,36 @@ impl CapPass {
     }
 }
 
-/// Check if a voxel at absolute voxel coordinates is solid.
-fn is_solid_at(world: &World, vx: usize, vy: usize, vz: usize) -> bool {
-    let cx = vx / CHUNK_SIZE;
-    let cy = vy / CHUNK_SIZE;
-    let cz = vz / CHUNK_SIZE;
-    let lx = vx % CHUNK_SIZE;
-    let ly = vy % CHUNK_SIZE;
-    let lz = vz % CHUNK_SIZE;
-    match world.get_chunk(cx, cy, cz) {
+fn loaded_voxel_bounds(world: &World) -> (i32, i32, i32, i32, i32, i32) {
+    // Returns (min_vx, max_vx, min_vy, max_vy, min_vz, max_vz) in voxel coords
+    if world.chunks.is_empty() {
+        return (0, 0, 0, 0, 0, 0);
+    }
+    let mut min = IVec3::splat(i32::MAX);
+    let mut max = IVec3::splat(i32::MIN);
+    for pos in world.chunks.keys() {
+        min = min.min(*pos);
+        max = max.max(*pos);
+    }
+    (
+        min.x * CHUNK_SIZE as i32,
+        (max.x + 1) * CHUNK_SIZE as i32,
+        min.y * CHUNK_SIZE as i32,
+        (max.y + 1) * CHUNK_SIZE as i32,
+        min.z * CHUNK_SIZE as i32,
+        (max.z + 1) * CHUNK_SIZE as i32,
+    )
+}
+
+// is_solid_at and has_mc_surface_at use IVec3 lookup:
+fn is_solid_at(world: &World, vx: i32, vy: i32, vz: i32) -> bool {
+    let cx = vx.div_euclid(CHUNK_SIZE as i32);
+    let cy = vy.div_euclid(CHUNK_SIZE as i32);
+    let cz = vz.div_euclid(CHUNK_SIZE as i32);
+    let lx = vx.rem_euclid(CHUNK_SIZE as i32) as usize;
+    let ly = vy.rem_euclid(CHUNK_SIZE as i32) as usize;
+    let lz = vz.rem_euclid(CHUNK_SIZE as i32) as usize;
+    match world.get_chunk(IVec3::new(cx, cy, cz)) {
         Some(chunk) => chunk.get_voxel(lx, ly, lz).is_solid(),
         None => false,
     }
@@ -258,27 +279,17 @@ fn is_solid_at(world: &World, vx: usize, vy: usize, vz: usize) -> bool {
 /// geometry (at least one solid and one non-solid corner among its 8 corners).
 /// This detects transitional cells where MC creates diagonal faces that extend
 /// beyond the solid voxel center into "air" voxels.
-fn has_mc_surface_at(world: &World, vx: usize, vy: usize, vz: usize) -> bool {
-    let max_vx = world.chunks_x * CHUNK_SIZE;
-    let max_vy = world.chunks_y * CHUNK_SIZE;
-    let max_vz = world.chunks_z * CHUNK_SIZE;
-
+fn has_mc_surface_at(world: &World, vx: i32, vy: i32, vz: i32) -> bool {
     let mut has_solid = false;
     let mut has_air = false;
 
     // Check all 8 corners of the MC cell at (vx, vy, vz).
     // Corners span from (vx, vy, vz) to (vx+1, vy+1, vz+1),
     // matching CORNER_OFFSETS in marching_cubes.rs.
-    for dz in 0..=1usize {
-        for dy in 0..=1usize {
-            for dx in 0..=1usize {
-                let cx = vx + dx;
-                let cy = vy + dy;
-                let cz = vz + dz;
-
-                if cx >= max_vx || cy >= max_vy || cz >= max_vz {
-                    has_air = true;
-                } else if is_solid_at(world, cx, cy, cz) {
+    for dz in 0..=1i32 {
+        for dy in 0..=1i32 {
+            for dx in 0..=1i32 {
+                if is_solid_at(world, vx + dx, vy + dy, vz + dz) {
                     has_solid = true;
                 } else {
                     has_air = true;
@@ -304,15 +315,13 @@ fn generate_cap_mesh(
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
 
-    let world_voxels_x = world.chunks_x * CHUNK_SIZE;
-    let world_voxels_y = world.chunks_y * CHUNK_SIZE;
-    let world_voxels_z = world.chunks_z * CHUNK_SIZE;
+    let (min_vx, max_vx, min_vy, max_vy, min_vz, max_vz) = loaded_voxel_bounds(world);
 
     // X clip plane
     if let Some(vx) = planes[0] {
-        if vx >= 0 && (vx as usize) < world_voxels_x {
+        if vx >= min_vx && vx < max_vx {
             generate_plane_x(
-                world, vx as usize, world_voxels_y, world_voxels_z,
+                world, vx, min_vy, max_vy, min_vz, max_vz,
                 clip_dirs[0], fog_color, &mut vertices, &mut indices,
             );
         }
@@ -320,9 +329,9 @@ fn generate_cap_mesh(
 
     // Y clip plane
     if let Some(vy) = planes[1] {
-        if vy >= 0 && (vy as usize) < world_voxels_y {
+        if vy >= min_vy && vy < max_vy {
             generate_plane_y(
-                world, vy as usize, world_voxels_x, world_voxels_z,
+                world, vy, min_vx, max_vx, min_vz, max_vz,
                 clip_dirs[1], fog_color, &mut vertices, &mut indices,
             );
         }
@@ -330,9 +339,9 @@ fn generate_cap_mesh(
 
     // Z clip plane
     if let Some(vz) = planes[2] {
-        if vz >= 0 && (vz as usize) < world_voxels_z {
+        if vz >= min_vz && vz < max_vz {
             generate_plane_z(
-                world, vz as usize, world_voxels_x, world_voxels_y,
+                world, vz, min_vx, max_vx, min_vy, max_vy,
                 clip_dirs[2], fog_color, &mut vertices, &mut indices,
             );
         }
@@ -345,9 +354,9 @@ fn generate_cap_mesh(
 /// `dir` is +1.0 (clip +X side, normal faces +X) or -1.0 (clip -X side, normal faces -X).
 fn generate_plane_x(
     world: &World,
-    vx: usize,
-    max_vy: usize,
-    max_vz: usize,
+    vx: i32,
+    min_vy: i32, max_vy: i32,
+    min_vz: i32, max_vz: i32,
     dir: f32,
     color: [f32; 3],
     vertices: &mut Vec<CapVertex>,
@@ -356,8 +365,8 @@ fn generate_plane_x(
     let normal = [dir, 0.0, 0.0];
     let wx = vx as f32 * VOXEL_SCALE;
 
-    for vz in 0..max_vz {
-        for vy in 0..max_vy {
+    for vz in min_vz..max_vz {
+        for vy in min_vy..max_vy {
             if is_solid_at(world, vx, vy, vz) || has_mc_surface_at(world, vx, vy, vz) {
                 let y0 = vy as f32 * VOXEL_SCALE;
                 let y1 = y0 + VOXEL_SCALE;
@@ -371,10 +380,8 @@ fn generate_plane_x(
                 vertices.push(CapVertex { position: [wx, y0, z1], normal, color });
 
                 if dir > 0.0 {
-                    // CCW winding when viewed from +X direction
                     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
                 } else {
-                    // Reversed winding for -X direction
                     indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
                 }
             }
@@ -386,9 +393,9 @@ fn generate_plane_x(
 /// `dir` is +1.0 (clip +Y side, normal faces +Y) or -1.0 (clip -Y side, normal faces -Y).
 fn generate_plane_y(
     world: &World,
-    vy: usize,
-    max_vx: usize,
-    max_vz: usize,
+    vy: i32,
+    min_vx: i32, max_vx: i32,
+    min_vz: i32, max_vz: i32,
     dir: f32,
     color: [f32; 3],
     vertices: &mut Vec<CapVertex>,
@@ -397,8 +404,8 @@ fn generate_plane_y(
     let normal = [0.0, dir, 0.0];
     let wy = vy as f32 * VOXEL_SCALE;
 
-    for vz in 0..max_vz {
-        for vx in 0..max_vx {
+    for vz in min_vz..max_vz {
+        for vx in min_vx..max_vx {
             if is_solid_at(world, vx, vy, vz) || has_mc_surface_at(world, vx, vy, vz) {
                 let x0 = vx as f32 * VOXEL_SCALE;
                 let x1 = x0 + VOXEL_SCALE;
@@ -412,10 +419,8 @@ fn generate_plane_y(
                 vertices.push(CapVertex { position: [x1, wy, z0], normal, color });
 
                 if dir > 0.0 {
-                    // CCW winding when viewed from +Y direction
                     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
                 } else {
-                    // Reversed winding for -Y direction
                     indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
                 }
             }
@@ -427,9 +432,9 @@ fn generate_plane_y(
 /// `dir` is +1.0 (clip +Z side, normal faces +Z) or -1.0 (clip -Z side, normal faces -Z).
 fn generate_plane_z(
     world: &World,
-    vz: usize,
-    max_vx: usize,
-    max_vy: usize,
+    vz: i32,
+    min_vx: i32, max_vx: i32,
+    min_vy: i32, max_vy: i32,
     dir: f32,
     color: [f32; 3],
     vertices: &mut Vec<CapVertex>,
@@ -438,8 +443,8 @@ fn generate_plane_z(
     let normal = [0.0, 0.0, dir];
     let wz = vz as f32 * VOXEL_SCALE;
 
-    for vy in 0..max_vy {
-        for vx in 0..max_vx {
+    for vy in min_vy..max_vy {
+        for vx in min_vx..max_vx {
             if is_solid_at(world, vx, vy, vz) || has_mc_surface_at(world, vx, vy, vz) {
                 let x0 = vx as f32 * VOXEL_SCALE;
                 let x1 = x0 + VOXEL_SCALE;
@@ -453,10 +458,8 @@ fn generate_plane_z(
                 vertices.push(CapVertex { position: [x0, y1, wz], normal, color });
 
                 if dir > 0.0 {
-                    // CCW winding when viewed from +Z direction
                     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
                 } else {
-                    // Reversed winding for -Z direction
                     indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
                 }
             }

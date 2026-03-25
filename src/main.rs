@@ -36,7 +36,6 @@ use rendering::palette_pass::PalettePass;
 use rendering::cap_pass::CapPass;
 use shader_reload::ShaderWatcher;
 use simulation::manager::SimulationManager;
-use simulation::water::StaticWater;
 use meshing::coordinator::MeshingCoordinator;
 use meshing::MeshingPipeline;
 use world::regen::WorldRegenCoordinator;
@@ -286,6 +285,9 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let world_cache_path =
         meshing::cache::world_cache_path(&cache_dir, world_key);
 
+    let min_y = initial_params.streaming.min_chunk_y;
+    let max_y = initial_params.streaming.max_chunk_y;
+
     let world = if let Some(chunks) =
         meshing::cache::load_world_cache(&world_cache_path, world_key)
     {
@@ -294,9 +296,9 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
             gen_start.elapsed(),
             chunks.len()
         );
-        world::World::from_cached_chunks(chunks, &initial_params.terrain_gen)
+        world::World::from_cached_chunks(chunks, &initial_params.terrain_gen, min_y, max_y)
     } else {
-        let w = world::World::generate(&initial_params.terrain_gen);
+        let w = world::World::generate(&initial_params.terrain_gen, min_y, max_y);
         log::info!("World generated in {:.2?}", gen_start.elapsed());
         if let Err(e) =
             meshing::cache::save_world_cache(&world_cache_path, world_key, &w)
@@ -312,10 +314,13 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Vegetation + water
     let vegetation_pass =
         VegetationPass::new(&ctx, &world, &initial_params.vegetation);
-    let static_water = StaticWater::new(
-        &world, &initial_params.water, &initial_params.terrain_gen,
+    let water_pass = WaterPass::new(
+        &ctx,
+        &world.generator,
+        &initial_params.terrain_gen,
+        initial_params.water.water_level,
+        world.chunks.keys().copied(),
     );
-    let water_pass = WaterPass::new(&ctx, &static_water);
 
     // Post-process pass
     let pp_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
@@ -362,9 +367,6 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // Meshing
     let mut meshing_pipeline = MeshingPipeline::new(
-        world.chunks_x,
-        world.chunks_y,
-        world.chunks_z,
         &ui_state.params.materials,
         &ui_state.params.meshing,
     );
@@ -396,7 +398,6 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(debug_line_pass);
     ecs.insert_resource(upscale_pass);
     ecs.insert_resource(vegetation_pass);
-    ecs.insert_resource(static_water);
     ecs.insert_resource(water_pass);
     ecs.insert_resource(post_process);
     ecs.insert_resource(outline_pass);
@@ -405,6 +406,11 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(shader_watcher);
     ecs.insert_resource(meshing);
     ecs.insert_resource(WorldRegenCoordinator::new());
+    let streaming_manager = world::streaming::ChunkStreamingManager::new(
+        &ui_state.params.streaming,
+        &ui_state.params.terrain_gen,
+    );
+    ecs.insert_resource(streaming_manager);
     ecs.insert_resource(ui_state);
     ecs.insert_resource(FrameCounter::new());
     ecs.insert_resource(RawInputBuffer::default());

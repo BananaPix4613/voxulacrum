@@ -317,12 +317,13 @@ pub fn save_world_cache(
 
     let mut buf = Vec::with_capacity(total_size);
     buf.write_all(&key.to_le_bytes())?;
-    buf.write_all(&(world.chunks_x as u32).to_le_bytes())?;
-    buf.write_all(&(world.chunks_y as u32).to_le_bytes())?;
-    buf.write_all(&(world.chunks_z as u32).to_le_bytes())?;
+    // Write dummy dimensions for backward compatibility
+    buf.write_all(&0u32.to_le_bytes())?; // chunks_x (unused)
+    buf.write_all(&0u32.to_le_bytes())?; // chunks_y (unused)
+    buf.write_all(&0u32.to_le_bytes())?; // chunks_z (unused)
     buf.write_all(&chunk_count.to_le_bytes())?;
 
-    for chunk in &world.chunks {
+    for chunk in world.chunks.values() {
         buf.write_all(&chunk.position.x.to_le_bytes())?;
         buf.write_all(&chunk.position.y.to_le_bytes())?;
         buf.write_all(&chunk.position.z.to_le_bytes())?;
@@ -337,7 +338,7 @@ pub fn save_world_cache(
 pub fn load_world_cache(
     path: &Path,
     expected_key: u64,
-) -> Option<Vec<crate::world::chunk::Chunk>> {
+) -> Option<std::collections::HashMap<glam::IVec3, crate::world::chunk::Chunk>> {
     use crate::world::chunk::{Chunk, CHUNK_VOLUME};
     use crate::world::voxel::Voxel;
     use glam::IVec3;
@@ -356,9 +357,7 @@ pub fn load_world_cache(
         return None;
     }
 
-    let _chunks_x = u32::from_le_bytes(data[8..12].try_into().ok()?);
-    let _chunks_y = u32::from_le_bytes(data[12..16].try_into().ok()?);
-    let _chunks_z = u32::from_le_bytes(data[16..20].try_into().ok()?);
+    // Skip dims (bytes 8..20), read chunk count
     let chunk_count = u32::from_le_bytes(data[20..24].try_into().ok()?) as usize;
 
     let per_chunk_bytes = 12 + voxel_size * CHUNK_VOLUME;
@@ -368,7 +367,7 @@ pub fn load_world_cache(
         return None;
     }
 
-    let mut chunks = Vec::with_capacity(chunk_count);
+    let mut chunks = std::collections::HashMap::with_capacity(chunk_count);
     let mut offset = 24;
 
     for _ in 0..chunk_count {
@@ -381,10 +380,11 @@ pub fn load_world_cache(
         offset += voxel_size * CHUNK_VOLUME;
 
         // Allocate chunk and copy voxel data
-        let mut chunk = Chunk::new(IVec3::new(px, py, pz));
+        let pos = IVec3::new(px, py, pz);
+        let mut chunk = Chunk::new(pos);
         let src: &[Voxel] = bytemuck::cast_slice(voxel_data);
         chunk.voxels.copy_from_slice(src);
-        chunks.push(chunk);
+        chunks.insert(pos, chunk);
     }
 
     Some(chunks)

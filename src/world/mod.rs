@@ -2,63 +2,73 @@ pub mod voxel;
 pub mod chunk;
 pub mod generation;
 pub mod regen;
+pub mod streaming;
 
+use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::JoinHandle;
 use bevy_ecs::prelude::Resource;
+use glam::IVec3;
 
 use chunk::{Chunk, ChunkMesh, ChunkNeighbors, CHUNK_VOLUME};
-use generation::{TerrainGenerator, WORLD_CHUNKS_X, WORLD_CHUNKS_Y, WORLD_CHUNKS_Z};
+use generation::TerrainGenerator;
 use voxel::{MATERIAL_COUNT, MATERIAL_TABLE};
 
 pub struct World {
-    pub chunks: Vec<Chunk>,
-    pub chunks_x: usize,
-    pub chunks_y: usize,
-    pub chunks_z: usize,
+    pub chunks: HashMap<IVec3, Chunk>,
     pub generator: TerrainGenerator,
+    pub min_chunk_y: i32,
+    pub max_chunk_y: i32, // exclusive upper bound
 }
 
 use crate::params::TerrainGenParams;
 
 impl World {
-    pub fn generate(params: &TerrainGenParams) -> Self {
+    pub fn generate(params: &TerrainGenParams, min_y: i32, max_y: i32) -> Self {
         let generator = TerrainGenerator::new(params);
-        let chunks = generator.generate_world(params);
+        let chunks = generator.generate_world(params, min_y, max_y);
 
         Self {
             chunks,
-            chunks_x: WORLD_CHUNKS_X,
-            chunks_y: WORLD_CHUNKS_Y,
-            chunks_z: WORLD_CHUNKS_Z,
             generator,
+            min_chunk_y: min_y,
+            max_chunk_y: max_y,
         }
     }
 
     /// Create a World from preloaded chunk data (from cache).
-    pub fn from_cached_chunks(chunks: Vec<Chunk>, params: &TerrainGenParams) -> Self {
+    pub fn from_cached_chunks(
+        chunks: HashMap<IVec3, Chunk>,
+        params: &TerrainGenParams,
+        min_y: i32,
+        max_y: i32,
+    ) -> Self {
         Self {
             chunks,
-            chunks_x: WORLD_CHUNKS_X,
-            chunks_y: WORLD_CHUNKS_Y,
-            chunks_z: WORLD_CHUNKS_Z,
             generator: TerrainGenerator::new(params),
+            min_chunk_y: min_y,
+            max_chunk_y: max_y,
         }
     }
 
     /// Upload a completed mesh result to the GPU for a specific chunk.
     pub fn upload_mesh_result(
         &mut self,
-        chunk_index: usize,
+        chunk_key: IVec3,
         vertices: &[crate::rendering::pipelines::TerrainVertex],
         indices: &[u32],
         device: &wgpu::Device,
     ) {
+        let chunk = match self.chunks.get_mut(&chunk_key) {
+            Some(c) => c,
+            None => return, // Chunk was unloaded while mesh was in flight
+        };
+
         if vertices.is_empty() || indices.is_empty() {
-            self.chunks[chunk_index].mesh = None;
-            self.chunks[chunk_index].mesh_dirty = false;
+            chunk.mesh = None;
+            chunk.mesh_dirty = false;
             return;
         }
 
@@ -74,51 +84,46 @@ impl World {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        self.chunks[chunk_index].mesh = Some(ChunkMesh {
+        chunk.mesh = Some(ChunkMesh {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
         });
-        self.chunks[chunk_index].mesh_dirty = false;
+        chunk.mesh_dirty = false;
     }
 
-    pub fn build_neighbors(&self, cx: usize, cy: usize, cz: usize) -> ChunkNeighbors {
+    pub fn build_neighbors(&self, pos: IVec3) -> ChunkNeighbors {
         let mut neighbors = ChunkNeighbors::empty();
         for dz in -1i32..=1 {
             for dy in -1i32..=1 {
                 for dx in -1i32..=1 {
                     if dx == 0 && dy == 0 && dz == 0 { continue; }
-                    let nx = cx as i32 + dx;
-                    let ny = cy as i32 + dy;
-                    let nz = cz as i32 + dz;
-                    if nx >= 0 && (nx as usize) < self.chunks_x
-                        && ny >= 0 && (ny as usize) < self.chunks_y
-                        && nz >= 0 && (nz as usize) < self.chunks_z
-                    {
-                        neighbors.set(dx, dy, dz, self.get_chunk(nx as usize, ny as usize, nz as usize));
-                    }
+                    let n_pos = pos + IVec3::new(dx, dy, dz);
+                    neighbors.set(dx, dy, dz, self.chunks.get(&n_pos));
                 }
             }
         }
         neighbors
     }
 
-    /// Get a chunk by its chunk-space coordinates, or None if out of bounds.
-    pub fn get_chunk(&self, cx: usize, cy: usize, cz: usize) -> Option<&Chunk> {
-        if cx >= self.chunks_x || cy >= self.chunks_y || cz >= self.chunks_z {
-            return None;
-        }
-        let index = cx + cy * self.chunks_x + cz * self.chunks_x * self.chunks_y;
-        self.chunks.get(index)
+    /// Get a chunk by its chunk-space IVec3 position.
+    pub fn get_chunk(&self, pos: IVec3) -> Option<&Chunk> {
+        self.chunks.get(&pos)
     }
 
-    /// Get a mutable chunk by its chunk-space coordinates.
-    pub fn get_chunk_mut(&mut self, cx: usize, cy: usize, cz: usize) -> Option<&mut Chunk> {
-        if cx >= self.chunks_x || cy >= self.chunks_y || cz >= self.chunks_z {
-            return None;
-        }
-        let index = cx + cy * self.chunks_x + cz * self.chunks_x * self.chunks_y;
-        self.chunks.get_mut(index)
+    /// Get a mutable chunk by its chunk-space IVec3 position.
+    pub fn get_chunk_mut(&mut self, pos: IVec3) -> Option<&mut Chunk> {
+        self.chunks.get_mut(&pos)
+    }
+
+    /// Insert a chunk into the world.
+    pub fn insert_chunk(&mut self, chunk: Chunk) {
+        self.chunks.insert(chunk.position, chunk);
+    }
+
+    /// Remove a chunk. GPU buffers freed on drop.
+    pub fn remove_chunk(&mut self, pos: IVec3) -> Option<Chunk> {
+        self.chunks.remove(&pos)
     }
 
     /// Print debug statistics about the generated world.
@@ -130,7 +135,7 @@ impl World {
         let mut max_density: i8 = i8::MIN;
         let mut flora_count: u64 = 0;
 
-        for chunk in &self.chunks {
+        for chunk in self.chunks.values() {
             for voxel in chunk.voxels.iter() {
                 if voxel.density > 0 {
                     total_solid += 1;
@@ -154,13 +159,12 @@ impl World {
         }
 
         let total = total_solid + total_air;
+        if total == 0 { return; }
         log::info!("=== World Generation Stats ===");
         log::info!("Chunks: {}", self.chunks.len());
         log::info!(
             "Total voxels: {} ({} solid, {} air)",
-            total,
-            total_solid,
-            total_air
+            total, total_solid, total_air
         );
         log::info!(
             "Solid: {:.1}%, Air: {:.1}%",
@@ -174,9 +178,7 @@ impl World {
             if *count > 0 {
                 log::info!(
                     "  [{}] {}: {} ({:.1}%)",
-                    id,
-                    MATERIAL_TABLE[id].name,
-                    count,
+                    id, MATERIAL_TABLE[id].name, count,
                     *count as f64 / total as f64 * 100.0
                 );
             }
@@ -197,15 +199,12 @@ impl World {
 /// caller swaps the new chunks into the active `World`.
 #[derive(Resource)]
 pub struct WorldManager {
-    /// Handle to the background regeneration thread, if active.
-    regen_handle: Mutex<Option<JoinHandle<Vec<Chunk>>>>,
-    /// Shared progress counter: chunks generated so far.
+    regen_handle: Mutex<Option<JoinHandle<HashMap<IVec3, Chunk>>>>,
     regen_progress: Arc<AtomicU32>,
-    /// Total chunks to generate (for progress bar denominator).
     regen_total: u32,
-    /// The terrain params that triggered this regeneration (kep for cache save
-    /// and stale-detection after completion).
     regen_params: Option<TerrainGenParams>,
+    regen_min_y: i32,
+    regen_max_y: i32,
 }
 
 impl WorldManager {
@@ -215,15 +214,15 @@ impl WorldManager {
             regen_progress: Arc::new(AtomicU32::new(0)),
             regen_total: 0,
             regen_params: None,
+            regen_min_y: 0,
+            regen_max_y: 4,
         }
     }
-    
-    /// Returns true if a background regeneration is currently in progress.
+
     pub fn is_regenerating(&self) -> bool {
         self.regen_handle.lock().unwrap().is_some()
     }
-    
-    /// Returns (chunks_completed, total_chunks) for the progress bar.
+
     pub fn progress(&self) -> (u32, u32) {
         if self.regen_handle.lock().unwrap().is_some() {
             (self.regen_progress.load(Ordering::Relaxed), self.regen_total)
@@ -231,16 +230,21 @@ impl WorldManager {
             (0, 0)
         }
     }
-    
-    /// Start background regeneration. No-op if one is already in progress.
-    pub fn start_regeneration(&mut self, params: &crate::params::TerrainGenParams) {
+
+    /// Start background regeneration for the given chunk set.
+    /// `positions` defines which chunks to generate.
+    pub fn start_regeneration(
+        &mut self,
+        params: &TerrainGenParams,
+        positions: Vec<IVec3>,
+    ) {
         let handle = self.regen_handle.get_mut().unwrap();
         if handle.is_some() {
             log::warn!("Regeneration already in progress, ignoring request");
             return;
         }
         
-        let total = (WORLD_CHUNKS_X * WORLD_CHUNKS_Y * WORLD_CHUNKS_Z) as u32;
+        let total = positions.len() as u32;
         self.regen_total = total;
         self.regen_progress.store(0, Ordering::Relaxed);
         self.regen_params = Some(params.clone());
@@ -252,17 +256,15 @@ impl WorldManager {
         
         let new_handle = std::thread::Builder::new()
             .name("terrain-regen".to_string())
-            .spawn(move || generate_world_background(&params_clone, &progress))
+            .spawn(move || generate_world_background(&params_clone, &positions, &progress))
             .expect("Failed to spawn terrain regeneration thread");
         
         *handle = Some(new_handle);
     }
-    
-    /// Poll for completion. Returns `Some((chunks, params))` when done.
-    /// The caller must swap chunks into the world and rebuild dependent passes.
+
     pub fn poll_regeneration(
         &mut self,
-    ) -> Option<(Vec<Chunk>, crate::params::TerrainGenParams)> {
+    ) -> Option<(HashMap<IVec3, Chunk>, TerrainGenParams)> {
         let handle_opt = self.regen_handle.get_mut().unwrap();
         let handle_ref = handle_opt.as_ref()?;
         
@@ -289,35 +291,24 @@ impl WorldManager {
     }
 }
 
-/// Generate the world on a background thread with per-chunk progress reporting.
 fn generate_world_background(
-    params: &crate::params::TerrainGenParams,
+    params: &TerrainGenParams,
+    positions: &[IVec3],
     progress: &Arc<AtomicU32>,
-) -> Vec<Chunk> {
+) -> HashMap<IVec3, Chunk> {
     use rayon::prelude::*;
     
     let generator = TerrainGenerator::new(params);
     
-    // Pre-allocate all chunks with default (empty) voxel data
-    let mut chunks: Vec<Chunk> = Vec::with_capacity(
-        WORLD_CHUNKS_X * WORLD_CHUNKS_Y * WORLD_CHUNKS_Z,
-    );
-    for cz in 0..WORLD_CHUNKS_Z {
-        for cy in 0..WORLD_CHUNKS_Y {
-            for cx in 0..WORLD_CHUNKS_X {
-                chunks.push(Chunk::new(glam::IVec3::new(
-                    cx as i32, cy as i32, cz as i32,
-                )));
-            }
-        }
-    }
+    let chunks: Vec<Chunk> = positions
+        .par_iter()
+        .map(|&pos| {
+            let mut chunk = Chunk::new(pos);
+            generator.generate_chunk(&mut chunk, params);
+            progress.fetch_add(1, Ordering::Relaxed);
+            chunk
+        })
+        .collect();
     
-    // Generate voxel data in parallel
-    let progress_ref = progress.clone();
-    chunks.par_iter_mut().for_each(|chunk| {
-        generator.generate_chunk(chunk, params);
-        progress_ref.fetch_add(1, Ordering::Relaxed);
-    });
-    
-    chunks
+    chunks.into_iter().map(|c| (c.position, c)).collect()
 }

@@ -1,7 +1,6 @@
 use glam::{Mat4, Vec3};
 
 use crate::params::{LightingParams, TimeControlParams};
-use crate::world::generation::{WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z};
 
 pub struct TimeOfDay {
     pub time: f32,
@@ -76,17 +75,17 @@ impl TimeOfDay {
         (-d * d * 0.5).exp()
     }
 
-    pub fn light_space_matrix(&self) -> Mat4 {
+    pub fn light_space_matrix(&self, camera_target: Vec3, shadow_radius: f32) -> Mat4 {
         let sun_dir = self.sun_direction();
         if sun_dir.y <= 0.01 { return Mat4::IDENTITY; }
 
-        let center = Vec3::new(WORLD_SIZE_X * 0.5, WORLD_SIZE_Y * 0.5, WORLD_SIZE_Z * 0.5);
-        let eye = center + sun_dir * 500.0;
+        let eye = camera_target + sun_dir * 500.0;
         let up = if sun_dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-        let view = Mat4::look_at_rh(eye, center, up);
+        let view = Mat4::look_at_rh(eye, camera_target, up);
 
-        let world_min = Vec3::ZERO;
-        let world_max = Vec3::new(WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z);
+        let half = Vec3::splat(shadow_radius);
+        let world_min = camera_target - half;
+        let world_max = camera_target + half;
         let corners = [
             Vec3::new(world_min.x, world_min.y, world_min.z),
             Vec3::new(world_max.x, world_min.y, world_min.z),

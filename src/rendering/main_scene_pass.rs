@@ -20,7 +20,7 @@ pub struct MainScenePassNode<'a> {
     pub sky_color: wgpu::Color,
     pub terrain_pipeline: &'a wgpu::RenderPipeline,
     pub uniform_bind_group: &'a wgpu::BindGroup,
-    pub chunks: &'a [Chunk],
+    pub chunks: &'a [&'a Chunk],
     pub frustum: &'a Frustum,
     // Sub-passes
     pub cap_pass: &'a CapPass,
@@ -83,7 +83,7 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         // Terrain
         pass.set_pipeline(self.terrain_pipeline);
         pass.set_bind_group(0, self.uniform_bind_group, &[]);
-        for chunk in self.chunks {
+        for &chunk in self.chunks {
             if let Some(mesh) = &chunk.mesh {
                 if self.frustum.is_chunk_visible(chunk.position) {
                     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -111,33 +111,41 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
             pass.draw_indexed(0..self.cap_pass.index_count, 0, 0..1);
         }
 
-        // Vegetation
-        if self.vegetation_pass.instance_count > 0 {
+        // Vegetation - per-chunk instanced draws with frustum culling
+        if !self.vegetation_pass.chunk_vegetation.is_empty() {
             pass.set_pipeline(self.vegetation_pipeline);
             pass.set_bind_group(0, self.uniform_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vegetation_pass.grass_vertex_buffer.slice(..));
-            pass.set_vertex_buffer(1, self.vegetation_pass.instance_buffer.slice(..));
             pass.set_index_buffer(
                 self.vegetation_pass.grass_index_buffer.slice(..),
                 wgpu::IndexFormat::Uint32,
             );
-            pass.draw_indexed(
-                0..self.vegetation_pass.grass_index_count,
-                0,
-                0..self.vegetation_pass.instance_count,
-            );
+            for (&chunk_pos, veg) in &self.vegetation_pass.chunk_vegetation {
+                if self.frustum.is_chunk_visible(chunk_pos) {
+                    pass.set_vertex_buffer(1, veg.instance_buffer.slice(..));
+                    pass.draw_indexed(
+                        0..self.vegetation_pass.grass_index_count,
+                        0,
+                        0..veg.instance_count,
+                    );
+                }
+            }
         }
 
-        // Water
-        if self.water_pass.index_count > 0 {
+        // Water - per-chunk indexed draws with frustum culling
+        if !self.water_pass.chunk_meshes.is_empty() {
             pass.set_pipeline(self.water_pipeline);
             pass.set_bind_group(0, self.uniform_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.water_pass.vertex_buffer.slice(..));
-            pass.set_index_buffer(
-                self.water_pass.index_buffer.slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            pass.draw_indexed(0..self.water_pass.index_count, 0, 0..1);
+            for (&chunk_pos, water_mesh) in &self.water_pass.chunk_meshes {
+                if self.frustum.is_chunk_visible(chunk_pos) {
+                    pass.set_vertex_buffer(0, water_mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(
+                        water_mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..water_mesh.index_count, 0, 0..1);
+                }
+            }
         }
 
         // Debug lines

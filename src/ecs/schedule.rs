@@ -46,10 +46,13 @@ pub fn build_frame_schedule() -> Schedule {
         systems::param_change_detection_system.in_set(FrameStage::Simulation),
         systems::palette_load_system.in_set(FrameStage::Simulation),
     ));
-    // Meshing
-    schedule.add_systems(
+    // Streaming + Meshing
+    schedule.add_systems((
+        systems::streaming_tick_system
+            .in_set(FrameStage::Meshing)
+            .before(systems::meshing_tick_system),
         systems::meshing_tick_system.in_set(FrameStage::Meshing),
-    );
+    ));
     // UniformWrite
     schedule.add_systems((
         systems::write_uniforms_system.in_set(FrameStage::UniformWrite),

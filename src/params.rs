@@ -501,6 +501,33 @@ impl Default for CrossSectionParams {
 }
 
 // ============================================================================
+// Streaming Params
+// ============================================================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct StreamingParams {
+    pub load_distance: u32,
+    pub unload_distance: u32,
+    pub min_chunk_y: i32,
+    pub max_chunk_y: i32,
+    pub max_gen_per_frame: u32,
+    pub max_mesh_per_frame: u32,
+}
+
+impl Default for StreamingParams {
+    fn default() -> Self {
+        Self {
+            load_distance: 8,
+            unload_distance: 12,
+            min_chunk_y: 0,
+            max_chunk_y: 4,
+            max_gen_per_frame: 1024,
+            max_mesh_per_frame: 1024,
+        }
+    }
+}
+
+// ============================================================================
 // Top-level EngineParams
 // ============================================================================
 
@@ -523,6 +550,7 @@ pub struct EngineParams {
     pub render_pipeline: RenderPipelineParams,
     pub outline: OutlineParams,
     pub cross_section: CrossSectionParams,
+    pub streaming: StreamingParams,
 }
 
 impl Default for EngineParams {
@@ -544,6 +572,7 @@ impl Default for EngineParams {
             render_pipeline: RenderPipelineParams::default(),
             outline: OutlineParams::default(),
             cross_section: CrossSectionParams::default(),
+            streaming: StreamingParams::default(),
         }
     }
 }

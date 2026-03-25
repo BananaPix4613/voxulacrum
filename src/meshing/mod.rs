@@ -3,6 +3,7 @@ pub mod coordinator;
 mod marching_cubes;
 mod mc_tables;
 
+use glam::IVec3;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -27,7 +28,7 @@ use marching_cubes::{
 // ============================================================================
 
 struct Phase1Request {
-    chunk_index: usize,
+    chunk_key: IVec3,
     snapshot: ChunkSnapshot,
 }
 
@@ -46,12 +47,12 @@ enum Phase1Outcome {
 }
 
 struct Phase1Result {
-    chunk_index: usize,
+    chunk_key: IVec3,
     outcome: Phase1Outcome,
 }
 
 struct Phase2Request {
-    chunk_index: usize,
+    chunk_key: IVec3,
     cell_data: CellVertexData,
     snapshot: ChunkSnapshot,
     neighbor_boundaries: OwnedNeighborBoundaries,
@@ -59,7 +60,7 @@ struct Phase2Request {
 }
 
 pub struct Phase2Result {
-    pub chunk_index: usize,
+    pub chunk_key: IVec3,
     pub vertices: Vec<TerrainVertex>,
     pub indices: Vec<u32>,
 }
@@ -136,18 +137,14 @@ pub struct MeshingPipeline {
     p2_result_rx: Mutex<Receiver<Phase2Result>>,
     _workers: Mutex<Vec<JoinHandle<()>>>,
 
-    chunk_states: Vec<ChunkMeshState>,
-    pending_phase1: HashMap<usize, (CellVertexData, ChunkSnapshot, u64)>,
-    boundary_maps: HashMap<usize, BoundaryVertexMap>,
+    chunk_states: HashMap<IVec3, ChunkMeshState>,
+    pending_phase1: HashMap<IVec3, (CellVertexData, ChunkSnapshot, u64)>,
+    boundary_maps: HashMap<IVec3, BoundaryVertexMap>,
     material_config: Arc<RwLock<MaterialConfig>>,
-
-    chunks_x: usize,
-    chunks_y: usize,
-    chunks_z: usize,
 
     pub stats: MeshingStats,
     batch_start: Option<Instant>,
-    pending_submissions: Vec<usize>,
+    pending_submissions: Vec<IVec3>,
 
     // Cache
     cache_stats: Arc<AtomicCacheStats>,
@@ -156,8 +153,7 @@ pub struct MeshingPipeline {
 }
 
 impl MeshingPipeline {
-    pub fn new(chunks_x: usize, chunks_y: usize, chunks_z: usize, materials: &MaterialParams, meshing: &crate::params::MeshingParams) -> Self {
-        let total_chunks = chunks_x * chunks_y * chunks_z;
+    pub fn new(materials: &MaterialParams, meshing: &crate::params::MeshingParams) -> Self {
         let num_workers = num_cpus::get().saturating_sub(2).max(2);
 
         // Setup cache directory
@@ -209,13 +205,10 @@ impl MeshingPipeline {
             p2_request_tx: p2_tx,
             p2_result_rx: Mutex::new(p2_result_rx),
             _workers: Mutex::new(workers),
-            chunk_states: vec![ChunkMeshState::Idle; total_chunks],
+            chunk_states: HashMap::new(),
             pending_phase1: HashMap::new(),
             boundary_maps: HashMap::new(),
             material_config,
-            chunks_x,
-            chunks_y,
-            chunks_z,
             stats: MeshingStats {
                 worker_count: num_workers,
                 ..Default::default()
@@ -231,15 +224,16 @@ impl MeshingPipeline {
     /// Queue all dirty chunks for meshing. Actual snapshot creation happens
     /// incrementally in drain_pending_submissions() to avoid blocking the main thread.
     pub fn submit_all_dirty(&mut self, world: &crate::world::World) {
-        for i in 0..world.chunks.len() {
-            if !world.chunks[i].mesh_dirty {
+        for (pos, chunk) in &world.chunks {
+            if !chunk.mesh_dirty {
                 continue;
             }
-            if self.chunk_states[i] != ChunkMeshState::Idle {
+            let state = self.chunk_states.get(pos).copied().unwrap_or(ChunkMeshState::Idle);
+            if state != ChunkMeshState::Idle {
                 continue;
             }
-            if !self.pending_submissions.contains(&i) {
-                self.pending_submissions.push(i);
+            if !self.pending_submissions.contains(pos) {
+                self.pending_submissions.push(*pos);
             }
         }
         if !self.pending_submissions.is_empty() && self.batch_start.is_none() {
@@ -256,29 +250,29 @@ impl MeshingPipeline {
             return;
         }
 
-        let batch: Vec<usize> = self.pending_submissions.drain(..count).collect();
-        for i in batch {
-            if self.chunk_states[i] != ChunkMeshState::Idle {
+        let batch: Vec<IVec3> = self.pending_submissions.drain(..count).collect();
+        for pos in batch {
+            let state = self.chunk_states.get(&pos).copied().unwrap_or(ChunkMeshState::Idle);
+            if state != ChunkMeshState::Idle {
                 continue;
             }
 
-            let chunk = &world.chunks[i];
-            let cx = chunk.position.x as usize;
-            let cy = chunk.position.y as usize;
-            let cz = chunk.position.z as usize;
-            let neighbors = world.build_neighbors(cx, cy, cz);
-            let snapshot = ChunkSnapshot::extract(chunk, &neighbors);
+            let chunk = match world.chunks.get(&pos) {
+                Some(c) => c,
+                None => continue, // Chunk unloaded since submission
+            };
+            let neighbors = world.build_neighbors(pos);
+            let snapshot = ChunkSnapshot::extract(chunk, &neighbors, world.min_chunk_y, world.max_chunk_y);
 
             match self.p1_request_tx.try_send(Phase1Request {
-                chunk_index: i,
+                chunk_key: pos,
                 snapshot,
             }) {
                 Ok(()) => {
-                    self.chunk_states[i] = ChunkMeshState::Phase1InProgress;
+                    self.chunk_states.insert(pos, ChunkMeshState::Phase1InProgress);
                 }
                 Err(mpsc::TrySendError::Full(_)) => {
-                    // Channel full - re-queue for next frame
-                    self.pending_submissions.push(i);
+                    self.pending_submissions.push(pos);
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     log::error!("Phase 1 request channel disconnected");
@@ -294,14 +288,14 @@ impl MeshingPipeline {
         // Drain Phase 1 results
         let p1_rx = self.p1_result_rx.get_mut().unwrap();
         while let Ok(result) = p1_rx.try_recv() {
-            let idx = result.chunk_index;
+            let key = result.chunk_key;
             match result.outcome {
                 Phase1Outcome::CacheHit { vertices, indices } => {
                     // Cache hit: directly produce a completed result, skip Phase 2
-                    self.chunk_states[idx] = ChunkMeshState::Idle;
+                    self.chunk_states.remove(&key);
                     self.stats.total_meshed += 1;
                     completed.push(Phase2Result {
-                        chunk_index: idx,
+                        chunk_key: key,
                         vertices,
                         indices,
                     });
@@ -312,27 +306,27 @@ impl MeshingPipeline {
                     cache_key,
                 } => {
                     // Normal Phase 1 complete -- store for Phase 2 dispatch
-                    self.chunk_states[idx] = ChunkMeshState::Phase1Complete;
+                    self.chunk_states.insert(key, ChunkMeshState::Phase1Complete);
                     self.boundary_maps
-                        .insert(idx, cell_data.boundary_map.clone());
+                        .insert(key, cell_data.boundary_map.clone());
                     self.pending_phase1
-                        .insert(idx, (cell_data, snapshot, cache_key));
+                        .insert(key, (cell_data, snapshot, cache_key));
                 }
             }
         }
 
         // Dispatch Phase 2 for chunks whose neighbors have completed Phase 1
-        let pending_indices: Vec<usize> = self.pending_phase1.keys().cloned().collect();
-        for idx in pending_indices {
-            if self.can_dispatch_phase2(idx) {
-                self.dispatch_phase2(idx);
+        let pending_keys: Vec<IVec3> = self.pending_phase1.keys().cloned().collect();
+        for key in pending_keys {
+            if self.can_dispatch_phase2(key) {
+                self.dispatch_phase2(key);
             }
         }
 
         // Drain Phase 2 results
         let p2_rx = self.p2_result_rx.get_mut().unwrap();
         while let Ok(result) = p2_rx.try_recv() {
-            self.chunk_states[result.chunk_index] = ChunkMeshState::Idle;
+            self.chunk_states.remove(&result.chunk_key);
             self.stats.total_meshed += 1;
             completed.push(result);
         }
@@ -340,17 +334,17 @@ impl MeshingPipeline {
         // Update stats
         self.stats.phase1_in_progress = self
             .chunk_states
-            .iter()
+            .values()
             .filter(|s| **s == ChunkMeshState::Phase1InProgress)
             .count();
         self.stats.phase1_complete = self
             .chunk_states
-            .iter()
+            .values()
             .filter(|s| **s == ChunkMeshState::Phase1Complete)
             .count();
         self.stats.phase2_in_progress = self
             .chunk_states
-            .iter()
+            .values()
             .filter(|s| **s == ChunkMeshState::Phase2InProgress)
             .count();
         self.stats.pending_submissions = self.pending_submissions.len();
@@ -390,29 +384,26 @@ impl MeshingPipeline {
         completed
     }
 
-    fn can_dispatch_phase2(&self, chunk_index: usize) -> bool {
-        let (cx, cy, cz) = self.index_to_coords(chunk_index);
-
-        for dz in 0u8..=1 {
-            for dy in 0u8..=1 {
-                for dx in 0u8..=1 {
+    fn can_dispatch_phase2(&self, chunk_key: IVec3) -> bool {
+        // Check the 7 positive-offset neighbors: (1,0,0), (0,1,0), (0,0,1),
+        // (1,1,0), (1,0,1), (0,1,1), (1,1,1)
+        for dz in 0i32..=1 {
+            for dy in 0i32..=1 {
+                for dx in 0i32..=1 {
                     if dx == 0 && dy == 0 && dz == 0 {
                         continue;
                     }
-                    let nx = cx + dx as usize;
-                    let ny = cy + dy as usize;
-                    let nz = cz + dz as usize;
-                    if nx < self.chunks_x && ny < self.chunks_y && nz < self.chunks_z {
-                        let ni = self.coords_to_index(nx, ny, nz);
-                        // Block if neighbor is still computing Phase 1
-                        if self.chunk_states[ni] == ChunkMeshState::Phase1InProgress {
-                            return false;
-                        }
-                        // Block if neighbor hasn't been submitted yet
-                        if self.pending_submissions.contains(&ni) {
-                            return false;
-                        }
+                    let n_key = chunk_key + IVec3::new(dx, dy, dz);
+                    // If neighbor is actively computing Phase 1, block
+                    if self.chunk_states.get(&n_key) == Some(&ChunkMeshState::Phase1InProgress) {
+                        return false;
                     }
+                    // If neighbor is queued but not yet submitted, block
+                    if self.pending_submissions.contains(&n_key) {
+                        return false;
+                    }
+                    // If neighbor doesn't exist at all (not loaded), that's OK —
+                    // we'll mesh without its boundary data
                 }
             }
         }
@@ -420,49 +411,40 @@ impl MeshingPipeline {
         true
     }
 
-    fn dispatch_phase2(&mut self, chunk_index: usize) {
-        let (cell_data, snapshot, cache_key) = match self.pending_phase1.remove(&chunk_index) {
+    fn dispatch_phase2(&mut self, chunk_key: IVec3) {
+        let (cell_data, snapshot, cache_key) = match self.pending_phase1.remove(&chunk_key) {
             Some(data) => data,
             None => return,
         };
 
-        let (cx, cy, cz) = self.index_to_coords(chunk_index);
-
         let mut nb = OwnedNeighborBoundaries::empty();
-        for dz in 0u8..=1 {
-            for dy in 0u8..=1 {
-                for dx in 0u8..=1 {
+        for dz in 0i32..=1 {
+            for dy in 0i32..=1 {
+                for dx in 0i32..=1 {
                     if dx == 0 && dy == 0 && dz == 0 {
                         continue;
                     }
-                    let nx = cx + dx as usize;
-                    let ny = cy + dy as usize;
-                    let nz = cz + dz as usize;
-                    if nx < self.chunks_x && ny < self.chunks_y && nz < self.chunks_z {
-                        let ni = self.coords_to_index(nx, ny, nz);
-                        let map_idx = dx as usize + (dy as usize) * 2 + (dz as usize) * 4;
-                        if let Some(bmap) = self.boundary_maps.get(&ni) {
-                            nb.maps[map_idx] = Some(bmap.clone());
-                        }
+                    let n_key = chunk_key + IVec3::new(dx, dy, dz);
+                    let map_idx = dx as usize + (dy as usize) * 2 + (dz as usize) * 4;
+                    if let Some(bmap) = self.boundary_maps.get(&n_key) {
+                        nb.maps[map_idx] = Some(bmap.clone());
                     }
                 }
             }
         }
 
         match self.p2_request_tx.try_send(Phase2Request {
-            chunk_index,
+            chunk_key,
             cell_data,
             snapshot,
             neighbor_boundaries: nb,
             cache_key,
         }) {
             Ok(()) => {
-                self.chunk_states[chunk_index] = ChunkMeshState::Phase2InProgress;
+                self.chunk_states.insert(chunk_key, ChunkMeshState::Phase2InProgress);
             }
             Err(mpsc::TrySendError::Full(req)) => {
-                // Re-insert for retry next frame
-                self.pending_phase1.insert(chunk_index, (req.cell_data, req.snapshot, req.cache_key));
-                // State stays Phase1Complete
+                self.pending_phase1.insert(chunk_key, (req.cell_data, req.snapshot, req.cache_key));
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 log::error!("Phase 2 request channel disconnected");
@@ -472,7 +454,7 @@ impl MeshingPipeline {
 
     pub fn is_idle(&self) -> bool {
         self.pending_submissions.is_empty()
-            && self.chunk_states.iter().all(|s| *s == ChunkMeshState::Idle)
+            && self.chunk_states.values().all(|s| *s == ChunkMeshState::Idle)
             && self.pending_phase1.is_empty()
     }
 
@@ -480,22 +462,20 @@ impl MeshingPipeline {
         self.boundary_maps.clear();
     }
 
-    /// Clear all cached mesh files from disk and reset cache stats.
-    pub fn clear_cache(&mut self) {
-        match cache::clear_cache(&self.cache_dir) {
-            Ok(count) => log::info!("Cleared {} cache files", count),
-            Err(e) => log::warn!("Failed to clear cache: {}", e),
-        }
-        self.cache_stats.reset();
-        self.cache_disk_stats_stale = true;
+    /// Remove all pipeline tracking state for a chunk (used during unload).
+    pub fn remove_chunk_state(&mut self, pos: IVec3) {
+        self.chunk_states.remove(&pos);
+        self.pending_phase1.remove(&pos);
+        self.boundary_maps.remove(&pos);
+        self.pending_submissions.retain(|p| *p != pos);
     }
 
-    /// Update runtime material properties. Workers will pick up the new values
-    /// on their next mesh computation.
-    pub fn update_material_config(&self, mat_params: &MaterialParams, mesh_params: &crate::params::MeshingParams) {
-        if let Ok(mut config) = self.material_config.write() {
-            *config = MaterialConfig::from_params(mat_params, mesh_params);
-        }
+    /// Check if a chunk has active meshing work in flight.
+    pub fn is_chunk_in_flight(&self, pos: IVec3) -> bool {
+        matches!(
+            self.chunk_states.get(&pos),
+            Some(ChunkMeshState::Phase1InProgress | ChunkMeshState::Phase2InProgress)
+        )
     }
 
     /// Reset all internal pipeline state for a freshly swapped world.
@@ -504,31 +484,18 @@ impl MeshingPipeline {
     /// stale in-flight results from worker threads. Does NOT shut down workers
     /// or clear the disk cache.
     pub fn reset_for_new_world(&mut self) {
-        // Reset all chunk states to Idle
-        for state in &mut self.chunk_states {
-            *state = ChunkMeshState::Idle;
-        }
-
-        // Clear pending Phase 1 data (snapshots/cell data from old world)
+        self.chunk_states.clear();
         self.pending_phase1.clear();
-
-        // Clear boundary maps from old world
         self.boundary_maps.clear();
-
-        // Clear pending submissions queue
         self.pending_submissions.clear();
-
-        // Reset batch timing
         self.batch_start = None;
 
-        // Reset stats counters (preserve worker count)
         let worker_count = self.stats.worker_count;
         self.stats = MeshingStats {
             worker_count,
             ..Default::default()
         };
 
-        // Drain any in-flight results from worker threads to discard stale data.
         let p1_rx = self.p1_result_rx.get_mut().unwrap();
         let p2_rx = self.p2_result_rx.get_mut().unwrap();
         while p1_rx.try_recv().is_ok() {}
@@ -537,15 +504,20 @@ impl MeshingPipeline {
         log::info!("MeshingPipeline reset for new world");
     }
 
-    fn index_to_coords(&self, index: usize) -> (usize, usize, usize) {
-        let cx = index % self.chunks_x;
-        let cy = (index / self.chunks_x) % self.chunks_y;
-        let cz = index / (self.chunks_x * self.chunks_y);
-        (cx, cy, cz)
+    /// Update material config so workers pick up new colors/sharpness.
+    pub fn update_material_config(&self, materials: &MaterialParams, meshing: &crate::params::MeshingParams) {
+        let mut config = self.material_config.write().unwrap();
+        *config = MaterialConfig::from_params(materials, meshing);
     }
 
-    fn coords_to_index(&self, cx: usize, cy: usize, cz: usize) -> usize {
-        cx + cy * self.chunks_x + cz * self.chunks_x * self.chunks_y
+    /// Clear the disk mesh cache.
+    pub fn clear_cache(&self) {
+        match cache::clear_cache(&self.cache_dir) {
+            Ok(n) => log::info!("Cleared {} cached mesh files", n),
+            Err(e) => log::warn!("Failed to clear mesh cache: {}", e),
+        }
+        self.cache_stats.reset();
+        // Disk stats will be recalculated on next poll
     }
 }
 
@@ -568,8 +540,7 @@ fn worker_loop(
                 drop(rx);
                 let mut cell_data = req.cell_data;
                 let nb = req.neighbor_boundaries.as_ref();
-                let indices =
-                    generate_faces_from_snapshot(&mut cell_data, &req.snapshot, &nb);
+                let indices = generate_faces_from_snapshot(&mut cell_data, &req.snapshot, &nb);
 
                 // Save to cache (fire-and-forget, errors are non-fatal)
                 if let Err(e) = cache::save_cached_mesh(
@@ -582,15 +553,12 @@ fn worker_loop(
                     &indices,
                 )
                 {
-                    log::warn!("Cache save failed for chunk {}: {}", req.chunk_index, e);
-                    cache_config
-                        .stats
-                        .errors
-                        .fetch_add(1, Ordering::Relaxed);
+                    log::warn!("Cache save failed for chunk {}: {}", req.chunk_key, e);
+                    cache_config.stats.errors.fetch_add(1, Ordering::Relaxed);
                 }
 
                 let _ = p2_result_tx.send(Phase2Result {
-                    chunk_index: req.chunk_index,
+                    chunk_key: req.chunk_key,
                     vertices: cell_data.vertices,
                     indices,
                 });
@@ -630,22 +598,16 @@ fn worker_loop(
                         cache::load_cached_mesh(&cache_path, cache_key)
                     {
                         // Cache hit -- skip both phases
-                        cache_config
-                            .stats
-                            .hits
-                            .fetch_add(1, Ordering::Relaxed);
+                        cache_config.stats.hits.fetch_add(1, Ordering::Relaxed);
                         let _ = p1_result_tx.send(Phase1Result {
-                            chunk_index: req.chunk_index,
+                            chunk_key: req.chunk_key,
                             outcome: Phase1Outcome::CacheHit { vertices, indices },
                         });
                         continue;
                     }
 
                     // Cache miss -- compute Phase 1 with current material config
-                    cache_config
-                        .stats
-                        .misses
-                        .fetch_add(1, Ordering::Relaxed);
+                    cache_config.stats.misses.fetch_add(1, Ordering::Relaxed);
                     let cell_data = generate_cell_vertices_from_snapshot(
                         &req.snapshot,
                         &mat_config,
@@ -653,7 +615,7 @@ fn worker_loop(
                     drop(mat_config); // Release lock
 
                     let _ = p1_result_tx.send(Phase1Result {
-                        chunk_index: req.chunk_index,
+                        chunk_key: req.chunk_key,
                         outcome: Phase1Outcome::Computed {
                             cell_data,
                             snapshot: req.snapshot,

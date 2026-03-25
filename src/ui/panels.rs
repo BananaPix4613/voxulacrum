@@ -39,6 +39,8 @@ pub struct UiState {
     pub palette_list: Vec<String>,
     pub palette_load_requested: bool,
     pub loaded_palette_preview: Vec<[f32; 3]>,
+    pub streaming_loaded: u32,
+    pub streaming_pending: u32,
 }
 
 impl UiState {
@@ -72,6 +74,8 @@ impl UiState {
             palette_list: crate::palette::list_palettes(&std::path::PathBuf::from("palettes")),
             palette_load_requested: false,
             loaded_palette_preview: Vec::new(),
+            streaming_loaded: 0,
+            streaming_pending: 0,
         }
     }
 
@@ -715,6 +719,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &UiState) {
             let cull_pct = (1.0 - state.chunks_visible as f64 / state.chunks_total as f64) * 100.0;
             ui.label(format!("Culled: {:.0}%", cull_pct));
         }
+        ui.label(format!("Streaming: {} loaded, {} pending", state.streaming_loaded, state.streaming_pending));
     });
 }
 

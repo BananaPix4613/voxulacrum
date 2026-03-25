@@ -6,7 +6,7 @@ pub struct ShadowPassNode<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub bind_group: &'a wgpu::BindGroup,
     pub shadow_depth_view: &'a wgpu::TextureView,
-    pub chunks: &'a [Chunk],
+    pub chunks: &'a [&'a Chunk],
 }
 
 impl<'a> RenderPassNode for ShadowPassNode<'a> {
@@ -35,7 +35,7 @@ impl<'a> RenderPassNode for ShadowPassNode<'a> {
         });
         pass.set_pipeline(self.pipeline);
         pass.set_bind_group(0, self.bind_group, &[]);
-        for chunk in self.chunks {
+        for &chunk in self.chunks {
             if let Some(mesh) = &chunk.mesh {
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

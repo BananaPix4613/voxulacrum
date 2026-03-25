@@ -1,5 +1,5 @@
 use bevy_ecs::prelude::Resource;
-
+use glam::IVec3;
 use crate::meshing::MeshingPipeline;
 use crate::rendering::render_context::RenderContext;
 use crate::ui::panels::UiState;
@@ -16,24 +16,28 @@ impl MeshingCoordinator {
     }
     
     /// Poll for completed meshes, handle UI requests.
+    /// Returns the chunk positions that received new mesh data this frame.
     pub fn tick(
         &mut self,
         world: &mut World,
         ctx: &RenderContext,
         ui_state: &mut UiState,
-    ) {
+    ) -> Vec<IVec3> {
         // Drain pending snapshot submissions (bounded per frame)
         self.pipeline.drain_pending_submissions(world);
         
         // Poll completed chunks
         let completed = self.pipeline.poll();
+        let mut meshed_positions = Vec::with_capacity(completed.len());
         for result in completed {
+            let pos = result.chunk_key;
             world.upload_mesh_result(
-                result.chunk_index,
+                pos,
                 &result.vertices,
                 &result.indices,
                 &ctx.device,
             );
+            meshed_positions.push(pos);
         }
         
         // Update meshing stats for UI
@@ -62,10 +66,12 @@ impl MeshingCoordinator {
                 &ui_state.params.meshing,
             );
             self.pipeline.reset_for_new_world();
-            for chunk in &mut world.chunks {
+            for chunk in world.chunks.values_mut() {
                 chunk.mesh_dirty = true;
             }
             self.pipeline.submit_all_dirty(world);
         }
+        
+        meshed_positions
     }
 }

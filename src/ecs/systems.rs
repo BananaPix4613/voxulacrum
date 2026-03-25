@@ -24,12 +24,13 @@ use crate::rendering::water_pass::WaterPass;
 use crate::shader_reload::ShaderWatcher;
 use crate::input::InputState;
 use crate::simulation::manager::{FrameState, SimulationManager};
-use crate::simulation::water::StaticWater;
 use crate::ui;
 use crate::ui::panels::UiState;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::{compute_render_dimensions, palette, FrameCounter};
-
+use crate::meshing::MeshingPipeline;
+use crate::world::chunk::Chunk;
+use crate::world::streaming::{CameraView, ChunkStreamingManager};
 // ==========================================================================
 // Input stage
 // ==========================================================================
@@ -222,6 +223,52 @@ pub fn palette_load_system(
 }
 
 // ==========================================================================
+// Streaming stage
+// ==========================================================================
+
+pub fn streaming_tick_system(
+    mut streaming: ResMut<ChunkStreamingManager>,
+    mut world: ResMut<VoxelWorld>,
+    mut meshing: ResMut<MeshingCoordinator>,
+    sim: Res<SimulationManager>,
+    frame: Res<FrameState>,
+    mut vegetation: ResMut<VegetationPass>,
+    mut water_pass: ResMut<WaterPass>,
+    mut ui: ResMut<UiState>,
+    ctx: Res<RenderContext>,
+) {
+    let cam_pos = sim.camera.smooth_target;
+    let camera_view = CameraView {
+        zoom: sim.camera.zoom,
+        aspect: sim.camera.aspect,
+        rotation: sim.camera.rotation,
+    };
+
+    let tick_result = streaming.tick(
+        &mut world.0,
+        &mut meshing,
+        [cam_pos.x, cam_pos.y, cam_pos.z],
+        &camera_view,
+        frame.dt,
+    );
+
+    // Remove vegetation and water for unloaded chunks
+    for pos in &tick_result.unloaded {
+        vegetation.remove_chunk_vegetation(*pos);
+        water_pass.remove_chunk_water(*pos);
+    }
+    
+    // NOTE: We do NOT add vegetation/water here for inserted chunks.
+    // Inserted chunks don't have meshes yet. Vegetation/water are added
+    // in meshing_tick_system when the mesh upload completes, so they
+    // appear on the same frame as the terrain.
+
+    // Update streaming stats for UI
+    ui.streaming_loaded = world.0.chunks.len() as u32;
+    ui.streaming_pending = streaming.pending_gen_count() as u32;
+}
+
+// ==========================================================================
 // Meshing stage
 // ==========================================================================
 
@@ -230,8 +277,28 @@ pub fn meshing_tick_system(
     mut world: ResMut<VoxelWorld>,
     ctx: Res<RenderContext>,
     mut ui: ResMut<UiState>,
+    mut vegetation: ResMut<VegetationPass>,
+    mut water_pass: ResMut<WaterPass>,
 ) {
-    meshing.tick(&mut world.0, &ctx, &mut ui);
+    // Phase 1: tick meshing with &mut world - collects meshed positions.
+    let meshed = meshing.tick(&mut world.0, &ctx, &mut ui);
+    
+    // Phase 2: for each newly meshed chunk, build per-chunk vegetation
+    // and water GPU buffers. world.0 is now borrowed immutably.
+    if !meshed.is_empty() {
+        let water_level = ui.params.water.water_level;
+        let terrain_params = &ui.params.terrain_gen;
+        let veg_params = &ui.params.vegetation;
+        
+        for pos in &meshed {
+            vegetation.add_chunk_vegetation(
+                *pos, &world.0, veg_params, &ctx.device,
+            );
+            water_pass.add_chunk_water(
+                *pos, &world.0.generator, terrain_params, water_level, &ctx.device,
+            );
+        }
+    }
 }
 
 // ==========================================================================
@@ -279,7 +346,7 @@ pub fn compute_stats_system(
     let mut total_tris: u64 = 0;
     let mut chunks_visible: u32 = 0;
     let mut chunks_total: u32 = 0;
-    for chunk in &world.0.chunks {
+    for chunk in world.0.chunks.values() {
         if chunk.mesh.is_some() {
             chunks_total += 1;
             if sim.frustum.is_chunk_visible(chunk.position) {
@@ -372,8 +439,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
                 .resource::<VoxelWorld>()
                 .0
                 .chunks
-                .iter()
-                .map(|c| c.position)
+                .keys()
+                .copied()
                 .collect();
             ecs.resource_scope::<DebugLinePass, _>(|ecs, mut debug| {
                 let sim = ecs.resource::<SimulationManager>();
@@ -442,11 +509,14 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             &pipeline_registry.terrain_pipeline
         };
 
+        // Collect chunk references from HashMap for render passes
+        let chunk_refs: Vec<&Chunk> = world.0.chunks.values().collect();
+
         let shadow_node = ShadowPassNode {
             pipeline: &pipeline_registry.shadow_pipeline,
             bind_group: &shadow_bind_group.0,
             shadow_depth_view: &shadow_depth_view.0,
-            chunks: &world.0.chunks,
+            chunks: &chunk_refs,
         };
 
         let sky = ui.params.render_pipeline.sky_color;
@@ -459,7 +529,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             },
             terrain_pipeline,
             uniform_bind_group: &uniform_bind_group.0,
-            chunks: &world.0.chunks,
+            chunks: &chunk_refs,
             frustum: &sim.frustum,
             cap_pass: &cap_pass,
             cap_config: CapConfig {
@@ -538,7 +608,6 @@ pub fn world_regen_system(
     mut meshing: ResMut<MeshingCoordinator>,
     mut vegetation: ResMut<VegetationPass>,
     mut water_pass: ResMut<WaterPass>,
-    mut static_water: ResMut<StaticWater>,
     mut ui: ResMut<UiState>,
     ctx: Res<RenderContext>,
 ) {
@@ -547,7 +616,6 @@ pub fn world_regen_system(
         &mut meshing,
         &mut vegetation,
         &mut water_pass,
-        &mut static_water,
         &mut ui,
         &ctx,
     );

@@ -120,7 +120,7 @@ impl SimulationManager {
             elapsed: self.elapsed,
             view_proj: snapped.view_proj,
             subpixel_offset: snapped.subpixel_offset,
-            light_space: self.time_of_day.light_space_matrix(),
+            light_space: self.time_of_day.light_space_matrix(self.camera.smooth_target, 128.0),
             sun_direction: self.time_of_day.sun_direction().into(),
             sun_color: self.time_of_day.sun_color(&params.lighting).into(),
             ambient_color: self.time_of_day.ambient_color(&params.lighting).into(),

@@ -5,15 +5,10 @@ use super::chunk::{Chunk, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
 use super::voxel::*;
 use crate::params::TerrainGenParams;
 
-/// World dimensions in chunks
+/// Initial load radius dimensions in chunks
 pub const WORLD_CHUNKS_X: usize = 8;
 pub const WORLD_CHUNKS_Y: usize = 4;
 pub const WORLD_CHUNKS_Z: usize = 8;
-
-/// World dimensions in meters
-pub const WORLD_SIZE_X: f32 = WORLD_CHUNKS_X as f32 * CHUNK_WORLD_SIZE;
-pub const WORLD_SIZE_Y: f32 = WORLD_CHUNKS_Y as f32 * CHUNK_WORLD_SIZE;
-pub const WORLD_SIZE_Z: f32 = WORLD_CHUNKS_Z as f32 * CHUNK_WORLD_SIZE;
 
 pub struct TerrainGenerator {
     height_fbm: FastNoiseLite,
@@ -211,16 +206,23 @@ impl TerrainGenerator {
         false
     }
 
-    pub fn generate_world(&self, params: &TerrainGenParams) -> Vec<Chunk> {
-        let total = WORLD_CHUNKS_X * WORLD_CHUNKS_Y * WORLD_CHUNKS_Z;
-        let mut chunks = Vec::with_capacity(total);
+    pub fn generate_world(
+        &self,
+        params: &TerrainGenParams,
+        min_y: i32,
+        max_y: i32,
+    ) -> std::collections::HashMap<IVec3, Chunk> {
+        let half_x = WORLD_CHUNKS_X as i32 / 2;
+        let half_z = WORLD_CHUNKS_Z as i32 / 2;
+        let mut chunks = std::collections::HashMap::new();
 
-        for cz in 0..WORLD_CHUNKS_Z {
-            for cy in 0..WORLD_CHUNKS_Y {
-                for cx in 0..WORLD_CHUNKS_X {
-                    let mut chunk = Chunk::new(IVec3::new(cx as i32, cy as i32, cz as i32));
+        for cz in -half_z..half_z {
+            for cy in min_y..max_y {
+                for cx in -half_x..half_x {
+                    let pos = IVec3::new(cx, cy, cz);
+                    let mut chunk = Chunk::new(pos);
                     self.generate_chunk(&mut chunk, params);
-                    chunks.push(chunk);
+                    chunks.insert(pos, chunk);
                 }
             }
         }

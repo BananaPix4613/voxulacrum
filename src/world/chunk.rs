@@ -99,7 +99,8 @@ pub struct ChunkSnapshot {
 
 impl ChunkSnapshot {
     /// Create a snapshot by copying voxels from the chunk and its neighbors.
-    pub fn extract(chunk: &Chunk, neighbors: &ChunkNeighbors) -> Self {
+    /// `min_chunk_y` is used to determine if this chunk is at the vertical world border.
+    pub fn extract(chunk: &Chunk, neighbors: &ChunkNeighbors, min_chunk_y: i32, max_chunk_y: i32) -> Self {
         let mut voxels: Box<[Voxel; SNAP_VOLUME]> = unsafe {
             let v: Vec<Voxel> = vec![Voxel::default(); SNAP_VOLUME];
             let boxed_slice = v.into_boxed_slice();
@@ -139,10 +140,11 @@ impl ChunkSnapshot {
             }
         }
 
+        // XZ is infinite, never a border
         let border_min = [
-            chunk.position.x == 0,
-            chunk.position.y == 0,
-            chunk.position.z == 0,
+            false,
+            chunk.position.y == min_chunk_y,
+            false,
         ];
 
         Self {
