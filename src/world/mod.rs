@@ -3,6 +3,8 @@ pub mod chunk;
 pub mod generation;
 pub mod regen;
 pub mod streaming;
+pub mod storage;
+pub mod persistence;
 
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -12,7 +14,8 @@ use std::thread::JoinHandle;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
-use chunk::{Chunk, ChunkMesh, ChunkNeighbors, CHUNK_VOLUME};
+use chunk::{Chunk, ChunkMesh, ChunkNeighbors, VoxelEdit, CHUNK_VOLUME, DELTA_THRESHOLD};
+use storage::ChunkStorage;
 use generation::TerrainGenerator;
 use voxel::{MATERIAL_COUNT, MATERIAL_TABLE};
 
@@ -53,6 +56,28 @@ impl World {
         }
     }
 
+    /// Check whether all 6 face-adjacent neighbor chunks around `pos` are loaded.
+    /// Only face neighbors are required because the cache key excludes edge/corner
+    /// border voxels (where 2+ axes are in the border zone). Neighbors outside the
+    /// Y range [min_chunk_y, max_chunk_y) are treated as present (always air).
+    pub fn has_all_face_neighbors(&self, pos: IVec3) -> bool {
+        const FACE_OFFSETS: [IVec3; 6] = [
+            IVec3::X, IVec3::NEG_X,
+            IVec3::Y, IVec3::NEG_Y,
+            IVec3::Z, IVec3::NEG_Z,
+        ];
+        for &offset in &FACE_OFFSETS {
+            let n = pos + offset;
+            if n.y < self.min_chunk_y || n.y >= self.max_chunk_y {
+                continue;
+            }
+            if !self.chunks.contains_key(&n) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Upload a completed mesh result to the GPU for a specific chunk.
     pub fn upload_mesh_result(
         &mut self,
@@ -60,6 +85,7 @@ impl World {
         vertices: &[crate::rendering::pipelines::TerrainVertex],
         indices: &[u32],
         device: &wgpu::Device,
+        mesh_seq: u64,
     ) {
         let chunk = match self.chunks.get_mut(&chunk_key) {
             Some(c) => c,
@@ -68,7 +94,10 @@ impl World {
 
         if vertices.is_empty() || indices.is_empty() {
             chunk.mesh = None;
-            chunk.mesh_dirty = false;
+            // Only clear mesh_dirty if the chunk wasn't re-dirtied during meshing
+            if chunk.mesh_seq == mesh_seq {
+                chunk.mesh_dirty = false;
+            }
             return;
         }
 
@@ -89,7 +118,9 @@ impl World {
             index_buffer,
             index_count: indices.len() as u32,
         });
-        chunk.mesh_dirty = false;
+        if chunk.mesh_seq == mesh_seq {
+            chunk.mesh_dirty = false;
+        }
     }
 
     pub fn build_neighbors(&self, pos: IVec3) -> ChunkNeighbors {
@@ -104,6 +135,42 @@ impl World {
             }
         }
         neighbors
+    }
+
+    /// Apply a voxel edit to a chunk, propagating mesh-dirty to border neighbors.
+    /// Sets persist_dirty on the edited chunk only.
+    pub fn apply_edit(&mut self, chunk_pos: IVec3, edit: VoxelEdit) {
+        if let Some(chunk) = self.chunks.get_mut(&chunk_pos) {
+            // Apply the edit to storage
+            let mut storage = (*chunk.storage).clone();
+            storage.set_voxel(edit.index as usize, edit.density, edit.material_id);
+            chunk.storage = Arc::new(storage);
+
+            // Track for persistence - deduplicate by index
+            let list = chunk.edit_list.get_or_insert_with(Vec::new);
+            if let Some(existing) = list.iter_mut().find(|e| e.index == edit.index) {
+                *existing = edit;
+            } else {
+                list.push(edit);
+            }
+
+            // Auto-promote: if over threshold, drop delta list entirely.
+            // build_chunk_edits sees edit_list==None + persist_dirty==true -> saves Full.
+            if list.len() >= DELTA_THRESHOLD {
+                chunk.edit_list = None;
+            }
+
+            chunk.persist_dirty = true;
+            chunk.mark_mesh_dirty_from_edit();
+        }
+
+        // Propagate mesh-dirty to border neighbors
+        for offset in chunk::border_dirty_neighbors(edit.index) {
+            let neighbor_pos = chunk_pos + offset;
+            if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
+                neighbor.mark_mesh_dirty_from_edit();
+            }
+        }
     }
 
     /// Get a chunk by its chunk-space IVec3 position.
@@ -133,27 +200,34 @@ impl World {
         let mut material_counts = [0u64; MATERIAL_COUNT];
         let mut min_density: i8 = i8::MAX;
         let mut max_density: i8 = i8::MIN;
-        let mut flora_count: u64 = 0;
+        let mut uniform_count: usize = 0;
+        let mut populated_count: usize = 0;
+        let mut total_storage_bytes: usize = 0;
 
         for chunk in self.chunks.values() {
-            for voxel in chunk.voxels.iter() {
-                if voxel.density > 0 {
+            if chunk.storage.is_uniform() {
+                uniform_count += 1;
+            } else {
+                populated_count += 1;
+            }
+            total_storage_bytes += chunk.storage.memory_bytes();
+
+            for idx in 0..CHUNK_VOLUME {
+                let d = chunk.storage.density(idx);
+                let m = chunk.storage.material(idx) as usize;
+                if d > 0 {
                     total_solid += 1;
                 } else {
                     total_air += 1;
                 }
-                let mat = voxel.material as usize;
-                if mat < MATERIAL_COUNT {
-                    material_counts[mat] += 1;
+                if m < MATERIAL_COUNT {
+                    material_counts[m] += 1;
                 }
-                if voxel.density < min_density {
-                    min_density = voxel.density;
+                if d < min_density {
+                    min_density = d;
                 }
-                if voxel.density > max_density {
-                    max_density = voxel.density;
-                }
-                if voxel.flora_id != 0 {
-                    flora_count += 1;
+                if d > max_density {
+                    max_density = d;
                 }
             }
         }
@@ -161,7 +235,7 @@ impl World {
         let total = total_solid + total_air;
         if total == 0 { return; }
         log::info!("=== World Generation Stats ===");
-        log::info!("Chunks: {}", self.chunks.len());
+        log::info!("Chunks: {} ({} uniform, {} populated)", self.chunks.len(), uniform_count, populated_count);
         log::info!(
             "Total voxels: {} ({} solid, {} air)",
             total, total_solid, total_air
@@ -172,7 +246,7 @@ impl World {
             total_air as f64 / total as f64 * 100.0
         );
         log::info!("Density range: {} to {}", min_density, max_density);
-        log::info!("Flora voxels: {}", flora_count);
+        // TODO: flora_id tracking returns in Phase 3
         log::info!("--- Material distribution ---");
         for (id, count) in material_counts.iter().enumerate() {
             if *count > 0 {
@@ -184,8 +258,8 @@ impl World {
             }
         }
         log::info!(
-            "Voxel memory: ~{} MB",
-            self.chunks.len() * CHUNK_VOLUME * 12 / (1024 * 1024)
+            "Storage memory: ~{} MB",
+            total_storage_bytes / (1024 * 1024)
         );
         log::info!("==============================")
     }
@@ -303,8 +377,8 @@ fn generate_world_background(
     let chunks: Vec<Chunk> = positions
         .par_iter()
         .map(|&pos| {
-            let mut chunk = Chunk::new(pos);
-            generator.generate_chunk(&mut chunk, params);
+            let storage = generator.generate_chunk_storage(pos, params);
+            let chunk = Chunk::new(pos, std::sync::Arc::new(storage));
             progress.fetch_add(1, Ordering::Relaxed);
             chunk
         })

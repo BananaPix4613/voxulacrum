@@ -270,7 +270,7 @@ fn is_solid_at(world: &World, vx: i32, vy: i32, vz: i32) -> bool {
     let ly = vy.rem_euclid(CHUNK_SIZE as i32) as usize;
     let lz = vz.rem_euclid(CHUNK_SIZE as i32) as usize;
     match world.get_chunk(IVec3::new(cx, cy, cz)) {
-        Some(chunk) => chunk.get_voxel(lx, ly, lz).is_solid(),
+        Some(chunk) => chunk.is_solid(lx, ly, lz),
         None => false,
     }
 }

@@ -85,14 +85,12 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         pass.set_bind_group(0, self.uniform_bind_group, &[]);
         for &chunk in self.chunks {
             if let Some(mesh) = &chunk.mesh {
-                if self.frustum.is_chunk_visible(chunk.position) {
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(
-                        mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                }
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(
+                    mesh.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
 

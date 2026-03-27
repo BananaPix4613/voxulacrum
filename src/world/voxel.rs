@@ -10,46 +10,20 @@ pub const MAT_GRAVEL: u16 = 8;
 
 pub const MATERIAL_COUNT: usize = 9;
 
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// Legacy Voxel struct — no longer used for bulk storage (see ChunkStorage).
+/// Kept for material constants and as a reference for Phase 3 field restoration.
+#[derive(Clone, Copy, Default)]
 pub struct Voxel {
     pub material: u16,
     pub density: i8,
-    pub _pad: u8,
-    pub moisture: u8,
-    pub light_sun: u8,
-    pub light_emit: u8,
-    pub temperature: u8,
-    pub flora_id: u16,
-    pub flora_growth: u8,
-    pub hidden_flags: u8,
-}
-
-impl Default for Voxel {
-    fn default() -> Self {
-        Self {
-            material: MAT_AIR,
-            density: 0,
-            _pad: 0,
-            moisture: 0,
-            light_sun: 0,
-            light_emit: 0,
-            temperature: 0,
-            flora_id: 0,
-            flora_growth: 0,
-            hidden_flags: 0,
-        }
-    }
-}
-
-impl Voxel {
-    pub fn is_solid(&self) -> bool {
-        self.density > 0
-    }
-
-    pub fn is_air(&self) -> bool {
-        self.material == MAT_AIR
-    }
+    // TODO Phase 3: these fields return as tiered allocation in ChunkStorage
+    // pub moisture: u8,
+    // pub light_sun: u8,
+    // pub light_emit: u8,
+    // pub temperature: u8,
+    // pub flora_id: u16,
+    // pub flora_growth: u8,
+    // pub hidden_flags: u8,
 }
 
 pub struct MaterialDef {

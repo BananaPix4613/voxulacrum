@@ -39,6 +39,7 @@ use simulation::manager::SimulationManager;
 use meshing::coordinator::MeshingCoordinator;
 use meshing::MeshingPipeline;
 use world::regen::WorldRegenCoordinator;
+use world::persistence::WorldPersistence;
 use camera::IsometricCamera;
 use cloud_shadow::CloudShadowState;
 use params::EngineParams;
@@ -369,6 +370,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let mut meshing_pipeline = MeshingPipeline::new(
         &ui_state.params.materials,
         &ui_state.params.meshing,
+        &ui_state.params.mesh_cache,
     );
     meshing_pipeline.submit_all_dirty(&world);
     let meshing = MeshingCoordinator::new(meshing_pipeline);
@@ -406,9 +408,21 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(shader_watcher);
     ecs.insert_resource(meshing);
     ecs.insert_resource(WorldRegenCoordinator::new());
+    let persistence = match WorldPersistence::open("default", ui_state.params.terrain_gen.seed) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Persistence init failed: {e}. Running without saves.");
+            WorldPersistence::disabled()
+        }
+    };
+    let db_path = persistence.db_path.clone();
+    let dict_bytes = persistence.dictionary_bytes().map(|b| Arc::new(b));
+    ecs.insert_resource(persistence);
     let streaming_manager = world::streaming::ChunkStreamingManager::new(
         &ui_state.params.streaming,
         &ui_state.params.terrain_gen,
+        db_path,
+        dict_bytes,
     );
     ecs.insert_resource(streaming_manager);
     ecs.insert_resource(ui_state);
@@ -511,6 +525,37 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => {
+                // Save dirty chunks to persistence DB
+                {
+                    let persistence = ecs.remove_resource::<WorldPersistence>();
+                    if let Some(persistence) = persistence {
+                        let mut voxel_world = ecs.resource_mut::<VoxelWorld>();
+                        match persistence.save_dirty_chunks(&mut voxel_world.0) {
+                            Ok(n) if n > 0 => log::info!("Saved {n} dirty chunks on exit"),
+                            Err(e) => log::error!("Exit save failed: {e}"),
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Save all chunks (including streaming) to world cache before exiting.
+                // This ensures streaming chunks are loaded all-at-once on the next run,
+                // producing deterministic snapshots and mesh cache hits.
+                let world = &ecs.resource::<VoxelWorld>().0;
+                let params = &ecs.resource::<UiState>().params;
+                let cache_dir = PathBuf::from("cache/meshes");
+                let world_key =
+                    meshing::cache::compute_world_cache_key(&params.terrain_gen);
+                let world_cache_path =
+                    meshing::cache::world_cache_path(&cache_dir, world_key);
+                match meshing::cache::save_world_cache(&world_cache_path, world_key, world) {
+                    Ok(()) => log::info!(
+                        "World cache saved on exit ({} chunks)",
+                        world.chunks.len()
+                    ),
+                    Err(e) => log::warn!("Failed to save world cache on exit: {}", e),
+                }
+
                 event_loop.exit();
             }
 

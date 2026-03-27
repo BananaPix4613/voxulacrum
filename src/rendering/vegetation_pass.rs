@@ -164,7 +164,7 @@ fn is_air_at(world: &World, wx: i32, wy: i32, wz: i32) -> bool {
         let lx = wx.rem_euclid(CHUNK_SIZE as i32) as usize;
         let ly = wy.rem_euclid(CHUNK_SIZE as i32) as usize;
         let lz = wz.rem_euclid(CHUNK_SIZE as i32) as usize;
-        chunk.get_voxel(lx, ly, lz).density <= 0
+        chunk.density(lx, ly, lz) <= 0
     } else {
         true
     }
@@ -178,7 +178,7 @@ fn density_at(world: &World, wx: i32, wy: i32, wz: i32) -> i8 {
         let lx = wx.rem_euclid(CHUNK_SIZE as i32) as usize;
         let ly = wy.rem_euclid(CHUNK_SIZE as i32) as usize;
         let lz = wz.rem_euclid(CHUNK_SIZE as i32) as usize;
-        chunk.get_voxel(lx, ly, lz).density
+        chunk.density(lx, ly, lz)
     } else {
         0
     }
@@ -214,8 +214,13 @@ fn collect_chunk_grass_instances(
     for lz in 0..CHUNK_SIZE {
         for ly in 0..CHUNK_SIZE {
             for lx in 0..CHUNK_SIZE {
-                let voxel = chunk.get_voxel(lx, ly, lz);
-                if voxel.flora_id == 0 { continue; }
+                // TODO: flora_id dropped from storage (Phase 3). Reconstruct
+                // eligibility from material type — matches generation logic.
+                let mat = chunk.material(lx, ly, lz);
+                if mat != crate::world::voxel::MAT_GRASS_SOIL { continue; }
+                // Only surface voxels (density > 0 but thin layer) qualify
+                let d = chunk.density(lx, ly, lz);
+                if d <= 0 { continue; }
 
                 let wx = base_x + lx as i32;
                 let wy = base_y + ly as i32;

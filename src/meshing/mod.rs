@@ -4,7 +4,7 @@ mod marching_cubes;
 mod mc_tables;
 
 use glam::IVec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -22,6 +22,7 @@ use marching_cubes::{
     generate_cell_vertices_from_snapshot, generate_faces_from_snapshot, BoundaryVertexMap,
     CellVertexData, OwnedNeighborBoundaries,
 };
+pub(crate) use marching_cubes::{find_normal_index, ALLOWED_NORMALS};
 
 // ============================================================================
 // Messages
@@ -30,6 +31,7 @@ use marching_cubes::{
 struct Phase1Request {
     chunk_key: IVec3,
     snapshot: ChunkSnapshot,
+    mesh_seq: u64,
 }
 
 enum Phase1Outcome {
@@ -38,11 +40,13 @@ enum Phase1Outcome {
         cell_data: CellVertexData,
         snapshot: ChunkSnapshot,
         cache_key: u64,
+        mesh_seq: u64,
     },
     /// Cache hit. Skip Phase 2 entirely.
     CacheHit {
         vertices: Vec<TerrainVertex>,
         indices: Vec<u32>,
+        mesh_seq: u64,
     },
 }
 
@@ -57,12 +61,14 @@ struct Phase2Request {
     snapshot: ChunkSnapshot,
     neighbor_boundaries: OwnedNeighborBoundaries,
     cache_key: u64,
+    mesh_seq: u64
 }
 
 pub struct Phase2Result {
     pub chunk_key: IVec3,
     pub vertices: Vec<TerrainVertex>,
     pub indices: Vec<u32>,
+    pub mesh_seq: u64,
 }
 
 // ============================================================================
@@ -92,6 +98,7 @@ pub struct MeshingStats {
     pub cache_errors: u64,
     pub cache_files: u64,
     pub cache_bytes: u64,
+    pub cache_evictions: u64,
 }
 
 // ============================================================================
@@ -101,6 +108,9 @@ pub struct MeshingStats {
 struct CacheConfig {
     cache_dir: PathBuf,
     stats: Arc<AtomicCacheStats>,
+    lru: Arc<Mutex<cache::MeshCacheLru>>,
+    max_cache_bytes: u64,
+    eviction_batch_size: usize,
 }
 
 /// Runtime material properties shared with worker threads.
@@ -138,23 +148,27 @@ pub struct MeshingPipeline {
     _workers: Mutex<Vec<JoinHandle<()>>>,
 
     chunk_states: HashMap<IVec3, ChunkMeshState>,
-    pending_phase1: HashMap<IVec3, (CellVertexData, ChunkSnapshot, u64)>,
+    pending_phase1: HashMap<IVec3, (CellVertexData, ChunkSnapshot, u64, u64)>,
     boundary_maps: HashMap<IVec3, BoundaryVertexMap>,
     material_config: Arc<RwLock<MaterialConfig>>,
 
     pub stats: MeshingStats,
     batch_start: Option<Instant>,
     pending_submissions: Vec<IVec3>,
+    pending_set: HashSet<IVec3>,
 
     // Cache
     cache_stats: Arc<AtomicCacheStats>,
     cache_dir: PathBuf,
-    cache_disk_stats_stale: bool,
+    cache_lru: Arc<Mutex<cache::MeshCacheLru>>,
 }
 
 impl MeshingPipeline {
-    pub fn new(materials: &MaterialParams, meshing: &crate::params::MeshingParams) -> Self {
-        let num_workers = num_cpus::get().saturating_sub(2).max(2);
+    pub fn new(materials: &MaterialParams, meshing: &crate::params::MeshingParams, mesh_cache: &crate::params::MeshCacheParams) -> Self {
+        // Scale mesh workers: ~2/3 of usable cores (streaming takes the rest)
+        let usable = num_cpus::get().saturating_sub(2).max(2);
+        let gen_workers = (usable / 3).max(2);
+        let num_workers = (usable - gen_workers).max(2);
 
         // Setup cache directory
         let cache_dir = PathBuf::from("cache/meshes");
@@ -163,11 +177,20 @@ impl MeshingPipeline {
         }
 
         let cache_stats = Arc::new(AtomicCacheStats::new());
+
+        // Scan existing cache files for LRU
+        let lru = cache::MeshCacheLru::from_scan(&cache_dir);
+        cache_stats.total_bytes.store(lru.total_bytes(), Ordering::Relaxed);
+        let cache_lru = Arc::new(Mutex::new(lru));
+
         let material_config = Arc::new(RwLock::new(MaterialConfig::from_params(materials, meshing)));
 
         let cache_config = Arc::new(CacheConfig {
             cache_dir: cache_dir.clone(),
             stats: cache_stats.clone(),
+            lru: cache_lru.clone(),
+            max_cache_bytes: mesh_cache.max_size_bytes,
+            eviction_batch_size: mesh_cache.eviction_batch_size,
         });
 
         let (p1_tx, p1_rx) = mpsc::sync_channel::<Phase1Request>(256);
@@ -215,24 +238,26 @@ impl MeshingPipeline {
             },
             batch_start: None,
             pending_submissions: Vec::new(),
+            pending_set: HashSet::new(),
             cache_stats,
             cache_dir,
-            cache_disk_stats_stale: true,
+            cache_lru,
         }
     }
 
     /// Queue all dirty chunks for meshing. Actual snapshot creation happens
     /// incrementally in drain_pending_submissions() to avoid blocking the main thread.
     pub fn submit_all_dirty(&mut self, world: &crate::world::World) {
+        const DEBOUNCE_MS: u128 = 50;
         for (pos, chunk) in &world.chunks {
-            if !chunk.mesh_dirty {
-                continue;
+            if !chunk.mesh_dirty { continue; }
+            // Skip chunks still in debounce window
+            if let Some(t) = chunk.mesh_debounce {
+                if t.elapsed().as_millis() < DEBOUNCE_MS { continue; }
             }
             let state = self.chunk_states.get(pos).copied().unwrap_or(ChunkMeshState::Idle);
-            if state != ChunkMeshState::Idle {
-                continue;
-            }
-            if !self.pending_submissions.contains(pos) {
+            if state != ChunkMeshState::Idle { continue; }
+            if self.pending_set.insert(*pos) {
                 self.pending_submissions.push(*pos);
             }
         }
@@ -244,35 +269,61 @@ impl MeshingPipeline {
     /// Create snapshots for a bounded number of pending chunks and submit them.
     /// Call this each frame from the main loop, passing the world reference.
     pub fn drain_pending_submissions(&mut self, world: &crate::world::World) {
-        const MAX_SNAPSHOTS_PER_FRAME: usize = 8;
-        let count = self.pending_submissions.len().min(MAX_SNAPSHOTS_PER_FRAME);
-        if count == 0 {
-            return;
-        }
+        const MAX_SNAPSHOTS_PER_FRAME: usize = 32;
+        let mut submitted = 0;
+        let mut i = 0;
 
-        let batch: Vec<IVec3> = self.pending_submissions.drain(..count).collect();
-        for pos in batch {
+        while i < self.pending_submissions.len() && submitted < MAX_SNAPSHOTS_PER_FRAME {
+            let pos = self.pending_submissions[i];
+
             let state = self.chunk_states.get(&pos).copied().unwrap_or(ChunkMeshState::Idle);
             if state != ChunkMeshState::Idle {
+                self.pending_submissions.swap_remove(i);
+                self.pending_set.remove(&pos);
                 continue;
             }
 
             let chunk = match world.chunks.get(&pos) {
                 Some(c) => c,
-                None => continue, // Chunk unloaded since submission
+                None => {
+                    // Chunk unloaded since submission
+                    self.pending_submissions.swap_remove(i);
+                    self.pending_set.remove(&pos);
+                    continue;
+                }
             };
+
+            // Wait until all 6 face neighbors are loaded. This ensures
+            // deterministic cache keys — missing neighbors would default to
+            // air density, producing a different snapshot hash each session.
+            // Only face neighbors matter: the cache key skips edge/corner
+            // border voxels. Y-boundary neighbors are treated as present.
+            if !world.has_all_face_neighbors(pos) {
+                i += 1; // Skip, try next frame
+                continue;
+            }
+            self.pending_submissions.swap_remove(i);
+            self.pending_set.remove(&pos);
+
             let neighbors = world.build_neighbors(pos);
-            let snapshot = ChunkSnapshot::extract(chunk, &neighbors, world.min_chunk_y, world.max_chunk_y);
+            let snapshot = ChunkSnapshot::extract(
+                chunk, &neighbors, world.min_chunk_y, world.max_chunk_y,
+            );
+            let mesh_seq = chunk.mesh_seq;
 
             match self.p1_request_tx.try_send(Phase1Request {
                 chunk_key: pos,
                 snapshot,
+                mesh_seq,
             }) {
                 Ok(()) => {
                     self.chunk_states.insert(pos, ChunkMeshState::Phase1InProgress);
+                    submitted += 1;
                 }
                 Err(mpsc::TrySendError::Full(_)) => {
+                    // Channel full - put it back for next frame
                     self.pending_submissions.push(pos);
+                    self.pending_set.insert(pos);
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     log::error!("Phase 1 request channel disconnected");
@@ -290,7 +341,7 @@ impl MeshingPipeline {
         while let Ok(result) = p1_rx.try_recv() {
             let key = result.chunk_key;
             match result.outcome {
-                Phase1Outcome::CacheHit { vertices, indices } => {
+                Phase1Outcome::CacheHit { vertices, indices, mesh_seq } => {
                     // Cache hit: directly produce a completed result, skip Phase 2
                     self.chunk_states.remove(&key);
                     self.stats.total_meshed += 1;
@@ -298,19 +349,21 @@ impl MeshingPipeline {
                         chunk_key: key,
                         vertices,
                         indices,
+                        mesh_seq,
                     });
                 }
                 Phase1Outcome::Computed {
                     cell_data,
                     snapshot,
                     cache_key,
+                    mesh_seq,
                 } => {
                     // Normal Phase 1 complete -- store for Phase 2 dispatch
                     self.chunk_states.insert(key, ChunkMeshState::Phase1Complete);
                     self.boundary_maps
                         .insert(key, cell_data.boundary_map.clone());
                     self.pending_phase1
-                        .insert(key, (cell_data, snapshot, cache_key));
+                        .insert(key, (cell_data, snapshot, cache_key, mesh_seq));
                 }
             }
         }
@@ -354,13 +407,10 @@ impl MeshingPipeline {
         self.stats.cache_misses = self.cache_stats.misses.load(Ordering::Relaxed);
         self.stats.cache_errors = self.cache_stats.errors.load(Ordering::Relaxed);
 
-        // Disk stats: only recompute when marked stale (expensive I/O)
-        if self.cache_disk_stats_stale {
-            let (files, bytes) = cache::disk_usage(&self.cache_dir);
-            self.stats.cache_files = files;
-            self.stats.cache_bytes = bytes;
-            self.cache_disk_stats_stale = false;
-        }
+        // Cache disk stats from atomic/LRU (no expensive I/O scan)
+        self.stats.cache_bytes = self.cache_stats.total_bytes.load(Ordering::Relaxed);
+        self.stats.cache_files = self.cache_lru.lock().unwrap().entry_count() as u64;
+        self.stats.cache_evictions = self.cache_stats.evictions.load(Ordering::Relaxed);
 
         // Record batch time when everything finishes
         if !completed.is_empty()
@@ -377,7 +427,6 @@ impl MeshingPipeline {
                     self.stats.cache_hits,
                     self.stats.cache_misses,
                 );
-                self.cache_disk_stats_stale = true;
             }
         }
 
@@ -412,7 +461,7 @@ impl MeshingPipeline {
     }
 
     fn dispatch_phase2(&mut self, chunk_key: IVec3) {
-        let (cell_data, snapshot, cache_key) = match self.pending_phase1.remove(&chunk_key) {
+        let (cell_data, snapshot, cache_key, mesh_seq) = match self.pending_phase1.remove(&chunk_key) {
             Some(data) => data,
             None => return,
         };
@@ -439,12 +488,13 @@ impl MeshingPipeline {
             snapshot,
             neighbor_boundaries: nb,
             cache_key,
+            mesh_seq,
         }) {
             Ok(()) => {
                 self.chunk_states.insert(chunk_key, ChunkMeshState::Phase2InProgress);
             }
             Err(mpsc::TrySendError::Full(req)) => {
-                self.pending_phase1.insert(chunk_key, (req.cell_data, req.snapshot, req.cache_key));
+                self.pending_phase1.insert(chunk_key, (req.cell_data, req.snapshot, req.cache_key, req.mesh_seq));
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 log::error!("Phase 2 request channel disconnected");
@@ -467,7 +517,9 @@ impl MeshingPipeline {
         self.chunk_states.remove(&pos);
         self.pending_phase1.remove(&pos);
         self.boundary_maps.remove(&pos);
-        self.pending_submissions.retain(|p| *p != pos);
+        if self.pending_set.remove(&pos) {
+            self.pending_submissions.retain(|p| *p != pos);
+        }
     }
 
     /// Check if a chunk has active meshing work in flight.
@@ -488,6 +540,7 @@ impl MeshingPipeline {
         self.pending_phase1.clear();
         self.boundary_maps.clear();
         self.pending_submissions.clear();
+        self.pending_set.clear();
         self.batch_start = None;
 
         let worker_count = self.stats.worker_count;
@@ -517,7 +570,10 @@ impl MeshingPipeline {
             Err(e) => log::warn!("Failed to clear mesh cache: {}", e),
         }
         self.cache_stats.reset();
-        // Disk stats will be recalculated on next poll
+        // Reset LRU
+        if let Ok(mut lru) = self.cache_lru.lock() {
+            *lru = cache::MeshCacheLru::from_scan(&self.cache_dir); // re-scan (should be empty)
+        }
     }
 }
 
@@ -542,25 +598,49 @@ fn worker_loop(
                 let nb = req.neighbor_boundaries.as_ref();
                 let indices = generate_faces_from_snapshot(&mut cell_data, &req.snapshot, &nb);
 
-                // Save to cache (fire-and-forget, errors are non-fatal)
-                if let Err(e) = cache::save_cached_mesh(
+                // Save to cache
+                match cache::save_cached_mesh(
                     &cache_config.cache_dir,
-                    req.snapshot.position.x,
-                    req.snapshot.position.y,
-                    req.snapshot.position.z,
+                    req.snapshot.position,
                     req.cache_key,
                     &cell_data.vertices,
                     &indices,
-                )
-                {
-                    log::warn!("Cache save failed for chunk {}: {}", req.chunk_key, e);
-                    cache_config.stats.errors.fetch_add(1, Ordering::Relaxed);
+                ) {
+                    Ok(bytes_written) => {
+                        // Update LRU and check eviction
+                        let cache_path = cache::cache_file_path(
+                            &cache_config.cache_dir,
+                            req.snapshot.position.x,
+                            req.snapshot.position.y,
+                            req.snapshot.position.z,
+                            req.cache_key,
+                        );
+                        if let Ok(mut lru) = cache_config.lru.lock() {
+                            lru.insert(req.snapshot.position, cache_path, bytes_written);
+                            // Evict if over limit
+                            if lru.total_bytes() > cache_config.max_cache_bytes {
+                                let freed = lru.evict(
+                                    cache_config.max_cache_bytes,
+                                    cache_config.eviction_batch_size,
+                                );
+                                if freed > 0 {
+                                    cache_config.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            cache_config.stats.total_bytes.store(lru.total_bytes(), Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Cache save failed for chunk {}: {}", req.chunk_key, e);
+                        cache_config.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
 
                 let _ = p2_result_tx.send(Phase2Result {
                     chunk_key: req.chunk_key,
                     vertices: cell_data.vertices,
                     indices,
+                    mesh_seq: req.mesh_seq,
                 });
                 continue;
             }
@@ -595,13 +675,16 @@ fn worker_loop(
                     );
 
                     if let Some((vertices, indices)) =
-                        cache::load_cached_mesh(&cache_path, cache_key)
+                        cache::load_cached_mesh(&cache_path, cache_key, &mat_config.colors)
                     {
-                        // Cache hit -- skip both phases
                         cache_config.stats.hits.fetch_add(1, Ordering::Relaxed);
+                        // LRU touch
+                        if let Ok(mut lru) = cache_config.lru.lock() {
+                            lru.touch(req.snapshot.position);
+                        }
                         let _ = p1_result_tx.send(Phase1Result {
                             chunk_key: req.chunk_key,
-                            outcome: Phase1Outcome::CacheHit { vertices, indices },
+                            outcome: Phase1Outcome::CacheHit { vertices, indices, mesh_seq: req.mesh_seq },
                         });
                         continue;
                     }
@@ -620,6 +703,7 @@ fn worker_loop(
                             cell_data,
                             snapshot: req.snapshot,
                             cache_key,
+                            mesh_seq: req.mesh_seq,
                         },
                     });
                     continue;

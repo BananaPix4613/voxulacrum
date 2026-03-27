@@ -21,6 +21,7 @@ use crate::rendering::shadow_pass::ShadowPassNode;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::vegetation_pass::VegetationPass;
 use crate::rendering::water_pass::WaterPass;
+use crate::rendering::frustum::Frustum;
 use crate::shader_reload::ShaderWatcher;
 use crate::input::InputState;
 use crate::simulation::manager::{FrameState, SimulationManager};
@@ -31,6 +32,8 @@ use crate::{compute_render_dimensions, palette, FrameCounter};
 use crate::meshing::MeshingPipeline;
 use crate::world::chunk::{Chunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
+use crate::world::persistence::WorldPersistence;
+
 // ==========================================================================
 // Input stage
 // ==========================================================================
@@ -236,6 +239,7 @@ pub fn streaming_tick_system(
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
     ctx: Res<RenderContext>,
+    persistence: Res<WorldPersistence>,
 ) {
     let cam_pos = sim.camera.smooth_target;
     let cam_cx = (cam_pos.x / CHUNK_WORLD_SIZE).floor() as i32;
@@ -253,6 +257,13 @@ pub fn streaming_tick_system(
         &mut meshing,
         &camera_view,
         frame.dt,
+        &mut |chunk: &crate::world::chunk::Chunk| {
+            if chunk.persist_dirty {
+                if let Err(e) = persistence.save_chunk_on_unload(chunk) {
+                    log::error!("Save on unload {:?}: {e}", chunk.position);
+                }
+            }
+        },
     );
 
     // Remove vegetation and water for unloaded chunks
@@ -512,14 +523,25 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             &pipeline_registry.terrain_pipeline
         };
 
-        // Collect chunk references from HashMap for render passes
-        let chunk_refs: Vec<&Chunk> = world.0.chunks.values().collect();
+        // Compute shadow frustum from the light-space (shadow VP) matrix.
+        // Frustum::from_view_projection works for orthographic projections too.
+        let frame = ecs.resource::<FrameState>();
+        let shadow_frustum = Frustum::from_view_projection(frame.light_space);
+
+        // Pre-filter chunks: one list for the camera frustum (main scene),
+        // one for the shadow frustum (shadow pass).
+        let visible_chunks: Vec<&Chunk> = world.0.chunks.values()
+            .filter(|c| c.mesh.is_some() && sim.frustum.is_chunk_visible(c.position))
+            .collect();
+        let shadow_chunks: Vec<&Chunk> = world.0.chunks.values()
+            .filter(|c| c.mesh.is_some() && shadow_frustum.is_chunk_visible(c.position))
+            .collect();
 
         let shadow_node = ShadowPassNode {
             pipeline: &pipeline_registry.shadow_pipeline,
             bind_group: &shadow_bind_group.0,
             shadow_depth_view: &shadow_depth_view.0,
-            chunks: &chunk_refs,
+            chunks: &shadow_chunks,
         };
 
         let sky = ui.params.render_pipeline.sky_color;
@@ -532,7 +554,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             },
             terrain_pipeline,
             uniform_bind_group: &uniform_bind_group.0,
-            chunks: &chunk_refs,
+            chunks: &visible_chunks,
             frustum: &sim.frustum,
             cap_pass: &cap_pass,
             cap_config: CapConfig {
@@ -622,4 +644,12 @@ pub fn world_regen_system(
         &mut ui,
         &ctx,
     );
+}
+
+pub fn persistence_autosave_system(
+    mut persistence: ResMut<WorldPersistence>,
+    mut world: ResMut<VoxelWorld>,
+    frame: Res<FrameState>,
+) {
+    persistence.tick_autosave(frame.dt, &mut world.0);
 }

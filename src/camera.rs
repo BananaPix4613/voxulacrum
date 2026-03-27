@@ -56,7 +56,9 @@ impl IsometricCamera {
             pitch.sin(),
             self.rotation.sin() * pitch.cos(),
         );
-        let eye = target + direction * 150.0;
+        // Scale eye distance with zoom so terrain never clips the near plane
+        let eye_dist = 150.0_f32.max(self.zoom * 3.0);
+        let eye = target + direction * eye_dist;
         Mat4::look_at_rh(eye, target, Vec3::Y)
     }
 
@@ -67,7 +69,7 @@ impl IsometricCamera {
     pub fn projection_matrix(&self) -> Mat4 {
         let half_height = self.zoom;
         let half_width = half_height * self.aspect;
-        Mat4::orthographic_rh(-half_width, half_width, -half_height, half_height, 0.1, 300.0)
+        Mat4::orthographic_rh(-half_width, half_width, -half_height, half_height, 0.001, 1000.0)
     }
 
     pub fn view_projection(&self) -> [[f32; 4]; 4] {

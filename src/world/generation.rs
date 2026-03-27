@@ -1,8 +1,9 @@
 use fastnoise_lite::{FastNoiseLite, FractalType, NoiseType};
 use glam::IVec3;
 
-use super::chunk::{Chunk, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
+use super::chunk::{Chunk, CHUNK_SIZE, CHUNK_VOLUME, CHUNK_WORLD_SIZE, VOXEL_SCALE};
 use super::voxel::*;
+use super::storage::{self, ChunkStorage};
 use crate::params::TerrainGenParams;
 
 /// Initial load radius dimensions in chunks
@@ -220,8 +221,8 @@ impl TerrainGenerator {
             for cy in min_y..max_y {
                 for cx in -half_x..half_x {
                     let pos = IVec3::new(cx, cy, cz);
-                    let mut chunk = Chunk::new(pos);
-                    self.generate_chunk(&mut chunk, params);
+                    let storage = self.generate_chunk_storage(pos, params);
+                    let chunk = Chunk::new(pos, std::sync::Arc::new(storage));
                     chunks.insert(pos, chunk);
                 }
             }
@@ -231,10 +232,21 @@ impl TerrainGenerator {
     }
 
     pub fn generate_chunk(&self, chunk: &mut Chunk, params: &TerrainGenParams) {
-        let chunk_world_x = chunk.position.x as f32 * CHUNK_WORLD_SIZE;
-        let chunk_world_y = chunk.position.y as f32 * CHUNK_WORLD_SIZE;
-        let chunk_world_z = chunk.position.z as f32 * CHUNK_WORLD_SIZE;
+        let storage = self.generate_chunk_storage(chunk.position, params);
+        chunk.storage = std::sync::Arc::new(storage);
+    }
 
+    /// Generate a ChunkStorage directly from terrain parameters.
+    /// Used by streaming workers and background regeneration.
+    pub fn generate_chunk_storage(&self, position: IVec3, params: &TerrainGenParams) -> ChunkStorage {
+        let chunk_world_x = position.x as f32 * CHUNK_WORLD_SIZE;
+        let chunk_world_y = position.y as f32 * CHUNK_WORLD_SIZE;
+        let chunk_world_z = position.z as f32 * CHUNK_WORLD_SIZE;
+
+        let mut density_arr = vec![0i8; CHUNK_VOLUME].into_boxed_slice();
+        let mut material_arr = [MAT_AIR; CHUNK_VOLUME];
+        let mut moisture_arr = [0u8; CHUNK_VOLUME];
+        
         for lz in 0..CHUNK_SIZE {
             for ly in 0..CHUNK_SIZE {
                 for lx in 0..CHUNK_SIZE {
@@ -242,40 +254,52 @@ impl TerrainGenerator {
                     let wy = chunk_world_y + ly as f32 * VOXEL_SCALE;
                     let wz = chunk_world_z + lz as f32 * VOXEL_SCALE;
 
-                    let voxel = chunk.get_voxel_mut(lx, ly, lz);
-                    self.generate_voxel(voxel, wx, wy, wz, params);
+                    let idx = Chunk::voxel_index(lx, ly, lz);
+                    let (d, m) = self.generate_voxel_data(wx, wy, wz, params);
+                    density_arr[idx] = d;
+                    material_arr[idx] = m;
+                    
+                    // Moisture: higher near water, lower at altitude, noise variation
+                    if d > 0 {
+                        let base_moisture = ((params.water_level - wy) / 20.0 + 0.5).clamp(0.0, 1.0);
+                        let noise_val = self.flora_noise.get_noise_2d(wx * 0.02, wz * 0.02);
+                        let moisture = ((base_moisture + noise_val * 0.3) * 255.0).clamp(0.0, 255.0) as u8;
+                        moisture_arr[idx] = moisture;
+                    }
                 }
             }
         }
+
+        // SAFETY: Vec guarantees length == CHUNK_VOLUME
+        let density_box: Box<[i8; CHUNK_VOLUME]> = unsafe {
+            Box::from_raw(Box::into_raw(density_arr) as *mut [i8; CHUNK_VOLUME])
+        };
+
+        storage::storage_from_arrays_with_moisture(density_box, &material_arr, &moisture_arr)
     }
 
-    fn generate_voxel(&self, voxel: &mut Voxel, wx: f32, wy: f32, wz: f32, params: &TerrainGenParams) {
+    /// Generate density and material for a single voxel position.
+    /// Returns (density, material). Flora/moisture/lighting fields are dropped (Phase 3).
+    fn generate_voxel_data(&self, wx: f32, wy: f32, wz: f32, params: &TerrainGenParams) -> (i8, u16) {
         let height = self.terrain_height(wx, wz, params);
-        let surface_depth = height - wy; // positive = below surface
-
-        // --- Base density: signed distance from terrain surface ---
+        let surface_depth = height - wy;
         let density = height - wy;
 
-        // --- Cave carving: threshold-based (does NOT modify density) ---
         let is_carved = self.is_cave(wx, wy, wz, surface_depth, params);
 
         if is_carved {
-            // Cave interior: force air
-            voxel.density = -1;
-            voxel.material = MAT_AIR;
-            return;
+            return (-1, MAT_AIR);
         }
 
-        voxel.density = density.clamp(-128.0, 127.0) as i8;
+        let density = density.clamp(-128.0, 127.0) as i8;
 
-        // --- Material assignment ---
-        if voxel.density > 0 {
+        if density > 0 {
             let depth_below_surface = height - wy;
             let steepness = self.cliff_steepness(wx, wz, params);
             let mat_noise = self.material_noise.get_noise_2d(wx * 0.05, wz * 0.05);
             let cliff = params.cliff_threshold;
 
-            voxel.material = if steepness > cliff && depth_below_surface < 6.0 {
+            let material = if steepness > cliff && depth_below_surface < 6.0 {
                 // Very steep cliff faces: limestone
                 MAT_LIMESTONE
             } else if steepness > cliff * 0.6 && depth_below_surface < 4.0 {
@@ -306,22 +330,10 @@ impl TerrainGenerator {
                 MAT_GRANITE
             };
 
-            // Moisture: increases with depth
-            let depth_moisture = (depth_below_surface * 10.0).min(100.0);
-            voxel.moisture = depth_moisture.clamp(0.0, 255.0) as u8;
-
-            // Flora: only on grass-covered soil near the surface
-            if voxel.material == MAT_GRASS_SOIL && depth_below_surface < 1.5 {
-                let flora_val = self.flora_noise.get_noise_2d(wx * 0.08, wz * 0.08);
-                if flora_val > 0.3 {
-                    voxel.flora_id = 1;
-                    let growth_noise = self.flora_noise.get_noise_2d(wx * 0.2, wz * 0.2);
-                    voxel.flora_growth =
-                        128 + ((growth_noise + 1.0) * 0.5 * 127.0).clamp(0.0, 127.0) as u8;
-                }
-            }
+            // TODO: moisture, flora_id, flora_growth dropped from storage (Phase 3)
+            (density, material)
         } else {
-            voxel.material = MAT_AIR;
+            (density, MAT_AIR)
         }
     }
 }

@@ -506,8 +506,14 @@ impl Default for CrossSectionParams {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct StreamingParams {
-    pub load_distance: u32,
-    pub unload_distance: u32,
+    /// Proportional load margin: fraction of visible extent added as buffer.
+    /// E.g., 0.15 = 15% buffer on each side beyond the visible view rect.
+    /// A minimum of 2 chunks is always enforced regardless of zoom.
+    pub load_margin: f32,
+    /// Proportional unload margin: fraction of visible extent beyond which
+    /// chunks are unloaded. Should be larger than load_margin to prevent
+    /// load/unload thrashing (hysteresis).
+    pub unload_margin: f32,
     pub min_chunk_y: i32,
     pub max_chunk_y: i32,
     pub max_gen_per_frame: u32,
@@ -517,12 +523,33 @@ pub struct StreamingParams {
 impl Default for StreamingParams {
     fn default() -> Self {
         Self {
-            load_distance: 8,
-            unload_distance: 12,
+            load_margin: 0.40,
+            unload_margin: 0.55,
             min_chunk_y: 0,
             max_chunk_y: 4,
             max_gen_per_frame: 64,
             max_mesh_per_frame: 64,
+        }
+    }
+}
+
+// ============================================================================
+// Mesh Cache Params
+// ============================================================================
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MeshCacheParams {
+    pub max_size_bytes: u64,
+    pub eviction_batch_size: usize,
+    pub enabled: bool,
+}
+
+impl Default for MeshCacheParams {
+    fn default() -> Self {
+        Self {
+            max_size_bytes: 256 * 1024 * 1024,
+            eviction_batch_size: 64,
+            enabled: true,
         }
     }
 }
@@ -551,6 +578,7 @@ pub struct EngineParams {
     pub outline: OutlineParams,
     pub cross_section: CrossSectionParams,
     pub streaming: StreamingParams,
+    pub mesh_cache: MeshCacheParams,
 }
 
 impl Default for EngineParams {
@@ -573,6 +601,7 @@ impl Default for EngineParams {
             outline: OutlineParams::default(),
             cross_section: CrossSectionParams::default(),
             streaming: StreamingParams::default(),
+            mesh_cache: MeshCacheParams::default(),
         }
     }
 }

@@ -63,9 +63,10 @@ pub fn build_frame_schedule() -> Schedule {
         systems::render_present_system.in_set(FrameStage::Render),
     );
     // PostFrame
-    schedule.add_systems(
+    schedule.add_systems((
         systems::world_regen_system.in_set(FrameStage::PostFrame),
-    );
+        systems::persistence_autosave_system.in_set(FrameStage::PostFrame),
+    ));
 
     schedule
 }

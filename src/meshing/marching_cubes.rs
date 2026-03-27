@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::rendering::pipelines::TerrainVertex;
-use crate::world::chunk::{ChunkMesh, ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
+use crate::world::chunk::{ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
 use crate::world::voxel::MAT_AIR;
 
 use super::mc_tables::{EDGE_TABLE, TRI_TABLE};
@@ -204,7 +204,7 @@ const K: f32 = 0.9428090415820634;  // 1.0/sqrt(2*0.25^2 + 1^2)
 
 /// The complete set of allowed face normal directions (~42 normals).
 /// Every face normal produced by the mesher is snapped to the closest entry.
-static ALLOWED_NORMALS: [[f32; 3]; 42] = [
+pub(crate) static ALLOWED_NORMALS: [[f32; 3]; 42] = [
     // 6 axis-aligned (cardinal walls + flat top/bottom)
     [ 1.0,  0.0,  0.0], [-1.0,  0.0,  0.0],
     [ 0.0,  1.0,  0.0], [ 0.0, -1.0,  0.0],
@@ -255,7 +255,7 @@ fn snap_density(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> f32 {
     if x < -2 || x > cs + 1 || y < -2 || y > cs + 1 || z < -2 || z > cs + 1 {
         return -1.0;
     }
-    snap.get_voxel(x, y, z).density as f32
+    snap.get_density(x, y, z) as f32
 }
 
 /// Sample material ID from snapshot at chunk-local voxel coordinates.
@@ -264,7 +264,7 @@ fn snap_material(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> u16 {
     if x < -2 || x > cs + 1 || y < -2 || y > cs + 1 || z < -2 || z > cs + 1 {
         return MAT_AIR;
     }
-    snap.get_voxel(x, y, z).material
+    snap.get_material(x, y, z)
 }
 
 /// Classify density for sign-change detection. Treats exact zero as
@@ -323,7 +323,7 @@ fn compute_ao(snap: &ChunkSnapshot, position: [f32; 3], chunk_offset: [f32; 3]) 
                 let vy = sy.clamp(-2, cs + 1);
                 let vz = sz.clamp(-2, cs + 1);
 
-                if snap.get_voxel(vx, vy, vz).density > 0 {
+                if snap.get_density(vx, vy, vz) > 0 {
                     weighted_solid += weight;
                 }
             }
@@ -364,7 +364,7 @@ fn make_edge(key_a: u64, key_b: u64) -> PositionEdge {
 
 /// Find which ALLOWED_NORMALS index a snapped normal corresponds to.
 /// Returns 0 as fallback (should not happen with properly snapped normals).
-fn find_normal_index(normal: [f32; 3]) -> u8 {
+pub(crate) fn find_normal_index(normal: [f32; 3]) -> u8 {
     let mut best = 0u8;
     let mut best_dot = dot3(normal, ALLOWED_NORMALS[0]);
     for (i, &candidate) in ALLOWED_NORMALS.iter().enumerate().skip(1) {

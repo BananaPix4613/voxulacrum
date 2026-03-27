@@ -36,6 +36,7 @@ impl MeshingCoordinator {
                 &result.vertices,
                 &result.indices,
                 &ctx.device,
+                result.mesh_seq,
             );
             meshed_positions.push(pos);
         }
@@ -67,7 +68,7 @@ impl MeshingCoordinator {
             );
             self.pipeline.reset_for_new_world();
             for chunk in world.chunks.values_mut() {
-                chunk.mesh_dirty = true;
+                chunk.mark_mesh_dirty();
             }
             self.pipeline.submit_all_dirty(world);
         }

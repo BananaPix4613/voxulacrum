@@ -1,5 +1,6 @@
 use std::collections::{BinaryHeap, HashSet};
 use std::cmp::Reverse;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -10,7 +11,7 @@ use glam::{IVec3, Vec3};
 
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::{StreamingParams, TerrainGenParams};
-use crate::world::chunk::CHUNK_WORLD_SIZE;
+use crate::world::chunk::{VoxelEdit, CHUNK_WORLD_SIZE};
 use crate::world::generation::TerrainGenerator;
 use crate::world::World;
 
@@ -56,14 +57,15 @@ impl CameraView {
     ///   right_dir = (sin(r), -cos(r))   — screen X axis on ground
     ///   up_dir    = (-cos(r), -sin(r))   — screen Y axis on ground (foreshortened)
     ///
-    /// Half-extents (in chunk space):
-    ///   half_right = zoom * aspect / CHUNK_WORLD_SIZE + margin
-    ///   half_up    = zoom * sin(θ) / CHUNK_WORLD_SIZE + margin
+    /// Half-extents (in chunk space), with proportional margin:
+    ///   half_right = zoom * aspect / CHUNK_WORLD_SIZE * (1 + margin_fraction) + MIN_MARGIN
+    ///   half_up    = zoom * sin(θ) / CHUNK_WORLD_SIZE * (1 + margin_fraction) + MIN_MARGIN
     ///
     /// A chunk is inside the view rectangle if BOTH projections are within bounds:
     ///   |dot(offset, right_dir)| <= half_right  AND  |dot(offset, up_dir)| <= half_up
-    pub fn is_in_view_rect(&self, chunk_x: i32, chunk_z: i32, margin: i32) -> bool {
-        let sin_theta = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
+    pub fn is_in_view_rect(&self, chunk_x: i32, chunk_z: i32, margin_fraction: f32) -> bool {
+        let (half_right, half_up) = self.half_extents(margin_fraction);
+
         let dx = (chunk_x - self.camera_chunk.x) as f32;
         let dz = (chunk_z - self.camera_chunk.z) as f32;
 
@@ -74,11 +76,26 @@ impl CameraView {
         let local_right = dx * sin_r - dz * cos_r;     // along screen X
         let local_up    = -dx * cos_r - dz * sin_r;    // along screen Y (ground component)
 
-        let half_right = self.zoom * self.aspect / CHUNK_WORLD_SIZE + margin as f32;
-        let half_up    = self.zoom * sin_theta / CHUNK_WORLD_SIZE + margin as f32;
-
         // Rectangle test: both projections must be within their half-extent
         local_right.abs() <= half_right && local_up.abs() <= half_up
+    }
+
+    /// Compute the half-extents of the view rectangle with proportional margin.
+    /// Returns (half_right, half_up) in chunk-space units.
+    ///
+    /// The margin is computed as a fraction of the LARGER visible axis and then
+    /// applied equally to both axes. This ensures the forward/backward direction
+    /// (foreshortened by the isometric pitch) gets the same absolute buffer as
+    /// the horizontal direction, preventing pop-in when the camera moves forward.
+    fn half_extents(&self, margin_fraction: f32) -> (f32, f32) {
+        const MIN_MARGIN: f32 = 2.0; // minimum buffer in chunks, prevents pop-in at low zoom
+        let sin_theta = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
+        let half_right_vis = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
+        let half_up_vis    = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
+
+        // Derive margin from the larger axis so both get adequate buffer
+        let margin_chunks = (half_right_vis.max(half_up_vis) * margin_fraction).max(MIN_MARGIN);
+        (half_right_vis + margin_chunks, half_up_vis + margin_chunks)
     }
 
     /// Priority score: lower = more urgent to load.
@@ -92,12 +109,10 @@ impl CameraView {
     }
 
     /// Bounding Chebyshev radius that fully contains the rotated view rectangle
-    /// + margin. This is the AABB half-extent of the rotated rectangle in
-    /// world-axis-aligned chunk space.
-    pub fn bounding_radius(&self, margin: i32) -> i32 {
-        let sin_theta = (1.0_f32 / 3.0).sqrt();
-        let half_right = self.zoom * self.aspect / CHUNK_WORLD_SIZE + margin as f32;
-        let half_up    = self.zoom * sin_theta / CHUNK_WORLD_SIZE + margin as f32;
+    /// with proportional margin. This is the AABB half-extent of the rotated
+    /// rectangle in world-axis-aligned chunk space.
+    pub fn bounding_radius(&self, margin_fraction: f32) -> i32 {
+        let (half_right, half_up) = self.half_extents(margin_fraction);
 
         let cos_r = self.rotation.cos().abs();
         let sin_r = self.rotation.sin().abs();
@@ -132,8 +147,12 @@ impl ChunkStreamingManager {
     pub fn new(
         params: &StreamingParams,
         terrain_params: &TerrainGenParams,
+        db_path: Option<PathBuf>,
+        dict_bytes: Option<Arc<Vec<u8>>>,
     ) -> Self {
-        let num_workers = 4.min(num_cpus::get().saturating_sub(2).max(1));
+        // Scale gen workers with available cores (~1/3 of usable cores, min 2)
+        let usable = num_cpus::get().saturating_sub(2).max(2);
+        let num_workers = (usable / 3).max(2);
 
         let work_queue = Arc::new(SharedWorkQueue::new());
         let in_flight: Arc<Mutex<HashSet<IVec3>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -147,36 +166,75 @@ impl ChunkStreamingManager {
             let flight = in_flight.clone();
             let tx = result_tx.clone();
             let tp = terrain_params.clone();
+            let db_path_clone = db_path.clone();
+            let dict_clone = dict_bytes.clone();
 
             let handle = std::thread::Builder::new()
                 .name(format!("chunk-gen-{}", i))
                 .spawn(move || {
                     let generator = TerrainGenerator::new(&tp);
+                    // Each worker opens its own read-only DB connection
+                    let worker_db = db_path_clone.as_ref().and_then(|path| {
+                        crate::world::persistence::WorldDatabase::open_readonly(
+                            path,
+                            dict_clone.as_deref().map(|v| v.as_slice()),
+                        )
+                        .map_err(|e| log::warn!("Worker {i} DB open failed: {e}"))
+                        .ok()
+                    });
+
                     loop {
-                        // Pop highest-priority item (lowest squared distance)
                         let pos = {
                             let mut q = wq.queue.lock().unwrap();
                             loop {
-                                if wq.shutdown.load(Ordering::Relaxed) {
-                                    return;
-                                }
+                                if wq.shutdown.load(Ordering::Relaxed) { return; }
                                 if let Some(Reverse((_, arr))) = q.pop() {
                                     break IVec3::new(arr[0], arr[1], arr[2]);
                                 }
-                                // Queue empty - wait for main thread to rebuild it
                                 q = wq.condvar.wait(q).unwrap();
                             }
                         };
-
-                        // Mark as in-flight so main thread won't re-queue it
                         flight.lock().unwrap().insert(pos);
 
-                        let mut chunk = crate::world::chunk::Chunk::new(pos);
-                        generator.generate_chunk(&mut chunk, &tp);
+                        // Generate base terrain
+                        let mut storage = generator.generate_chunk_storage(pos, &tp);
 
-                        if tx.send(GenResult { chunk }).is_err() {
-                            return; // Main thread dropped, shut down
+                        // Overlay saved edits from DB
+                        let mut edit_list = None;
+                        if let Some(ref db) = worker_db {
+                            match db.load_chunk_edits(pos) {
+                                Ok(Some(crate::world::persistence::ChunkEdits::Delta(ref delta))) => {
+                                    // Self-healing: skip edits that match base terrain (no-ops)
+                                    let filtered: Vec<VoxelEdit> = delta.iter().filter(|e| {
+                                        let idx = e.index as usize;
+                                        storage.density(idx) != e.density || storage.material(idx) != e.material_id
+                                    }).cloned().collect();
+
+                                    if !filtered.is_empty() {
+                                        storage = crate::world::persistence::apply_edits_to_storage(&storage, &filtered);
+                                    }
+                                    edit_list = Some(filtered);
+
+                                    // If all edits were no-ops, mark for re-save to clean up DB
+                                    if edit_list.as_ref().map_or(false, |l| l.is_empty()) && !delta.is_empty() {
+                                        // persist_dirty will cause re-save with empty list -> None -> row deleted or skipped
+                                    }
+                                }
+                                Ok(Some(crate::world::persistence::ChunkEdits::Full(full))) => {
+                                    storage = full;
+                                    // Full replacement: no individual edit tracking
+                                }
+                                Ok(None) => {}
+                                Err(e) => log::warn!("Worker: load edits for {pos:?} failed: {e}"),
+                            }
                         }
+
+                        let mut chunk = crate::world::chunk::Chunk::new(pos, std::sync::Arc::new(storage));
+                        chunk.edit_list = edit_list;
+                        // Not dirty - matches what's in DB
+                        chunk.persist_dirty = false;
+
+                        if tx.send(GenResult { chunk }).is_err() { return; }
                     }
                 })
                 .expect("Failed to spawn chunk generation worker");
@@ -197,8 +255,13 @@ impl ChunkStreamingManager {
     }
 
     /// Rebuild workers when terrain params change (new generator needed).
-    pub fn rebuild_for_new_params(&mut self, terrain_params: &TerrainGenParams) {
-        *self = Self::new(&self.params, terrain_params);
+    pub fn rebuild_for_new_params(
+        &mut self,
+        terrain_params: &TerrainGenParams,
+        db_path: Option<PathBuf>,
+        dict_bytes: Option<Arc<Vec<u8>>>,    
+    ) {
+        *self = Self::new(&self.params, terrain_params, db_path, dict_bytes);
         self.last_camera_chunk = None;
     }
 
@@ -212,11 +275,12 @@ impl ChunkStreamingManager {
         meshing: &mut MeshingCoordinator,
         camera_view: &CameraView,
         _dt: f32,
+        on_unload: &mut dyn FnMut(&crate::world::chunk::Chunk),
     ) -> StreamingTickResult {
         let min_y = self.params.min_chunk_y;
         let max_y = self.params.max_chunk_y;
-        let load_margin = self.params.load_distance as i32;
-        let unload_margin = self.params.unload_distance as i32;
+        let load_margin = self.params.load_margin;
+        let unload_margin = self.params.unload_margin;
 
         let cam_cx = camera_view.camera_chunk.x;
         let cam_cz = camera_view.camera_chunk.z;
@@ -242,7 +306,9 @@ impl ChunkStreamingManager {
                 world.insert_chunk(gen_result.chunk);
                 result.inserted.push(pos);
 
-                // Mark face-adjacent neighbors for re-meshing (seam fix)
+                // Mark 6 face-adjacent neighbors for re-meshing (they share
+                // border voxels that affect visible seams). Diagonal neighbors
+                // are excluded from the cache key, so they don't need remeshing.
                 for &offset in &[
                     IVec3::X, IVec3::NEG_X,
                     IVec3::Y, IVec3::NEG_Y,
@@ -250,7 +316,7 @@ impl ChunkStreamingManager {
                 ] {
                     let neighbor_pos = pos + offset;
                     if let Some(neighbor) = world.chunks.get_mut(&neighbor_pos) {
-                        neighbor.mesh_dirty = true;
+                        neighbor.mark_mesh_dirty();
                     }
                 }
             }
@@ -305,6 +371,10 @@ impl ChunkStreamingManager {
                 continue;
             }
             meshing.pipeline.remove_chunk_state(pos);
+            // Save dirty chunk before dropping
+            if let Some(chunk) = world.chunks.get(&pos) {
+                on_unload(chunk);
+            }
             world.remove_chunk(pos);
             result.unloaded.push(pos);
         }
