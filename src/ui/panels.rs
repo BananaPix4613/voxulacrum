@@ -3,6 +3,7 @@ use bevy_ecs::prelude::Resource;
 
 use crate::params::*;
 use crate::meshing::MeshingStats;
+use crate::world::generation::GEN_STATS;
 
 pub struct ShaderLogEntry {
     pub message: String,
@@ -511,27 +512,31 @@ fn draw_terrain_gen(
         // Disable param sliders while regenerating (scoped via add_enabled_ui)
         ui.add_enabled_ui(!regenerating, |ui| {
             ui.horizontal(|ui| { dot_red(ui); ui.label("Seed:"); ui.add(egui::DragValue::new(&mut p.seed)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Base height:"); ui.add(egui::Slider::new(&mut p.base_height, 0.0..=64.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cliff threshold:"); ui.add(egui::Slider::new(&mut p.cliff_threshold, 0.5..=5.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Hill amplitude:"); ui.add(egui::Slider::new(&mut p.hill_amplitude, 0.0..=50.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Hill frequency:"); ui.add(egui::Slider::new(&mut p.hill_frequency, 0.0001..=0.05).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge amplitude:"); ui.add(egui::Slider::new(&mut p.ridge_amplitude, 0.0..=30.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge frequency:"); ui.add(egui::Slider::new(&mut p.ridge_frequency, 0.001..=0.1).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Detail amplitude:"); ui.add(egui::Slider::new(&mut p.detail_amplitude, 0.0..=10.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Detail frequency:"); ui.add(egui::Slider::new(&mut p.detail_frequency, 0.001..=0.2).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.separator();
+            ui.label("3D Terrain Shape");
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Terrain frequency:"); ui.add(egui::Slider::new(&mut p.terrain_freq, 0.01..=0.5).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Selector frequency:"); ui.add(egui::Slider::new(&mut p.selector_freq, 0.005..=0.2).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Terrain octaves:"); ui.add(egui::DragValue::new(&mut p.terrain_octaves).range(1..=8)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Terrain gain:"); ui.add(egui::Slider::new(&mut p.terrain_gain, 0.1..=0.9).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Y squash:"); ui.add(egui::Slider::new(&mut p.y_squash, 0.1..=2.0).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Terrain warp:"); ui.add(egui::Slider::new(&mut p.terrain_warp, 0.0..=50.0).clamping(egui::SliderClamping::Never)); });
+            ui.separator();
+            ui.label("2D Column Noise");
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Continental freq:"); ui.add(egui::Slider::new(&mut p.continental_freq, 0.001..=0.1).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Temperature freq:"); ui.add(egui::Slider::new(&mut p.temperature_freq, 0.001..=0.1).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Humidity freq:"); ui.add(egui::Slider::new(&mut p.humidity_freq, 0.001..=0.1).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Erosion freq:"); ui.add(egui::Slider::new(&mut p.erosion_freq, 0.002..=0.2).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Elevation freq:"); ui.add(egui::Slider::new(&mut p.elevation_freq, 0.005..=0.5).logarithmic(true).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Elevation warp:"); ui.add(egui::Slider::new(&mut p.elevation_warp, 0.0..=30.0).clamping(egui::SliderClamping::Never)); });
+            ui.separator();
+            ui.label("Density Post-Processing");
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Density scale:"); ui.add(egui::Slider::new(&mut p.density_scale, 1.0..=50.0).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Floor level:"); ui.add(egui::Slider::new(&mut p.floor_level, -300.0..=0.0).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Ceiling level:"); ui.add(egui::Slider::new(&mut p.ceiling_level, 100.0..=500.0).clamping(egui::SliderClamping::Never)); });
             ui.separator();
             ui.label("Cave System");
             ui.horizontal(|ui| { dot_red(ui); ui.label("Caves enabled:"); ui.add(egui::Checkbox::without_text(&mut p.cave_enabled)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Spaghetti freq:"); ui.add(egui::Slider::new(&mut p.cave_spaghetti_freq, 0.005..=0.1).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Spaghetti thickness:"); ui.add(egui::Slider::new(&mut p.cave_spaghetti_thickness, 0.01..=0.3).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Noodle freq:"); ui.add(egui::Slider::new(&mut p.cave_noodle_freq, 0.001..=0.2).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Noodle thickness:"); ui.add(egui::Slider::new(&mut p.cave_noodle_thickness, 0.01..=0.5).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cheese freq:"); ui.add(egui::Slider::new(&mut p.cave_cheese_freq, 0.002..=0.03).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cheese threshold:"); ui.add(egui::Slider::new(&mut p.cave_cheese_threshold, 0.1..=0.9).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Warp amplitude:"); ui.add(egui::Slider::new(&mut p.cave_warp_amp, 0.0..=80.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Surface margin:"); ui.add(egui::Slider::new(&mut p.cave_surface_margin, 0.1..=10.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Y squash:"); ui.add(egui::Slider::new(&mut p.cave_y_squash, 0.1..=2.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Water level (gen):"); ui.add(egui::Slider::new(&mut p.water_level, 0.0..=64.0).clamping(egui::SliderClamping::Never)); });
+            ui.horizontal(|ui| { dot_red(ui); ui.label("Water level:"); ui.add(egui::Slider::new(&mut p.water_level, 0.0..=64.0).clamping(egui::SliderClamping::Never)); });
         });
 
         // Button/progress area (always enabled, outside the add_enabled_ui scope)
@@ -720,6 +725,32 @@ fn draw_performance(ui: &mut egui::Ui, state: &UiState) {
             ui.label(format!("Culled: {:.0}%", cull_pct));
         }
         ui.label(format!("Streaming: {} loaded, {} pending", state.streaming_loaded, state.streaming_pending));
+
+        // Generation range analysis stats
+        let detail = GEN_STATS.snapshot_detail();
+        let total = detail.skipped_air + detail.skipped_solid + detail.full_gen;
+        if total > 0 {
+            let skip_pct = (detail.skipped_air + detail.skipped_solid) as f64 / total as f64 * 100.0;
+            ui.separator();
+            ui.label(format!("Gen skipped: {} air, {} solid ({:.0}%)", detail.skipped_air, detail.skipped_solid, skip_pct));
+            ui.label(format!("Gen full: {} / {} total", detail.full_gen, total));
+
+            // Two-pass voxel classification
+            let voxel_total = detail.voxels_near_surface + detail.voxels_deep_solid + detail.voxels_clear_air;
+            if voxel_total > 0 {
+                let skip_voxel_pct = (detail.voxels_deep_solid + detail.voxels_clear_air) as f64 / voxel_total as f64 * 100.0;
+                ui.label(format!(
+                    "Voxels: {} surface, {} deep, {} air ({:.0}% skip)",
+                    format_number(detail.voxels_near_surface),
+                    format_number(detail.voxels_deep_solid),
+                    format_number(detail.voxels_clear_air),
+                    skip_voxel_pct,
+                ));
+            }
+            if detail.detail_noise_skipped > 0 {
+                ui.label(format!("Detail noise skipped: {} chunks", detail.detail_noise_skipped));
+            }
+        }
     });
 }
 

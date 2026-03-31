@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::rendering::pipelines::TerrainVertex;
-use crate::world::chunk::{ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, VOXEL_SCALE};
+use crate::world::chunk::{ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, SNAP_PAD, VOXEL_SCALE};
 use crate::world::voxel::MAT_AIR;
 
 use super::mc_tables::{EDGE_TABLE, TRI_TABLE};
@@ -252,7 +252,8 @@ fn snap_normal(raw: [f32; 3]) -> [f32; 3] {
 /// Returns -1.0 for out-of-range coordinates.
 fn snap_density(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> f32 {
     let cs = CHUNK_SIZE as i32;
-    if x < -2 || x > cs + 1 || y < -2 || y > cs + 1 || z < -2 || z > cs + 1 {
+    let pad = SNAP_PAD as i32;
+    if x < -pad || x > cs + pad - 1 || y < -pad || y > cs + pad - 1 || z < -pad || z > cs + pad - 1 {
         return -1.0;
     }
     snap.get_density(x, y, z) as f32
@@ -261,7 +262,8 @@ fn snap_density(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> f32 {
 /// Sample material ID from snapshot at chunk-local voxel coordinates.
 fn snap_material(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> u16 {
     let cs = CHUNK_SIZE as i32;
-    if x < -2 || x > cs + 1 || y < -2 || y > cs + 1 || z < -2 || z > cs + 1 {
+    let pad = SNAP_PAD as i32;
+    if x < -pad || x > cs + pad - 1 || y < -pad || y > cs + pad - 1 || z < -pad || z > cs + pad - 1 {
         return MAT_AIR;
     }
     snap.get_material(x, y, z)
@@ -319,9 +321,10 @@ fn compute_ao(snap: &ChunkSnapshot, position: [f32; 3], chunk_offset: [f32; 3]) 
 
                 // Clamp to snapshot bounds to avoid out-of-range access
                 let cs = CHUNK_SIZE as i32;
-                let vx = sx.clamp(-2, cs + 1);
-                let vy = sy.clamp(-2, cs + 1);
-                let vz = sz.clamp(-2, cs + 1);
+                let pad = SNAP_PAD as i32;
+                let vx = sx.clamp(-pad, cs + pad - 1);
+                let vy = sy.clamp(-pad, cs + pad - 1);
+                let vz = sz.clamp(-pad, cs + pad - 1);
 
                 if snap.get_density(vx, vy, vz) > 0 {
                     weighted_solid += weight;

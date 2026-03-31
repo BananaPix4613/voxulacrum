@@ -5,6 +5,7 @@ pub mod regen;
 pub mod streaming;
 pub mod storage;
 pub mod persistence;
+pub mod biome;
 
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -56,23 +57,27 @@ impl World {
         }
     }
 
-    /// Check whether all 6 face-adjacent neighbor chunks around `pos` are loaded.
-    /// Only face neighbors are required because the cache key excludes edge/corner
-    /// border voxels (where 2+ axes are in the border zone). Neighbors outside the
-    /// Y range [min_chunk_y, max_chunk_y) are treated as present (always air).
-    pub fn has_all_face_neighbors(&self, pos: IVec3) -> bool {
-        const FACE_OFFSETS: [IVec3; 6] = [
-            IVec3::X, IVec3::NEG_X,
-            IVec3::Y, IVec3::NEG_Y,
-            IVec3::Z, IVec3::NEG_Z,
-        ];
-        for &offset in &FACE_OFFSETS {
-            let n = pos + offset;
-            if n.y < self.min_chunk_y || n.y >= self.max_chunk_y {
-                continue;
-            }
-            if !self.chunks.contains_key(&n) {
-                return false;
+    /// Check whether all 26 neighbor chunks around `pos` are loaded (face, edge,
+    /// and corner neighbors). All neighbors are required so that the snapshot
+    /// border has correct density data everywhere — edge/diagonal positions are
+    /// sampled by marching cubes cells that straddle chunk boundaries. Without
+    /// the actual neighbor data, cave carving boundaries produce visible seam
+    /// artifacts because the density transition is binary (solid 127 → carved -1).
+    /// Neighbors outside the Y range [min_chunk_y, max_chunk_y) are treated as
+    /// present (implicit air above/below the world).
+    pub fn has_all_neighbors(&self, pos: IVec3) -> bool {
+        for dz in -1i32..=1 {
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 && dz == 0 { continue; }
+                    let n = pos + IVec3::new(dx, dy, dz);
+                    if n.y < self.min_chunk_y || n.y >= self.max_chunk_y {
+                        continue;
+                    }
+                    if !self.chunks.contains_key(&n) {
+                        return false;
+                    }
+                }
             }
         }
         true

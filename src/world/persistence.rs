@@ -329,6 +329,13 @@ impl WorldDatabase {
 
     // -- Chunk CRUD --
 
+    /// Delete all saved chunk data (used when terrain params change).
+    pub fn clear_all_chunks(&self) -> Result<usize, PersistError> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute("DELETE FROM chunks", [])?;
+        Ok(deleted)
+    }
+
     pub fn load_chunk_edits(&self, pos: IVec3) -> Result<Option<ChunkEdits>, PersistError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
@@ -516,6 +523,15 @@ impl WorldPersistence {
 
     pub fn is_active(&self) -> bool {
         self.db.is_some()
+    }
+
+    /// Clear all saved chunk data (called when terrain params change).
+    pub fn clear_all_chunks(&self) -> Result<usize, PersistError> {
+        if let Some(db) = &self.db {
+            db.clear_all_chunks()
+        } else {
+            Ok(0)
+        }
     }
 
     pub fn dictionary_bytes(&self) -> Option<Vec<u8>> {

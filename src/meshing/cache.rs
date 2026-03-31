@@ -155,21 +155,21 @@ pub fn compute_cache_key(
     flat_error: f32,
     flat_normal: f32,
 ) -> u64 {
-    use crate::world::chunk::{CHUNK_SIZE, SNAP_SIZE};
+    use crate::world::chunk::{CHUNK_SIZE, SNAP_PAD, SNAP_SIZE};
     use seahash::SeaHasher;
     use std::hash::Hasher;
 
     let mut hasher = SeaHasher::new();
 
     for sz in 0..SNAP_SIZE {
-        let z_border = sz < 2 || sz >= CHUNK_SIZE + 2;
+        let z_border = sz < SNAP_PAD || sz >= CHUNK_SIZE + SNAP_PAD;
         for sy in 0..SNAP_SIZE {
-            let y_border = sy < 2 || sy >= CHUNK_SIZE + 2;
+            let y_border = sy < SNAP_PAD || sy >= CHUNK_SIZE + SNAP_PAD;
             if z_border && y_border {
                 continue;
             }
             for sx in 0..SNAP_SIZE {
-                let x_border = sx < 2 || sx >= CHUNK_SIZE + 2;
+                let x_border = sx < SNAP_PAD || sx >= CHUNK_SIZE + SNAP_PAD;
                 let border_count = x_border as u8 + y_border as u8 + z_border as u8;
                 if border_count >= 2 {
                     continue;
@@ -177,9 +177,9 @@ pub fn compute_cache_key(
                 let idx = sx + sy * SNAP_SIZE + sz * SNAP_SIZE * SNAP_SIZE;
                 hasher.write_i8(snapshot.density[idx]);
                 // Material lookup via chunk-local coordinates
-                let cx = sx as i32 - 2;
-                let cy = sy as i32 - 2;
-                let cz = sz as i32 - 2;
+                let cx = sx as i32 - SNAP_PAD as i32;
+                let cy = sy as i32 - SNAP_PAD as i32;
+                let cz = sz as i32 - SNAP_PAD as i32;
                 hasher.write_u16(snapshot.get_material(cx, cy, cz));
             }
         }
@@ -507,24 +507,26 @@ pub fn compute_world_cache_key(params: &crate::params::TerrainGenParams) -> u64 
     use std::hash::Hasher;
 
     let mut hasher = SeaHasher::new();
-    hasher.write(&params.base_height.to_le_bytes());
-    hasher.write(&params.cliff_threshold.to_le_bytes());
-    hasher.write(&params.hill_amplitude.to_le_bytes());
-    hasher.write(&params.hill_frequency.to_le_bytes());
-    hasher.write(&params.ridge_amplitude.to_le_bytes());
-    hasher.write(&params.ridge_frequency.to_le_bytes());
-    hasher.write(&params.detail_amplitude.to_le_bytes());
-    hasher.write(&params.detail_frequency.to_le_bytes());
+    // 3D terrain shape
+    hasher.write(&params.terrain_freq.to_le_bytes());
+    hasher.write(&params.selector_freq.to_le_bytes());
+    hasher.write(&params.terrain_octaves.to_le_bytes());
+    hasher.write(&params.terrain_gain.to_le_bytes());
+    hasher.write(&params.y_squash.to_le_bytes());
+    hasher.write(&params.terrain_warp.to_le_bytes());
+    // 2D column noise
+    hasher.write(&params.continental_freq.to_le_bytes());
+    hasher.write(&params.temperature_freq.to_le_bytes());
+    hasher.write(&params.humidity_freq.to_le_bytes());
+    hasher.write(&params.erosion_freq.to_le_bytes());
+    hasher.write(&params.elevation_freq.to_le_bytes());
+    hasher.write(&params.elevation_warp.to_le_bytes());
+    // Density post-processing
+    hasher.write(&params.density_scale.to_le_bytes());
+    hasher.write(&params.floor_level.to_le_bytes());
+    hasher.write(&params.ceiling_level.to_le_bytes());
+    // Cave system
     hasher.write(&(params.cave_enabled as u8).to_le_bytes());
-    hasher.write(&params.cave_spaghetti_freq.to_le_bytes());
-    hasher.write(&params.cave_spaghetti_thickness.to_le_bytes());
-    hasher.write(&params.cave_noodle_freq.to_le_bytes());
-    hasher.write(&params.cave_noodle_thickness.to_le_bytes());
-    hasher.write(&params.cave_cheese_freq.to_le_bytes());
-    hasher.write(&params.cave_cheese_threshold.to_le_bytes());
-    hasher.write(&params.cave_warp_amp.to_le_bytes());
-    hasher.write(&params.cave_surface_margin.to_le_bytes());
-    hasher.write(&params.cave_y_squash.to_le_bytes());
     hasher.write(&params.water_level.to_le_bytes());
     hasher.write_i32(params.seed);
     hasher.finish()

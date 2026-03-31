@@ -9,6 +9,8 @@ use crate::rendering::vegetation_pass::VegetationPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::ui::panels::UiState;
 use crate::world::{World, WorldManager};
+use crate::world::persistence::WorldPersistence;
+use crate::world::streaming::ChunkStreamingManager;
 
 #[derive(Resource)]
 pub struct WorldRegenCoordinator {
@@ -31,6 +33,8 @@ impl WorldRegenCoordinator {
         water_pass: &mut WaterPass,
         ui_state: &mut UiState,
         ctx: &RenderContext,
+        persistence: &WorldPersistence,
+        streaming: &mut ChunkStreamingManager,
     ) {
         // Feed regeneration status to UI
         ui_state.regenerating = self.manager.is_regenerating();
@@ -61,6 +65,13 @@ impl WorldRegenCoordinator {
             );
             log::info!("Water pass rebuilt after regeneration");
             
+            // Clear saved chunk edits (stale under new terrain params)
+            match persistence.clear_all_chunks() {
+                Ok(n) if n > 0 => log::info!("Cleared {n} saved chunk edits for new terrain params"),
+                Err(e) => log::warn!("Failed to clear saved chunks: {e}"),
+                _ => {}
+            }
+
             // Clear stale caches and save new world
             let cache_dir = PathBuf::from("cache/meshes");
             meshing.pipeline.clear_cache();
@@ -76,8 +87,16 @@ impl WorldRegenCoordinator {
                 log::info!("Regenerated world saved to cache");
             }
             
+            // Rebuild streaming workers so new chunks use the new terrain params
+            streaming.rebuild_for_new_params(
+                &regen_params,
+                persistence.db_path.clone(),
+                persistence.dictionary_bytes().map(|b| std::sync::Arc::new(b)),
+            );
+            log::info!("Streaming workers rebuilt for new terrain params");
+
             ui_state.regenerating = false;
-            
+
             // If terrain params changed during regen, restart
             if regen_params != ui_state.params.terrain_gen {
                 log::info!("Terrain params changed during regeneration, restarting");

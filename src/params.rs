@@ -58,6 +58,19 @@ impl Default for MaterialParams {
                 MaterialEntry { name: "Grass Soil".into(), color: [0.30, 0.55, 0.18],  sharpness: 0.35, hardness: 0.2,  permeable: false, supports_flora: true  },
                 MaterialEntry { name: "Water".into(),      color: [0.2, 0.35, 0.6],    sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false },
                 MaterialEntry { name: "Gravel".into(),     color: [0.52, 0.49, 0.45],  sharpness: 0.6,  hardness: 0.5,  permeable: true,  supports_flora: false },
+                MaterialEntry { name: "Snow".into(),       color: [0.95, 0.97, 1.0],   sharpness: 0.1,  hardness: 0.1,  permeable: true,  supports_flora: false },
+                MaterialEntry { name: "Sandstone".into(),  color: [0.82, 0.72, 0.50],  sharpness: 0.7,  hardness: 0.7,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Basalt".into(),     color: [0.20, 0.20, 0.22],  sharpness: 0.95, hardness: 0.98, permeable: false, supports_flora: false },
+                MaterialEntry { name: "Deep Stone".into(), color: [0.35, 0.33, 0.38],  sharpness: 0.9,  hardness: 0.95, permeable: false, supports_flora: false },
+                MaterialEntry { name: "Bedrock".into(),    color: [0.15, 0.15, 0.18],  sharpness: 1.0,  hardness: 1.0,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Lava".into(),       color: [1.0, 0.35, 0.05],   sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false },
+                MaterialEntry { name: "Ice".into(),        color: [0.70, 0.85, 0.95],  sharpness: 0.8,  hardness: 0.6,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Coal".into(),       color: [0.12, 0.12, 0.12],  sharpness: 0.5,  hardness: 0.6,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Iron".into(),       color: [0.55, 0.45, 0.40],  sharpness: 0.7,  hardness: 0.85, permeable: false, supports_flora: false },
+                MaterialEntry { name: "Copper".into(),     color: [0.60, 0.42, 0.28],  sharpness: 0.65, hardness: 0.75, permeable: false, supports_flora: false },
+                MaterialEntry { name: "Gold".into(),       color: [0.85, 0.75, 0.25],  sharpness: 0.4,  hardness: 0.5,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Crystal".into(),    color: [0.75, 0.82, 0.95],  sharpness: 0.95, hardness: 0.9,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Magma Gem".into(),  color: [0.90, 0.25, 0.10],  sharpness: 0.9,  hardness: 0.85, permeable: false, supports_flora: false },
             ],
         }
     }
@@ -383,25 +396,26 @@ impl Default for CameraParams {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TerrainGenParams {
-    pub base_height: f32,
-    pub cliff_threshold: f32,
-    pub hill_amplitude: f32,
-    pub hill_frequency: f32,
-    pub ridge_amplitude: f32,
-    pub ridge_frequency: f32,
-    pub detail_amplitude: f32,
-    pub detail_frequency: f32,
+    // 3D terrain shape (Graph 6)
+    pub terrain_freq: f32,        // DomainScale for low/high paths (default: 0.09)
+    pub selector_freq: f32,       // DomainScale for selector path (default: 0.05)
+    pub terrain_octaves: i32,     // FBm octaves for low/high (default: 5)
+    pub terrain_gain: f32,        // FBm gain for low/high (default: 0.55)
+    pub y_squash: f32,            // DomainAxisScale Y for low/high (default: 0.7)
+    pub terrain_warp: f32,        // DomainWarpGradient amplitude (default: 3.0)
+    // 2D column noise frequencies
+    pub continental_freq: f32,    // (default: 0.008)
+    pub temperature_freq: f32,    // (default: 0.006)
+    pub humidity_freq: f32,       // (default: 0.006)
+    pub erosion_freq: f32,        // (default: 0.02)
+    pub elevation_freq: f32,      // (default: 0.05)
+    pub elevation_warp: f32,      // DomainWarpGradient for elevation detail (default: 4.0)
+    // Density post-processing
+    pub density_scale: f32,       // quantize_density multiplier (default: 12.7)
+    pub floor_level: f32,         // Y below which terrain is forced solid (default: -176.0)
+    pub ceiling_level: f32,       // Y above which terrain is forced air (default: 280.0)
     // Cave system
     pub cave_enabled: bool,
-    pub cave_spaghetti_freq: f32,      // Frequency for main tunnel noise (default: 0.02)
-    pub cave_spaghetti_thickness: f32, // Threshold width - higher = wider tunnels (default: 0.12)
-    pub cave_noodle_freq: f32,         // Frequency for thin passages (default: 0.04)
-    pub cave_noodle_thickness: f32,    // Threshold for thin passages (default: 0.06)
-    pub cave_cheese_freq: f32,         // Frequency for large chambers (default: 0.008)
-    pub cave_cheese_threshold: f32,    // Threshold - how much noise must exceed to carve (default: 0.6)
-    pub cave_warp_amp: f32,            // Domain warp amplitude for organic shapes (default: 30.0)
-    pub cave_surface_margin: f32,      // Depth below surface before caves begin (default: 4.0)
-    pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
     pub water_level: f32,
     pub seed: i32,
 }
@@ -409,24 +423,22 @@ pub struct TerrainGenParams {
 impl Default for TerrainGenParams {
     fn default() -> Self {
         Self {
-            base_height: 32.0,
-            cliff_threshold: 2.0,
-            hill_amplitude: 20.0,
-            hill_frequency: 0.0025,
-            ridge_amplitude: 8.0,
-            ridge_frequency: 0.01,
-            detail_amplitude: 2.0,
-            detail_frequency: 0.05,
+            terrain_freq: 0.09,
+            selector_freq: 0.05,
+            terrain_octaves: 5,
+            terrain_gain: 0.55,
+            y_squash: 0.7,
+            terrain_warp: 3.0,
+            continental_freq: 0.008,
+            temperature_freq: 0.006,
+            humidity_freq: 0.006,
+            erosion_freq: 0.02,
+            elevation_freq: 0.05,
+            elevation_warp: 4.0,
+            density_scale: 12.7,
+            floor_level: -176.0,
+            ceiling_level: 280.0,
             cave_enabled: true,
-            cave_spaghetti_freq: 0.01,
-            cave_spaghetti_thickness: 0.25,
-            cave_noodle_freq: 0.015,
-            cave_noodle_thickness: 0.2,
-            cave_cheese_freq: 0.008,
-            cave_cheese_threshold: 0.6,
-            cave_warp_amp: 15.0,
-            cave_surface_margin: 2.0,
-            cave_y_squash: 0.5,
             water_level: 30.0,
             seed: 54321,
         }
@@ -525,8 +537,8 @@ impl Default for StreamingParams {
         Self {
             load_margin: 0.40,
             unload_margin: 0.55,
-            min_chunk_y: 0,
-            max_chunk_y: 4,
+            min_chunk_y: -4,
+            max_chunk_y: 8,
             max_gen_per_frame: 64,
             max_mesh_per_frame: 64,
         }

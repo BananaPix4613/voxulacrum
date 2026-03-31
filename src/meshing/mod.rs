@@ -293,12 +293,10 @@ impl MeshingPipeline {
                 }
             };
 
-            // Wait until all 6 face neighbors are loaded. This ensures
-            // deterministic cache keys — missing neighbors would default to
-            // air density, producing a different snapshot hash each session.
-            // Only face neighbors matter: the cache key skips edge/corner
-            // border voxels. Y-boundary neighbors are treated as present.
-            if !world.has_all_face_neighbors(pos) {
+            // Wait until all 26 neighbors are loaded. Edge/diagonal neighbor
+            // data is needed for correct snapshot borders — cave carving creates
+            // binary density transitions that produce seam artifacts if approximated.
+            if !world.has_all_neighbors(pos) {
                 i += 1; // Skip, try next frame
                 continue;
             }
@@ -443,16 +441,20 @@ impl MeshingPipeline {
                         continue;
                     }
                     let n_key = chunk_key + IVec3::new(dx, dy, dz);
-                    // If neighbor is actively computing Phase 1, block
-                    if self.chunk_states.get(&n_key) == Some(&ChunkMeshState::Phase1InProgress) {
+                    // If neighbor already has a boundary map, it's ready
+                    if self.boundary_maps.contains_key(&n_key) {
+                        continue;
+                    }
+                    // No boundary map — block if neighbor is anywhere in the
+                    // meshing pipeline (it will produce a map when done)
+                    if self.chunk_states.contains_key(&n_key) {
                         return false;
                     }
-                    // If neighbor is queued but not yet submitted, block
-                    if self.pending_submissions.contains(&n_key) {
+                    if self.pending_set.contains(&n_key) {
                         return false;
                     }
-                    // If neighbor doesn't exist at all (not loaded), that's OK —
-                    // we'll mesh without its boundary data
+                    // Neighbor not in pipeline at all — either not loaded or
+                    // not dirty. Proceed without its boundary data.
                 }
             }
         }
@@ -500,6 +502,13 @@ impl MeshingPipeline {
                 log::error!("Phase 2 request channel disconnected");
             }
         }
+    }
+
+    /// Number of chunks waiting to be submitted or in-progress in the meshing pipeline.
+    /// Used by streaming to apply backpressure when meshing is overloaded.
+    pub fn pending_count(&self) -> usize {
+        self.pending_submissions.len()
+            + self.chunk_states.values().filter(|s| **s != ChunkMeshState::Idle).count()
     }
 
     pub fn is_idle(&self) -> bool {

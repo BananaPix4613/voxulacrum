@@ -10,8 +10,11 @@ pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 pub const VOXEL_SCALE: f32 = 0.5;
 pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 16.0
-/// Padded snapshot size: CHUNK_SIZE + 4 (two voxel border on each side)
-pub const SNAP_SIZE: usize = CHUNK_SIZE + 4;
+/// Number of voxels of padding on each side of the snapshot.
+/// Must be >= AO kernel radius (2) + 1 to prevent boundary AO seams.
+pub const SNAP_PAD: usize = 3;
+/// Padded snapshot size: CHUNK_SIZE + 2*SNAP_PAD
+pub const SNAP_SIZE: usize = CHUNK_SIZE + 2 * SNAP_PAD;
 pub const SNAP_VOLUME: usize = SNAP_SIZE * SNAP_SIZE * SNAP_SIZE;
 /// When edit count exceeds this, store full chunk instead of delta.
 pub const DELTA_THRESHOLD: usize = CHUNK_VOLUME / 4; // 8192
@@ -142,7 +145,7 @@ pub struct SnapshotMaterials {
 }
 
 impl SnapshotMaterials {
-    /// Look up material at chunk-local coordinates (x in -2..CHUNKS_SIZE+2).
+    /// Look up material at chunk-local coordinates (supports neighbor ranges).
     pub fn material(&self, x: i32, y: i32, z: i32) -> u16 {
         let cs = CHUNK_SIZE as i32;
         let (dx, lx) = if x < 0 {
@@ -168,11 +171,16 @@ impl SnapshotMaterials {
         };
 
         let ni = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
-        match &self.storages[ni] {
-            Some(storage) => {
-                let idx = Chunk::voxel_index(lx, ly, lz);
-                storage.material(idx)
-            }
+        if let Some(storage) = &self.storages[ni] {
+            return storage.material(Chunk::voxel_index(lx, ly, lz));
+        }
+
+        // Diagonal/edge neighbor not loaded — use center chunk's nearest boundary voxel.
+        let cx = x.clamp(0, CHUNK_SIZE as i32 - 1) as usize;
+        let cy = y.clamp(0, CHUNK_SIZE as i32 - 1) as usize;
+        let cz = z.clamp(0, CHUNK_SIZE as i32 - 1) as usize;
+        match &self.storages[13] {
+            Some(storage) => storage.material(Chunk::voxel_index(cx, cy, cz)),
             None => MAT_AIR,
         }
     }
@@ -199,14 +207,14 @@ impl ChunkSnapshot {
             Box::from_raw(Box::into_raw(boxed_slice) as *mut [i8; SNAP_VOLUME])
         };
 
-        // Fill interior: chunk's own 32^3 voxels at snapshot coords [2..CHUNK_SIZE+2)
+        // Fill interior: chunk's own 32^3 voxels at snapshot coords [PAD..CHUNK_SIZE+PAD)
         // Optimized: copy row-by-row for cache locality
         match chunk.storage.density_slice() {
             Some(src_density) => {
                 for z in 0..CHUNK_SIZE {
                     for y in 0..CHUNK_SIZE {
                         let src_start = Chunk::voxel_index(0, y, z);
-                        let dst_start = Self::snap_index(2, y + 2, z + 2);
+                        let dst_start = Self::snap_index(SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD);
                         density[dst_start..dst_start + CHUNK_SIZE]
                             .copy_from_slice(&src_density[src_start..src_start + CHUNK_SIZE]);
                     }
@@ -217,7 +225,7 @@ impl ChunkSnapshot {
                 let d = chunk.storage.density(0);
                 for z in 0..CHUNK_SIZE {
                     for y in 0..CHUNK_SIZE {
-                        let dst_start = Self::snap_index(2, y + 2, z + 2);
+                        let dst_start = Self::snap_index(SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD);
                         density[dst_start..dst_start + CHUNK_SIZE].fill(d);
                     }
                 }
@@ -229,16 +237,16 @@ impl ChunkSnapshot {
             for sy in 0..SNAP_SIZE {
                 for sx in 0..SNAP_SIZE {
                     // Skip interior (already filled)
-                    if sx >= 2 && sx < CHUNK_SIZE + 2
-                        && sy >= 2 && sy < CHUNK_SIZE + 2
-                        && sz >= 2 && sz < CHUNK_SIZE + 2
+                    if sx >= SNAP_PAD && sx < CHUNK_SIZE + SNAP_PAD
+                        && sy >= SNAP_PAD && sy < CHUNK_SIZE + SNAP_PAD
+                        && sz >= SNAP_PAD && sz < CHUNK_SIZE + SNAP_PAD
                     {
                         continue;
                     }
 
-                    let cx = sx as i32 - 2;
-                    let cy = sy as i32 - 2;
-                    let cz = sz as i32 - 2;
+                    let cx = sx as i32 - SNAP_PAD as i32;
+                    let cy = sy as i32 - SNAP_PAD as i32;
+                    let cz = sz as i32 - SNAP_PAD as i32;
 
                     density[Self::snap_index(sx, sy, sz)] =
                         resolve_density(chunk, neighbors, cx, cy, cz);
@@ -276,12 +284,13 @@ impl ChunkSnapshot {
         sx + sy * SNAP_SIZE + sz * SNAP_SIZE * SNAP_SIZE
     }
 
-    /// Read density at chunk-local coordinates (x in -2..=CHUNK_SIZE+1).
+    /// Read density at chunk-local coordinates (x in -PAD..=CHUNK_SIZE+PAD-1).
     #[inline]
     pub fn get_density(&self, x: i32, y: i32, z: i32) -> i8 {
-        let sx = (x + 2) as usize;
-        let sy = (y + 2) as usize;
-        let sz = (z + 2) as usize;
+        let pad = SNAP_PAD as i32;
+        let sx = (x + pad) as usize;
+        let sy = (y + pad) as usize;
+        let sz = (z + pad) as usize;
         debug_assert!(
             sx < SNAP_SIZE && sy < SNAP_SIZE && sz < SNAP_SIZE,
             "ChunkSnapshot::get_density out of range: ({}, {}, {})", x, y, z
@@ -297,6 +306,12 @@ impl ChunkSnapshot {
 }
 
 /// Resolve density at chunk-local coords, reading from chunk or neighbors.
+///
+/// When the required neighbor chunk is not loaded (edge/diagonal neighbors are
+/// not guaranteed to be present), we fall back through progressively simpler
+/// lookups: first try face neighbors along each out-of-range axis, then fall
+/// back to the chunk's own nearest corner voxel. This prevents false air
+/// pockets at chunk corners that would produce vertex artifacts in marching cubes.
 fn resolve_density(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> i8 {
     let cs = CHUNK_SIZE as i32;
     let (dx, lx) = if x < 0 { (-1, (x + cs) as usize) }
@@ -313,10 +328,17 @@ fn resolve_density(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z:
         return chunk.storage.density(Chunk::voxel_index(lx, ly, lz));
     }
 
-    match neighbors.get(dx, dy, dz) {
-        Some(neighbor) => neighbor.storage.density(Chunk::voxel_index(lx, ly, lz)),
-        None => 0, // air default
+    if let Some(neighbor) = neighbors.get(dx, dy, dz) {
+        return neighbor.storage.density(Chunk::voxel_index(lx, ly, lz));
     }
+
+    // Neighbor not loaded (edge/diagonal neighbors are not guaranteed present).
+    // Use the chunk's own nearest boundary voxel as an approximation. This
+    // assumes terrain is locally continuous, which holds for the 2-voxel border.
+    let cx = x.clamp(0, cs - 1) as usize;
+    let cy = y.clamp(0, cs - 1) as usize;
+    let cz = z.clamp(0, cs - 1) as usize;
+    chunk.storage.density(Chunk::voxel_index(cx, cy, cz))
 }
 
 /// Given a flat voxel index, return chunk-relative offsets of neighbors
