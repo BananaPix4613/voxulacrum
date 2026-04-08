@@ -121,6 +121,9 @@ pub struct MaterialConfig {
     pub greedy_merge_enabled: bool,
     pub flat_threshold_error: f32,
     pub flat_normal_threshold: f32,
+    pub smooth_normals: bool,
+    /// 0 = auto outward check, 1 = blanket swap, 2 = no swap
+    pub winding_mode: u8,
 }
 
 impl MaterialConfig {
@@ -131,6 +134,8 @@ impl MaterialConfig {
             greedy_merge_enabled: mesh_params.greedy_merge_enabled,
             flat_threshold_error: mesh_params.flat_threshold_error,
             flat_normal_threshold: mesh_params.flat_normal_threshold,
+            smooth_normals: mesh_params.smooth_normals,
+            winding_mode: mesh_params.winding_mode,
         }
     }
 }

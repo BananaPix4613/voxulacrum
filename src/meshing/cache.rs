@@ -11,7 +11,7 @@ use crate::world::chunk::ChunkSnapshot;
 
 /// Cache file format version. Increment when TerrainVertex layout or
 /// serialization format changes to automatically invalidate old caches.
-const CACHE_VERSION: u32 = 8;
+const CACHE_VERSION: u32 = 9;
 
 // ============================================================================
 // Cache file format
@@ -21,7 +21,7 @@ const CACHE_VERSION: u32 = 8;
 ///
 /// Exploits domain constraints:
 /// - Positions are snapped to 0.125 grid (u8 per axis, relative to chunk origin)
-/// - Normals are one of 42 predefined directions (u8 index)
+/// - Normals are one of 26 predefined directions (u8 index)
 /// - Colors are derived from material_id (not stored)
 /// - AO range 0.5..1.0 (u8 quantized)
 /// - Only 9 materials (u8)
@@ -80,7 +80,7 @@ fn from_compact(
             c.pos_y as f32 / 8.0 - 0.5 + chunk_origin[1],
             c.pos_z as f32 / 8.0 - 0.5 + chunk_origin[2],
         ],
-        normal: ALLOWED_NORMALS[c.normal_index.min(41) as usize],
+        normal: ALLOWED_NORMALS[c.normal_index.min(ALLOWED_NORMALS.len() as u8 - 1) as usize],
         color,
         ao: c.ao as f32 / 510.0 + 0.5,
         material_id: c.material_id as u32,

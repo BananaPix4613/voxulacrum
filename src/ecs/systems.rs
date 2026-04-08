@@ -580,6 +580,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             water_pipeline: &pipeline_registry.water_pipeline,
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
+            hide_water: ui.params.debug.hide_water,
+            hide_vegetation: ui.params.debug.hide_vegetation,
         };
 
         let mut graph = RenderGraph::new();

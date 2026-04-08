@@ -299,6 +299,15 @@ pub struct MeshingParams {
     pub edge_strength: f32,
     pub ortho_ao_enabled: bool,
     pub ortho_ao_strength: f32,
+    /// Enable smooth normal averaging on shared vertices before flat shading.
+    /// When on, slope normals are reconstructed from surrounding face normals.
+    /// When off, raw cross-product face normals are used directly.
+    pub smooth_normals: bool,
+    /// Winding correction mode:
+    /// 0 = Auto (per-triangle outward check against cell solid→air direction)
+    /// 1 = Blanket swap (old behavior: always swap vi1/vi2)
+    /// 2 = None (raw Bourke table winding, no swap)
+    pub winding_mode: u8,
 }
 
 impl Default for MeshingParams {
@@ -310,6 +319,8 @@ impl Default for MeshingParams {
             edge_strength: 0.15,
             ortho_ao_enabled: true,
             ortho_ao_strength: 0.3,
+            smooth_normals: true,
+            winding_mode: 0,
         }
     }
 }
@@ -460,6 +471,8 @@ pub struct DebugParams {
     pub show_water_debug: bool,
     pub show_performance: bool,
     pub freeze_culling: bool,
+    pub hide_water: bool,
+    pub hide_vegetation: bool,
 }
 
 impl Default for DebugParams {
@@ -474,6 +487,8 @@ impl Default for DebugParams {
             show_water_debug: false,
             show_performance: true,
             freeze_culling: false,
+            hide_water: false,
+            hide_vegetation: false,
         }
     }
 }

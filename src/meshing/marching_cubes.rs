@@ -1,14 +1,20 @@
 //! Constrained Marching Cubes mesher.
 //!
-//! Replaces the dual contouring system with a marching-cubes-based mesher that
-//! produces flat-shaded geometry with constrained vertex positions (snapped to
-//! quarter-voxel grid) and snapped face normals from a discrete set of ~42
-//! allowed directions.
+//! Produces flat-shaded geometry with vertex positions snapped to the half-voxel
+//! grid (corners and edge midpoints only). Face normals are snapped to one of 26
+//! allowed directions (6 axis-aligned + 12 edge diagonals + 8 corner diagonals).
+//! This constrains all geometry to be either axis-aligned (blocky Minecraft-style)
+//! or at exactly 45 degrees, fitting cleanly within the voxel grid.
+//!
+//! Smooth normals are computed by averaging face normals at shared vertices before
+//! the flat-shading pass. This reconstructs the true slope direction from the
+//! terraced staircase geometry, enabling correct normal-based edge detection and
+//! lighting without sacrificing the grid-aligned aesthetic.
 //!
 //! Key properties:
 //! - Topological correctness of standard MC (caves, overhangs, arbitrary shapes)
 //! - Trivial chunk stitching (deterministic snap from identical boundary densities)
-//! - Flat faces at controlled angles for clean cel-shaded light bands
+//! - All faces axis-aligned or at 45 degrees — clean voxel grid aesthetic
 //! - No QEF, no SVD, no numerical instability
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -197,14 +203,12 @@ fn canonical_edge_id(cx: i32, cy: i32, cz: i32, edge_num: usize) -> EdgeId {
 
 const R: f32 = 0.7071067811865476;  // 1/sqrt(2)
 const S: f32 = 0.5773502691896258;  // 1/sqrt(3)
-const G: f32 = 0.24253562503633297; // 0.25/sqrt(0.25^2 + 1^2)
-const H: f32 = 0.9701425001453319;  // 1.0/sqrt(0.25^2 + 1^2)
-const D: f32 = 0.23570226039551587; // 0.25/sqrt(2*0.25^2 + 1^2)
-const K: f32 = 0.9428090415820634;  // 1.0/sqrt(2*0.25^2 + 1^2)
 
-/// The complete set of allowed face normal directions (~42 normals).
-/// Every face normal produced by the mesher is snapped to the closest entry.
-pub(crate) static ALLOWED_NORMALS: [[f32; 3]; 42] = [
+/// The complete set of allowed face normal directions (26 normals).
+/// Only axis-aligned and 45-degree diagonals — all faces align cleanly to
+/// the voxel grid. Combined with snap_t = {0.0, 0.5, 1.0}, this produces
+/// blocky Minecraft-style geometry with optional 45-degree slopes.
+pub(crate) static ALLOWED_NORMALS: [[f32; 3]; 26] = [
     // 6 axis-aligned (cardinal walls + flat top/bottom)
     [ 1.0,  0.0,  0.0], [-1.0,  0.0,  0.0],
     [ 0.0,  1.0,  0.0], [ 0.0, -1.0,  0.0],
@@ -215,17 +219,9 @@ pub(crate) static ALLOWED_NORMALS: [[f32; 3]; 42] = [
     [ R,  0.0,  R], [ R,  0.0, -R], [-R,  0.0,  R], [-R,  0.0, -R],
     [ 0.0,  R,  R], [ 0.0,  R, -R], [ 0.0, -R,  R], [ 0.0, -R, -R],
 
-    // 8 corner normals (steep diagonal slopes)
+    // 8 corner normals (three-axis 45-degree diagonals)
     [ S,  S,  S], [ S,  S, -S], [ S, -S,  S], [ S, -S, -S],
     [-S,  S,  S], [-S,  S, -S], [-S, -S,  S], [-S, -S, -S],
-
-    // 8 gentle slopes up-facing (~14 degrees from vertical)
-    [ G,  H,  0.0], [-G,  H,  0.0], [ 0.0,  H,  G], [ 0.0,  H, -G],
-    [ D,  K,  D],   [ D,  K, -D],   [-D,  K,  D],   [-D,  K, -D],
-
-    // 8 gentle slopes down-facing
-    [ G, -H,  0.0], [-G, -H,  0.0], [ 0.0, -H,  G], [ 0.0, -H, -G],
-    [ D, -K,  D],   [ D, -K, -D],   [-D, -K,  D],   [-D, -K, -D],
 ];
 
 /// Snap a raw face normal to the nearest allowed direction.
@@ -481,24 +477,70 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 // Core MC functions
 // ============================================================================
 
-/// Snap raw interpolation parameter to the nearest quarter-voxel position.
-/// Allowed values: {0.0, 0.25, 0.5, 0.75, 1.0}
-#[inline]
-fn snap_t(raw_t: f32) -> f32 {
-    let snapped = (raw_t * 4.0).round() / 4.0;
-    snapped.clamp(0.0, 1.0)
-}
+/// Snap raw interpolation parameter to the nearest half-voxel position.
+/// Allowed values: {0.0, 0.5, 1.0}
+///
+/// This constrains all MC edge vertices to either voxel corners (0.0 or 1.0)
+/// or edge midpoints (0.5), producing blocky geometry where all faces are
+/// either axis-aligned (flat tops, vertical walls) or at exactly 45 degrees.
+// #[inline]
+// fn snap_t(raw_t: f32) -> f32 {
+//     let snapped = (raw_t * 2.0).round() / 2.0;
+//     snapped.clamp(0.0, 1.0)
+// }
 
 /// Compute the standard MC interpolation parameter for the zero-crossing
 /// between two density values on a cell edge.
-#[inline]
-fn compute_raw_t(density_a: f32, density_b: f32) -> f32 {
-    let denom = density_a - density_b;
-    if denom.abs() < 1e-6 {
-        0.5
-    } else {
-        density_a / denom
+// #[inline]
+// fn compute_raw_t(density_a: f32, density_b: f32) -> f32 {
+//     let denom = density_a - density_b;
+//     if denom.abs() < 1e-6 {
+//         0.5
+//     } else {
+//         density_a / denom
+//     }
+// }
+
+/// Compute the outward direction for an MC cell: from the centroid of solid
+/// corners toward the centroid of air corners. This gives a robust reference
+/// direction for checking/fixing triangle winding on a per-triangle basis,
+/// replacing the error-prone blanket winding swap.
+fn compute_cell_outward_dir(
+    cx: i32, cy: i32, cz: i32,
+    corners: &[f32; 8],
+    chunk_offset: [f32; 3],
+) -> [f32; 3] {
+    let mut solid_sum = [0.0f32; 3];
+    let mut air_sum = [0.0f32; 3];
+    let mut solid_count = 0u32;
+    let mut air_count = 0u32;
+
+    for ci in 0..8 {
+        let pos = corner_world_position(cx, cy, cz, ci, chunk_offset);
+        if corners[ci] > 0.0 {
+            solid_sum[0] += pos[0];
+            solid_sum[1] += pos[1];
+            solid_sum[2] += pos[2];
+            solid_count += 1;
+        } else {
+            air_sum[0] += pos[0];
+            air_sum[1] += pos[1];
+            air_sum[2] += pos[2];
+            air_count += 1;
+        }
     }
+
+    if solid_count == 0 || air_count == 0 {
+        return [0.0, 1.0, 0.0]; // degenerate cell — shouldn't happen for surface cells
+    }
+
+    let sc = 1.0 / solid_count as f32;
+    let ac = 1.0 / air_count as f32;
+    [
+        air_sum[0] * ac - solid_sum[0] * sc,
+        air_sum[1] * ac - solid_sum[1] * sc,
+        air_sum[2] * ac - solid_sum[2] * sc,
+    ]
 }
 
 /// Sample the 8 corner densities for a cell at (cx, cy, cz).
@@ -643,12 +685,17 @@ fn compute_edge_vertex(
     let da = corners[ci_a];
     let db = corners[ci_b];
 
-    let raw_t = compute_raw_t(da, db);
-    let t = snap_t(raw_t);
+    //let raw_t = compute_raw_t(da, db);
+    //let t = snap_t(raw_t);
 
     let pos_a = corner_world_position(cx, cy, cz, ci_a, chunk_offset);
     let pos_b = corner_world_position(cx, cy, cz, ci_b, chunk_offset);
-    let position = lerp3(pos_a, pos_b, t);
+    //let position = lerp3(pos_a, pos_b, t);
+    let position = [
+        (pos_a[0] + pos_b[0]) * 0.5,
+        (pos_a[1] + pos_b[1]) * 0.5,
+        (pos_a[2] + pos_b[2]) * 0.5,
+    ];
 
     // Material: sample at vertex position offset into the solid interior,
     // then round to nearest voxel grid point. Rounding (not flooring) ensures
@@ -682,12 +729,71 @@ fn compute_edge_vertex(
 
     TerrainVertex {
         position,
-        normal: [0.0, 1.0, 0.0],
+        normal: [0.0, 1.0, 0.0], // placeholder — replaced by smooth normals later
         color,
         ao: 1.0,
         material_id: mat as u32,
         cell_flags: 0,
         _pad_vert: [0; 2],
+    }
+}
+
+// ============================================================================
+// Smooth normal computation
+// ============================================================================
+
+/// Compute smooth normals by accumulating EQUAL-weighted face normals at each
+/// shared vertex. Each face normal is normalized before accumulation so every
+/// face contributes equally regardless of area.
+///
+/// This is critical for terraced MC geometry: with area-weighting, the large
+/// horizontal shelf faces would dominate the tiny vertical riser faces, keeping
+/// normals mostly Y-up. Equal weighting lets each face (shelf or riser) contribute
+/// equally, so at a shared vertex between 2 shelf faces and 1 riser face, the
+/// blended normal is tilted significantly from vertical — correctly reflecting
+/// the slope the staircase approximates.
+fn compute_smooth_normals(
+    shared_vertices: &mut [TerrainVertex],
+    shared_indices: &[u32],
+) {
+    // Reset all vertex normals to zero
+    for v in shared_vertices.iter_mut() {
+        v.normal = [0.0, 0.0, 0.0];
+    }
+
+    // Accumulate equal-weighted (normalized) face normals at each vertex
+    let tri_count = shared_indices.len() / 3;
+    for tri in 0..tri_count {
+        let i0 = shared_indices[tri * 3] as usize;
+        let i1 = shared_indices[tri * 3 + 1] as usize;
+        let i2 = shared_indices[tri * 3 + 2] as usize;
+
+        let e1 = sub3(shared_vertices[i1].position, shared_vertices[i0].position);
+        let e2 = sub3(shared_vertices[i2].position, shared_vertices[i0].position);
+        let face_cross = cross3(e1, e2);
+
+        // Skip degenerate triangles
+        if length_sq3(face_cross) < 1e-12 {
+            continue;
+        }
+
+        // Normalize face normal so each face contributes equally
+        let face_normal = normalize3(face_cross);
+
+        for &idx in &[i0, i1, i2] {
+            shared_vertices[idx].normal[0] += face_normal[0];
+            shared_vertices[idx].normal[1] += face_normal[1];
+            shared_vertices[idx].normal[2] += face_normal[2];
+        }
+    }
+
+    // Normalize accumulated normals
+    for v in shared_vertices.iter_mut() {
+        if length_sq3(v.normal) > 1e-12 {
+            v.normal = normalize3(v.normal);
+        } else {
+            v.normal = [0.0, 1.0, 0.0]; // degenerate fallback
+        }
     }
 }
 
@@ -729,7 +835,25 @@ fn flatten_mesh(
             continue;
         }
 
-        let raw_normal = normalize3(raw_cross);
+        // Use smooth vertex normals (area-weighted average of surrounding face
+        // normals, computed in compute_smooth_normals) to determine the face
+        // normal. This reconstructs the true slope direction from the terraced
+        // staircase geometry: horizontal shelf normals and vertical riser normals
+        // blend at shared vertices to give the actual slope angle.
+        let avg_smooth = [
+            v0.normal[0] + v1.normal[0] + v2.normal[0],
+            v0.normal[1] + v1.normal[1] + v2.normal[1],
+            v0.normal[2] + v1.normal[2] + v2.normal[2],
+        ];
+
+        let geometric_normal = normalize3(raw_cross);
+        let raw_normal = if length_sq3(avg_smooth) > 1e-6 {
+            let n = normalize3(avg_smooth);
+            // Ensure smooth normal agrees with face winding
+            if dot3(n, geometric_normal) > 0.0 { n } else { geometric_normal }
+        } else {
+            geometric_normal
+        };
         let snapped = snap_normal(raw_normal);
 
         // Per-vertex AO — same world position always produces the same AO value,
@@ -1400,6 +1524,14 @@ pub fn generate_cell_vertices_from_snapshot(
                     shared_vertices.push(vertex);
                 }
 
+                // Compute the reference outward direction for this cell
+                // (only needed for winding_mode 0 = auto check)
+                let outward_dir = if materials.winding_mode == 0 {
+                    compute_cell_outward_dir(cx, cy, cz, &corners, chunk_offset)
+                } else {
+                    [0.0, 1.0, 0.0] // unused
+                };
+
                 // Generate triangles from TRI_TABLE
                 let tri_entry = &TRI_TABLE[case_index];
                 let mut i = 0;
@@ -1412,16 +1544,45 @@ pub fn generate_cell_vertices_from_snapshot(
                     let vi1 = edge_cache[&canonical_edge_id(cx, cy, cz, e1)];
                     let vi2 = edge_cache[&canonical_edge_id(cx, cy, cz, e2)];
 
-                    shared_indices.push(vi0);
-                    shared_indices.push(vi2);
-                    shared_indices.push(vi1);
+                    // Winding mode:
+                    // 0 = Auto: per-triangle outward check
+                    // 1 = Blanket swap (old behavior)
+                    // 2 = No swap (raw Bourke table)
+                    let should_swap = match materials.winding_mode {
+                        0 => {
+                            let p0 = shared_vertices[vi0 as usize].position;
+                            let p1 = shared_vertices[vi1 as usize].position;
+                            let p2 = shared_vertices[vi2 as usize].position;
+                            let tri_cross = cross3(sub3(p1, p0), sub3(p2, p0));
+                            dot3(tri_cross, outward_dir) < 0.0
+                        }
+                        1 => true,  // always swap
+                        _ => false, // never swap
+                    };
 
+                    if should_swap {
+                        shared_indices.push(vi0);
+                        shared_indices.push(vi2);
+                        shared_indices.push(vi1);
+                    } else {
+                        shared_indices.push(vi0);
+                        shared_indices.push(vi1);
+                        shared_indices.push(vi2);
+                    }
+
+                    // Store swap status in tri_flags for debug visualization
+                    // bit 0 = winding was swapped
                     tri_materials.push(cell_material as u32);
 
                     i += 3;
                 }
             }
         }
+    }
+
+    // Optionally compute smooth normals on the shared-vertex mesh.
+    if materials.smooth_normals {
+        compute_smooth_normals(&mut shared_vertices, &shared_indices);
     }
 
     // Flatten for flat shading with snapped normals

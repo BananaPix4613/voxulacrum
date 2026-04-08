@@ -483,6 +483,25 @@ fn draw_meshing_params(ui: &mut egui::Ui, p: &mut MeshingParams, remeshing: bool
             ui.horizontal(|ui| { dot_yellow(ui); ui.label("Greedy merge:"); ui.add(egui::Checkbox::without_text(&mut p.greedy_merge_enabled)); });
             ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat error threshold:"); ui.add(egui::Slider::new(&mut p.flat_threshold_error, 0.001..=0.1)); });
             ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat normal threshold:"); ui.add(egui::Slider::new(&mut p.flat_normal_threshold, 0.8..=1.0)); });
+            ui.separator();
+            ui.label("Normal & Winding");
+            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Smooth normals:"); ui.add(egui::Checkbox::without_text(&mut p.smooth_normals)); });
+            ui.horizontal(|ui| {
+                dot_yellow(ui);
+                ui.label("Winding:");
+                egui::ComboBox::from_id_salt("winding_mode")
+                    .width(120.0)
+                    .selected_text(match p.winding_mode {
+                        0 => "Auto check",
+                        1 => "Blanket swap",
+                        _ => "No swap",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut p.winding_mode, 0, "Auto check");
+                        ui.selectable_value(&mut p.winding_mode, 1, "Blanket swap");
+                        ui.selectable_value(&mut p.winding_mode, 2, "No swap");
+                    });
+            });
         });
         if mesh_params_pending {
             ui.colored_label(egui::Color32::from_rgb(220, 200, 60), "Remesh required.");
@@ -566,6 +585,8 @@ fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
     ui.collapsing("Debug Overlays", |ui| {
         ui.checkbox(&mut p.show_wireframe, "Wireframe");
         ui.checkbox(&mut p.show_chunk_boundaries, "Chunk boundaries");
+        ui.checkbox(&mut p.hide_water, "Hide water");
+        ui.checkbox(&mut p.hide_vegetation, "Hide vegetation");
 
         ui.separator();
         ui.label("Shader debug (mutually exclusive):");
