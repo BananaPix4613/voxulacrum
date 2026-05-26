@@ -280,9 +280,6 @@ impl Default for OutlineParams {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MeshingParams {
-    pub greedy_merge_enabled: bool,
-    pub flat_threshold_error: f32,
-    pub flat_normal_threshold: f32,
     pub edge_strength: f32,
     pub ortho_ao_enabled: bool,
     pub ortho_ao_strength: f32,
@@ -291,9 +288,6 @@ pub struct MeshingParams {
 impl Default for MeshingParams {
     fn default() -> Self {
         Self {
-            greedy_merge_enabled: false,
-            flat_threshold_error: 0.025,
-            flat_normal_threshold: 0.95,
             edge_strength: 0.15,
             ortho_ao_enabled: true,
             ortho_ao_strength: 0.3,
@@ -448,6 +442,8 @@ pub struct DebugParams {
     pub show_water_debug: bool,
     pub show_performance: bool,
     pub freeze_culling: bool,
+    pub hide_water: bool,
+    pub hide_vegetation: bool,
 }
 
 impl Default for DebugParams {
@@ -462,6 +458,8 @@ impl Default for DebugParams {
             show_water_debug: false,
             show_performance: true,
             freeze_culling: false,
+            hide_water: false,
+            hide_vegetation: false,
         }
     }
 }
@@ -671,12 +669,6 @@ impl ParamChangeDetector {
             return ParamChangeKind::RegenerationRequired;
         }
         if current.materials.materials_changed(&self.previous.materials) {
-            return ParamChangeKind::MeshInvalidating;
-        }
-        if current.meshing.greedy_merge_enabled != self.previous.meshing.greedy_merge_enabled
-            || current.meshing.flat_threshold_error != self.previous.meshing.flat_threshold_error
-            || current.meshing.flat_normal_threshold != self.previous.meshing.flat_normal_threshold
-        {
             return ParamChangeKind::MeshInvalidating;
         }
         if (current.render_pipeline.world_pixel_density

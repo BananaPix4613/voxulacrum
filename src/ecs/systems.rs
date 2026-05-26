@@ -379,6 +379,14 @@ pub fn compute_stats_system(
 // ==========================================================================
 
 pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
+    // Skip rendering when the window has zero dimensions (e.g. during shutdown).
+    {
+        let surface = ecs.resource::<SurfaceState>();
+        if surface.surface_config.width == 0 || surface.surface_config.height == 0 {
+            return;
+        }
+    }
+
     // Clone is cheap — Device/Queue are Arc handles internally.
     // This avoids all borrow conflicts with resource_mut calls below.
     let ctx = ecs.resource::<RenderContext>().clone();
@@ -572,6 +580,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             water_pipeline: &pipeline_registry.water_pipeline,
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
+            hide_water: ui.params.debug.hide_water,
+            hide_vegetation: ui.params.debug.hide_vegetation,
         };
 
         let mut graph = RenderGraph::new();
@@ -635,6 +645,8 @@ pub fn world_regen_system(
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
     ctx: Res<RenderContext>,
+    persistence: Res<WorldPersistence>,
+    mut streaming: ResMut<ChunkStreamingManager>,
 ) {
     regen.tick(
         &mut world.0,
@@ -643,6 +655,8 @@ pub fn world_regen_system(
         &mut water_pass,
         &mut ui,
         &ctx,
+        &persistence,
+        &mut streaming,
     );
 }
 

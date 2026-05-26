@@ -10,20 +10,10 @@ pub const MAT_GRAVEL: u16 = 8;
 
 pub const MATERIAL_COUNT: usize = 9;
 
-/// Legacy Voxel struct — no longer used for bulk storage (see ChunkStorage).
-/// Kept for material constants and as a reference for Phase 3 field restoration.
+/// Legacy Voxel struct — bulk storage lives in ChunkStorage.
 #[derive(Clone, Copy, Default)]
 pub struct Voxel {
     pub material: u16,
-    pub density: i8,
-    // TODO Phase 3: these fields return as tiered allocation in ChunkStorage
-    // pub moisture: u8,
-    // pub light_sun: u8,
-    // pub light_emit: u8,
-    // pub temperature: u8,
-    // pub flora_id: u16,
-    // pub flora_growth: u8,
-    // pub hidden_flags: u8,
 }
 
 pub struct MaterialDef {

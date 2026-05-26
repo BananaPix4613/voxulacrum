@@ -164,13 +164,13 @@ fn is_air_at(world: &World, wx: i32, wy: i32, wz: i32) -> bool {
         let lx = wx.rem_euclid(CHUNK_SIZE as i32) as usize;
         let ly = wy.rem_euclid(CHUNK_SIZE as i32) as usize;
         let lz = wz.rem_euclid(CHUNK_SIZE as i32) as usize;
-        chunk.density(lx, ly, lz) <= 0
+        !chunk.is_solid(lx, ly, lz)
     } else {
         true
     }
 }
 
-fn density_at(world: &World, wx: i32, wy: i32, wz: i32) -> i8 {
+fn solid_at(world: &World, wx: i32, wy: i32, wz: i32) -> i8 {
     let cx = wx.div_euclid(CHUNK_SIZE as i32);
     let cy = wy.div_euclid(CHUNK_SIZE as i32);
     let cz = wz.div_euclid(CHUNK_SIZE as i32);
@@ -178,16 +178,16 @@ fn density_at(world: &World, wx: i32, wy: i32, wz: i32) -> i8 {
         let lx = wx.rem_euclid(CHUNK_SIZE as i32) as usize;
         let ly = wy.rem_euclid(CHUNK_SIZE as i32) as usize;
         let lz = wz.rem_euclid(CHUNK_SIZE as i32) as usize;
-        chunk.density(lx, ly, lz)
+        if chunk.is_solid(lx, ly, lz) { 1 } else { -1 }
     } else {
-        0
+        -1
     }
 }
 
 fn terrain_slope(world: &World, wx: i32, wy: i32, wz: i32) -> f32 {
-    let dx = density_at(world, wx + 1, wy, wz) as f32 - density_at(world, wx - 1, wy, wz) as f32;
-    let dz = density_at(world, wx, wy, wz + 1) as f32 - density_at(world, wx, wy, wz - 1) as f32;
-    let dy = density_at(world, wx, wy + 1, wz) as f32 - density_at(world, wx, wy - 1, wz) as f32;
+    let dx = solid_at(world, wx + 1, wy, wz) as f32 - solid_at(world, wx - 1, wy, wz) as f32;
+    let dz = solid_at(world, wx, wy, wz + 1) as f32 - solid_at(world, wx, wy, wz - 1) as f32;
+    let dy = solid_at(world, wx, wy + 1, wz) as f32 - solid_at(world, wx, wy - 1, wz) as f32;
     if dy.abs() < 1.0 { return 10.0; }
     (dx * dx + dz * dz).sqrt() / dy.abs()
 }
@@ -218,9 +218,6 @@ fn collect_chunk_grass_instances(
                 // eligibility from material type — matches generation logic.
                 let mat = chunk.material(lx, ly, lz);
                 if mat != crate::world::voxel::MAT_GRASS_SOIL { continue; }
-                // Only surface voxels (density > 0 but thin layer) qualify
-                let d = chunk.density(lx, ly, lz);
-                if d <= 0 { continue; }
 
                 let wx = base_x + lx as i32;
                 let wy = base_y + ly as i32;

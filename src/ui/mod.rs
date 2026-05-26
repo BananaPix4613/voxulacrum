@@ -66,11 +66,12 @@ impl EguiRenderer {
         output_view: &wgpu::TextureView,
         window: &winit::window::Window,
     ) {
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
         let screen_descriptor = ScreenDescriptor {
-            size_in_pixels: [
-                window.inner_size().width,
-                window.inner_size().height,
-            ],
+            size_in_pixels: [size.width, size.height],
             pixels_per_point: window.scale_factor() as f32,
         };
         

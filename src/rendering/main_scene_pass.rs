@@ -31,6 +31,8 @@ pub struct MainScenePassNode<'a> {
     pub water_pipeline: &'a wgpu::RenderPipeline,
     pub debug_line_pass: &'a DebugLinePass,
     pub show_debug_lines: bool,
+    pub hide_water: bool,
+    pub hide_vegetation: bool,
 }
 
 impl<'a> RenderPassNode for MainScenePassNode<'a> {
@@ -110,7 +112,7 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         }
 
         // Vegetation - per-chunk instanced draws with frustum culling
-        if !self.vegetation_pass.chunk_vegetation.is_empty() {
+        if !self.hide_vegetation && !self.vegetation_pass.chunk_vegetation.is_empty() {
             pass.set_pipeline(self.vegetation_pipeline);
             pass.set_bind_group(0, self.uniform_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vegetation_pass.grass_vertex_buffer.slice(..));
@@ -131,7 +133,7 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         }
 
         // Water - per-chunk indexed draws with frustum culling
-        if !self.water_pass.chunk_meshes.is_empty() {
+        if !self.hide_water && !self.water_pass.chunk_meshes.is_empty() {
             pass.set_pipeline(self.water_pipeline);
             pass.set_bind_group(0, self.uniform_bind_group, &[]);
             for (&chunk_pos, water_mesh) in &self.water_pass.chunk_meshes {

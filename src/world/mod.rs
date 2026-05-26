@@ -27,6 +27,7 @@ pub struct World {
 }
 
 use crate::params::TerrainGenParams;
+use crate::world::voxel::MAT_AIR;
 
 impl World {
     pub fn generate(params: &TerrainGenParams, min_y: i32, max_y: i32) -> Self {
@@ -57,23 +58,16 @@ impl World {
     }
 
     /// Check whether all 6 face-adjacent neighbor chunks around `pos` are loaded.
-    /// Only face neighbors are required because the cache key excludes edge/corner
-    /// border voxels (where 2+ axes are in the border zone). Neighbors outside the
-    /// Y range [min_chunk_y, max_chunk_y) are treated as present (always air).
-    pub fn has_all_face_neighbors(&self, pos: IVec3) -> bool {
-        const FACE_OFFSETS: [IVec3; 6] = [
-            IVec3::X, IVec3::NEG_X,
-            IVec3::Y, IVec3::NEG_Y,
-            IVec3::Z, IVec3::NEG_Z,
-        ];
-        for &offset in &FACE_OFFSETS {
+    /// The cube mesher only reads face-adjacent voxels for culling, so face
+    /// neighbors are sufficient. Neighbors outside [min_chunk_y, max_chunk_y)
+    /// are treated as present (implicit air above/below the world).
+    pub fn has_face_neighbors(&self, pos: IVec3) -> bool {
+        for offset in [IVec3::new(1,0,0), IVec3::new(-1,0,0),
+                              IVec3::new(0,1,0), IVec3::new(0,-1,0),
+                              IVec3::new(0,0,1), IVec3::new(0,0,-1)] {
             let n = pos + offset;
-            if n.y < self.min_chunk_y || n.y >= self.max_chunk_y {
-                continue;
-            }
-            if !self.chunks.contains_key(&n) {
-                return false;
-            }
+            if n.y < self.min_chunk_y || n.y >= self.max_chunk_y { continue; }
+            if !self.chunks.contains_key(&n) { return false; }
         }
         true
     }
@@ -143,7 +137,7 @@ impl World {
         if let Some(chunk) = self.chunks.get_mut(&chunk_pos) {
             // Apply the edit to storage
             let mut storage = (*chunk.storage).clone();
-            storage.set_voxel(edit.index as usize, edit.density, edit.material_id);
+            storage.set_voxel(edit.index as usize, edit.material_id);
             chunk.storage = Arc::new(storage);
 
             // Track for persistence - deduplicate by index
@@ -198,8 +192,6 @@ impl World {
         let mut total_solid: u64 = 0;
         let mut total_air: u64 = 0;
         let mut material_counts = [0u64; MATERIAL_COUNT];
-        let mut min_density: i8 = i8::MAX;
-        let mut max_density: i8 = i8::MIN;
         let mut uniform_count: usize = 0;
         let mut populated_count: usize = 0;
         let mut total_storage_bytes: usize = 0;
@@ -213,21 +205,14 @@ impl World {
             total_storage_bytes += chunk.storage.memory_bytes();
 
             for idx in 0..CHUNK_VOLUME {
-                let d = chunk.storage.density(idx);
                 let m = chunk.storage.material(idx) as usize;
-                if d > 0 {
+                if chunk.storage.material(idx) != MAT_AIR {
                     total_solid += 1;
                 } else {
                     total_air += 1;
                 }
                 if m < MATERIAL_COUNT {
                     material_counts[m] += 1;
-                }
-                if d < min_density {
-                    min_density = d;
-                }
-                if d > max_density {
-                    max_density = d;
                 }
             }
         }
@@ -245,8 +230,6 @@ impl World {
             total_solid as f64 / total as f64 * 100.0,
             total_air as f64 / total as f64 * 100.0
         );
-        log::info!("Density range: {} to {}", min_density, max_density);
-        // TODO: flora_id tracking returns in Phase 3
         log::info!("--- Material distribution ---");
         for (id, count) in material_counts.iter().enumerate() {
             if *count > 0 {

@@ -52,11 +52,6 @@ impl MeshingCoordinator {
             log::info!("Cache cleared by user");
         }
         
-        // Clear boundary maps when pipeline finishes
-        if self.pipeline.is_idle() {
-            self.pipeline.clear_boundary_maps();
-        }
-        
         // Handle explicit "Remesh" button press
         if ui_state.remesh_requested {
             ui_state.remesh_requested = false;

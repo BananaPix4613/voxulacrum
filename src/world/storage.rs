@@ -1,7 +1,6 @@
 //! Chunk storage: SoA layout with Uniform/Populated variants and palette compression.
 
-use serde_json::json;
-use super::chunk::{CHUNK_SIZE, CHUNK_VOLUME};
+use super::chunk::CHUNK_VOLUME;
 use super::voxel::MAT_AIR;
 
 // ============================================================================
@@ -220,7 +219,7 @@ fn next_power_bits(current: u8) -> u8 {
 #[derive(Clone)]
 pub enum ChunkStorage {
     /// Every voxel is identical. Near-zero memory.
-    Uniform { density: i8, material_id: u16 },
+    Uniform { material_id: u16 },
     /// Heterogeneous chunk with struct-of-arrays layout.
     Populated(Box<PopulatedChunk>),
 }
@@ -244,18 +243,13 @@ pub struct FloraData {
     pub hidden_flags: Box<[u8; CHUNK_VOLUME]>,
 }
 
-/// SoA layout - only Tier 1 (hot) fields in this phase.
-/// Tiers 2-4 (lighting, simulation, flora) are added in Phase 3.
+/// Material-only hot tier; lighting/simulation/flora stay defined so future
+/// systems can populate them without re-plumbing storage.
 #[derive(Clone)]
 pub struct PopulatedChunk {
-    // Tier 1: Hot (always present)
-    pub density: Box<[i8; CHUNK_VOLUME]>,
     pub material_id: PalettedBitArray,
-    // Tier 2: Warm (lighting)
     pub lighting: Option<Box<LightingData>>,
-    // Tier 3: Cold (simulation)
     pub simulation: Option<Box<SimulationData>>,
-    // Tier 4: Sparse (flora)
     pub flora: Option<Box<FloraData>>,
 }
 
@@ -263,17 +257,7 @@ impl ChunkStorage {
     /// Create a uniform air chunk.
     pub fn new_air() -> Self {
         ChunkStorage::Uniform {
-            density: 0,
             material_id: MAT_AIR,
-        }
-    }
-
-    /// Read density at a flat index (x + y*32 + z*32*32).
-    #[inline]
-    pub fn density(&self, index: usize) -> i8 {
-        match self {
-            ChunkStorage::Uniform { density, .. } => *density,
-            ChunkStorage::Populated(p) => p.density[index],
         }
     }
 
@@ -293,14 +277,6 @@ impl ChunkStorage {
         }
     }
 
-    /// Write density at a flat index. Promotes Uniform -> Populated if needed.
-    pub fn set_density(&mut self, index: usize, value: i8) {
-        self.ensure_populated();
-        if let ChunkStorage::Populated(p) = self {
-            p.density[index] = value;
-        }
-    }
-
     /// Write material at a flat index. Promotes Uniform -> Populated if needed.
     pub fn set_material(&mut self, index: usize, value: u16) {
         self.ensure_populated();
@@ -309,13 +285,10 @@ impl ChunkStorage {
         }
     }
 
-    /// Write both density and material (common in generation).
-    pub fn set_voxel(&mut self, index: usize, density: i8, material: u16) {
-        self.ensure_populated();
-        if let ChunkStorage::Populated(p) = self {
-            p.density[index] = density;
-            p.material_id.set(index, material);
-        }
+    /// Alias kept for callers using the legacy "set this voxel" naming.
+    #[inline]
+    pub fn set_voxel(&mut self, index: usize, material: u16) {
+        self.set_material(index, material);
     }
 
     /// Check if this chunk is uniform.
@@ -323,28 +296,21 @@ impl ChunkStorage {
         matches!(self, ChunkStorage::Uniform { .. })
     }
 
+    /// Check if a voxel is solid
+    #[inline]
+    pub fn is_solid(&self, index: usize) -> bool {
+        self.material(index) != MAT_AIR
+    }
+    
     /// Try to collapse a Populated chunk back to Uniform if all values match.
     pub fn try_collapse(&mut self) {
         if let ChunkStorage::Populated(p) = self {
-            let first_d = p.density[0];
             let first_m = p.material_id.get(0);
-            let all_same = p.density.iter().all(|&d| d == first_d)
-                && (0..CHUNK_VOLUME).all(|i| p.material_id.get(i) == first_m);
-            if all_same {
+            if (0..CHUNK_VOLUME).all(|i| p.material_id.get(i) == first_m) {
                 *self = ChunkStorage::Uniform {
-                    density: first_d,
                     material_id: first_m,
                 };
             }
-        }
-    }
-
-    /// Get the raw density slice for cache-optimal meshing reads.
-    /// For Uniform, returns None (caller fills a local buffer with the constant).
-    pub fn density_slice(&self) -> Option<&[i8; CHUNK_VOLUME]> {
-        match self {
-            ChunkStorage::Populated(p) => Some(&p.density),
-            ChunkStorage::Uniform { .. } => None,
         }
     }
 
@@ -361,19 +327,10 @@ impl ChunkStorage {
     /// Promote from Uniform to Populated, filling arrays with the uniform values.
     pub(crate) fn ensure_populated(&mut self) {
         if let ChunkStorage::Uniform {
-            density,
             material_id,
         } = *self
         {
-            let density_arr = {
-                let mut arr = vec![density; CHUNK_VOLUME].into_boxed_slice();
-                // SAFETY: Vec guarantees length == CHUNK_VOLUME
-                unsafe {
-                    Box::from_raw(Box::into_raw(arr) as *mut [i8; CHUNK_VOLUME])
-                }
-            };
             *self = ChunkStorage::Populated(Box::new(PopulatedChunk {
-                density: density_arr,
                 material_id: PalettedBitArray::new(material_id),
                 lighting: None,
                 simulation: None,
@@ -411,7 +368,7 @@ impl PopulatedChunk {
     pub fn flora(&self) -> Option<&FloraData> { self.flora.as_deref() }
 
     pub fn memory_bytes(&self) -> usize {
-        let mut total = CHUNK_VOLUME + self.material_id.memory_bytes();
+        let mut total = self.material_id.memory_bytes();
         if let Some(ref l) = self.lighting {
             total += std::mem::size_of_val(l.as_ref());
         }
@@ -433,67 +390,17 @@ fn zeroed_u8_box() -> Box<[u8; CHUNK_VOLUME]> {
     }
 }
 
-/// Build a ChunkStorage from separate density and material arrays.
+/// Build a ChunkStorage from a flat material array.
 /// Checks for uniformity and returns Uniform when possible.
-pub fn storage_from_arrays(
-    density: Box<[i8; CHUNK_VOLUME]>,
-    material: &[u16; CHUNK_VOLUME],
-) -> ChunkStorage {
-    // Check uniformity
-    let first_d = density[0];
+pub fn storage_from_arrays(material: &[u16; CHUNK_VOLUME]) -> ChunkStorage {
     let first_m = material[0];
-    let is_uniform = density.iter().all(|&d| d == first_d)
-        && material.iter().all(|&m| m == first_m);
-
-    if is_uniform {
-        ChunkStorage::Uniform {
-            density: first_d,
-            material_id: first_m,
-        }
+    if material.iter().all(|&m| m == first_m) {
+        ChunkStorage::Uniform { material_id: first_m }
     } else {
         ChunkStorage::Populated(Box::new(PopulatedChunk {
-            density,
             material_id: PalettedBitArray::from_raw(material),
             lighting: None,
             simulation: None,
-            flora: None,
-        }))
-    }
-}
-
-pub fn storage_from_arrays_with_moisture(
-    density: Box<[i8; CHUNK_VOLUME]>,
-    material: &[u16; CHUNK_VOLUME],
-    moisture: &[u8; CHUNK_VOLUME],
-) -> ChunkStorage {
-    // Check uniformity for density+material (same as before)
-    let first_d = density[0];
-    let first_m = material[0];
-    let is_uniform = density.iter().all(|&d| d == first_d)
-        && material.iter().all(|&m| m == first_m);
-
-    if is_uniform {
-        // Uniform chunks don't store moisture (regenerated from noise)
-        ChunkStorage::Uniform { density: first_d, material_id: first_m }
-    } else {
-        // Check if moisture has any non-zero values
-        let has_moisture = moisture.iter().any(|&m| m != 0);
-        let simulation = if has_moisture {
-            let mut moisture_box = zeroed_u8_box();
-            moisture_box.copy_from_slice(moisture);
-            Some(Box::new(SimulationData {
-                moisture: moisture_box,
-                temperature: zeroed_u8_box(),
-            }))
-        } else {
-            None
-        };
-
-        ChunkStorage::Populated(Box::new(PopulatedChunk {
-            density,
-            material_id: PalettedBitArray::from_raw(material),
-            lighting: None,
-            simulation,
             flora: None,
         }))
     }
@@ -540,28 +447,21 @@ mod tests {
     #[test]
     fn storage_uniform_access() {
         let s = ChunkStorage::Uniform {
-            density: 42,
             material_id: 3,
         };
-        assert_eq!(s.density(0), 42);
-        assert_eq!(s.density(16384), 42);
         assert_eq!(s.material(0), 3);
         assert!(s.is_uniform());
     }
 
     #[test]
     fn storage_promote_and_collapse() {
-        let mut s = ChunkStorage::Uniform {
-            density: 10,
-            material_id: 5,
-        };
-        s.set_density(100, 20);
+        let mut s = ChunkStorage::Uniform { material_id: 5 };
+        s.set_material(100, 7);
         assert!(!s.is_uniform());
-        assert_eq!(s.density(100), 20);
-        assert_eq!(s.density(0), 10); // other voxels unchanged
+        assert_eq!(s.material(100), 7);
+        assert_eq!(s.material(0), 5);
 
-        // Set it back
-        s.set_density(100, 10);
+        s.set_material(100, 5);
         s.try_collapse();
         assert!(s.is_uniform());
     }

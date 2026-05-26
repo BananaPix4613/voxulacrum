@@ -35,7 +35,7 @@ impl From<std::io::Error> for PersistError { fn from(e: std::io::Error) -> Self 
 
 // -- Format constants --------------------------------------------------------
 
-const BLOB_VERSION: u8 = 2;
+const BLOB_VERSION: u8 = 3;
 
 // Bitflags for optional VoxelEdit fields
 const EDIT_FLAG_MOISTURE: u8     = 0b0000_0001;
@@ -69,23 +69,16 @@ pub fn serialize_chunk_edits_raw(edits: &ChunkEdits) -> Result<Vec<u8>, PersistE
             raw.extend_from_slice(&(edits.len() as u32).to_le_bytes());
             for edit in edits {
                 raw.extend_from_slice(&edit.index.to_le_bytes());
-                raw.push(edit.density as u8);
                 raw.extend_from_slice(&edit.material_id.to_le_bytes());
             }
         }
         ChunkEdits::Full(storage) => match storage {
-            ChunkStorage::Uniform { density, material_id } => {
+            ChunkStorage::Uniform { material_id } => {
                 raw.push(TAG_FULL_UNIFORM);
-                raw.push(*density as u8);
                 raw.extend_from_slice(&material_id.to_le_bytes());
             }
             ChunkStorage::Populated(pop) => {
                 raw.push(TAG_FULL_POPULATED);
-                // density: 32768 i8 as u8
-                let density_bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(pop.density.as_ptr() as *const u8, CHUNK_VOLUME)
-                };
-                raw.extend_from_slice(density_bytes);
                 // material: palette-compressed
                 pop.material_id.serialize_to_bytes(&mut raw);
             }
@@ -108,7 +101,8 @@ pub fn deserialize_chunk_edits_raw(raw: &[u8]) -> Result<ChunkEdits, PersistErro
         TAG_DELTA => {
             if raw.len() < 6 { return Err(PersistError::Corrupt("delta header short".into())); }
             let count = u32::from_le_bytes(raw[2..6].try_into().unwrap()) as usize;
-            if raw.len() < 6 + count * 5 {
+            const EDIT_BYTES: usize = 4; // index:u16 + material_id:u16
+            if raw.len() < 6 + count * EDIT_BYTES {
                 return Err(PersistError::Corrupt("delta data truncated".into()));
             }
             let mut edits = Vec::with_capacity(count);
@@ -116,41 +110,26 @@ pub fn deserialize_chunk_edits_raw(raw: &[u8]) -> Result<ChunkEdits, PersistErro
             for _ in 0..count {
                 edits.push(VoxelEdit {
                     index: u16::from_le_bytes(raw[off..off+2].try_into().unwrap()),
-                    density: raw[off+2] as i8,
-                    material_id: u16::from_le_bytes(raw[off+3..off+5].try_into().unwrap()),
+                    material_id: u16::from_le_bytes(raw[off+2..off+4].try_into().unwrap()),
                     moisture: None,
                     flora_id: None,
                     flora_growth: None,
                 });
-                off += 5;
+                off += EDIT_BYTES;
             }
             Ok(ChunkEdits::Delta(edits))
         }
         TAG_FULL_UNIFORM => {
-            if raw.len() < 5 { return Err(PersistError::Corrupt("uniform short".into())); }
+            if raw.len() < 4 { return Err(PersistError::Corrupt("uniform short".into())); }
             Ok(ChunkEdits::Full(ChunkStorage::Uniform {
-                density: raw[2] as i8,
-                material_id: u16::from_le_bytes(raw[3..5].try_into().unwrap()),
+                material_id: u16::from_le_bytes(raw[2..4].try_into().unwrap()),
             }))
         }
         TAG_FULL_POPULATED => {
-            let d_start = 2;
-            let d_end = d_start + CHUNK_VOLUME;
-            if raw.len() < d_end { return Err(PersistError::Corrupt("density truncated".into())); }
-
-            let mut density_vec = vec![0i8; CHUNK_VOLUME].into_boxed_slice();
-            for i in 0..CHUNK_VOLUME {
-                density_vec[i] = raw[d_start + i] as i8;
-            }
-            let density: Box<[i8; CHUNK_VOLUME]> = unsafe {
-                Box::from_raw(Box::into_raw(density_vec) as *mut [i8; CHUNK_VOLUME])
-            };
-
-            let (material_id, _) = PalettedBitArray::deserialize_from_bytes(&raw, d_end)
+            let (material_id, _) = PalettedBitArray::deserialize_from_bytes(raw, 2)
                 .ok_or_else(|| PersistError::Corrupt("material palette failed".into()))?;
 
             Ok(ChunkEdits::Full(ChunkStorage::Populated(Box::new(PopulatedChunk {
-                density,
                 material_id,
                 lighting: None,
                 simulation: None,
@@ -329,6 +308,13 @@ impl WorldDatabase {
 
     // -- Chunk CRUD --
 
+    /// Delete all saved chunk data (used when terrain params change).
+    pub fn clear_all_chunks(&self) -> Result<usize, PersistError> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn.execute("DELETE FROM chunks", [])?;
+        Ok(deleted)
+    }
+
     pub fn load_chunk_edits(&self, pos: IVec3) -> Result<Option<ChunkEdits>, PersistError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
@@ -404,7 +390,7 @@ impl WorldDatabase {
 pub fn apply_edits_to_storage(base: &ChunkStorage, edits: &[VoxelEdit]) -> ChunkStorage {
     let mut storage = base.clone();
     for edit in edits {
-        storage.set_voxel(edit.index as usize, edit.density, edit.material_id);
+        storage.set_voxel(edit.index as usize, edit.material_id);
         // Apply optional tier fields
         if edit.moisture.is_some() || edit.flora_id.is_some() || edit.flora_growth.is_some() {
             storage.ensure_populated();
@@ -516,6 +502,15 @@ impl WorldPersistence {
 
     pub fn is_active(&self) -> bool {
         self.db.is_some()
+    }
+
+    /// Clear all saved chunk data (called when terrain params change).
+    pub fn clear_all_chunks(&self) -> Result<usize, PersistError> {
+        if let Some(db) = &self.db {
+            db.clear_all_chunks()
+        } else {
+            Ok(0)
+        }
     }
 
     pub fn dictionary_bytes(&self) -> Option<Vec<u8>> {

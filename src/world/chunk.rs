@@ -8,10 +8,11 @@ use super::voxel::MAT_AIR;
 
 pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-pub const VOXEL_SCALE: f32 = 0.5;
-pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 16.0
-/// Padded snapshot size: CHUNK_SIZE + 4 (two voxel border on each side)
-pub const SNAP_SIZE: usize = CHUNK_SIZE + 4;
+pub const VOXEL_SCALE: f32 = 1.0;
+pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 32.0
+pub const SNAP_PAD: usize = 1;
+/// Padded snapshot size: CHUNK_SIZE + 2*SNAP_PAD
+pub const SNAP_SIZE: usize = CHUNK_SIZE + 2 * SNAP_PAD;
 pub const SNAP_VOLUME: usize = SNAP_SIZE * SNAP_SIZE * SNAP_SIZE;
 /// When edit count exceeds this, store full chunk instead of delta.
 pub const DELTA_THRESHOLD: usize = CHUNK_VOLUME / 4; // 8192
@@ -26,7 +27,6 @@ pub struct ChunkMesh {
 #[derive(Clone, Copy)]
 pub struct VoxelEdit {
     pub index: u16,
-    pub density: i8,
     pub material_id: u16,
     // Optional fields (bitflag-controlled in serialization)
     pub moisture: Option<u8>,
@@ -90,18 +90,13 @@ impl Chunk {
     }
 
     #[inline]
-    pub fn density(&self, x: usize, y: usize, z: usize) -> i8 {
-        self.storage.density(Self::voxel_index(x, y, z))
-    }
-
-    #[inline]
     pub fn material(&self, x: usize, y: usize, z: usize) -> u16 {
         self.storage.material(Self::voxel_index(x, y, z))
     }
 
     #[inline]
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
-        self.storage.density(Self::voxel_index(x, y, z)) > 0
+        self.storage.is_solid(Self::voxel_index(x, y, z))
     }
 }
 
@@ -133,140 +128,56 @@ impl<'a> ChunkNeighbors<'a> {
 // ChunkSnapshot — SoA density array + lazy material lookup
 // ============================================================================
 
-/// Material lookup through Arc<ChunkStorage> references.
-/// Only accessed at surface voxels (~10-20% of volume), so indirection cost is minimal.
-pub struct SnapshotMaterials {
-    /// 27-entry array indexed by (dx+1)*9 + (dy+1)*3 + (dz+1).
-    /// Index 13 = center chunk.
-    storages: [Option<Arc<ChunkStorage>>; 27],
-}
-
-impl SnapshotMaterials {
-    /// Look up material at chunk-local coordinates (x in -2..CHUNKS_SIZE+2).
-    pub fn material(&self, x: i32, y: i32, z: i32) -> u16 {
-        let cs = CHUNK_SIZE as i32;
-        let (dx, lx) = if x < 0 {
-            (-1, (x + cs) as usize)
-        } else if x >= cs {
-            (1, (x - cs) as usize)
-        } else {
-            (0, x as usize)
-        };
-        let (dy, ly) = if y < 0 {
-            (-1, (y + cs) as usize)
-        } else if y >= cs {
-            (1, (y - cs) as usize)
-        } else {
-            (0, y as usize)
-        };
-        let (dz, lz) = if z < 0 {
-            (-1, (z + cs) as usize)
-        } else if z >= cs {
-            (1, (z - cs) as usize)
-        } else {
-            (0, z as usize)
-        };
-
-        let ni = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
-        match &self.storages[ni] {
-            Some(storage) => {
-                let idx = Chunk::voxel_index(lx, ly, lz);
-                storage.material(idx)
-            }
-            None => MAT_AIR,
-        }
-    }
-}
-
-/// A self-contained snapshot of all data needed to mesh one chunk.
-/// Contains a flat density array for cache-optimal MC iteration and
-/// lazy material lookup through Arc references to chunk storages.
+/// Self-contained snapshot used by the cube mesher. Holds the chunk's 32^3
+/// materials plus a 1-voxel border copied from face/edge/corner neighbors.
+/// Missing neighbors fall back to MAT_AIR (closed-world boundary).
 pub struct ChunkSnapshot {
     pub position: IVec3,
-    pub density: Box<[i8; SNAP_VOLUME]>,
-    pub materials: SnapshotMaterials,
+    pub materials: Box<[u16; SNAP_VOLUME]>, // 34*34*34 = 39_304
     /// True per axis if this chunk is at the negative world border.
     pub border_min: [bool; 3],
 }
 
 impl ChunkSnapshot {
-    /// Create a snapshot by copying voxels from the chunk and its neighbors.
     pub fn extract(chunk: &Chunk, neighbors: &ChunkNeighbors, min_chunk_y: i32, _max_chunk_y: i32) -> Self {
-        // Allocate density array on heap
-        let mut density: Box<[i8; SNAP_VOLUME]> = unsafe {
-            let v: Vec<i8> = vec![0i8; SNAP_VOLUME];
+        let mut materials: Box<[u16; SNAP_VOLUME]> = unsafe {
+            let v: Vec<u16> = vec![MAT_AIR; SNAP_VOLUME];
             let boxed_slice = v.into_boxed_slice();
-            Box::from_raw(Box::into_raw(boxed_slice) as *mut [i8; SNAP_VOLUME])
+            Box::from_raw(Box::into_raw(boxed_slice) as *mut [u16; SNAP_VOLUME])
         };
 
-        // Fill interior: chunk's own 32^3 voxels at snapshot coords [2..CHUNK_SIZE+2)
-        // Optimized: copy row-by-row for cache locality
-        match chunk.storage.density_slice() {
-            Some(src_density) => {
-                for z in 0..CHUNK_SIZE {
-                    for y in 0..CHUNK_SIZE {
-                        let src_start = Chunk::voxel_index(0, y, z);
-                        let dst_start = Self::snap_index(2, y + 2, z + 2);
-                        density[dst_start..dst_start + CHUNK_SIZE]
-                            .copy_from_slice(&src_density[src_start..src_start + CHUNK_SIZE]);
-                    }
-                }
-            }
-            None => {
-                // Uniform chunk: fill interior with constant density
-                let d = chunk.storage.density(0);
-                for z in 0..CHUNK_SIZE {
-                    for y in 0..CHUNK_SIZE {
-                        let dst_start = Self::snap_index(2, y + 2, z + 2);
-                        density[dst_start..dst_start + CHUNK_SIZE].fill(d);
-                    }
+        // Fill interior: chunk's own 32^3 voxels at snapshot coords [PAD..CHUNK_SIZE+PAD).
+        for z in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for x in 0..CHUNK_SIZE {
+                    let m = chunk.storage.material(Chunk::voxel_index(x, y, z));
+                    materials[Self::snap_index(x + SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD)] = m;
                 }
             }
         }
 
-        // Fill border voxels
+        // Fill 1-voxel border from face-adjacent neighbors (missing -> MAT_AIR).
         for sz in 0..SNAP_SIZE {
             for sy in 0..SNAP_SIZE {
                 for sx in 0..SNAP_SIZE {
-                    // Skip interior (already filled)
-                    if sx >= 2 && sx < CHUNK_SIZE + 2
-                        && sy >= 2 && sy < CHUNK_SIZE + 2
-                        && sz >= 2 && sz < CHUNK_SIZE + 2
-                    {
-                        continue;
-                    }
-
-                    let cx = sx as i32 - 2;
-                    let cy = sy as i32 - 2;
-                    let cz = sz as i32 - 2;
-
-                    density[Self::snap_index(sx, sy, sz)] =
-                        resolve_density(chunk, neighbors, cx, cy, cz);
+                    let interior = sx >= SNAP_PAD && sx < CHUNK_SIZE + SNAP_PAD
+                        && sy >= SNAP_PAD && sy < CHUNK_SIZE + SNAP_PAD
+                        && sz >= SNAP_PAD && sz < CHUNK_SIZE + SNAP_PAD;
+                    if interior { continue; }
+                    let cx = sx as i32 - SNAP_PAD as i32;
+                    let cy = sy as i32 - SNAP_PAD as i32;
+                    let cz = sz as i32 - SNAP_PAD as i32;
+                    materials[Self::snap_index(sx, sy, sz)] =
+                        resolve_material(neighbors, cx, cy, cz);
                 }
             }
         }
 
-        // Build material sources from Arc references
-        let mut storages: [Option<Arc<ChunkStorage>>; 27] = Default::default();
-        // Center chunk at index 13 = (0+1)*9 + (0+1)*3 + (0+1)
-        storages[13] = Some(Arc::clone(&chunk.storage));
-        for (i, neighbor_opt) in neighbors.neighbors.iter().enumerate() {
-            if i == 13 { continue; } // skip center
-            if let Some(neighbor) = neighbor_opt {
-                storages[i] = Some(Arc::clone(&neighbor.storage));
-            }
-        }
-
-        let border_min = [
-            false,
-            chunk.position.y == min_chunk_y,
-            false,
-        ];
+        let border_min = [false, chunk.position.y == min_chunk_y, false];
 
         Self {
             position: chunk.position,
-            density,
-            materials: SnapshotMaterials { storages },
+            materials,
             border_min,
         }
     }
@@ -276,28 +187,24 @@ impl ChunkSnapshot {
         sx + sy * SNAP_SIZE + sz * SNAP_SIZE * SNAP_SIZE
     }
 
-    /// Read density at chunk-local coordinates (x in -2..=CHUNK_SIZE+1).
-    #[inline]
-    pub fn get_density(&self, x: i32, y: i32, z: i32) -> i8 {
-        let sx = (x + 2) as usize;
-        let sy = (y + 2) as usize;
-        let sz = (z + 2) as usize;
-        debug_assert!(
-            sx < SNAP_SIZE && sy < SNAP_SIZE && sz < SNAP_SIZE,
-            "ChunkSnapshot::get_density out of range: ({}, {}, {})", x, y, z
-        );
-        self.density[Self::snap_index(sx, sy, sz)]
-    }
-
-    /// Read material at chunk-local coordinates (lazy lookup through Arc refs).
+    /// Read material at chunk-local coordinates (x in -PAD..CHUNK_SIZE+PAD).
     #[inline]
     pub fn get_material(&self, x: i32, y: i32, z: i32) -> u16 {
-        self.materials.material(x, y, z)
+        let pad = SNAP_PAD as i32;
+        let sx = (x + pad) as usize;
+        let sy = (y + pad) as usize;
+        let sz = (z + pad) as usize;
+        debug_assert!(
+            sx < SNAP_SIZE && sy < SNAP_SIZE && sz < SNAP_SIZE,
+            "ChunkSnapshot::get_material out of range: ({}, {}, {})", x, y, z
+        );
+        self.materials[Self::snap_index(sx, sy, sz)]
     }
 }
 
-/// Resolve density at chunk-local coords, reading from chunk or neighbors.
-fn resolve_density(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> i8 {
+/// Resolve a material at a chunk-border coord by reading the appropriate neighbor.
+/// Missing neighbors (edge/corner slots) fall back to MAT_AIR.
+fn resolve_material(neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> u16 {
     let cs = CHUNK_SIZE as i32;
     let (dx, lx) = if x < 0 { (-1, (x + cs) as usize) }
                 else if x >= cs { (1, (x - cs) as usize) }
@@ -310,12 +217,12 @@ fn resolve_density(chunk: &Chunk, neighbors: &ChunkNeighbors, x: i32, y: i32, z:
                 else { (0, z as usize) };
 
     if dx == 0 && dy == 0 && dz == 0 {
-        return chunk.storage.density(Chunk::voxel_index(lx, ly, lz));
+        return MAT_AIR;
     }
 
     match neighbors.get(dx, dy, dz) {
-        Some(neighbor) => neighbor.storage.density(Chunk::voxel_index(lx, ly, lz)),
-        None => 0, // air default
+        Some(neighbor) => neighbor.storage.material(Chunk::voxel_index(lx, ly, lz)),
+        None => MAT_AIR,
     }
 }
 

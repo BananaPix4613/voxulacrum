@@ -243,9 +243,7 @@ impl TerrainGenerator {
         let chunk_world_y = position.y as f32 * CHUNK_WORLD_SIZE;
         let chunk_world_z = position.z as f32 * CHUNK_WORLD_SIZE;
 
-        let mut density_arr = vec![0i8; CHUNK_VOLUME].into_boxed_slice();
         let mut material_arr = [MAT_AIR; CHUNK_VOLUME];
-        let mut moisture_arr = [0u8; CHUNK_VOLUME];
         
         for lz in 0..CHUNK_SIZE {
             for ly in 0..CHUNK_SIZE {
@@ -255,85 +253,57 @@ impl TerrainGenerator {
                     let wz = chunk_world_z + lz as f32 * VOXEL_SCALE;
 
                     let idx = Chunk::voxel_index(lx, ly, lz);
-                    let (d, m) = self.generate_voxel_data(wx, wy, wz, params);
-                    density_arr[idx] = d;
+                    let m = self.generate_voxel_data(wx, wy, wz, params);
                     material_arr[idx] = m;
-                    
-                    // Moisture: higher near water, lower at altitude, noise variation
-                    if d > 0 {
-                        let base_moisture = ((params.water_level - wy) / 20.0 + 0.5).clamp(0.0, 1.0);
-                        let noise_val = self.flora_noise.get_noise_2d(wx * 0.02, wz * 0.02);
-                        let moisture = ((base_moisture + noise_val * 0.3) * 255.0).clamp(0.0, 255.0) as u8;
-                        moisture_arr[idx] = moisture;
-                    }
                 }
             }
         }
 
-        // SAFETY: Vec guarantees length == CHUNK_VOLUME
-        let density_box: Box<[i8; CHUNK_VOLUME]> = unsafe {
-            Box::from_raw(Box::into_raw(density_arr) as *mut [i8; CHUNK_VOLUME])
-        };
-
-        storage::storage_from_arrays_with_moisture(density_box, &material_arr, &moisture_arr)
+        storage::storage_from_arrays(&material_arr)
     }
 
-    /// Generate density and material for a single voxel position.
-    /// Returns (density, material). Flora/moisture/lighting fields are dropped (Phase 3).
-    fn generate_voxel_data(&self, wx: f32, wy: f32, wz: f32, params: &TerrainGenParams) -> (i8, u16) {
+    /// Generate the material for a single voxel position.
+    /// Returns `MAT_AIR` for air voxels and a solid material otherwise.
+    fn generate_voxel_data(&self, wx: f32, wy: f32, wz: f32, params: &TerrainGenParams) -> u16 {
         let height = self.terrain_height(wx, wz, params);
-        let surface_depth = height - wy;
-        let density = height - wy;
+        if wy >= height { return MAT_AIR }
 
-        let is_carved = self.is_cave(wx, wy, wz, surface_depth, params);
+        let depth = height - wy;
+        if self.is_cave(wx, wy, wz, depth, params) { return MAT_AIR; }
+        let steepness = self.cliff_steepness(wx, wz, params);
+        let mat_noise = self.material_noise.get_noise_2d(wx * 0.05, wz * 0.05);
+        let cliff = params.cliff_threshold;
 
-        if is_carved {
-            return (-1, MAT_AIR);
-        }
-
-        let density = density.clamp(-128.0, 127.0) as i8;
-
-        if density > 0 {
-            let depth_below_surface = height - wy;
-            let steepness = self.cliff_steepness(wx, wz, params);
-            let mat_noise = self.material_noise.get_noise_2d(wx * 0.05, wz * 0.05);
-            let cliff = params.cliff_threshold;
-
-            let material = if steepness > cliff && depth_below_surface < 6.0 {
-                // Very steep cliff faces: limestone
-                MAT_LIMESTONE
-            } else if steepness > cliff * 0.6 && depth_below_surface < 4.0 {
-                // Moderately steep exposed rock: granite
-                MAT_GRANITE
-            } else if wy < params.water_level + 1.5 && depth_below_surface < 2.0 {
-                // Beach/shoreline: sand near water level
-                MAT_SAND
-            } else if wy < params.water_level + 3.0 && depth_below_surface < 3.0
-                && steepness < cliff * 0.3
-            {
-                // Lowland near water: gravel
-                MAT_GRAVEL
-            } else if depth_below_surface < 1.5 && steepness < cliff * 0.5 {
-                // Gentle surface: grass (1.5 units = 3 voxels thick)
-                MAT_GRASS_SOIL
-            } else if depth_below_surface < 1.5 && steepness >= cliff * 0.5 {
-                // Moderate slopes near surface: exposed soil
-                MAT_SOIL
-            } else if depth_below_surface < 3.0 {
-                // Subsurface: soil
-                MAT_SOIL
-            } else if depth_below_surface < 6.0 {
-                // Transition zone: clay/soil mix
-                if mat_noise > 0.3 { MAT_CLAY } else { MAT_SOIL }
-            } else {
-                // Deep bedrock: granite
-                MAT_GRANITE
-            };
-
-            // TODO: moisture, flora_id, flora_growth dropped from storage (Phase 3)
-            (density, material)
+        let material = if steepness > cliff && depth < 6.0 {
+            // Very steep cliff faces: limestone
+            MAT_LIMESTONE
+        } else if steepness > cliff * 0.6 && depth < 4.0 {
+            // Moderately steep exposed rock: granite
+            MAT_GRANITE
+        } else if wy < params.water_level + 1.5 && depth < 2.0 {
+            // Beach/shoreline: sand near water level
+            MAT_SAND
+        } else if wy < params.water_level + 3.0 && depth < 3.0
+            && steepness < cliff * 0.3
+        {
+            // Lowland near water: gravel
+            MAT_GRAVEL
+        } else if depth < 1.5 && steepness < cliff * 0.5 {
+            // Gentle surface: grass (1.5 units = 3 voxels thick)
+            MAT_GRASS_SOIL
+        } else if depth < 1.5 && steepness >= cliff * 0.5 {
+            // Moderate slopes near surface: exposed soil
+            MAT_SOIL
+        } else if depth < 3.0 {
+            // Subsurface: soil
+            MAT_SOIL
+        } else if depth < 6.0 {
+            // Transition zone: clay/soil mix
+            if mat_noise > 0.3 { MAT_CLAY } else { MAT_SOIL }
         } else {
-            (density, MAT_AIR)
-        }
+            // Deep bedrock: granite
+            MAT_GRANITE
+        };
+        material
     }
 }

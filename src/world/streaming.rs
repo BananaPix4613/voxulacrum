@@ -150,7 +150,6 @@ impl ChunkStreamingManager {
         db_path: Option<PathBuf>,
         dict_bytes: Option<Arc<Vec<u8>>>,
     ) -> Self {
-        // Scale gen workers with available cores (~1/3 of usable cores, min 2)
         let usable = num_cpus::get().saturating_sub(2).max(2);
         let num_workers = (usable / 3).max(2);
 
@@ -159,6 +158,8 @@ impl ChunkStreamingManager {
         let (result_tx, result_rx) = mpsc::channel::<GenResult>();
 
         let terrain_params = Arc::new(terrain_params.clone());
+        // Build node graphs once; Arc<NoiseGraph> fields are Send + Sync
+        let generator = Arc::new(TerrainGenerator::new(&terrain_params));
 
         let mut workers = Vec::with_capacity(num_workers);
         for i in 0..num_workers {
@@ -166,14 +167,13 @@ impl ChunkStreamingManager {
             let flight = in_flight.clone();
             let tx = result_tx.clone();
             let tp = terrain_params.clone();
+            let gen = Arc::clone(&generator);
             let db_path_clone = db_path.clone();
             let dict_clone = dict_bytes.clone();
 
             let handle = std::thread::Builder::new()
                 .name(format!("chunk-gen-{}", i))
                 .spawn(move || {
-                    let generator = TerrainGenerator::new(&tp);
-                    // Each worker opens its own read-only DB connection
                     let worker_db = db_path_clone.as_ref().and_then(|path| {
                         crate::world::persistence::WorldDatabase::open_readonly(
                             path,
@@ -197,7 +197,7 @@ impl ChunkStreamingManager {
                         flight.lock().unwrap().insert(pos);
 
                         // Generate base terrain
-                        let mut storage = generator.generate_chunk_storage(pos, &tp);
+                        let mut storage = gen.generate_chunk_storage(pos, &tp);
 
                         // Overlay saved edits from DB
                         let mut edit_list = None;
@@ -207,7 +207,7 @@ impl ChunkStreamingManager {
                                     // Self-healing: skip edits that match base terrain (no-ops)
                                     let filtered: Vec<VoxelEdit> = delta.iter().filter(|e| {
                                         let idx = e.index as usize;
-                                        storage.density(idx) != e.density || storage.material(idx) != e.material_id
+                                        storage.material(idx) != e.material_id
                                     }).cloned().collect();
 
                                     if !filtered.is_empty() {
@@ -290,10 +290,26 @@ impl ChunkStreamingManager {
             unloaded: Vec::new(),
         };
 
-        // --- Poll completed chunk generations ---
+        // --- Poll completed chunk generations (capped per frame) ---
+        //
+        // Without a cap, burst chunk completions can insert dozens of chunks
+        // in a single frame, each marking 6 neighbors dirty. This overwhelms
+        // the meshing pipeline and causes main-thread stalls during snapshot
+        // creation. Cap insertions to spread the load across frames.
+        let max_insertions = self.params.max_gen_per_frame as usize;
+        let meshing_backlog = meshing.pipeline.pending_count();
+        // Reduce insertion rate when meshing is already backlogged
+        let effective_cap = if meshing_backlog > 128 {
+            (max_insertions / 4).max(2)
+        } else if meshing_backlog > 64 {
+            (max_insertions / 2).max(4)
+        } else {
+            max_insertions
+        };
         {
             let rx = self.gen_result_rx.get_mut().unwrap();
             let mut flight = self.in_flight.lock().unwrap();
+            let mut inserted_count = 0usize;
             while let Ok(gen_result) = rx.try_recv() {
                 let pos = gen_result.chunk.position;
                 flight.remove(&pos);
@@ -306,18 +322,24 @@ impl ChunkStreamingManager {
                 world.insert_chunk(gen_result.chunk);
                 result.inserted.push(pos);
 
-                // Mark 6 face-adjacent neighbors for re-meshing (they share
-                // border voxels that affect visible seams). Diagonal neighbors
-                // are excluded from the cache key, so they don't need remeshing.
-                for &offset in &[
-                    IVec3::X, IVec3::NEG_X,
-                    IVec3::Y, IVec3::NEG_Y,
-                    IVec3::Z, IVec3::NEG_Z,
-                ] {
-                    let neighbor_pos = pos + offset;
-                    if let Some(neighbor) = world.chunks.get_mut(&neighbor_pos) {
+                inserted_count += 1;
+
+                // Mark the 6 face-adjacent neighbors dirty so their boundary
+                // faces re-cull against the newly loaded chunk.
+                for offset in [IVec3::new( 1, 0, 0), IVec3::new(-1, 0, 0),
+                               IVec3::new( 0, 1, 0), IVec3::new( 0,-1, 0),
+                               IVec3::new( 0, 0, 1), IVec3::new( 0, 0,-1)] {
+                    if let Some(neighbor) = world.chunks.get_mut(&(pos + offset)) {
                         neighbor.mark_mesh_dirty();
                     }
+                }
+
+                // Stop draining channel when cap is hit. Remaining results
+                // stay in the channel and their chunks stay in in_flight,
+                // so they won't be re-queued. Next frame picks up where
+                // we left off — no work is ever discarded.
+                if inserted_count >= effective_cap {
+                    break;
                 }
             }
         }

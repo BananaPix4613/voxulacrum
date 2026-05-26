@@ -479,9 +479,7 @@ fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams, mesh_params_pend
 fn draw_meshing_params(ui: &mut egui::Ui, p: &mut MeshingParams, remeshing: bool, mesh_params_pending: bool) {
     ui.collapsing("Meshing", |ui| {
         ui.add_enabled_ui(!remeshing, |ui| {
-            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Greedy merge:"); ui.add(egui::Checkbox::without_text(&mut p.greedy_merge_enabled)); });
-            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat error threshold:"); ui.add(egui::Slider::new(&mut p.flat_threshold_error, 0.001..=0.1)); });
-            ui.horizontal(|ui| { dot_yellow(ui); ui.label("Flat normal threshold:"); ui.add(egui::Slider::new(&mut p.flat_normal_threshold, 0.8..=1.0)); });
+            ui.label("(no cube-mesh tuning knobs yet)");
         });
         if mesh_params_pending {
             ui.colored_label(egui::Color32::from_rgb(220, 200, 60), "Remesh required.");
@@ -561,6 +559,8 @@ fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
     ui.collapsing("Debug Overlays", |ui| {
         ui.checkbox(&mut p.show_wireframe, "Wireframe");
         ui.checkbox(&mut p.show_chunk_boundaries, "Chunk boundaries");
+        ui.checkbox(&mut p.hide_water, "Hide water");
+        ui.checkbox(&mut p.hide_vegetation, "Hide vegetation");
 
         ui.separator();
         ui.label("Shader debug (mutually exclusive):");
@@ -645,15 +645,12 @@ fn draw_meshing_section(
         if stats.pending_submissions > 0 {
             ui.label(format!("Pending: {}", stats.pending_submissions));
         }
-        ui.label(format!("Phase 1 active: {}", stats.phase1_in_progress));
-        ui.label(format!("Phase 1 waiting: {}", stats.phase1_complete));
-        ui.label(format!("Phase 2 active: {}", stats.phase2_in_progress));
+        ui.label(format!("In progress: {}", stats.in_progress));
         ui.label(format!("Total meshed: {}", stats.total_meshed));
         if stats.last_batch_time_ms > 0.0 {
             ui.label(format!("Last batch: {:.0}ms", stats.last_batch_time_ms));
         }
-        let active =
-            stats.phase1_in_progress + stats.phase1_complete + stats.phase2_in_progress;
+        let active = stats.in_progress;
         if active > 0 {
             ui.colored_label(
                 egui::Color32::from_rgb(80, 200, 80),
