@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
@@ -73,7 +72,7 @@ impl WorldRegenCoordinator {
             }
             
             // Clear stale caches and save new world
-            let cache_dir = PathBuf::from("cache/meshes");
+            let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
             meshing.pipeline.clear_cache();
             let _ = meshing::cache::clear_world_cache(&cache_dir);
 

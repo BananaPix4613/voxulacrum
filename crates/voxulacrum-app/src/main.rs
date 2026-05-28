@@ -10,6 +10,7 @@ mod ui;
 mod world;
 mod palette;
 mod input;
+mod paths;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -244,7 +245,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     );
 
     // Shaders
-    let shader_dir = PathBuf::from("shaders");
+    let shader_dir = paths::asset_root().join("shaders");
     let shader_watcher = ShaderWatcher::new(&shader_dir);
 
     let post_process_bind_group_layout =
@@ -280,7 +281,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // World
     let gen_start = std::time::Instant::now();
-    let cache_dir = PathBuf::from("cache/meshes");
+    let cache_dir = paths::asset_root().join("cache").join("meshes");
     let world_key =
         meshing::cache::compute_world_cache_key(&initial_params.terrain_gen);
     let world_cache_path =
@@ -543,7 +544,7 @@ impl ApplicationHandler for App {
                 // producing deterministic snapshots and mesh cache hits.
                 let world = &ecs.resource::<VoxelWorld>().0;
                 let params = &ecs.resource::<UiState>().params;
-                let cache_dir = PathBuf::from("cache/meshes");
+                let cache_dir = paths::asset_root().join("cache").join("meshes");
                 let world_key =
                     meshing::cache::compute_world_cache_key(&params.terrain_gen);
                 let world_cache_path =

@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use bevy_ecs::prelude::*;
 use glam::IVec3;
 
@@ -206,7 +204,7 @@ pub fn palette_load_system(
     ui.palette_load_requested = false;
     let name = &ui.params.palette.selected_palette;
     if !name.is_empty() {
-        let path = PathBuf::from("palettes").join(format!("{}.json", name));
+        let path = crate::paths::asset_root().join("palettes").join(format!("{}.json", name));
         match palette::load_palette(&path) {
             Ok(pal) => {
                 log::info!("Loaded palette: {}", pal.name);

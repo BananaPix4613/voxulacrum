@@ -1,0 +1,37 @@
+[package]
+name = "voxulacrum"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "voxulacrum-app"
+path = "src/main.rs"
+
+[dependencies]
+voxel-core = { path = "../voxel-core" }
+
+wgpu.workspace = true
+winit.workspace = true
+glam.workspace = true
+fastnoise-lite.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+image.workspace = true
+env_logger.workspace = true
+log.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+notify.workspace = true
+num_cpus.workspace = true
+bincode.workspace = true
+seahash.workspace = true
+rayon.workspace = true
+bevy_ecs.workspace = true
+lz4_flex.workspace = true
+rusqlite.workspace = true
+zstd.workspace = true
+smallvec.workspace = true
+fastnoise2.workspace = true

@@ -71,7 +71,7 @@ impl UiState {
             regenerating: false,
             remeshing: false,
             regen_progress: (0, 0),
-            palette_list: crate::palette::list_palettes(&std::path::PathBuf::from("palettes")),
+            palette_list: crate::palette::list_palettes(&crate::paths::asset_root().join("palettes")),
             palette_load_requested: false,
             loaded_palette_preview: Vec::new(),
             streaming_loaded: 0,

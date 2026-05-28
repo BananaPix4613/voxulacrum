@@ -468,7 +468,7 @@ impl WorldPersistence {
 
     /// Open or create a world database.
     pub fn open(world_name: &str, seed: i32) -> Result<Self, PersistError> {
-        let dir = PathBuf::from("saves").join(world_name);
+        let dir = crate::paths::asset_root().join("saves").join(world_name);
         let db_path = dir.join("world.vxdb");
         let mut db = WorldDatabase::open(&db_path)?;
 

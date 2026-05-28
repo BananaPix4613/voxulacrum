@@ -121,7 +121,7 @@ impl MeshingPipeline {
         let gen_workers = (usable / 3).max(2);
         let num_workers = (usable - gen_workers).max(2);
 
-        let cache_dir = PathBuf::from("cache/meshes");
+        let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             log::warn!("Failed to create cache directory: {}", e);
         }

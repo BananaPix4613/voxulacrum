@@ -1,31 +1,54 @@
-[package]
-name = "voxulacrum"
-version = "0.1.1"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = [
+    "crates/voxel-core",
+    "crates/voxulacrum-app",
+]
 
-[dependencies]
+[workspace.package]
+edition = "2021"
+version = "0.1.1"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Shared core
+glam = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1.15.1"
+rayon = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+log = "0.4"
+bincode = "1"
+
+# Engine-only (used by voxulacrum-app)
 wgpu = "25"
 winit = "0.30"
-glam = "0.29"
-fastnoise-lite = "1"
-bytemuck = { version = "1", features = ["derive"] }
-pollster = "0.4"
-image = "0.25"
-env_logger = "0.11"
-log = "0.4"
 egui = "0.32"
 egui-wgpu = "0.32"
 egui-winit = "0.32"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-notify = "7"
-num_cpus = "1"
-bincode = "1"
-seahash = "4"
-rayon = "1"
 bevy_ecs = { version = "0.16", default-features = false }
-lz4_flex = "0.11"
+pollster = "0.4"
+image = "0.25"
+bytemuck = { version = "1", features = ["derive"] }
+notify = "7"
+fastnoise-lite = "1"
+fastnoise2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zstd = "0.13"
-smallvec = "1.15.1"
-fastnoise2 = "0.4"
+lz4_flex = "0.11"
+seahash = "4"
+num_cpus = "1"
+env_logger = "0.11"
+
+# Dev / bench
+criterion = "0.5"
+insta = "1"
+static_assertions = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
