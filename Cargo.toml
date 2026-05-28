@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/voxel-core",
+    "crates/nodegraph-ir",
     "crates/voxulacrum-app",
 ]
 
@@ -22,6 +23,7 @@ anyhow = "1"
 tracing = "0.1"
 log = "0.4"
 bincode = "1"
+slotmap = { version = "1", features = ["serde"] }
 
 # Engine-only (used by voxulacrum-app)
 wgpu = "25"
