@@ -18,7 +18,9 @@
 #![warn(missing_docs)]
 
 mod error;
+mod example;
 mod watcher;
 
 pub use error::{HotReloadError, HotReloadResult};
+pub use example::bootstrap_example_graph;
 pub use watcher::GraphWatcher;

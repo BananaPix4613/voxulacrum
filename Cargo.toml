@@ -5,6 +5,7 @@ members = [
     "crates/nodegraph-ir",
     "crates/nodegraph-eval",
     "crates/nodegraph-hotreload",
+    "crates/voxulacrum-preview",
     "crates/voxulacrum-app",
 ]
 
@@ -46,6 +47,7 @@ lz4_flex = "0.11"
 seahash = "4"
 num_cpus = "1"
 env_logger = "0.11"
+eframe = "0.32"
 
 # Dev / bench
 criterion = "0.5"

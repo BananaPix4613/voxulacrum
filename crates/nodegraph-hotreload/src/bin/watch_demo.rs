@@ -7,10 +7,7 @@ use std::time::{Duration, Instant};
 use glam::IVec3;
 use nodegraph_eval::{render_graph_to_png, EvalContext};
 use nodegraph_hotreload::GraphWatcher;
-use nodegraph_ir::{
-    AddParams, ConstantParams, Graph, NodeKind,
-    OutputParams, Perlin2DParams, PinRef,
-};
+use nodegraph_ir::{Graph};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const QUIET_WINDOW: Duration = Duration::from_millis(50);
@@ -28,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| PathBuf::from("assets/graphs"));
 
     std::fs::create_dir_all(&dir)?;
-    bootstrap_example_if_empty(&dir)?;
+    let _ = nodegraph_hotreload::bootstrap_example_graph(&dir)?;
 
     // Initial render of every existing graph.
     for path in list_graph_files(&dir)? {
@@ -100,33 +97,4 @@ fn regenerate(json_path: &Path) {
         ),
         Err(e) => log::error!("failed to regenerate {}: {}", json_path.display(), e),
     }
-}
-
-/// If the watched dir has no `*.json` files yet, write a default example so
-/// the demo has something to load. Built from the same Perlin+Constant+Add
-/// graph as the Phase 3 test; serialized through the real
-/// `Graph::to_json_pretty` so the slotmap encoding is always correct.
-fn bootstrap_example_if_empty(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let any_json = list_graph_files(dir)?.into_iter().next().is_some();
-    if any_json {
-        return Ok(());
-    }
-    let mut g = Graph::new();
-    let perlin = g.add_node(NodeKind::Perlin2D(Perlin2DParams {
-        seed: 1337,
-        frequency: 0.05,
-        octaves: 4,
-        lacunarity: 2.0,
-        gain: 0.5,
-    }));
-    let bias = g.add_node(NodeKind::Constant(ConstantParams { value: 0.2 }));
-    let add = g.add_node(NodeKind::Add(AddParams::default()));
-    let out = g.add_node(NodeKind::Output(OutputParams::default()));
-    g.connect(PinRef::new(perlin, 0), PinRef::new(add, 0))?;
-    g.connect(PinRef::new(bias, 0), PinRef::new(add, 1))?;
-    g.connect(PinRef::new(add, 0), PinRef::new(out, 0))?;
-    let path = dir.join("example.graph.json");
-    std::fs::write(&path, g.to_json_pretty()?)?;
-    log::info!("bootstrapped example at {}", path.display());
-    Ok(())
 }

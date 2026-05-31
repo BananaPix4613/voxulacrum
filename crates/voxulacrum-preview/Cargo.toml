@@ -1,0 +1,20 @@
+[package]
+name = "voxulacrum-preview"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone 2D preview window for nodegraph density fields."
+
+[[bin]]
+name = "voxulacrum-preview"
+path = "src/main.rs"
+
+[dependencies]
+nodegraph-ir = { path = "../nodegraph-ir" }
+nodegraph-eval = { path = "../nodegraph-eval" }
+nodegraph-hotreload = { path = "../nodegraph-hotreload" }
+eframe.workspace = true
+egui.workspace = true
+glam = { workspace = true }
+log.workspace = true
+env_logger.workspace = true

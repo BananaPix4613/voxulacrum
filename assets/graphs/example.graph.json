@@ -1,0 +1,113 @@
+{
+  "nodes": [
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Perlin2D",
+          "seed": 1337,
+          "frequency": 0.1,
+          "octaves": 4,
+          "lacunarity": 2.0,
+          "gain": 0.5
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Constant",
+          "value": 0.2
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Add"
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Output",
+          "label": "terrain"
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    }
+  ],
+  "edges": [
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      }
+    }
+  ]
+}
