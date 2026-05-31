@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/voxel-core",
     "crates/nodegraph-ir",
+    "crates/nodegraph-eval",
     "crates/voxulacrum-app",
 ]
 

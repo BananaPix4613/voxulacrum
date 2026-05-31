@@ -117,6 +117,21 @@ impl Default for OutputParams {
     }
 }
 
+/// Parameters for [`NodeKind::Constant`].
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct ConstantParams {
+    /// The constant value emitted at every position.
+    pub value: f32,
+}
+
+/// Parameters for [`NodeKind::Add`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct AddParams {}
+
+/// Parameters for [`NodeKind::WorldPos`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct WorldPosParams {}
+
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -128,6 +143,12 @@ pub enum NodeKind {
     Threshold(ThresholdParams),
     /// Terminal node; consumes one density input.
     Output(OutputParams),
+    /// Uniform scalar source. Outputs a [`PinType::Scalar`] field.
+    Constant(ConstantParams),
+    /// Adds two density/scalar fields elementwise.
+    Add(AddParams),
+    /// Source of world-space position. Outputs a [`PinType::Vec3`] field.
+    WorldPos(WorldPosParams),
 }
 
 // Static pin layouts, shared by all instances of a kind.
@@ -138,6 +159,14 @@ const DENSITY_IN: &[PinSpec] =
     &[PinSpec { name: "in", ty: PinType::Density, required: true }];
 const DENSITY_OUT: &[PinSpec] =
     &[PinSpec { name: "out", ty: PinType::Density, required: false }];
+const SCALAR_OUT: &[PinSpec] =
+    &[PinSpec { name: "value", ty: PinType::Scalar, required: false }];
+const ADD_INPUTS: &[PinSpec] = &[
+    PinSpec { name: "a", ty: PinType::Density, required: true },
+    PinSpec { name: "b", ty: PinType::Density, required: true },
+];
+const VEC3_OUT: &[PinSpec] =
+    &[PinSpec { name: "pos", ty: PinType::Vec3, required: false }];
 
 impl NodeKind {
     /// Static descriptor (display, color, typed pins) for this kind.
@@ -164,6 +193,27 @@ impl NodeKind {
                 inputs: DENSITY_IN,
                 outputs: NO_PINS,
             },
+            NodeKind::Constant(_) => NodeDescriptor {
+                display_name: "Constant",
+                category: NodeCategory::Source,
+                color: [0x6c, 0xc0, 0x6c],
+                inputs: NO_PINS,
+                outputs: SCALAR_OUT,
+            },
+            NodeKind::Add(_) => NodeDescriptor {
+                display_name: "Add",
+                category: NodeCategory::Math,
+                color: [0x9c, 0x7c, 0xff],
+                inputs: ADD_INPUTS,
+                outputs: DENSITY_OUT,
+            },
+            NodeKind::WorldPos(_) => NodeDescriptor {
+                display_name: "World Position",
+                category: NodeCategory::Source,
+                color: [0x4c, 0x9a, 0xff],
+                inputs: NO_PINS,
+                outputs: VEC3_OUT,
+            },
         }
     }
 
@@ -173,6 +223,9 @@ impl NodeKind {
             NodeKind::Perlin2D(_) => "Perlin2D",
             NodeKind::Threshold(_) => "Threshold",
             NodeKind::Output(_) => "Output",
+            NodeKind::Constant(_) => "Constant",
+            NodeKind::Add(_) => "Add",
+            NodeKind::WorldPos(_) => "WorldPos",
         }
     }
 }

@@ -185,9 +185,12 @@ impl Graph {
         self.validate().iter().any(|d| d.severity == Severity::Error)
     }
 
-    /// Kahn's-algorithm cycle detection. Returns the set of nodes left
-    /// unprocessed (i.e. in or downstream of a cycle), or `None` if acyclic.
-    fn detect_cycle(&self) -> Option<Vec<NodeId>> {
+    /// Node IDs in dependency-first (topological) order. Returns `Err` holding
+    /// the set of nodes in or downstream of a cycle when the graph is cyclic.
+    ///
+    /// Any valid topological order yields identical evaluation output, since
+    /// nodes are pure functions of their inputs.
+    pub fn topological_order(&self) -> Result<Vec<NodeId>, Vec<NodeId>> {
         let mut in_degree: HashMap<NodeId, usize> = self.nodes.keys().map(|k| (k, 0)).collect();
         for edge in &self.edges {
             if self.nodes.contains_key(edge.from.node) && self.nodes.contains_key(edge.to.node) {
@@ -196,9 +199,9 @@ impl Graph {
         }
         let mut queue: Vec<NodeId> =
             in_degree.iter().filter(|(_, &d)| d == 0).map(|(&id, _)| id).collect();
-        let mut visited = 0usize;
+        let mut order = Vec::with_capacity(self.nodes.len());
         while let Some(n) = queue.pop() {
-            visited += 1;
+            order.push(n);
             for edge in &self.edges {
                 if edge.from.node == n && self.nodes.contains_key(edge.to.node) {
                     if let Some(d) = in_degree.get_mut(&edge.to.node) {
@@ -210,11 +213,16 @@ impl Graph {
                 }
             }
         }
-        if visited < self.nodes.len() {
-            Some(in_degree.into_iter().filter(|(_, d)| *d > 0).map(|(id, _)| id).collect())
+        if order.len() == self.nodes.len() {
+            Ok(order)
         } else {
-            None
+            Err(in_degree.into_iter().filter(|(_, d)| *d > 0).map(|(id, _)| id).collect())
         }
+    }
+
+    /// Returns the nodes in a cycle, or `None` if acyclic.
+    fn detect_cycle(&self) -> Option<Vec<NodeId>> {
+        self.topological_order().err()
     }
 
     /// Serialize to compact JSON.
