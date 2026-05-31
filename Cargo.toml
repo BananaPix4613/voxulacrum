@@ -4,6 +4,7 @@ members = [
     "crates/voxel-core",
     "crates/nodegraph-ir",
     "crates/nodegraph-eval",
+    "crates/nodegraph-hotreload",
     "crates/voxulacrum-app",
 ]
 

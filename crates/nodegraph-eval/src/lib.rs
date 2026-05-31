@@ -31,4 +31,4 @@ pub use context::EvalContext;
 pub use error::{EvalError, EvalResult};
 pub use eval::Evaluator;
 pub use field::{ScalarField, Vec3Field, CHUNK_DIM};
-pub use png::{ascii_heightmap, write_heightmap_png};
+pub use png::{ascii_heightmap, render_graph_to_png, write_heightmap_png};

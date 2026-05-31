@@ -4,6 +4,8 @@
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/crates/nodegraph-eval/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/nodegraph-eval/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/nodegraph-hotreload/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/nodegraph-hotreload/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/nodegraph-ir/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/nodegraph-ir/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/voxel-core/benches" isTestSource="true" />

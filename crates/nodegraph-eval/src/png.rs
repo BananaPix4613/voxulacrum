@@ -1,8 +1,11 @@
 //! Heightmap rendering: grayscale PNG (viewable artifact) and ASCII (snapshot).
 
+use nodegraph_ir::{Graph, NodeKind};
 use std::path::Path;
 
-use crate::error::EvalResult;
+use crate::context::EvalContext;
+use crate::error::{EvalError, EvalResult};
+use crate::eval::Evaluator;
 use crate::field::{ScalarField, CHUNK_DIM};
 
 /// Render a Y-slice of a field to a grayscale PNG, normalizing values across
@@ -24,6 +27,33 @@ pub fn write_heightmap_png(
     }
     img.save(path)?;
     Ok(())
+}
+
+/// One-shot: validate + evaluate the graph for `ctx`, locate its `Output`
+/// node, and dump a Y-slice of its density to a PNG at `path`. Returns
+/// `EvalError::InvalidGraph(0)` (count 0) as a sentinel when no `Output`
+/// node is present.
+pub fn render_graph_to_png(
+    graph: &Graph,
+    ctx: EvalContext,
+    y: usize,
+    range: (f32, f32),
+    path: &std::path::Path,
+) -> EvalResult<()> {
+    let out_id = graph
+        .nodes
+        .iter()
+        .find(|(_, n)| matches!(n.kind, NodeKind::Output(_)))
+        .map(|(id, _)| id)
+        .ok_or(EvalError::InvalidGraph(0))?;
+    let mut eval = Evaluator::new(graph, ctx);
+    eval.evaluate()?;
+    let field = eval
+        .cache()
+        .get(out_id)
+        .and_then(|o| o.as_scalar())
+        .ok_or(EvalError::MissingOutput(out_id))?;
+    write_heightmap_png(field, y, range, path)
 }
 
 /// Render a Y-slice as an ASCII heightmap over a fixed `(lo, hi)` range using a
