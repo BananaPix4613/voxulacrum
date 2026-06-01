@@ -1,0 +1,13 @@
+[package]
+name = "nodegraph-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Visual node-graph editor for nodegraph-ir, built on egui-snarl."
+
+[dependencies]
+nodegraph-ir = { path = "../nodegraph-ir" }
+egui.workspace = true
+egui-snarl.workspace = true
+glam = { workspace = true }
+log.workspace = true

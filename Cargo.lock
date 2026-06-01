@@ -1362,6 +1362,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-scale"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bb08961f7bed888db11e206cc6a42b3c614df5aef8fc7a82ff61c61b81e803e"
+dependencies = [
+ "egui",
+]
+
+[[package]]
+name = "egui-snarl"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0ee327e6531ed22020e479106165e11cb335c6a87b201f5e479b4b209f7ef82"
+dependencies = [
+ "egui",
+ "egui-scale",
+ "slab",
+ "smallvec",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2704,6 +2725,17 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "nodegraph-editor"
+version = "0.1.1"
+dependencies = [
+ "egui",
+ "egui-snarl",
+ "glam",
+ "log",
+ "nodegraph-ir",
+]
 
 [[package]]
 name = "nodegraph-eval"
@@ -4454,9 +4486,11 @@ version = "0.1.1"
 dependencies = [
  "eframe",
  "egui",
+ "egui-snarl",
  "env_logger",
  "glam",
  "log",
+ "nodegraph-editor",
  "nodegraph-eval",
  "nodegraph-hotreload",
  "nodegraph-ir",

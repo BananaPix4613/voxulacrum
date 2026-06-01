@@ -10,8 +10,8 @@
           "type": "WorldPos"
         },
         "position": [
-          0.0,
-          0.0
+          -1437.559,
+          7.725331
         ]
       },
       "version": 1
@@ -25,8 +25,8 @@
           "amplitude": 50.0
         },
         "position": [
-          0.0,
-          0.0
+          -1246.7855,
+          7.048931
         ]
       },
       "version": 1
@@ -43,8 +43,8 @@
           "fractal_type": "FBm"
         },
         "position": [
-          0.0,
-          0.0
+          -884.28906,
+          -75.4463
         ]
       },
       "version": 1
@@ -55,11 +55,7 @@
           "type": "CurveMapper",
           "stops": [
             [
-              -1.0,
-              -0.6
-            ],
-            [
-              -0.2,
+              -0.3,
               -0.1
             ],
             [
@@ -77,8 +73,8 @@
           ]
         },
         "position": [
-          0.0,
-          0.0
+          -293.43237,
+          -73.56312
         ]
       },
       "version": 1
@@ -95,8 +91,8 @@
           "fractal_type": "FBm"
         },
         "position": [
-          0.0,
-          0.0
+          -307.47385,
+          17.606222
         ]
       },
       "version": 1
@@ -113,8 +109,8 @@
           "fractal_type": "Ridged"
         },
         "position": [
-          0.0,
-          0.0
+          -528.8879,
+          114.76554
         ]
       },
       "version": 1
@@ -126,8 +122,8 @@
           "value": 0.35
         },
         "position": [
-          0.0,
-          0.0
+          -104.748215,
+          227.65724
         ]
       },
       "version": 1
@@ -138,8 +134,8 @@
           "type": "Multiply"
         },
         "position": [
-          0.0,
-          0.0
+          80.60564,
+          117.48612
         ]
       },
       "version": 1
@@ -150,8 +146,8 @@
           "type": "Add"
         },
         "position": [
-          0.0,
-          0.0
+          325.84076,
+          19.04459
         ]
       },
       "version": 1
@@ -162,8 +158,8 @@
           "type": "Add"
         },
         "position": [
-          0.0,
-          0.0
+          577.75195,
+          20.048176
         ]
       },
       "version": 1
@@ -175,14 +171,142 @@
           "label": "terrain"
         },
         "position": [
-          0.0,
-          0.0
+          821.975,
+          23.693377
         ]
       },
       "version": 1
     }
   ],
   "edges": [
+    {
+      "from": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 10,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 11,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 9,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 9,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 10,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 6,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
     {
       "from": {
         "node": {
@@ -218,54 +342,6 @@
     {
       "from": {
         "node": {
-          "idx": 3,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 4,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 2,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 5,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 2,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 6,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
           "idx": 6,
           "version": 1
         },
@@ -282,70 +358,6 @@
     {
       "from": {
         "node": {
-          "idx": 7,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 8,
-          "version": 1
-        },
-        "pin": 1
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 5,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 9,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 8,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 9,
-          "version": 1
-        },
-        "pin": 1
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 4,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 10,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
           "idx": 9,
           "version": 1
         },
@@ -357,22 +369,6 @@
           "version": 1
         },
         "pin": 1
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 10,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 11,
-          "version": 1
-        },
-        "pin": 0
       }
     }
   ]

@@ -22,6 +22,9 @@ pub struct Runtime {
     pub field_version: u64,
     pub last_eval_ms: f32,
     pub error: Option<String>,
+    /// The graph that produced the current field. Populated on every
+    /// successful load/replace so the editor can mirror its Snarl from it.
+    current_graph: Option<Graph>,
 }
 
 impl Runtime {
@@ -44,6 +47,7 @@ impl Runtime {
             field_version: 0,
             last_eval_ms: 0.0,
             error: None,
+            current_graph: None,
         };
         me.reload();
         Ok(me)
@@ -52,6 +56,47 @@ impl Runtime {
     /// Path of the graph this preview is bound to.
     pub fn graph_path(&self) -> &std::path::Path {
         &self.graph_path
+    }
+
+    /// Replace the active graph in-memory (no disk read), re-evaluate, and
+    /// bump `field_version`. Used by the editor to push live edits.
+    pub fn replace_graph(&mut self, graph: Graph) {
+        let started = std::time::Instant::now();
+        match Self::evaluate_graph(&graph) {
+            Ok(field) => {
+                self.field = Some(field);
+                self.field_version = self.field_version.wrapping_add(1);
+                self.error = None;
+                self.current_graph = Some(graph);
+            }
+            Err(e) => self.error = Some(e),
+        }
+        self.last_eval_ms = started.elapsed().as_secs_f32() * 1000.0;
+    }
+
+    /// The most recently successfully-evaluated graph, if any. The editor
+    /// reads this one at startup to populate its initial Snarl.
+    pub fn current_graph(&self) -> Option<&Graph> { self.current_graph.as_ref() }
+
+    /// Save the given graph to `self.graph_path` (pretty JSON). Returns the
+    /// path on success.
+    pub fn save_to_disk(&self, graph: &Graph) -> Result<std::path::PathBuf, String> {
+        let json = graph.to_json_pretty().map_err(|e| e.to_string())?;
+        std::fs::write(&self.graph_path, json).map_err(|e| e.to_string())?;
+        Ok(self.graph_path.clone())
+    }
+
+    fn evaluate_graph(graph: &Graph) -> Result<std::sync::Arc<ScalarField>, String> {
+        let out_id = graph.nodes.iter()
+            .find(|(_, n)| matches!(n.kind, NodeKind::Output(_)))
+            .map(|(id, _)| id)
+            .ok_or_else(|| "graph has no Output node".to_string())?;
+        let mut eval = Evaluator::new(graph, EvalContext::new(WORLD_SEED, PREVIEW_CHUNK));
+        eval.evaluate().map_err(|e| e.to_string())?;
+        match eval.cache().get(out_id) {
+            Some(nodegraph_eval::CachedOutput::Scalar(f)) => Ok(f.clone()),
+            _ => Err("Output produced no scalar".to_string()),
+        }
     }
 
     /// Drain pending watcher events; reload + re-evaluate if our graph changed.
@@ -74,10 +119,11 @@ impl Runtime {
     fn reload(&mut self) {
         let started = Instant::now();
         match self.try_reload() {
-            Ok(field) => {
+            Ok((graph, field)) => {
                 self.field = Some(field);
                 self.field_version = self.field_version.wrapping_add(1);
                 self.error = None;
+                self.current_graph = Some(graph);
             }
             Err(e) => {
                 log::warn!("reload failed: {}", e);
@@ -87,22 +133,11 @@ impl Runtime {
         self.last_eval_ms = started.elapsed().as_secs_f32() * 1000.0;
     }
 
-    fn try_reload(&self) -> Result<Arc<ScalarField>, String> {
+    fn try_reload(&self) -> Result<(Graph, Arc<ScalarField>), String> {
         let text = std::fs::read_to_string(&self.graph_path).map_err(|e| e.to_string())?;
         let graph = Graph::from_json(&text).map_err(|e| e.to_string())?;
-        let out_id = graph
-            .nodes
-            .iter()
-            .find(|(_, n)| matches!(n.kind, NodeKind::Output(_)))
-            .map(|(id, _)| id)
-            .ok_or_else(|| "graph has no Output node".to_string())?;
-        let mut eval = Evaluator::new(&graph, EvalContext::new(WORLD_SEED, PREVIEW_CHUNK));
-        eval.evaluate().map_err(|e| e.to_string())?;
-        // `CachedOutput::Scalar` is already `Arc<ScalarField>` internally; clone is cheap.
-        match eval.cache().get(out_id) {
-            Some(nodegraph_eval::CachedOutput::Scalar(f)) => Ok(f.clone()),
-            _ => Err("Output node produced no scalar".to_string()),
-        }
+        let field = Self::evaluate_graph(&graph)?;
+        Ok((graph, field))
     }
 }
 

@@ -13,8 +13,10 @@ path = "src/main.rs"
 nodegraph-ir = { path = "../nodegraph-ir" }
 nodegraph-eval = { path = "../nodegraph-eval" }
 nodegraph-hotreload = { path = "../nodegraph-hotreload" }
+nodegraph-editor = { path = "../nodegraph-editor" }
 eframe.workspace = true
 egui.workspace = true
+egui-snarl.workspace = true
 glam = { workspace = true }
 log.workspace = true
 env_logger.workspace = true

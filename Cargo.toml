@@ -5,6 +5,7 @@ members = [
     "crates/nodegraph-ir",
     "crates/nodegraph-eval",
     "crates/nodegraph-hotreload",
+    "crates/nodegraph-editor",
     "crates/voxulacrum-preview",
     "crates/voxulacrum-app",
 ]
@@ -34,6 +35,7 @@ winit = "0.30"
 egui = "0.32"
 egui-wgpu = "0.32"
 egui-winit = "0.32"
+egui-snarl = "0.8"
 bevy_ecs = { version = "0.16", default-features = false }
 pollster = "0.4"
 image = "0.25"
