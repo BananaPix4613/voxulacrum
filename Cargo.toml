@@ -50,7 +50,7 @@ env_logger = "0.11"
 eframe = "0.32"
 
 # Dev / bench
-criterion = "0.5"
+criterion = "0.8.2"
 insta = "1"
 static_assertions = "1"
 

@@ -12,6 +12,7 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/voxel-core/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/voxel-core/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/voxulacrum-app/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/nodegraph-eval/benches" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/voxulacrum-preview/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>

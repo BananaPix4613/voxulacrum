@@ -5,7 +5,7 @@ use std::sync::{mpsc, Mutex};
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 
-use crate::error::{HotReloadError, HotReloadResult};
+use crate::error::HotReloadResult;
 
 /// Watches a directory for changes to `*.json` files. Mirrors the pattern of
 /// `voxulacrum-app::shader_reload::ShaderWatcher`.

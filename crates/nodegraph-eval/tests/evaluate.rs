@@ -13,6 +13,7 @@ fn heightmap_graph() -> (Graph, NodeId) {
         octaves: 4,
         lacunarity: 2.0,
         gain: 0.5,
+        ..Perlin2DParams::default()
     }));
     let bias = g.add_node(NodeKind::Constant(ConstantParams { value: 0.2 }));
     let add = g.add_node(NodeKind::Add(AddParams::default()));

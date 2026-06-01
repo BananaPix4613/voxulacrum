@@ -2,10 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nodegraph_ir::{
-    AddParams, ConstantParams, Graph, NodeKind,
-    OutputParams, Perlin2DParams, PinRef,
-};
+use nodegraph_ir::{AddParams, ConstantParams, CurveMapperParams, DomainWarpParams, FractalType, Graph, MultiplyParams, NodeKind, NoiseParams, OutputParams, PinRef, WorldPosParams};
 
 use crate::error::HotReloadResult;
 
@@ -24,24 +21,58 @@ pub fn bootstrap_example_graph(dir: &Path) -> HotReloadResult<Option<PathBuf>> {
     }
     
     let mut g = Graph::new();
-    let perlin = g.add_node(NodeKind::Perlin2D(Perlin2DParams {
-        seed: 1337,
-        frequency: 0.05,
-        octaves: 4,
-        lacunarity: 2.0,
-        gain: 0.5,
+
+    // Source position field, warped before consumption.
+    let pos = g.add_node(NodeKind::WorldPos(WorldPosParams::default()));
+    let warp = g.add_node(NodeKind::DomainWarp(DomainWarpParams {
+        seed: 11, frequency: 0.01, amplitude: 12.0,
     }));
-    let bias = g.add_node(NodeKind::Constant(ConstantParams { value: 0.2 }));
-    let add = g.add_node(NodeKind::Add(AddParams::default()));
+    g.connect(PinRef::new(pos, 0), PinRef::new(warp, 0)).expect("pos -> warp");
+
+    // Continentalness: very low frequency, FBm.
+    let continental = g.add_node(NodeKind::Perlin2D(NoiseParams {
+        seed: 1, frequency: 0.005, octaves: 5, lacunarity: 2.0, gain: 0.5,
+        fractal_type: FractalType::FBm,
+    }));
+    g.connect(PinRef::new(warp, 0), PinRef::new(continental, 0)).expect("warp -> continental");
+
+    // Shape continentalness into a flatter-then-rising profile.
+    let shaped = g.add_node(NodeKind::CurveMapper(CurveMapperParams {
+        stops: vec![(-1.0, -0.6), (-0.2, -0.1), (0.1, 0.1), (0.6, 0.6), (1.0, 0.9)],
+    }));
+    g.connect(PinRef::new(continental, 0), PinRef::new(shaped, 0)).expect("continental -> shaped");
+
+    // Erosion: mid frequency, FBm.
+    let erosion = g.add_node(NodeKind::Perlin2D(NoiseParams {
+        seed: 2, frequency: 0.02, octaves: 4, lacunarity: 2.0, gain: 0.5,
+        fractal_type: FractalType::FBm,
+    }));
+    g.connect(PinRef::new(warp, 0), PinRef::new(erosion, 0)).expect("warp -> erosion");
+
+    // Ridges: same family, Ridged fractal — high-frequency relief.
+    let ridges = g.add_node(NodeKind::Perlin2D(NoiseParams {
+        seed: 3, frequency: 0.04, octaves: 4, lacunarity: 2.0, gain: 0.5,
+        fractal_type: FractalType::Ridged,
+    }));
+    g.connect(PinRef::new(warp, 0), PinRef::new(ridges, 0)).expect("warp -> ridges");
+
+    // Scale ridges down and add into erosion to make detailed relief.
+    let ridge_scale = g.add_node(NodeKind::Constant(ConstantParams { value: 0.35 }));
+    let ridges_scaled = g.add_node(NodeKind::Multiply(MultiplyParams::default()));
+    g.connect(PinRef::new(ridges, 0), PinRef::new(ridges_scaled, 0)).expect("ridges -> mul a");
+    g.connect(PinRef::new(ridge_scale, 0), PinRef::new(ridges_scaled, 1)).expect("0.35 -> mul b");
+
+    let detail = g.add_node(NodeKind::Add(AddParams::default()));
+    g.connect(PinRef::new(erosion, 0), PinRef::new(detail, 0)).expect("erosion -> add a");
+    g.connect(PinRef::new(ridges_scaled, 0), PinRef::new(detail, 1)).expect("ridges*0.35 -> add b");
+
+    // Final = shapedContinental + detail.
+    let final_density = g.add_node(NodeKind::Add(AddParams::default()));
+    g.connect(PinRef::new(shaped, 0), PinRef::new(final_density, 0)).expect("shaped -> final a");
+    g.connect(PinRef::new(detail, 0), PinRef::new(final_density, 1)).expect("detail -> final b");
+
     let out = g.add_node(NodeKind::Output(OutputParams::default()));
-    // connect() returns GraphError; can't be `?`'d into HotReloadResult.
-    // None of these can fail on this hand-built graph, so expect is fine.
-    g.connect(PinRef::new(perlin, 0), PinRef::new(add, 0))
-        .expect("perlin -> add(0)");
-    g.connect(PinRef::new(bias, 0), PinRef::new(add, 1))
-        .expect("bias -> add(1)");
-    g.connect(PinRef::new(add, 0), PinRef::new(out, 0))
-        .expect("add -> out");
+    g.connect(PinRef::new(final_density, 0), PinRef::new(out, 0)).expect("final -> out");
     
     let path = dir.join("example.graph.json");
     let json = g

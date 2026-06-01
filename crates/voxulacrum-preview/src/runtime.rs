@@ -33,6 +33,8 @@ impl Runtime {
 
         let graph_path = pick_initial_graph(&dir)
             .ok_or_else(|| format!("no .json graphs in {}", dir.display()))?;
+        // Canonicalize so equality holds against notify's absolute paths.
+        let graph_path = std::fs::canonicalize(&graph_path).map_err(|e| e.to_string())?;
 
         let watcher = GraphWatcher::new(&dir).map_err(|e| e.to_string())?;
         let mut me = Self {
@@ -54,14 +56,19 @@ impl Runtime {
 
     /// Drain pending watcher events; reload + re-evaluate if our graph changed.
     /// Returns `true` if the field was replaced.
+    ///
+    /// Path equality is brittle across notify backends — Windows may emit
+    /// relative paths joined onto the watched dir, absolute canonical paths,
+    /// or short-name forms depending on conditions. The watcher is
+    /// non-recursive on one dir, so comparing by file name is unique and
+    /// platform-stable.
     pub fn poll(&mut self) -> bool {
-        let changes = self.watcher.poll_changes();
-        if changes.iter().any(|p| p == &self.graph_path) {
+        let our_name = self.graph_path.file_name();
+        let hit = changes_match(&self.watcher.poll_changes(), our_name);
+        if hit {
             self.reload();
-            true
-        } else {
-            false
         }
+        hit
     }
 
     fn reload(&mut self) {
@@ -97,6 +104,11 @@ impl Runtime {
             _ => Err("Output node produced no scalar".to_string()),
         }
     }
+}
+
+fn changes_match(changes: &[PathBuf], target_name: Option<&std::ffi::OsStr>) -> bool {
+    let Some(name) = target_name else { return false };
+    changes.iter().any(|p| p.file_name() == Some(name))
 }
 
 fn pick_initial_graph(dir: &std::path::Path) -> Option<PathBuf> {

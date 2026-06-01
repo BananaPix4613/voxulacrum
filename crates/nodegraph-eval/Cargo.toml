@@ -11,6 +11,11 @@ glam = { workspace = true }
 fastnoise-lite.workspace = true
 image.workspace = true
 thiserror.workspace = true
+criterion.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+
+[[bench]]
+name = "biome"
+harness = false
