@@ -270,9 +270,12 @@ impl Default for LayerParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct MaskParams {}
 /// Parameters for [`NodeKind::Queue`] (no parameters yet - 2-ary fall-through).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct QueueParams {}
-
 /// Parameters for [`NodeKind::TerrainOutput`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct TerrainOutputParams {}
+/// Parameters for [`NodeKind::BuildTerrain`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct BuildTerrainParams {}
+/// Parameters for [`NodeKind::SlopeRefiner`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct SlopeRefinerParams {}
 
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
@@ -340,6 +343,10 @@ pub enum NodeKind {
     /// Terrain terminal: consumes a density + a material field, produces
     /// a `ChunkBuffer<Voxel>` of cubes.
     TerrainOutput(TerrainOutputParams),
+    /// Builds a terrain (`ChunkBuffer<Voxel>`) from density + material fields.
+    BuildTerrain(BuildTerrainParams),
+    /// Reclassifies surface cubes into slopes/corners based on neighbor patterns.
+    SlopeRefiner(SlopeRefinerParams),
     /// Terminal node; consumes one density input.
     Output(OutputParams),
 }
@@ -385,10 +392,16 @@ const QUEUE_IN: &[PinSpec] = &[
     PinSpec { name: "primary",  ty: PinType::Material, required: true },
     PinSpec { name: "fallback", ty: PinType::Material, required: true },
 ];
-const TERRAIN_OUT_IN: &[PinSpec] = &[
+const TERRAIN_OUT: &[PinSpec] =
+    &[PinSpec { name: "terrain", ty: PinType::Terrain, required: false }];
+const BUILD_TERRAIN_IN: &[PinSpec] = &[
     PinSpec { name: "density",  ty: PinType::Density,  required: true },
     PinSpec { name: "material", ty: PinType::Material, required: true },
 ];
+const SLOPE_REFINER_IN: &[PinSpec] =
+    &[PinSpec { name: "terrain", ty: PinType::Terrain, required: true }];
+const TERRAIN_TERMINAL_IN: &[PinSpec] =
+    &[PinSpec { name: "terrain", ty: PinType::Terrain, required: true }];
 
 impl NodeKind {
     /// Static descriptor (display, color, typed pins) for this kind.
@@ -588,11 +601,25 @@ impl NodeKind {
                 inputs: QUEUE_IN,
                 outputs: MATERIAL_OUT,
             },
+            NodeKind::BuildTerrain(_) => NodeDescriptor {
+                display_name: "Build Terrain",
+                category: NodeCategory::Material,
+                color: [0xe0, 0x4c, 0x4c],
+                inputs: BUILD_TERRAIN_IN,
+                outputs: TERRAIN_OUT,
+            },
+            NodeKind::SlopeRefiner(_) => NodeDescriptor {
+                display_name: "Slope Refiner",
+                category: NodeCategory::Slope, // existing variant — see node.rs:37
+                color: [0x70, 0xa0, 0xb0],
+                inputs: SLOPE_REFINER_IN,
+                outputs: TERRAIN_OUT,
+            },
             NodeKind::TerrainOutput(_) => NodeDescriptor {
                 display_name: "Terrain Output",
-                category: NodeCategory::Output,
+                category: NodeCategory::Output, // unchanged
                 color: [0xe0, 0x4c, 0x4c],
-                inputs: TERRAIN_OUT_IN,
+                inputs: TERRAIN_TERMINAL_IN, // shrunk from (density, material) to (terrain)
                 outputs: NO_PINS,
             },
         }
@@ -628,6 +655,8 @@ impl NodeKind {
             NodeKind::Layer(_)            => "Layer",
             NodeKind::Queue(_)            => "Queue",
             NodeKind::TerrainOutput(_)    => "TerrainOutput",
+            NodeKind::BuildTerrain(_)     => "BuildTerrain",
+            NodeKind::SlopeRefiner(_)     => "SlopeRefiner",
         }
     }
 }

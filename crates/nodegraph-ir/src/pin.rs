@@ -22,7 +22,7 @@ pub enum PinType {
     Vec3,
     /// Discrete biome identifier.
     BiomeId,
-    /// `ChunkBuffer<Voxel>` - the final output type. A bare tag in the IR.
+    /// `ChunkBuffer<Voxel>` - the final output type. Makes terrain a real flowing pin type.
     Terrain,
 }
 

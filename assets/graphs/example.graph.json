@@ -10,8 +10,8 @@
           "type": "WorldPos"
         },
         "position": [
-          -882.7529,
-          -16.051846
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -25,8 +25,8 @@
           "amplitude": 6.0
         },
         "position": [
-          -682.46295,
-          -17.664728
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -43,8 +43,8 @@
           "fractal_type": "FBm"
         },
         "position": [
-          -303.20758,
-          -17.069342
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -61,8 +61,8 @@
           "fractal_type": "FBm"
         },
         "position": [
-          -749.9286,
-          -116.83986
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -91,8 +91,8 @@
           ]
         },
         "position": [
-          -146.07312,
-          -117.553925
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -104,8 +104,8 @@
           "value": 0.5
         },
         "position": [
-          134.938,
-          80.213936
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -116,8 +116,8 @@
           "type": "Multiply"
         },
         "position": [
-          335.148,
-          -15.218085
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -128,8 +128,8 @@
           "type": "Add"
         },
         "position": [
-          586.47675,
-          -132.66228
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -141,8 +141,8 @@
           "label": "terrain"
         },
         "position": [
-          960.41223,
-          -58.86657
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -168,8 +168,32 @@
           "fill": 2
         },
         "position": [
-          10.741979,
-          -234.91005
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "BuildTerrain"
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "SlopeRefiner"
+        },
+        "position": [
+          0.0,
+          0.0
         ]
       },
       "version": 1
@@ -180,14 +204,30 @@
           "type": "TerrainOutput"
         },
         "position": [
-          960.4126,
-          -250.78778
+          0.0,
+          0.0
         ]
       },
       "version": 1
     }
   ],
   "edges": [
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
     {
       "from": {
         "node": {
@@ -207,14 +247,14 @@
     {
       "from": {
         "node": {
-          "idx": 8,
+          "idx": 2,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 11,
+          "idx": 4,
           "version": 1
         },
         "pin": 0
@@ -223,14 +263,62 @@
     {
       "from": {
         "node": {
-          "idx": 1,
+          "idx": 4,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 2,
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 6,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 8,
           "version": 1
         },
         "pin": 0
@@ -287,14 +375,14 @@
     {
       "from": {
         "node": {
-          "idx": 4,
+          "idx": 8,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 5,
+          "idx": 11,
           "version": 1
         },
         "pin": 0
@@ -319,14 +407,14 @@
     {
       "from": {
         "node": {
-          "idx": 2,
+          "idx": 11,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 4,
+          "idx": 12,
           "version": 1
         },
         "pin": 0
@@ -335,46 +423,14 @@
     {
       "from": {
         "node": {
-          "idx": 6,
+          "idx": 12,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 7,
-          "version": 1
-        },
-        "pin": 1
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 5,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 8,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 3,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 7,
+          "idx": 13,
           "version": 1
         },
         "pin": 0

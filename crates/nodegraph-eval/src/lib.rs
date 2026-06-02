@@ -25,6 +25,7 @@ mod error;
 mod eval;
 mod field;
 mod png;
+mod slope_refine;
 
 pub use cache::{CachedOutput, EvalCache};
 pub use context::EvalContext;

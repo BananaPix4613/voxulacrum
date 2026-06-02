@@ -2297,6 +2297,7 @@ dependencies = [
  "glam",
  "image",
  "insta",
+ "log",
  "nodegraph-ir",
  "thiserror 2.0.18",
  "voxel-core",

@@ -5,6 +5,7 @@
 mod camera;
 mod mesh;
 mod renderer;
+mod shape_table;
 
 pub use camera::OrbitCamera;
 pub use renderer::{ChunkRenderState, RenderCallback};

@@ -7,11 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nodegraph_ir::{
-    AddParams, ConstantParams, CurveMapperParams, DomainWarpParams, FractalType, Graph,
-    LayerParams, MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef,
-    TerrainOutputParams, WorldPosParams,
-};
+use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams, DomainWarpParams, FractalType, Graph, LayerParams, MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef, SlopeRefinerParams, TerrainOutputParams, WorldPosParams};
 use voxel_core::MaterialId;
 
 use crate::error::HotReloadResult;
@@ -117,11 +113,23 @@ pub fn build_example_graph() -> Graph {
     g.connect(PinRef::new(final_density, 0), PinRef::new(layer, 0))
         .expect("density -> layer");
 
+    // Phase-9 terrain tail: density + material → BuildTerrain → SlopeRefiner
+    // → TerrainOutput. The refiner reclassifies surface cubes as
+    // slopes/corners; the terminal just passes its terrain through to the
+    // runtime cache.
+    let build = g.add_node(NodeKind::BuildTerrain(BuildTerrainParams::default()));
+    g.connect(PinRef::new(final_density, 0), PinRef::new(build, 0))
+        .expect("density -> build.density");
+    g.connect(PinRef::new(layer, 0), PinRef::new(build, 1))
+        .expect("layer -> build.material");
+
+    let refiner = g.add_node(NodeKind::SlopeRefiner(SlopeRefinerParams::default()));
+    g.connect(PinRef::new(build, 0), PinRef::new(refiner, 0))
+        .expect("build -> refiner.terrain");
+
     let terrain = g.add_node(NodeKind::TerrainOutput(TerrainOutputParams::default()));
-    g.connect(PinRef::new(final_density, 0), PinRef::new(terrain, 0))
-        .expect("density -> terrain.density");
-    g.connect(PinRef::new(layer, 0), PinRef::new(terrain, 1))
-        .expect("layer -> terrain.material");
+    g.connect(PinRef::new(refiner, 0), PinRef::new(terrain, 0))
+        .expect("refiner -> terrain.terrain");
 
     g
 }

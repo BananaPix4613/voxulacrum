@@ -45,7 +45,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)
         | NodeKind::Lerp(_) | NodeKind::Union(_) | NodeKind::Intersect(_)
         | NodeKind::DensitySubtract(_) | NodeKind::Mix(_) | NodeKind::Mask(_)
-        | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) => {
+        | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) | NodeKind::BuildTerrain(_) | NodeKind::SlopeRefiner(_) => {
             ui.weak("(no parameters)");
             false
         }

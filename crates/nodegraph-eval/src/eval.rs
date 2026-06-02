@@ -139,6 +139,19 @@ impl<'g> Evaluator<'g> {
         }
     }
 
+    fn input_terrain(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ChunkBuffer<Voxel, 32>>> {
+        let edge = self.graph.edges.iter()
+            .find(|e| e.to.node == node && e.to.pin == pin)
+            .ok_or(EvalError::MissingInput { node, pin })?;
+        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
+        match src {
+            CachedOutput::Terrain(f) => Ok(f.clone()),
+            other => Err(EvalError::WrongInputType {
+                node, expected: "terrain", got: other.kind_name(),
+            }),
+        }
+    }
+
     fn fill_noise_2d(&self, p: &NoiseParams, id: NodeId, noise_type: NoiseType) -> EvalResult<Arc<ScalarField>> {
         let n = self.noise(p, noise_type);
         let pos = self.position_field(id)?;
@@ -355,8 +368,8 @@ impl<'g> Evaluator<'g> {
                 out.try_collapse();
                 CachedOutput::Material(Arc::new(out))
             }
-            // --- Terrain terminal ---
-            NodeKind::TerrainOutput(_) => {
+            // --- Terrain pipeline ---
+            NodeKind::BuildTerrain(_) => {
                 let density = self.input_scalar(id, 0)?;
                 let material = self.input_material(id, 1)?;
                 let mut out: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
@@ -377,6 +390,15 @@ impl<'g> Evaluator<'g> {
                 }
                 out.try_collapse();
                 CachedOutput::Terrain(Arc::new(out))
+            }
+            NodeKind::SlopeRefiner(_) => {
+                let input = self.input_terrain(id, 0)?;
+                let refined = crate::slope_refine::refine_chunk(&input);
+                CachedOutput::Terrain(Arc::new(refined))
+            }
+            // --- Terrain terminal ---
+            NodeKind::TerrainOutput(_) => {
+                CachedOutput::Terrain(self.input_terrain(id, 0)?)
             }
             // --- Terminal ---
             NodeKind::Output(_) => CachedOutput::Scalar(self.input_scalar(id, 0)?),
@@ -426,6 +448,8 @@ impl<'g> Evaluator<'g> {
             NodeKind::ConstantMaterial(_)
             | NodeKind::Layer(_)
             | NodeKind::Queue(_)
+            | NodeKind::BuildTerrain(_)
+            | NodeKind::SlopeRefiner(_)
             | NodeKind::TerrainOutput(_) => {
                 return Err(EvalError::WrongInputType {
                     node: id, expected: "scalar", got: "material/terrain",

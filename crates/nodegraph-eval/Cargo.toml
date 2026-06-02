@@ -12,6 +12,7 @@ glam = { workspace = true }
 fastnoise-lite.workspace = true
 image.workspace = true
 thiserror.workspace = true
+log.workspace = true
 criterion.workspace = true
 
 [dev-dependencies]

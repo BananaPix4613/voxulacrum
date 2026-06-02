@@ -41,6 +41,8 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Material, "Constant Material", || NodeKind::ConstantMaterial(ConstantMaterialParams::default())),
         (NodeCategory::Material, "Layer",             || NodeKind::Layer(LayerParams::default())),
         (NodeCategory::Material, "Queue",             || NodeKind::Queue(QueueParams::default())),
+        (NodeCategory::Material, "Build Terrain", || NodeKind::BuildTerrain(BuildTerrainParams::default())),
+        (NodeCategory::Slope, "Slope Refiner", || NodeKind::SlopeRefiner(SlopeRefinerParams::default())),
         (NodeCategory::Output, "Output",         || NodeKind::Output(OutputParams::default())),
         (NodeCategory::Output, "Terrain Output", || NodeKind::TerrainOutput(TerrainOutputParams::default())),
     ]

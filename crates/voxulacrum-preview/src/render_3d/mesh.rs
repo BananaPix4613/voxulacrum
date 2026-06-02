@@ -1,11 +1,15 @@
-//! Face-culled cube mesher.
+//! Per-voxel face-culled mesher. Dispatches each non-empty voxel to its
+//! per-`(ShapeId, Rotation)` triangle table from `shape_table.rs`; emits a
+//! triangle either unconditionally (slope surfaces, cut faces) or when the
+//! named face-neighbor is air.
 
 use bytemuck::{Pod, Zeroable};
-use voxel_core::{ChunkBuffer, ShapeId, Voxel};
+use voxel_core::{ChunkBuffer, Voxel};
 
 use crate::material_colors::material_color;
+use crate::render_3d::shape_table::{covers_face, shape_geometry, FaceCondition, NeighborDir};
 
-/// One vertex of one cube face. Three floats position, three normal, three color.
+/// One vertex of one triangle. Three floats position, three normal, three color.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
 pub struct FaceVertex {
@@ -20,78 +24,87 @@ pub struct ChunkMesh {
 }
 
 impl ChunkMesh {
-    pub fn vertex_count(&self) -> u32 { self.vertices.len() as u32}
+    pub fn vertex_count(&self) -> u32 { self.vertices.len() as u32 }
 }
 
-// One face quad is two triangles drawn from the in-loop `quad` table below;
-// six faces, with `(neighbor offset, quad corner, u-basis, v-basis, normal)`
-// entries below `build_chunk_mesh`.
+const N: usize = 32;
 
-/// Emit a face-culled mesh for `chunk`. Faces between two solid voxels
-/// are skipped; only voxels with `ShapeId::Cube` produce faces.
+/// Emit a face-culled mesh for `chunk`. Each non-empty voxel contributes
+/// its shape's triangles, with conditional faces culled against the
+/// neighbor's solidity (out-of-bounds counts as air).
 pub fn build_chunk_mesh(chunk: &ChunkBuffer<Voxel, 32>) -> ChunkMesh {
-    let mut verts = Vec::new();
+    let mut verts: Vec<FaceVertex> = Vec::with_capacity(8 * 1024);
 
-    let solid = |x: i32, y: i32, z: i32| -> bool {
-        if !(0..32).contains(&x) || !(0..32).contains(&y) || !(0..32).contains(&z) {
-            return false;
-        }
-        chunk.get(x as usize, y as usize, z as usize).shape == ShapeId::Cube
-    };
-
-    // (neighbor_offset, quad_corner, u_basis, v_basis, normal)
-    //
-    // Each face's `corner` sits at the low corner of that face within the
-    // unit cube, and `u_basis + v_basis` keep all four vertices inside
-    // [0,1]³. The winding is CCW from outside the cube, i.e.
-    // `u_basis × v_basis == normal`. The pipeline uses
-    // FrontFace::Ccw + cull_mode=Back, so front faces face the camera and
-    // back faces cull cleanly.
-    let faces: &[([i32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 3])] = &[
-        // +X (right, x=1):  u=+Y, v=+Z  →  Y×Z = +X
-        ([ 1, 0, 0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [ 1.0, 0.0, 0.0]),
-        // -X (left,  x=0):  u=+Z, v=+Y  →  Z×Y = -X
-        ([-1, 0, 0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]),
-        // +Y (top,   y=1):  u=+Z, v=+X  →  Z×X = +Y
-        ([ 0, 1, 0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [ 0.0, 1.0, 0.0]),
-        // -Y (bot,   y=0):  u=+X, v=+Z  →  X×Z = -Y
-        ([ 0,-1, 0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [ 0.0,-1.0, 0.0]),
-        // +Z (front, z=1):  u=+X, v=+Y  →  X×Y = +Z
-        ([ 0, 0, 1], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [ 0.0, 0.0, 1.0]),
-        // -Z (back,  z=0):  u=+Y, v=+X  →  Y×X = -Z
-        ([ 0, 0,-1], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [ 0.0, 0.0,-1.0]),
-    ];
-
-    for z in 0..32 {
-        for y in 0..32 {
-            for x in 0..32{
+    for z in 0..N {
+        for y in 0..N {
+            for x in 0..N {
                 let v = chunk.get(x, y, z);
-                if v.shape != ShapeId::Cube { continue; }
+                if !v.is_solid() { continue; }
                 let color = material_color(v.material);
                 let base = [x as f32, y as f32, z as f32];
 
-                for (off, corner, bu, bv, n) in faces {
-                    if solid(x as i32 + off[0], y as i32 + off[1], z as i32 + off[2]) {
-                        continue;
-                    }
-                    // Two triangles per face: (0,1,2) and (0,2,3) of FACE_VERTS' u-v.
-                    let quad = [
-                        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]
-                    ];
-                    let tris = [0, 1, 2, 0, 2, 3];
-                    for &i in &tris {
-                        let (u, v_) = (quad[i][0], quad[i][1]);
-                        let p = [
-                            base[0] + corner[0] + bu[0] * u + bv[0] * v_,
-                            base[1] + corner[1] + bu[1] * u + bv[1] * v_,
-                            base[2] + corner[2] + bu[2] * u + bv[2] * v_,
-                        ];
-                        verts.push(FaceVertex { position: p, normal: *n, color });
+                for tri in shape_geometry(v.shape, v.rotation) {
+                    let draw = match tri.condition {
+                        FaceCondition::Always => true,
+                        FaceCondition::WhenAirAt(dir) => {
+                            !neighbor_blocks_face(chunk, x as i32, y as i32, z as i32, dir)
+                        }
+                    };
+                    if !draw { continue; }
+                    for &vert in &tri.verts {
+                        verts.push(FaceVertex {
+                            position: [
+                                base[0] + vert[0],
+                                base[1] + vert[1],
+                                base[2] + vert[2],
+                            ],
+                            normal: tri.normal,
+                            color,
+                        });
                     }
                 }
             }
         }
     }
-    
+
     ChunkMesh { vertices: verts }
+}
+
+/// True iff the neighbor cell at `(x+dir.x, y+dir.y, z+dir.z)` is in-bounds,
+/// solid, AND its face facing back at us is a full 1×1 quad (per
+/// [`covers_face`]).
+///
+/// Stricter than a plain `is_solid` check: an outer-corner neighbor whose
+/// `-Z` side is a half-triangle does NOT block our `+Z` cube face. Without
+/// this, the cube on the back side of the corner culls its face and leaves
+/// a visible hole peeking through the corner's half-triangle.
+#[inline]
+fn neighbor_blocks_face(
+    buf: &ChunkBuffer<Voxel, 32>,
+    x: i32, y: i32, z: i32,
+    dir: NeighborDir,
+) -> bool {
+    let [dx, dy, dz] = dir.offset();
+    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+    if !(0..N as i32).contains(&nx)
+        || !(0..N as i32).contains(&ny)
+        || !(0..N as i32).contains(&nz)
+    {
+        return false;
+    }
+    let n = buf.get(nx as usize, ny as usize, nz as usize);
+    if !n.is_solid() {
+        return false;
+    }
+    covers_face(n.shape, n.rotation, opposite_dir(dir))
+}
+
+#[inline]
+fn opposite_dir(d: NeighborDir) -> NeighborDir {
+    use NeighborDir::*;
+    match d {
+        PosX => NegX, NegX => PosX,
+        PosY => NegY, NegY => PosY,
+        PosZ => NegZ, NegZ => PosZ,
+    }
 }

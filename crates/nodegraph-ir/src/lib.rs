@@ -57,5 +57,6 @@ pub use node::{
     NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams,
     Perlin2DParams, PinSpec, QueueParams, RemapParams, SubtractParams,
     TerrainOutputParams, ThresholdParams, UnionParams, WorldPosParams,
+    BuildTerrainParams, SlopeRefinerParams,
 };
 pub use pin::PinType;

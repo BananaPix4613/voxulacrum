@@ -48,12 +48,30 @@ pub enum ShapeId {
     InnerCornerSE = 12,
     /// Inner-corner slope, low corner at SW.
     InnerCornerSW = 13,
+    /// Ceiling slope, high edge to the north — vertical mirror of [`Self::SlopeN`].
+    /// Solid material is at the top of the cell; the slope hangs down and
+    /// opens toward `+Z` (south).
+    CeilingSlopeN = 14,
+    /// Ceiling slope, high edge to the east — vertical mirror of [`Self::SlopeE`].
+    CeilingSlopeE = 15,
+    /// Ceiling slope, high edge to the south — vertical mirror of [`Self::SlopeS`].
+    CeilingSlopeS = 16,
+    /// Ceiling slope, high edge to the west — vertical mirror of [`Self::SlopeW`].
+    CeilingSlopeW = 17,
+    /// Ceiling outer-corner, low corner at NE — vertical mirror of [`Self::OuterCornerNE`].
+    CeilingOuterCornerNE = 18,
+    /// Ceiling outer-corner, low corner at NW — vertical mirror of [`Self::OuterCornerNW`].
+    CeilingOuterCornerNW = 19,
+    /// Ceiling outer-corner, low corner at SE — vertical mirror of [`Self::OuterCornerSE`].
+    CeilingOuterCornerSE = 20,
+    /// Ceiling outer-corner, low corner at SW — vertical mirror of [`Self::OuterCornerSW`].
+    CeilingOuterCornerSW = 21,
 }
 
 impl ShapeId {
     /// Maximum discriminant value currently in use. Tests assert this fits
     /// inside the 5-bit budget declared by the voxel format.
-    pub const MAX_DISCRIMINANT: u8 = 13;
+    pub const MAX_DISCRIMINANT: u8 = 21;
 
     /// Bit budget reserved by the [`crate::Voxel`] packed format.
     pub const BIT_BUDGET: u32 = 5;
@@ -76,6 +94,14 @@ impl ShapeId {
             11 => Some(Self::InnerCornerNW),
             12 => Some(Self::InnerCornerSE),
             13 => Some(Self::InnerCornerSW),
+            14 => Some(Self::CeilingSlopeN),
+            15 => Some(Self::CeilingSlopeE),
+            16 => Some(Self::CeilingSlopeS),
+            17 => Some(Self::CeilingSlopeW),
+            18 => Some(Self::CeilingOuterCornerNE),
+            19 => Some(Self::CeilingOuterCornerNW),
+            20 => Some(Self::CeilingOuterCornerSE),
+            21 => Some(Self::CeilingOuterCornerSW),
             _ => None,
         }
     }
