@@ -7,6 +7,7 @@ description = "Visual node-graph editor for nodegraph-ir, built on egui-snarl."
 
 [dependencies]
 nodegraph-ir = { path = "../nodegraph-ir" }
+voxel-core = { path = "../voxel-core" }
 egui.workspace = true
 egui-snarl.workspace = true
 glam = { workspace = true }

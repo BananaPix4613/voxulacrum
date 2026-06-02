@@ -125,7 +125,7 @@ mod tests {
     fn out_of_range_clamps() {
         for cmap in Colormap::ALL {
             assert_eq!(cmap.apply(-5.0), cmap.apply(0.0));
-            assert_eq!(cmap.apply(5.0), cmap.aply(1.0));
+            assert_eq!(cmap.apply(5.0), cmap.apply(1.0));
         }
     }
 

@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
 use nodegraph_ir::{Graph, FractalType, NoiseParams, NodeId, NodeKind, Severity};
+use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
 use crate::cache::{CachedOutput, EvalCache};
 use crate::context::EvalContext;
@@ -80,19 +81,6 @@ impl<'g> Evaluator<'g> {
         }
     }
 
-    /// Resolve a required Vec3 input - like `input_scalar` but for `Vec3Field`.
-    fn input_vec3(&self, node: NodeId, pin: u16) -> EvalResult<Arc<Vec3Field>> {
-        let edge = self.graph.edges.iter().find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
-        match src {
-            CachedOutput::Vec3(f) => Ok(f.clone()),
-            other => Err(EvalError::WrongInputType {
-                node, expected: "vec3", got: other.kind_name(),
-            })
-        }
-    }
-
     /// Resolve the scalar field feeding `(node, pin)`. `Scalar → Density`
     /// coercion is a no-op here (both are `f32` fields).
     fn input_scalar(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ScalarField>> {
@@ -111,6 +99,41 @@ impl<'g> Evaluator<'g> {
             other => Err(EvalError::WrongInputType {
                 node,
                 expected: "scalar/density",
+                got: other.kind_name(),
+            }),
+        }
+    }
+
+    /// Resolve a required Vec3 input - like `input_scalar` but for `Vec3Field`.
+    fn input_vec3(&self, node: NodeId, pin: u16) -> EvalResult<Arc<Vec3Field>> {
+        let edge = self.graph.edges.iter().find(|e| e.to.node == node && e.to.pin == pin)
+            .ok_or(EvalError::MissingInput { node, pin })?;
+        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
+        match src {
+            CachedOutput::Vec3(f) => Ok(f.clone()),
+            other => Err(EvalError::WrongInputType {
+                node, expected: "vec3", got: other.kind_name(),
+            })
+        }
+    }
+
+    fn input_material(
+        &self,
+        node: NodeId,
+        pin: u16,
+    ) -> EvalResult<Arc<ChunkBuffer<MaterialId, 32>>> {
+        let edge = self
+            .graph
+            .edges
+            .iter()
+            .find(|e| e.to.node == node && e.to.pin == pin)
+            .ok_or(EvalError::MissingInput { node, pin })?;
+        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
+        match src {
+            CachedOutput::Material(f) => Ok(f.clone()),
+            other => Err(EvalError::WrongInputType {
+                node,
+                expected: "material",
                 got: other.kind_name(),
             }),
         }
@@ -269,6 +292,92 @@ impl<'g> Evaluator<'g> {
                 let (signal, mask) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?);
                 CachedOutput::Scalar(Arc::new(signal.zip_with(&mask, |s, m| s * m.clamp(0.0, 1.0))))
             }
+            // --- Material providers ---
+            NodeKind::ConstantMaterial(p) => {
+                CachedOutput::Material(Arc::new(ChunkBuffer::uniform(p.material)))
+            }
+            NodeKind::Layer(p) => {
+                let density = self.input_scalar(id, 0)?;
+                let bands = p.bands.clone();
+                let fill = p.fill;
+                let mut out: ChunkBuffer<MaterialId, 32> = ChunkBuffer::uniform(MaterialId::AIR);
+
+                // For each XZ column, find the topmost solid Y, then write
+                // materials downward.
+                for z in 0..CHUNK_DIM {
+                    for x in 0..CHUNK_DIM {
+                        // Find surface (topmost solid).
+                        let mut surface: Option<usize> = None;
+                        for y in (0..CHUNK_DIM).rev() {
+                            if density.get(x, y, z) > 0.0 {
+                                surface = Some(y);
+                                break;
+                            }
+                        }
+                        for y in 0..CHUNK_DIM {
+                            let mat = match surface {
+                                None => MaterialId::AIR, // empty column
+                                Some(sy) if y > sy => MaterialId::AIR, // above surface
+                                Some(sy) => {
+                                    let depth = sy - y;
+                                    let mut accum: u32 = 0;
+                                    let mut chosen = fill;
+                                    for &(material, thickness) in &bands {
+                                        if (depth as u32) < accum + thickness {
+                                            chosen = material;
+                                            break;
+                                        }
+                                        accum += thickness;
+                                    }
+                                    chosen
+                                }
+                            };
+                            out.set(x, y, z, mat);
+                        }
+                    }
+                }
+                out.try_collapse();
+                CachedOutput::Material(Arc::new(out))
+            }
+            NodeKind::Queue(_) => {
+                let primary = self.input_material(id, 0)?;
+                let fallback = self.input_material(id, 1)?;
+                let mut out: ChunkBuffer<MaterialId, 32> = ChunkBuffer::uniform(MaterialId::AIR);
+                for z in 0..CHUNK_DIM {
+                    for y in 0..CHUNK_DIM {
+                        for x in 0..CHUNK_DIM {
+                            let p = primary.get(x, y, z);
+                            let m = if p != MaterialId::AIR { p } else { fallback.get(x, y, z) };
+                            out.set(x, y, z, m);
+                        }
+                    }
+                }
+                out.try_collapse();
+                CachedOutput::Material(Arc::new(out))
+            }
+            // --- Terrain terminal ---
+            NodeKind::TerrainOutput(_) => {
+                let density = self.input_scalar(id, 0)?;
+                let material = self.input_material(id, 1)?;
+                let mut out: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
+                for z in 0..CHUNK_DIM {
+                    for y in 0..CHUNK_DIM {
+                        for x in 0..CHUNK_DIM {
+                            if density.get(x, y, z) > 0.0 {
+                                let m = material.get(x, y, z);
+                                out.set(x, y, z, Voxel {
+                                    shape: ShapeId::Cube,
+                                    rotation: voxel_core::Rotation::None,
+                                    material: m,
+                                    flags: 0,
+                                });
+                            }
+                        }
+                    }
+                }
+                out.try_collapse();
+                CachedOutput::Terrain(Arc::new(out))
+            }
             // --- Terminal ---
             NodeKind::Output(_) => CachedOutput::Scalar(self.input_scalar(id, 0)?),
         })
@@ -313,6 +422,14 @@ impl<'g> Evaluator<'g> {
             NodeKind::Output(_) => self.sample_input(id, 0, x, y, z)?,
             NodeKind::WorldPos(_) | NodeKind::DomainWarp(_) => {
                 return Err(EvalError::WrongInputType { node: id, expected: "scalar", got: "vec3" });
+            }
+            NodeKind::ConstantMaterial(_)
+            | NodeKind::Layer(_)
+            | NodeKind::Queue(_)
+            | NodeKind::TerrainOutput(_) => {
+                return Err(EvalError::WrongInputType {
+                    node: id, expected: "scalar", got: "material/terrain",
+                });
             }
         })
     }

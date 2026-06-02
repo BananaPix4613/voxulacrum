@@ -2,6 +2,7 @@
 
 use egui::Ui;
 use nodegraph_ir::{FractalType, NodeKind};
+use voxel_core::MaterialId;
 
 /// Draw the body of a node - its parameters. Returns `true` if anything
 /// was edited this frame.
@@ -37,11 +38,14 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
             changed
         }
         NodeKind::CurveMapper(p) => curve_stops_ui(ui, &mut p.stops),
+        NodeKind::ConstantMaterial(p) => material_id_ui(ui, &mut p.material, "material"),
+        NodeKind::Layer(p) => layer_bands_ui(ui, p),
         // Parameterless variants:
         NodeKind::WorldPos(_) | NodeKind::Add(_) | NodeKind::Multiply(_)
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)
         | NodeKind::Lerp(_) | NodeKind::Union(_) | NodeKind::Intersect(_)
-        | NodeKind::DensitySubtract(_) | NodeKind::Mix(_) | NodeKind::Mask(_) => {
+        | NodeKind::DensitySubtract(_) | NodeKind::Mix(_) | NodeKind::Mask(_)
+        | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) => {
             ui.weak("(no parameters)");
             false
         }
@@ -68,6 +72,45 @@ fn noise_params_ui(ui: &mut Ui, p: &mut nodegraph_ir::NoiseParams) -> bool {
                 }
             }
         });
+    changed
+}
+
+/// Inline drag-value for a `MaterialId` (just its u16). Authors can look up
+/// IDs in the preview's material color table.
+fn material_id_ui(ui: &mut Ui, id: &mut MaterialId, label: &str) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(&mut id.0).range(0..=u16::MAX))
+            .changed()
+    })
+    .inner
+}
+
+fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {
+    let mut changed = false;
+    ui.label("Bands (top → down):");
+    let mut remove: Option<usize> = None;
+    for (i, (mat, thickness)) in p.bands.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::DragValue::new(&mut mat.0).prefix("mat ")).changed();
+            changed |= ui
+                .add(egui::DragValue::new(thickness).range(1u32..=64).prefix("× "))
+                .changed();
+            if ui.small_button("✕").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        p.bands.remove(i);
+        changed = true;
+    }
+    if ui.button("+ band").clicked() {
+        p.bands.push((MaterialId(1), 1));
+        changed = true;
+    }
+    ui.separator();
+    changed |= material_id_ui(ui, &mut p.fill, "fill ");
     changed
 }
 

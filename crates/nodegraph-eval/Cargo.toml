@@ -7,6 +7,7 @@ description = "Evaluator for nodegraph-ir: turns a graph into scalar/density fie
 
 [dependencies]
 nodegraph-ir = { path = "../nodegraph-ir" }
+voxel-core = { path = "../voxel-core" }
 glam = { workspace = true }
 fastnoise-lite.workspace = true
 image.workspace = true

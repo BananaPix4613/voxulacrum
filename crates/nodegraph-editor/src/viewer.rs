@@ -38,7 +38,11 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Density, "Density Subtract", || NodeKind::DensitySubtract(DensitySubtractParams::default())),
         (NodeCategory::Density, "Mix",         || NodeKind::Mix(MixParams::default())),
         (NodeCategory::Density, "Mask",        || NodeKind::Mask(MaskParams::default())),
-        (NodeCategory::Output, "Output",       || NodeKind::Output(OutputParams::default())),
+        (NodeCategory::Material, "Constant Material", || NodeKind::ConstantMaterial(ConstantMaterialParams::default())),
+        (NodeCategory::Material, "Layer",             || NodeKind::Layer(LayerParams::default())),
+        (NodeCategory::Material, "Queue",             || NodeKind::Queue(QueueParams::default())),
+        (NodeCategory::Output, "Output",         || NodeKind::Output(OutputParams::default())),
+        (NodeCategory::Output, "Terrain Output", || NodeKind::TerrainOutput(TerrainOutputParams::default())),
     ]
 }
 
@@ -191,7 +195,8 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         ui.separator();
         for cat in [
             NodeCategory::Source, NodeCategory::Math, NodeCategory::Curves,
-            NodeCategory::Domain, NodeCategory::Density, NodeCategory::Output,
+            NodeCategory::Domain, NodeCategory::Density, NodeCategory::Material,
+            NodeCategory::Output,
         ] {
             ui.menu_button(format!("{cat:?}"), |ui| {
                 for (entry_cat, label, factory) in catalog() {

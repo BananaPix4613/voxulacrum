@@ -51,10 +51,11 @@ pub use edge::{Edge, PinRef};
 pub use error::{GraphError, GraphResult};
 pub use graph::Graph;
 pub use node::{
-    AddParams, ClampParams, ConstantParams, CurveMapperParams, DensitySubtractParams,
-    DomainWarpParams, FractalType, IntersectParams, LerpParams, MaskParams, MaxParams,
-    MinParams, MixParams, MultiplyParams, Node, NodeCategory, NodeDescriptor, NodeId,
-    NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinSpec, RemapParams,
-    SubtractParams, ThresholdParams, UnionParams, WorldPosParams,
+    AddParams, ClampParams, ConstantMaterialParams, ConstantParams, CurveMapperParams,
+    DensitySubtractParams, DomainWarpParams, FractalType, IntersectParams, LayerParams,
+    LerpParams, MaskParams, MaxParams, MinParams, MixParams, MultiplyParams, Node,
+    NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams,
+    Perlin2DParams, PinSpec, QueueParams, RemapParams, SubtractParams,
+    TerrainOutputParams, ThresholdParams, UnionParams, WorldPosParams,
 };
 pub use pin::PinType;

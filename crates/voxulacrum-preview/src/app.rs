@@ -7,8 +7,12 @@ use nodegraph_editor::{
 };
 use nodegraph_eval::{ScalarField, CHUNK_DIM};
 
+use crate::render_3d::{ChunkRenderState, OrbitCamera, RenderCallback};
 use crate::colormap::Colormap;
 use crate::runtime::Runtime;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BottomTab { Heatmap, Voxels }
 
 /// Cache key for the currently-uploaded texture; re-upload only when it changes.
 #[derive(Clone, Copy, PartialEq)]
@@ -44,12 +48,22 @@ pub struct PreviewApp {
     texture: Option<egui::TextureHandle>,
     texture_key: Option<TextureKey>,
     hover_readout: Option<(usize, usize, f32)>,
+    bottom_tab: BottomTab,
+    camera: OrbitCamera,
+    /// Cached `field_version` that drove the last 3D mesh upload
+    last_mesh_version: u64,
 }
 
 impl PreviewApp {
     /// Construct the app and load the initial graph (also seeding the editor).
-    pub fn new(dir: PathBuf) -> Result<Self, String> {
+    pub fn new(dir: PathBuf, cc: &eframe::CreationContext<'_>) -> Result<Self, String> {
         let runtime = Runtime::new(dir)?;
+        let wgpu_state = cc.wgpu_render_state.as_ref().expect("eframe wgpu backend required");
+        let chunk_renderer = ChunkRenderState::new(
+            &wgpu_state.device,
+            wgpu_state.target_format,
+        );
+        wgpu_state.renderer.write().callback_resources.insert(chunk_renderer);
         let editor = match runtime.current_graph() {
             Some(g) => EditorState::from_graph(g),
             None => EditorState::new(),
@@ -64,6 +78,9 @@ impl PreviewApp {
             texture: None,
             texture_key: None,
             hover_readout: None,
+            bottom_tab: BottomTab::Heatmap,
+            camera: OrbitCamera::default(),
+            last_mesh_version: u64::MAX, // forces first upload
         })
     }
 
@@ -89,7 +106,7 @@ impl PreviewApp {
 }
 
 impl eframe::App for PreviewApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // 1. Watcher → reload from disk if external edit landed.
         if self.runtime.poll() {
             if let Some(g) = self.runtime.current_graph() {
@@ -202,53 +219,19 @@ impl eframe::App for PreviewApp {
         // 4. Refresh the heatmap texture if any input changed.
         self.ensure_texture(ctx);
 
-        // 5. Bottom panel: heatmap with pan/zoom + hover.
-        egui::TopBottomPanel::bottom("heatmap")
-            .default_height(300.0)
+        // 5. Bottom tabbed panel: 2D Heatmap | 3D Voxels.
+        egui::TopBottomPanel::bottom("bottom")
+            .default_height(360.0)
             .resizable(true)
             .show(ctx, |ui| {
-                self.hover_readout = None;
-
-                let Some(texture) = self.texture.as_ref() else {
-                    ui.centered_and_justified(|ui| { ui.label("no field"); });
-                    return;
-                };
-
-                let area = ui.available_rect_before_wrap();
-                let response = ui.allocate_rect(area, egui::Sense::click_and_drag());
-
-                if response.dragged() {
-                    self.pan_zoom.pan += response.drag_delta();
-                }
-                if response.hovered() {
-                    let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
-                        let factor = (scroll * 0.005).exp();
-                        self.pan_zoom.zoom = (self.pan_zoom.zoom * factor).clamp(1.0, 64.0);
-                    }
-                }
-
-                let img_size = egui::vec2(CHUNK_DIM as f32, CHUNK_DIM as f32) * self.pan_zoom.zoom;
-                let img_min = area.min + self.pan_zoom.pan;
-                let img_rect = egui::Rect::from_min_size(img_min, img_size);
-
-                ui.painter_at(area).image(
-                    texture.id(),
-                    img_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-
-                if let (Some(pos), Some(field)) =
-                    (response.hover_pos(), self.runtime.field.as_ref())
-                {
-                    let rel = (pos - img_rect.min) / self.pan_zoom.zoom;
-                    let x = rel.x.floor() as i32;
-                    let z = rel.y.floor() as i32;
-                    if (0..CHUNK_DIM as i32).contains(&x) && (0..CHUNK_DIM as i32).contains(&z) {
-                        let v = field.get(x as usize, self.y_slice, z as usize);
-                        self.hover_readout = Some((x as usize, z as usize, v));
-                    }
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.bottom_tab, BottomTab::Heatmap, "2D Heatmap");
+                    ui.selectable_value(&mut self.bottom_tab, BottomTab::Voxels, "3D Voxels");
+                });
+                ui.separator();
+                match self.bottom_tab {
+                    BottomTab::Heatmap => self.show_heatmap(ui, ctx),
+                    BottomTab::Voxels => self.show_voxels(ui, frame),
                 }
             });
 
@@ -289,6 +272,114 @@ impl eframe::App for PreviewApp {
             let g = self.editor.build_graph();
             self.runtime.replace_graph(g);
         }
+    }
+}
+
+impl PreviewApp {
+    /// 2D heatmap body (left tab in the bottom panel).
+    fn show_heatmap(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.hover_readout = None;
+
+        let Some(texture) = self.texture.as_ref() else {
+            ui.centered_and_justified(|ui| { ui.label("no field"); });
+            return;
+        };
+
+        let area = ui.available_rect_before_wrap();
+        let response = ui.allocate_rect(area, egui::Sense::click_and_drag());
+
+        if response.dragged() {
+            self.pan_zoom.pan += response.drag_delta();
+        }
+        if response.hovered() {
+            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                let factor = (scroll * 0.005).exp();
+                self.pan_zoom.zoom = (self.pan_zoom.zoom * factor).clamp(1.0, 64.0);
+            }
+        }
+
+        let img_size = egui::vec2(CHUNK_DIM as f32, CHUNK_DIM as f32) * self.pan_zoom.zoom;
+        let img_min = area.min + self.pan_zoom.pan;
+        let img_rect = egui::Rect::from_min_size(img_min, img_size);
+
+        ui.painter_at(area).image(
+            texture.id(),
+            img_rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+
+        if let (Some(pos), Some(field)) =
+            (response.hover_pos(), self.runtime.field.as_ref())
+        {
+            let rel = (pos - img_rect.min) / self.pan_zoom.zoom;
+            let x = rel.x.floor() as i32;
+            let z = rel.y.floor() as i32;
+            if (0..CHUNK_DIM as i32).contains(&x) && (0..CHUNK_DIM as i32).contains(&z) {
+                let v = field.get(x as usize, self.y_slice, z as usize);
+                self.hover_readout = Some((x as usize, z as usize, v));
+            }
+        }
+    }
+
+    /// 3D voxel body (right tab in the bottom panel). Uploads the chunk mesh
+    /// when `field_version` advances; schedules an egui-wgpu paint callback
+    /// for the actual draw.
+    fn show_voxels(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let Some(wgpu_state) = frame.wgpu_render_state() else {
+            ui.centered_and_justified(|ui| {
+                ui.colored_label(egui::Color32::LIGHT_RED, "wgpu backend not available");
+            });
+            return;
+        };
+
+        // 1. (Re)upload the mesh when the field has been refreshed.
+        if let Some(terrain) = self.runtime.terrain() {
+            if self.last_mesh_version != self.runtime.field_version {
+                let mut renderer = wgpu_state.renderer.write();
+                if let Some(state) = renderer
+                    .callback_resources
+                    .get_mut::<ChunkRenderState>()
+                {
+                    state.update_mesh(
+                        &wgpu_state.device,
+                        terrain,
+                        self.runtime.field_version,
+                    );
+                }
+                self.last_mesh_version = self.runtime.field_version;
+            }
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.label("Add a Terrain Output node to render 3D voxels.");
+            });
+            return;
+        }
+
+        // 2. Allocate the viewport rect; handle drag-rotate + scroll-zoom.
+        let (rect, response) =
+            ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+        if response.dragged() {
+            let d = response.drag_delta();
+            self.camera.rotate(d.x, d.y);
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                self.camera.zoom(scroll);
+            }
+        }
+
+        // 3. Schedule the paint callback for this frame.
+        let cb = egui_wgpu::Callback::new_paint_callback(
+            rect,
+            RenderCallback {
+                camera: self.camera,
+                size: [rect.width().max(1.0) as u32, rect.height().max(1.0) as u32],
+            },
+        );
+        ui.painter().add(cb);
     }
 }
 

@@ -10,8 +10,8 @@
           "type": "WorldPos"
         },
         "position": [
-          -1437.559,
-          7.725331
+          -882.7529,
+          -16.051846
         ]
       },
       "version": 1
@@ -21,12 +21,30 @@
         "kind": {
           "type": "DomainWarp",
           "seed": 11,
-          "frequency": 0.01,
-          "amplitude": 50.0
+          "frequency": 0.005,
+          "amplitude": 6.0
         },
         "position": [
-          -1246.7855,
-          7.048931
+          -682.46295,
+          -17.664728
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Perlin3D",
+          "seed": 1,
+          "frequency": 0.045,
+          "octaves": 4,
+          "lacunarity": 2.0,
+          "gain": 0.5,
+          "fractal_type": "FBm"
+        },
+        "position": [
+          -303.20758,
+          -17.069342
         ]
       },
       "version": 1
@@ -35,16 +53,16 @@
       "value": {
         "kind": {
           "type": "Perlin2D",
-          "seed": 1,
-          "frequency": 0.005,
+          "seed": 2,
+          "frequency": 0.008,
           "octaves": 5,
           "lacunarity": 2.0,
           "gain": 0.5,
           "fractal_type": "FBm"
         },
         "position": [
-          -884.28906,
-          -75.4463
+          -749.9286,
+          -116.83986
         ]
       },
       "version": 1
@@ -55,62 +73,26 @@
           "type": "CurveMapper",
           "stops": [
             [
-              -0.3,
-              -0.1
+              -1.0,
+              -0.8
             ],
             [
-              0.1,
-              0.1
+              -0.2,
+              -0.3
             ],
             [
-              0.6,
-              0.6
+              0.2,
+              0.3
             ],
             [
               1.0,
-              0.9
+              0.8
             ]
           ]
         },
         "position": [
-          -293.43237,
-          -73.56312
-        ]
-      },
-      "version": 1
-    },
-    {
-      "value": {
-        "kind": {
-          "type": "Perlin2D",
-          "seed": 2,
-          "frequency": 0.02,
-          "octaves": 4,
-          "lacunarity": 2.0,
-          "gain": 0.5,
-          "fractal_type": "FBm"
-        },
-        "position": [
-          -307.47385,
-          17.606222
-        ]
-      },
-      "version": 1
-    },
-    {
-      "value": {
-        "kind": {
-          "type": "Perlin2D",
-          "seed": 3,
-          "frequency": 0.04,
-          "octaves": 4,
-          "lacunarity": 2.0,
-          "gain": 0.5,
-          "fractal_type": "Ridged"
-        },
-        "position": [
-          -528.8879,
-          114.76554
+          -146.07312,
+          -117.553925
         ]
       },
       "version": 1
@@ -119,11 +101,11 @@
       "value": {
         "kind": {
           "type": "Constant",
-          "value": 0.35
+          "value": 0.5
         },
         "position": [
-          -104.748215,
-          227.65724
+          134.938,
+          80.213936
         ]
       },
       "version": 1
@@ -134,8 +116,8 @@
           "type": "Multiply"
         },
         "position": [
-          80.60564,
-          117.48612
+          335.148,
+          -15.218085
         ]
       },
       "version": 1
@@ -146,20 +128,8 @@
           "type": "Add"
         },
         "position": [
-          325.84076,
-          19.04459
-        ]
-      },
-      "version": 1
-    },
-    {
-      "value": {
-        "kind": {
-          "type": "Add"
-        },
-        "position": [
-          577.75195,
-          20.048176
+          586.47675,
+          -132.66228
         ]
       },
       "version": 1
@@ -171,8 +141,47 @@
           "label": "terrain"
         },
         "position": [
-          821.975,
-          23.693377
+          960.41223,
+          -58.86657
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Layer",
+          "bands": [
+            [
+              6,
+              1
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              1,
+              8
+            ]
+          ],
+          "fill": 2
+        },
+        "position": [
+          10.741979,
+          -234.91005
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "TerrainOutput"
+        },
+        "position": [
+          960.4126,
+          -250.78778
         ]
       },
       "version": 1
@@ -189,48 +198,16 @@
       },
       "to": {
         "node": {
-          "idx": 5,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
           "idx": 3,
           "version": 1
         },
         "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 4,
-          "version": 1
-        },
-        "pin": 0
       }
     },
     {
       "from": {
-        "node": {
-          "idx": 7,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
         "node": {
           "idx": 8,
-          "version": 1
-        },
-        "pin": 1
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 10,
           "version": 1
         },
         "pin": 0
@@ -238,70 +215,6 @@
       "to": {
         "node": {
           "idx": 11,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 5,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 9,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 8,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 9,
-          "version": 1
-        },
-        "pin": 1
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 4,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 10,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 2,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 6,
           "version": 1
         },
         "pin": 0
@@ -326,6 +239,86 @@
     {
       "from": {
         "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 9,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 10,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 10,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 11,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
           "idx": 2,
           "version": 1
         },
@@ -333,7 +326,7 @@
       },
       "to": {
         "node": {
-          "idx": 3,
+          "idx": 4,
           "version": 1
         },
         "pin": 0
@@ -349,6 +342,22 @@
       },
       "to": {
         "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
           "idx": 8,
           "version": 1
         },
@@ -358,17 +367,17 @@
     {
       "from": {
         "node": {
-          "idx": 9,
+          "idx": 3,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 10,
+          "idx": 7,
           "version": 1
         },
-        "pin": 1
+        "pin": 0
       }
     }
   ]

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nodegraph_ir::NodeId;
+use voxel_core::{ChunkBuffer, MaterialId, Voxel};
 
 use crate::field::{ScalarField, Vec3Field};
 
@@ -12,32 +13,42 @@ use crate::field::{ScalarField, Vec3Field};
 pub enum CachedOutput {
     /// A scalar / density field.
     Scalar(Arc<ScalarField>),
-    /// A vector field (e.g. `WorldPos`).
+    /// A vector field (e.g. `WorldPos`, `DomainWarp`).
     Vec3(Arc<Vec3Field>),
+    /// A material field - palette-compressed via `voxel-core`.
+    Material(Arc<ChunkBuffer<MaterialId, 32>>),
+    /// A terrain field (the `TerrainOutput` result).
+    Terrain(Arc<ChunkBuffer<Voxel, 32>>),
 }
 
 impl CachedOutput {
     /// Borrow as a scalar field, if it is one.
     pub fn as_scalar(&self) -> Option<&ScalarField> {
-        match self {
-            CachedOutput::Scalar(f) => Some(f),
-            CachedOutput::Vec3(_) => None,
-        }
+        if let Self::Scalar(f) = self { Some(f) } else { None }
     }
 
     /// Borrow as a vector field, if it is one.
     pub fn as_vec3(&self) -> Option<&Vec3Field> {
-        match self {
-            CachedOutput::Vec3(f) => Some(f),
-            CachedOutput::Scalar(_) => None,
-        }
+        if let Self::Vec3(f) = self { Some(f) } else { None }
+    }
+
+    /// Borrow as a material, if it is one.
+    pub fn as_material(&self) -> Option<&ChunkBuffer<MaterialId, 32>> {
+        if let Self::Material(f) = self { Some(f) } else { None }
+    }
+
+    /// Borrow as a terrain, if it is one.
+    pub fn as_terrain(&self) -> Option<&ChunkBuffer<Voxel, 32>> {
+        if let Self::Terrain(f) = self { Some(f) } else { None }
     }
 
     /// Static name for diagnostics.
     pub fn kind_name(&self) -> &'static str {
         match self {
-            CachedOutput::Scalar(_) => "scalar",
-            CachedOutput::Vec3(_) => "vec3",
+            Self::Scalar(_)   => "scalar",
+            Self::Vec3(_)     => "vec3",
+            Self::Material(_) => "material",
+            Self::Terrain(_)  => "terrain",
         }
     }
 }

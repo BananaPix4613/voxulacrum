@@ -205,6 +205,46 @@ impl Default for DomainWarpParams {
     fn default() -> Self { Self { seed: 0, frequency: 0.02, amplitude: 8.0 } }
 }
 
+/// Parameters for [`NodeKind::ConstantMaterial`].
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ConstantMaterialParams {
+    /// The material emitted at every position.
+    pub material: voxel_core::MaterialId,
+}
+
+impl Default for ConstantMaterialParams {
+    fn default() -> Self {
+        Self { material: voxel_core::MaterialId(1) } // 1 = stone-ish
+    }
+}
+
+/// Parameters for [`NodeKind::Layer`]: cake-style top-down material stacking.
+///
+/// For each `(x, z)` column the input density determines the surface Y; cells
+/// above it emit `AIR`. Cells at or below the surface walk `bands` top-down.
+/// accumulating thickness; the band whose range covers `depth = surface_y - y`
+/// wins. Past the last band, every remaining cell uses `fill`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct LayerParams {
+    /// Top-down `(material, thickness_in_voxels)` pairs.
+    pub bands: Vec<(voxel_core::MaterialId, u32)>,
+    /// Material applied below the last band.
+    pub fill: voxel_core::MaterialId,
+}
+
+impl Default for LayerParams {
+    fn default() -> Self {
+        // Grass on top, dirt under, stone fill below.
+        Self {
+            bands: vec![
+                (voxel_core::MaterialId(6), 1), // grass soil
+                (voxel_core::MaterialId(3), 3), // soil
+            ],
+            fill: voxel_core::MaterialId(1), // limestone
+        }
+    }
+}
+
 // Empty param structs for parameterless variants (kept for shape uniformity
 // and future-proof param-adding). All derive `Default`.
 
@@ -228,6 +268,11 @@ impl Default for DomainWarpParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct MixParams {}
 /// Parameters for [`NodeKind::Mask`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct MaskParams {}
+/// Parameters for [`NodeKind::Queue`] (no parameters yet - 2-ary fall-through).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct QueueParams {}
+
+/// Parameters for [`NodeKind::TerrainOutput`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct TerrainOutputParams {}
 
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
@@ -283,7 +328,18 @@ pub enum NodeKind {
     Mix(MixParams),
     /// `signal * clamp(mask, 0, 1)`.
     Mask(MaskParams),
+    // --- Material providers ---
+    /// Uniform-material source.
+    ConstantMaterial(ConstantMaterialParams),
+    /// Cake-style top-down material stacking, surface-relative.
+    Layer(LayerParams),
+    /// 2-ary priority chain; `primary`'s value wins unless it's `AIR`,
+    /// in which case `fallback` is used.
+    Queue(QueueParams),
     // --- Terminal ---
+    /// Terrain terminal: consumes a density + a material field, produces
+    /// a `ChunkBuffer<Voxel>` of cubes.
+    TerrainOutput(TerrainOutputParams),
     /// Terminal node; consumes one density input.
     Output(OutputParams),
 }
@@ -322,6 +378,16 @@ const DENSITY_3IN_MIX: &[PinSpec] = &[
 const DENSITY_MASK_IN: &[PinSpec] = &[
     PinSpec { name: "signal", ty: PinType::Density, required: true },
     PinSpec { name: "mask",   ty: PinType::Density, required: true },
+];
+const MATERIAL_OUT: &[PinSpec] =
+    &[PinSpec { name: "material", ty: PinType::Material, required: false }];
+const QUEUE_IN: &[PinSpec] = &[
+    PinSpec { name: "primary",  ty: PinType::Material, required: true },
+    PinSpec { name: "fallback", ty: PinType::Material, required: true },
+];
+const TERRAIN_OUT_IN: &[PinSpec] = &[
+    PinSpec { name: "density",  ty: PinType::Density,  required: true },
+    PinSpec { name: "material", ty: PinType::Material, required: true },
 ];
 
 impl NodeKind {
@@ -501,6 +567,34 @@ impl NodeKind {
                 inputs: DENSITY_IN,
                 outputs: NO_PINS
             },
+            NodeKind::ConstantMaterial(_) => NodeDescriptor {
+                display_name: "Constant Material",
+                category: NodeCategory::Material,
+                color: [0xe0, 0x4c, 0x4c],
+                inputs: NO_PINS,
+                outputs: MATERIAL_OUT,
+            },
+            NodeKind::Layer(_) => NodeDescriptor {
+                display_name: "Layer",
+                category: NodeCategory::Material,
+                color: [0xe0, 0x4c, 0x4c],
+                inputs: DENSITY_IN,
+                outputs: MATERIAL_OUT,
+            },
+            NodeKind::Queue(_) => NodeDescriptor {
+                display_name: "Queue",
+                category: NodeCategory::Material,
+                color: [0xe0, 0x4c, 0x4c],
+                inputs: QUEUE_IN,
+                outputs: MATERIAL_OUT,
+            },
+            NodeKind::TerrainOutput(_) => NodeDescriptor {
+                display_name: "Terrain Output",
+                category: NodeCategory::Output,
+                color: [0xe0, 0x4c, 0x4c],
+                inputs: TERRAIN_OUT_IN,
+                outputs: NO_PINS,
+            },
         }
     }
 
@@ -530,6 +624,10 @@ impl NodeKind {
             NodeKind::Mix(_)              => "Mix",
             NodeKind::Mask(_)             => "Mask",
             NodeKind::Output(_)           => "Output",
+            NodeKind::ConstantMaterial(_) => "ConstantMaterial",
+            NodeKind::Layer(_)            => "Layer",
+            NodeKind::Queue(_)            => "Queue",
+            NodeKind::TerrainOutput(_)    => "TerrainOutput",
         }
     }
 }

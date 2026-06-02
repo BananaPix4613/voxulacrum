@@ -8,6 +8,8 @@
 mod app;
 mod colormap;
 mod runtime;
+mod material_colors;
+mod render_3d;
 
 use std::path::PathBuf;
 
@@ -33,8 +35,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "voxulacrum-preview",
         options,
-        Box::new(move |_cc| {
-            let app = PreviewApp::new(dir.clone())
+        Box::new(move |cc| {
+            let app = PreviewApp::new(dir.clone(), cc)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
             Ok(Box::new(app))
         }),

@@ -14,9 +14,14 @@ nodegraph-ir = { path = "../nodegraph-ir" }
 nodegraph-eval = { path = "../nodegraph-eval" }
 nodegraph-hotreload = { path = "../nodegraph-hotreload" }
 nodegraph-editor = { path = "../nodegraph-editor" }
+voxel-core = { path = "../voxel-core" }
 eframe.workspace = true
 egui.workspace = true
+egui-wgpu.workspace = true
 egui-snarl.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
 glam = { workspace = true }
 log.workspace = true
 env_logger.workspace = true
+pollster.workspace = true

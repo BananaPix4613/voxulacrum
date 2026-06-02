@@ -8,6 +8,7 @@ description = "File-watcher for nodegraph JSON graphs; reloads + re-evaluates on
 [dependencies]
 nodegraph-ir = { path = "../nodegraph-ir" }
 nodegraph-eval = { path = "../nodegraph-eval" }
+voxel-core = { path = "../voxel-core" }
 notify.workspace = true
 log.workspace = true
 env_logger.workspace = true
