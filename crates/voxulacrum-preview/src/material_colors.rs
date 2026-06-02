@@ -17,6 +17,8 @@ pub fn material_color(id: MaterialId) -> [f32; 3] {
         6  => [0.30, 0.55, 0.18], // Grass Soil
         7  => [0.20, 0.35, 0.60], // Water
         8  => [0.52, 0.49, 0.45], // Gravel
+        9  => [0.45, 0.30, 0.15], // Wood
+        10 => [0.18, 0.45, 0.16], // Leaves
         _  => [1.00, 0.00, 1.00], // unknown — magenta to flag
     }
 }

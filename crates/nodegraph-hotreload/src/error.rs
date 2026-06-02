@@ -12,6 +12,10 @@ pub enum HotReloadError {
     /// I/O failure (e.g. watched dir does not exist).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    
+    /// Prefab JSON parse failure.
+    #[error("prefab json: {0}")]
+    Serde(#[from] serde_json::Error),
 }
 
 /// Result alias for hot-reload operations.

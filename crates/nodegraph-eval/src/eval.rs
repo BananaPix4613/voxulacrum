@@ -10,6 +10,7 @@ use crate::cache::{CachedOutput, EvalCache};
 use crate::context::EvalContext;
 use crate::error::{EvalError, EvalResult};
 use crate::field::{ScalarField, Vec3Field, CHUNK_DIM};
+use crate::scatter::ScatterPoint;
 
 /// Evaluates a graph for one chunk. Holds a chunk-scoped CSE cache.
 pub struct Evaluator<'g> {
@@ -148,6 +149,19 @@ impl<'g> Evaluator<'g> {
             CachedOutput::Terrain(f) => Ok(f.clone()),
             other => Err(EvalError::WrongInputType {
                 node, expected: "terrain", got: other.kind_name(),
+            }),
+        }
+    }
+
+    fn input_positions(&self, node: NodeId, pin: u16) -> EvalResult<Arc<Vec<ScatterPoint>>> {
+        let edge = self.graph.edges.iter()
+            .find(|e| e.to.node == node && e.to.pin == pin)
+            .ok_or(EvalError::MissingInput { node, pin })?;
+        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
+        match src {
+            CachedOutput::Positions(p) => Ok(p.clone()),
+            other => Err(EvalError::WrongInputType {
+                node, expected: "positions", got: other.kind_name(),
             }),
         }
     }
@@ -396,6 +410,30 @@ impl<'g> Evaluator<'g> {
                 let refined = crate::slope_refine::refine_chunk(&input);
                 CachedOutput::Terrain(Arc::new(refined))
             }
+            // --- Positions / Scanners / Props ---
+            NodeKind::JitteredGrid(p) => {
+                CachedOutput::Positions(Arc::new(crate::scatter::jittered_grid(&self.ctx, p)))
+            }
+            NodeKind::PoissonDisk(p) => {
+                CachedOutput::Positions(Arc::new(crate::scatter::poisson_disk(&self.ctx, p)))
+            }
+            NodeKind::FindFlat(p) => {
+                let terrain = self.input_terrain(id, 0)?;
+                let points = self.input_positions(id, 1)?;
+                CachedOutput::Positions(Arc::new(crate::scan::find_flat(&terrain, &points, p)))
+            }
+            NodeKind::PlaceTree(p) => {
+                let terrain = self.input_terrain(id, 0)?;
+                let points = self.input_positions(id, 1)?;
+                CachedOutput::Terrain(Arc::new(crate::place::place_trees(&terrain, &points, p)))
+            }
+            NodeKind::PlacePrefab(p) => {
+                let terrain = self.input_terrain(id, 0)?;
+                let points = self.input_positions(id, 1)?;
+                let template = p.template.as_ref()
+                    .ok_or(EvalError::UnresolvedPrefab { node: id })?;
+                CachedOutput::Terrain(Arc::new(crate::place::place_prefabs(&terrain, &points, template)))
+            }
             // --- Terrain terminal ---
             NodeKind::TerrainOutput(_) => {
                 CachedOutput::Terrain(self.input_terrain(id, 0)?)
@@ -450,9 +488,14 @@ impl<'g> Evaluator<'g> {
             | NodeKind::Queue(_)
             | NodeKind::BuildTerrain(_)
             | NodeKind::SlopeRefiner(_)
-            | NodeKind::TerrainOutput(_) => {
+            | NodeKind::TerrainOutput(_)
+            | NodeKind::JitteredGrid(_)
+            | NodeKind::PoissonDisk(_)
+            | NodeKind::FindFlat(_)
+            | NodeKind::PlaceTree(_)
+            | NodeKind::PlacePrefab(_) => {
                 return Err(EvalError::WrongInputType {
-                    node: id, expected: "scalar", got: "material/terrain",
+                    node: id, expected: "scalar", got: "material/terrain/positions",
                 });
             }
         })

@@ -43,7 +43,12 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Material, "Queue",             || NodeKind::Queue(QueueParams::default())),
         (NodeCategory::Material, "Build Terrain", || NodeKind::BuildTerrain(BuildTerrainParams::default())),
         (NodeCategory::Slope, "Slope Refiner", || NodeKind::SlopeRefiner(SlopeRefinerParams::default())),
-        (NodeCategory::Output, "Output",         || NodeKind::Output(OutputParams::default())),
+        (NodeCategory::Positions, "Jittered Grid", || NodeKind::JitteredGrid(JitteredGridParams::default())),
+        (NodeCategory::Positions, "Poisson Disk", || NodeKind::PoissonDisk(PoissonDiskParams::default())),
+        (NodeCategory::Scanners, "Find Flat",  || NodeKind::FindFlat(FindFlatParams::default())),
+        (NodeCategory::Props, "Place Tree",    || NodeKind::PlaceTree(PlaceTreeParams::default())),
+        (NodeCategory::Props, "Place Prefab",  || NodeKind::PlacePrefab(PlacePrefabParams::default())),
+        (NodeCategory::Output, "Output",       || NodeKind::Output(OutputParams::default())),
         (NodeCategory::Output, "Terrain Output", || NodeKind::TerrainOutput(TerrainOutputParams::default())),
     ]
 }
@@ -198,7 +203,8 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         for cat in [
             NodeCategory::Source, NodeCategory::Math, NodeCategory::Curves,
             NodeCategory::Domain, NodeCategory::Density, NodeCategory::Material,
-            NodeCategory::Output,
+            NodeCategory::Positions, NodeCategory::Scanners, NodeCategory::Props,
+            NodeCategory::Slope, NodeCategory::Biome, NodeCategory::Output,
         ] {
             ui.menu_button(format!("{cat:?}"), |ui| {
                 for (entry_cat, label, factory) in catalog() {

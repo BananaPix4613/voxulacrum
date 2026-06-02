@@ -38,6 +38,14 @@ pub enum EvalError {
         got: &'static str,
     },
 
+    /// A `PlacePrefab` node was evaluated without a resolved template (the
+    /// hot-reload layer failed to load its prefab JSON).
+    #[error("node {node:?} has an unresolved prefab template")]
+    UnresolvedPrefab {
+        /// The offending node.
+        node: NodeId,
+    },
+
     /// PNG encoding failed.
     #[error("image write failed: {0}")]
     Image(#[from] image::ImageError),

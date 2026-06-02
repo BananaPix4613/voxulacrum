@@ -43,4 +43,34 @@ impl EvalContext {
         h ^= h >> 31;
         h as i32
     }
+
+    /// Per-chunk stochastic seed: folds chunk coords into the seed so each
+    /// chunk scatters independently. Used by `PoissonDisk` (per-chunk set).
+    pub fn scatter_seed(&self, node_local_seed: u32) -> u64 {
+        let mut h = self.world_seed;
+        h = mix64(h ^ (node_local_seed as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        h = mix64(h ^ (self.chunk.x as i64 as u64).wrapping_mul(0xD1B54A32D192ED03));
+        h = mix64(h ^ (self.chunk.z as i64 as u64).wrapping_mul(0xABC98388FB8FAC03));
+        h
+    }
+
+    /// World-absolute grid-cell seed, independent of which chunk evaluates it.
+    /// Two chunks sharing a border cell derive the identical seed, so
+    /// `JitteredGrid` scatter is seamless across chunk boundaries.
+    pub fn world_cell_seed(&self, node_local_seed: u32, cell_x: i64, cell_z: i64) -> u64 {
+        let mut h = self.world_seed;
+        h = mix64(h ^ (node_local_seed as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        h = mix64(h ^ (cell_x as u64).wrapping_mul(0xD1B54A32D192ED03));
+        h = mix64(h ^ (cell_z as u64).wrapping_mul(0xABC98388FB8FAC03));
+        h
+    }
+}
+
+/// SplitMix64 finalizer used to derive scatter seeds.
+#[inline]
+fn mix64(z: u64) -> u64 {
+    let mut z = z.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
 }

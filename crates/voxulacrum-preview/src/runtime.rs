@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use glam::IVec3;
 use nodegraph_eval::{CachedOutput, EvalContext, Evaluator, ScalarField};
-use nodegraph_hotreload::{bootstrap_example_graph, GraphWatcher};
+use nodegraph_hotreload::{bootstrap_example_graph, resolve_prefabs, GraphWatcher};
 use nodegraph_ir::{Graph, NodeKind};
 use voxel_core::{ChunkBuffer, Voxel};
 
@@ -85,6 +85,15 @@ impl Runtime {
         &self.graph_path
     }
 
+    /// Sibling `prefabs/` dir next to the watched `graphs/` dir.
+    fn prefab_dir(&self) -> PathBuf {
+        self.graph_path
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("prefabs"))
+            .unwrap_or_else(|| PathBuf::from("assets/prefabs"))
+    }
+
     /// The most recently successfully-evaluated graph, if any. The editor
     /// reads this once at startup to populate its initial Snarl.
     pub fn current_graph(&self) -> Option<&Graph> {
@@ -98,8 +107,13 @@ impl Runtime {
 
     /// Replace the active graph in-memory (no disk read), re-evaluate, and
     /// bump `field_version`. Used by the editor to push live edits.
-    pub fn replace_graph(&mut self, graph: Graph) {
+    pub fn replace_graph(&mut self, mut graph: Graph) {
         let started = Instant::now();
+        if let Err(e) = resolve_prefabs(&mut graph, &self.prefab_dir()) {
+            self.error = Some(e.to_string());
+            self.last_eval_ms = started.elapsed().as_secs_f32() * 1000.0;
+            return;
+        }
         match Self::evaluate_graph(&graph) {
             Ok(evaluated) => self.apply_evaluation(Some(graph), evaluated),
             Err(e) => self.error = Some(e),
@@ -148,7 +162,8 @@ impl Runtime {
 
     fn try_reload(&self) -> Result<(Graph, EvaluatedGraph), String> {
         let text = std::fs::read_to_string(&self.graph_path).map_err(|e| e.to_string())?;
-        let graph = Graph::from_json(&text).map_err(|e| e.to_string())?;
+        let mut graph = Graph::from_json(&text).map_err(|e| e.to_string())?;
+        resolve_prefabs(&mut graph, &self.prefab_dir()).map_err(|e| e.to_string())?;
         let evaluated = Self::evaluate_graph(&graph)?;
         Ok((graph, evaluated))
     }

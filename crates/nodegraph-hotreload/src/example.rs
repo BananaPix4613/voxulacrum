@@ -7,7 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams, DomainWarpParams, FractalType, Graph, LayerParams, MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef, SlopeRefinerParams, TerrainOutputParams, WorldPosParams};
+use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams,
+                   DomainWarpParams, FindFlatParams, FractalType, Graph, JitteredGridParams, LayerParams,
+                   MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef,
+                   PlaceTreeParams, SlopeRefinerParams, TerrainOutputParams, WorldPosParams};
 use voxel_core::MaterialId;
 
 use crate::error::HotReloadResult;
@@ -127,9 +130,39 @@ pub fn build_example_graph() -> Graph {
     g.connect(PinRef::new(build, 0), PinRef::new(refiner, 0))
         .expect("build -> refiner.terrain");
 
+    // --- Phase-10 forest tail: scatter → find flat grass → place trees ----
+    let scatter = g.add_node(NodeKind::JitteredGrid(JitteredGridParams {
+        seed: 7,
+        cell_size: 6.0,
+        jitter: 0.6,
+        density: 0.5,
+    }));
+
+    let find = g.add_node(NodeKind::FindFlat(FindFlatParams {
+        max_step: 1,
+        on_materials: vec![MaterialId(6)], // grass-soil surfaces only
+    }));
+    g.connect(PinRef::new(refiner, 0), PinRef::new(find, 0))
+        .expect("refiner -> find.terrain");
+    g.connect(PinRef::new(scatter, 0), PinRef::new(find, 1))
+        .expect("scatter -> find.points");
+
+    let trees = g.add_node(NodeKind::PlaceTree(PlaceTreeParams {
+        seed: 13,
+        trunk_min: 4,
+        trunk_max: 6,
+        canopy_radius: 3,
+        trunk_material: MaterialId(9),  // Wood
+        leaf_material: MaterialId(10),  // Leaves
+    }));
+    g.connect(PinRef::new(refiner, 0), PinRef::new(trees, 0))
+        .expect("refiner -> trees.terrain");
+    g.connect(PinRef::new(find, 0), PinRef::new(trees, 1))
+        .expect("find -> trees.points");
+
     let terrain = g.add_node(NodeKind::TerrainOutput(TerrainOutputParams::default()));
-    g.connect(PinRef::new(refiner, 0), PinRef::new(terrain, 0))
-        .expect("refiner -> terrain.terrain");
+    g.connect(PinRef::new(trees, 0), PinRef::new(terrain, 0))
+        .expect("trees -> terrain.terrain");
 
     g
 }

@@ -7,6 +7,7 @@ use nodegraph_ir::NodeId;
 use voxel_core::{ChunkBuffer, MaterialId, Voxel};
 
 use crate::field::{ScalarField, Vec3Field};
+use crate::scatter::ScatterPoint;
 
 /// A computed node output. Shared via `Arc` so cache reads are cheap clones.
 #[derive(Clone)]
@@ -19,6 +20,8 @@ pub enum CachedOutput {
     Material(Arc<ChunkBuffer<MaterialId, 32>>),
     /// A terrain field (the `TerrainOutput` result).
     Terrain(Arc<ChunkBuffer<Voxel, 32>>),
+    /// A scattered point set (for prop placement).
+    Positions(Arc<Vec<ScatterPoint>>),
 }
 
 impl CachedOutput {
@@ -41,6 +44,11 @@ impl CachedOutput {
     pub fn as_terrain(&self) -> Option<&ChunkBuffer<Voxel, 32>> {
         if let Self::Terrain(f) = self { Some(f) } else { None }
     }
+    
+    /// Borrow as a point set, if it is one.
+    pub fn as_positions(&self) -> Option<&Vec<ScatterPoint>> {
+        if let Self::Positions(p) = self { Some(p) } else { None }
+    }
 
     /// Static name for diagnostics.
     pub fn kind_name(&self) -> &'static str {
@@ -49,6 +57,7 @@ impl CachedOutput {
             Self::Vec3(_)     => "vec3",
             Self::Material(_) => "material",
             Self::Terrain(_)  => "terrain",
+            Self::Positions(_) => "positions",
         }
     }
 }

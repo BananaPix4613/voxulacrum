@@ -19,8 +19,10 @@
 
 mod error;
 mod example;
+mod prefab;
 mod watcher;
 
 pub use error::{HotReloadError, HotReloadResult};
 pub use example::{bootstrap_example_graph, build_example_graph};
+pub use prefab::{load_prefab, resolve_prefabs};
 pub use watcher::GraphWatcher;

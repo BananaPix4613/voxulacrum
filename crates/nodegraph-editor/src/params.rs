@@ -40,6 +40,44 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
         NodeKind::CurveMapper(p) => curve_stops_ui(ui, &mut p.stops),
         NodeKind::ConstantMaterial(p) => material_id_ui(ui, &mut p.material, "material"),
         NodeKind::Layer(p) => layer_bands_ui(ui, p),
+        NodeKind::JitteredGrid(p) => {
+            let mut changed = false;
+            changed |= ui.add(egui::DragValue::new(&mut p.seed).prefix("seed ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut p.cell_size).speed(0.1).range(0.5..=64.0).prefix("cell ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut p.jitter).speed(0.02).range(0.0..=1.0).prefix("jitter ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut p.density).speed(0.02).range(0.0..=1.0).prefix("density ")).changed();
+            changed
+        }
+        NodeKind::PoissonDisk(p) => {
+            let mut changed = false;
+            changed |= ui.add(egui::DragValue::new(&mut p.seed).prefix("seed ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut p.radius).speed(0.1).range(0.5..=64.0).prefix("radius ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut p.k).range(1..=64).prefix("k ")).changed();
+            changed
+        }
+        NodeKind::FindFlat(p) => {
+            let mut changed = ui.add(egui::DragValue::new(&mut p.max_step).range(0..=16).prefix("max_step ")).changed();
+            changed |= material_list_ui(ui, &mut p.on_materials);
+            changed
+        }
+        NodeKind::PlaceTree(p) => {
+            let mut changed = false;
+            changed |= ui.add(egui::DragValue::new(&mut p.seed).prefix("seed ")).changed();
+            ui.horizontal(|ui| {
+                changed |= ui.add(egui::DragValue::new(&mut p.trunk_min).range(1..=32).prefix("trunk≥ ")).changed();
+                changed |= ui.add(egui::DragValue::new(&mut p.trunk_max).range(1..=32).prefix("trunk≤ ")).changed();
+            });
+            changed |= ui.add(egui::DragValue::new(&mut p.canopy_radius).range(1..=8).prefix("canopy ")).changed();
+            changed |= material_id_ui(ui, &mut p.trunk_material, "trunk");
+            changed |= material_id_ui(ui, &mut p.leaf_material, "leaf");
+            changed
+        }
+        NodeKind::PlacePrefab(p) => {
+            ui.horizontal(|ui| {
+                ui.label("prefab");
+                ui.text_edit_singleline(&mut p.prefab)
+            }).inner.changed()
+        }
         // Parameterless variants:
         NodeKind::WorldPos(_) | NodeKind::Add(_) | NodeKind::Multiply(_)
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)
@@ -84,6 +122,22 @@ fn material_id_ui(ui: &mut Ui, id: &mut MaterialId, label: &str) -> bool {
             .changed()
     })
     .inner
+}
+
+/// Editor for a `Vec<MaterialId>` (the FindFlat allow-list). Empty = any.
+fn material_list_ui(ui: &mut Ui, mats: &mut Vec<MaterialId>) -> bool {
+    let mut changed = false;
+    ui.label("on materials (empty = any):");
+    let mut remove: Option<usize> = None;
+    for (i, m) in mats.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            changed |= ui.add(egui::DragValue::new(&mut m.0).prefix("mat ")).changed();
+            if ui.small_button("✕").clicked() { remove = Some(i); }
+        });
+    }
+    if let Some(i) = remove { mats.remove(i); changed = true; }
+    if ui.button("+ material").clicked() { mats.push(MaterialId(6)); changed = true; }
+    changed
 }
 
 fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {

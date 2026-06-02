@@ -11,10 +11,11 @@
 //!
 //! ## What this crate does *not* do
 //!
-//! It does not evaluate graphs (that is the evaluator crate) and does not
-//! depend on `voxel-core`. [`PinType::Terrain`] is a bare tag here; no
-//! chunk buffer is referenced. The IR is purely structure + validation +
-//! serialization.
+//! It does not evaluate graphs (that is the evaluator crate) and performs no
+//! filesystem I/O. It embeds `voxel-core` value types (`MaterialId`, `Voxel`)
+//! so that prefab templates can round-trip, but references no chunk buffer for
+//! [`PinType::Terrain`] — that is a bare tag here. The IR is purely structure
+//! + validation + serialization.
 //!
 //! ## Serialization
 //!
@@ -45,6 +46,7 @@ mod error;
 mod graph;
 mod node;
 mod pin;
+mod prefab;
 
 pub use diagnostic::{Diagnostic, Severity};
 pub use edge::{Edge, PinRef};
@@ -58,5 +60,7 @@ pub use node::{
     Perlin2DParams, PinSpec, QueueParams, RemapParams, SubtractParams,
     TerrainOutputParams, ThresholdParams, UnionParams, WorldPosParams,
     BuildTerrainParams, SlopeRefinerParams,
+    JitteredGridParams, PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlacePrefabParams,
 };
 pub use pin::PinType;
+pub use prefab::{PrefabTemplate, PrefabVoxel};

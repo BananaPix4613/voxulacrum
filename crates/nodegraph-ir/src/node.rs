@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 
 use crate::pin::PinType;
+use crate::prefab::PrefabTemplate;
 
 new_key_type! {
     /// Stable identifier for a node. Survives edits and serialization;
@@ -277,6 +278,97 @@ impl Default for LayerParams {
 /// Parameters for [`NodeKind::SlopeRefiner`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct SlopeRefinerParams {}
 
+/// Parameters for [`NodeKind::JitteredGrid`]: points on a regular XZ grid,
+/// each cell offset by a per-cell random jitter, kept with probability
+/// `density`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct JitteredGridParams {
+    /// Per-node seed; combined with world cell coords for seam-correctness.
+    pub seed: u32,
+    /// Grid cell size in world units.
+    pub cell_size: f32,
+    /// Max jitter as a fraction of a cell (0 = centered, 1 = anywhere in cell).
+    pub jitter: f32,
+    /// Probability `[0,1]` that a given cell emits a point.
+    pub density: f32,
+}
+impl Default for JitteredGridParams {
+    fn default() -> Self { Self { seed: 0, cell_size: 6.0, jitter: 0.6, density: 0.5 } }
+}
+
+/// Parameters for [`NodeKind::PoissonDisk`]: Bridson blue-noise scatter with a
+/// minimum spacing of `radius`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PoissonDiskParams {
+    /// Per-node seed (per-chunk; not seam-continuous).
+    pub seed: u32,
+    /// Minimum distance between any two points, in world units.
+    pub radius: f32,
+    /// Candidate attempts per active point (Bridson `k`).
+    pub k: u32,
+}
+impl Default for PoissonDiskParams {
+    fn default() -> Self { Self { seed: 0, radius: 4.0, k: 30 } }
+}
+
+/// Parameters for [`NodeKind::FindFlat`]: keep only points whose surface is
+/// flat (neighbor surface Y within `max_step` and, optionally, on one of the
+/// listed materials (empty = any solid).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct FindFlatParams {
+    /// Max allowed surface-Y difference to any 8-neighbor column.
+    pub max_step: i32,
+    /// Allowed surface materials. Empty = accept any solid surface.
+    pub on_materials: Vec<voxel_core::MaterialId>,
+}
+impl Default for FindFlatParams {
+    fn default() -> Self { Self { max_step: 1, on_materials: Vec::new() } }
+}
+
+/// Parameters for [`NodeKind::PlaceTree`]: procedural trunk + spherical canopy.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlaceTreeParams {
+    /// Per-node seed, mixed with each point's seed for height variation.
+    pub seed: u32,
+    /// Minimum trunk height (voxels above the surface).
+    pub trunk_min: u32,
+    /// Maximum trunk height (inclusive).
+    pub trunk_max: u32,
+    /// Canopy sphere radius in voxels.
+    pub canopy_radius: u32,
+    /// Trunk material.
+    pub trunk_material: voxel_core::MaterialId,
+    /// Leaf material.
+    pub leaf_material: voxel_core::MaterialId,
+}
+impl Default for PlaceTreeParams {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            trunk_min: 4,
+            trunk_max: 6,
+            canopy_radius: 3,
+            trunk_material: voxel_core::MaterialId(9), // Wood
+            leaf_material: voxel_core::MaterialId(10), // Leaves
+        }
+    }
+}
+
+/// Parameters for [`NodeKind::PlacePrefab`]: stamp a named voxel template.
+/// `template` is resolved from disk at the hot-reload boundary and is not
+/// serialized (the `prefab` name is the source of truth on disk).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlacePrefabParams {
+    /// Prefab name; resolves to `<name>.prefab.json` in the prefab dir.
+    pub prefab: String,
+    /// Resolved template (filled by `resolve_prefabs`; `None` until then).
+    #[serde(skip)]
+    pub template: Option<PrefabTemplate>,
+}
+impl Default for PlacePrefabParams {
+    fn default() -> Self { Self { prefab: "rock".to_string(), template: None } }
+}
+
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -347,6 +439,19 @@ pub enum NodeKind {
     BuildTerrain(BuildTerrainParams),
     /// Reclassifies surface cubes into slopes/corners based on neighbor patterns.
     SlopeRefiner(SlopeRefinerParams),
+    // --- Positions ---
+    /// Jittered-grid point scatter.
+    JitteredGrid(JitteredGridParams),
+    /// Poisson-disk (blue-noise) point scatter.
+    PoissonDisk(PoissonDiskParams),
+    // --- Scanners ---
+    /// Annotate points with surface Y; reject steep / wrong-material spots.
+    FindFlat(FindFlatParams),
+    // --- Props ---
+    /// Stamp a procedural tree (trunk + canopy) at each point.
+    PlaceTree(PlaceTreeParams),
+    /// Stamp a named prefab template at each point.
+    PlacePrefab(PlacePrefabParams),
     /// Terminal node; consumes one density input.
     Output(OutputParams),
 }
@@ -402,6 +507,16 @@ const SLOPE_REFINER_IN: &[PinSpec] =
     &[PinSpec { name: "terrain", ty: PinType::Terrain, required: true }];
 const TERRAIN_TERMINAL_IN: &[PinSpec] =
     &[PinSpec { name: "terrain", ty: PinType::Terrain, required: true }];
+const POSITIONS_OUT: &[PinSpec] =
+    &[PinSpec { name: "positions", ty: PinType::Positions, required: false }];
+const SCAN_IN: &[PinSpec] = &[
+    PinSpec { name: "terrain", ty: PinType::Terrain,   required: true },
+    PinSpec { name: "points",  ty: PinType::Positions, required: true },
+];
+const PLACE_IN: &[PinSpec] = &[
+    PinSpec { name: "terrain", ty: PinType::Terrain,   required: true },
+    PinSpec { name: "points",  ty: PinType::Positions, required: true },
+];
 
 impl NodeKind {
     /// Static descriptor (display, color, typed pins) for this kind.
@@ -615,6 +730,41 @@ impl NodeKind {
                 inputs: SLOPE_REFINER_IN,
                 outputs: TERRAIN_OUT,
             },
+            NodeKind::JitteredGrid(_) => NodeDescriptor {
+                display_name: "Jittered Grid",
+                category: NodeCategory::Positions,
+                color: [0xe0, 0xc0, 0x4c],
+                inputs: NO_PINS,
+                outputs: POSITIONS_OUT,
+            },
+            NodeKind::PoissonDisk(_) => NodeDescriptor {
+                display_name: "Poisson Disk",
+                category: NodeCategory::Positions,
+                color: [0xe0, 0xc0, 0x4c],
+                inputs: NO_PINS,
+                outputs: POSITIONS_OUT,
+            },
+            NodeKind::FindFlat(_) => NodeDescriptor {
+                display_name: "Find Flat",
+                category: NodeCategory::Scanners,
+                color: [0xb0, 0xb0, 0xc0],
+                inputs: SCAN_IN,
+                outputs: POSITIONS_OUT,
+            },
+            NodeKind::PlaceTree(_) => NodeDescriptor {
+                display_name: "Place Tree",
+                category: NodeCategory::Props,
+                color: [0xc8, 0x90, 0x60],
+                inputs: PLACE_IN,
+                outputs: TERRAIN_OUT,
+            },
+            NodeKind::PlacePrefab(_) => NodeDescriptor {
+                display_name: "Place Prefab",
+                category: NodeCategory::Props,
+                color: [0xc8, 0x90, 0x60],
+                inputs: PLACE_IN,
+                outputs: TERRAIN_OUT,
+            },
             NodeKind::TerrainOutput(_) => NodeDescriptor {
                 display_name: "Terrain Output",
                 category: NodeCategory::Output, // unchanged
@@ -657,6 +807,11 @@ impl NodeKind {
             NodeKind::TerrainOutput(_)    => "TerrainOutput",
             NodeKind::BuildTerrain(_)     => "BuildTerrain",
             NodeKind::SlopeRefiner(_)     => "SlopeRefiner",
+            NodeKind::JitteredGrid(_)     => "JitteredGrid",
+            NodeKind::PoissonDisk(_)      => "PoissonDisk",
+            NodeKind::FindFlat(_)         => "FindFlat",
+            NodeKind::PlaceTree(_)        => "PlaceTree",
+            NodeKind::PlacePrefab(_)      => "PlacePrefab",
         }
     }
 }
