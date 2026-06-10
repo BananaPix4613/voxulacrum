@@ -13,16 +13,16 @@
 //! ## Voxel format
 //!
 //! ```text
-//! shape    : ShapeId  (5 bits logical - 14 named variants)
-//! rotation : u8       (2 bits - quarter turns about Y)
+//! shape    : ShapeId  (3 bits logical - 3 named variants)
 //! material : MaterialId (16 bits)
 //! flags    : u8       (8 bits - light source, water-logged, etc.)
 //! ----------------------------------
-//! total    : 31 bits  -> packs into a u32 for serialization / GPU upload
+//! total    : 27 bits  -> packs into a u32 for serialization / GPU upload
 //! ```
 //!
-//! In memory the struct is `#[repr(C)]` with natural alignment (6 bytes).
-//! Use [`Voxel::pack`] / [`Voxel::unpack`] for the 31-bit packed form.
+//! In memory the struct is `#[repr(C)]` with fields ordered `material, shape,
+//! flags` — a tight 4 bytes with no padding. Use [`Voxel::pack`] /
+//! [`Voxel::unpack`] for the 27-bit packed form.
 //!
 //! ## Chunk dimensions
 //!
@@ -49,6 +49,7 @@
 mod buffer;
 mod error;
 mod material;
+mod material_registry;
 mod neighbor;
 mod palette;
 mod shape;
@@ -57,7 +58,12 @@ mod voxel;
 pub use buffer::{ChunkBuffer, StorageKind};
 pub use error::{VoxelCoreError, VoxelCoreResult};
 pub use material::MaterialId;
+pub use material_registry::{MaterialDef, MaterialRegistry};
 pub use neighbor::{NeighborView, BorderAxis};
 pub use palette::{Palettable, PaletteStorage};
-pub use shape::{ShapeId, Rotation};
+pub use shape::ShapeId;
 pub use voxel::Voxel;
+
+/// Edge length of a chunk along each axis — the single source of truth shared
+/// by the engine and the evaluator.
+pub const CHUNK_DIM: usize = 32;

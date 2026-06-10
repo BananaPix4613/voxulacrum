@@ -1,6 +1,5 @@
 use std::path::Path;
 use serde::Deserialize;
-use crate::params::PaletteParams;
 use crate::rendering::palette_pass::{PaletteUniforms, MAX_PALETTE_COLORS};
 
 #[derive(Deserialize)]

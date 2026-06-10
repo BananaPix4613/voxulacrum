@@ -1,4 +1,5 @@
 use egui::Color32;
+use egui_snarl::ui::PinShape;
 use nodegraph_ir::{NodeCategory, PinType};
 
 /// Distinct color per pin type. Used for both pin markers and connection wires.
@@ -28,8 +29,37 @@ pub fn category_fill(cat: NodeCategory) -> Color32 {
         NodeCategory::Positions => Color32::from_rgb(0xe0, 0xc0, 0x4c),
         NodeCategory::Scanners  => Color32::from_rgb(0xb0, 0xb0, 0xc0),
         NodeCategory::Props     => Color32::from_rgb(0xc8, 0x90, 0x60),
-        NodeCategory::Slope     => Color32::from_rgb(0x70, 0xa0, 0xb0),
         NodeCategory::Biome     => Color32::from_rgb(0xb0, 0x80, 0xff),
         NodeCategory::Output    => Color32::from_rgb(0xe0, 0x4c, 0x4c),
+    }
+}
+
+/// Black or white header title text, whichever reads better against the
+/// category band color. Uses a perceptual-luminance threshold so bright
+/// bands (e.g. Curves, Positions) get dark text and dark bands get light
+/// text.
+pub fn header_text_color(cat: NodeCategory) -> Color32 {
+    let c = category_fill(cat);
+    let luma = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+    if luma > 140.0 {
+        Color32::from_gray(20)
+    } else {
+        Color32::from_gray(235)
+    }
+}
+
+/// Pin marker shape by type *family*. Shape gives at-a-glance grouping;
+/// [`pin_color`] disambiguates the exact type within a family. Snarl offers
+/// four built-in shapes, so the nine pin types fold into four families.
+pub fn pin_shape(ty: PinType) -> PinShape {
+    match ty {
+        // Continuous scalar fields & transfer functions.
+        PinType::Scalar | PinType::Density | PinType::Curve => PinShape::Circle,
+        // Discrete material / category data.
+        PinType::Material | PinType::BiomeId | PinType::Assignments => PinShape::Square,
+        // Spatial / positional data.
+        PinType::Positions | PinType::Vec3 => PinShape::Triangle,
+        // Terminal terrain payload.
+        PinType::Terrain => PinShape::Star,
     }
 }

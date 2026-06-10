@@ -1,40 +1,93 @@
 //! Per-`NodeKind` parameter editor widgets.
 
 use egui::Ui;
-use nodegraph_ir::{FractalType, NodeKind};
+use nodegraph_ir::{Axis, FractalType, NodeKind};
 use voxel_core::MaterialId;
+
+/// One parameter row: a left-aligned label followed by its editor widget.
+/// Returns `true` if the widget reported a change this frame.
+fn row(ui: &mut Ui, label: &str, widget: impl FnOnce(&mut Ui) -> egui::Response) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        widget(ui)
+    })
+        .inner
+        .changed()
+}
+
+/// Two tightly-related parameter fields on one row:
+/// `label_a [a]   label_b [b]`. Returns `true` if either widget changed.
+/// Use only for short-labeled pairs that fit the body width cap.
+fn row2(
+    ui: &mut Ui,
+    label_a: &str,
+    a: impl FnOnce(&mut Ui) -> egui::Response,
+    label_b: &str,
+    b: impl FnOnce(&mut Ui) -> egui::Response,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label_a);
+        let ca = a(ui).changed();
+        ui.label(label_b);
+        let cb = b(ui).changed();
+        ca || cb
+    })
+        .inner
+}
 
 /// Draw the body of a node - its parameters. Returns `true` if anything
 /// was edited this frame.
 pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
     match kind {
-        NodeKind::Constant(p) => ui.add(egui::DragValue::new(&mut p.value).speed(0.05)).changed(),
-        NodeKind::Threshold(p) => ui.add(egui::DragValue::new(&mut p.threshold).speed(0.05)).changed(),
-        NodeKind::Clamp(p) => {
-            let a = ui.add(egui::DragValue::new(&mut p.min).speed(0.05).prefix("min ")).changed();
-            let b = ui.add(egui::DragValue::new(&mut p.max).speed(0.05).prefix("max ")).changed();
-            a || b
-        }
+        NodeKind::Constant(p) => row(ui, "value", |ui| {
+            ui.add(egui::DragValue::new(&mut p.value).speed(0.05))
+        }),
+        NodeKind::Threshold(p) => row(ui, "threshold", |ui| {
+            ui.add(egui::DragValue::new(&mut p.threshold).speed(0.05))
+        }),
+        NodeKind::Clamp(p) => row2(
+            ui,
+            "min", |ui| ui.add(egui::DragValue::new(&mut p.min).speed(0.05)),
+            "max", |ui| ui.add(egui::DragValue::new(&mut p.max).speed(0.05)),
+        ),
         NodeKind::Remap(p) => {
             let mut changed = false;
+            changed |= row2(
+                ui,
+                "src lo", |ui| ui.add(egui::DragValue::new(&mut p.src_lo).speed(0.05)),
+                "src hi", |ui| ui.add(egui::DragValue::new(&mut p.src_hi).speed(0.05)),
+            );
+            changed |= row2(
+                ui,
+                "dst lo", |ui| ui.add(egui::DragValue::new(&mut p.dst_lo).speed(0.05)),
+                "dst hi", |ui| ui.add(egui::DragValue::new(&mut p.dst_hi).speed(0.05)),
+            );
+            changed
+        }
+        NodeKind::Output(p) => row(ui, "label", |ui| ui.text_edit_singleline(&mut p.label)),
+        NodeKind::Perlin2D(p) | NodeKind::Perlin3D(p)
+        | NodeKind::Simplex2D(p) | NodeKind::Simplex3D(p) => noise_params_ui(ui, p),
+        NodeKind::WorldAxis(p) => {
+            let mut changed = false;
             ui.horizontal(|ui| {
-                changed |= ui.add(egui::DragValue::new(&mut p.src_lo).speed(0.05).prefix("src_lo ")).changed();
-                changed |= ui.add(egui::DragValue::new(&mut p.src_hi).speed(0.05).prefix("src_hi ")).changed();
-            });
-            ui.horizontal(|ui| {
-                changed |= ui.add(egui::DragValue::new(&mut p.dst_lo).speed(0.05).prefix("dst_lo ")).changed();
-                changed |= ui.add(egui::DragValue::new(&mut p.dst_hi).speed(0.05).prefix("dst_hi ")).changed();
+                ui.label("axis");
+                egui::ComboBox::from_id_salt("world_axis")
+                    .selected_text(format!("{:?}", p.axis))
+                    .show_ui(ui, |ui| {
+                        for ax in [Axis::X, Axis::Y, Axis::Z] {
+                            if ui.selectable_value(&mut p.axis, ax, format!("{:?}", ax)).clicked() {
+                                changed = true;
+                            }
+                        }
+                    });
             });
             changed
         }
-        NodeKind::Output(p) => ui.text_edit_singleline(&mut p.label).changed(),
-        NodeKind::Perlin2D(p) | NodeKind::Perlin3D(p)
-        | NodeKind::Simplex2D(p) | NodeKind::Simplex3D(p) => noise_params_ui(ui, p),
         NodeKind::DomainWarp(p) => {
             let mut changed = false;
-            changed |= ui.add(egui::DragValue::new(&mut p.seed)).changed();
-            changed |= ui.add(egui::DragValue::new(&mut p.frequency).speed(0.001).prefix("freq ")).changed();
-            changed |= ui.add(egui::DragValue::new(&mut p.amplitude).speed(0.1).prefix("amp ")).changed();
+            changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "frequency", |ui| ui.add(egui::DragValue::new(&mut p.frequency).speed(0.001)));
+            changed |= row(ui, "amplitude", |ui| ui.add(egui::DragValue::new(&mut p.amplitude).speed(0.1)));
             changed
         }
         NodeKind::CurveMapper(p) => curve_stops_ui(ui, &mut p.stops),
@@ -42,48 +95,41 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
         NodeKind::Layer(p) => layer_bands_ui(ui, p),
         NodeKind::JitteredGrid(p) => {
             let mut changed = false;
-            changed |= ui.add(egui::DragValue::new(&mut p.seed).prefix("seed ")).changed();
-            changed |= ui.add(egui::DragValue::new(&mut p.cell_size).speed(0.1).range(0.5..=64.0).prefix("cell ")).changed();
-            changed |= ui.add(egui::DragValue::new(&mut p.jitter).speed(0.02).range(0.0..=1.0).prefix("jitter ")).changed();
-            changed |= ui.add(egui::DragValue::new(&mut p.density).speed(0.02).range(0.0..=1.0).prefix("density ")).changed();
+            changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "cell size", |ui| ui.add(egui::DragValue::new(&mut p.cell_size).speed(0.1).range(0.5..=64.0)));
+            changed |= row(ui, "jitter", |ui| ui.add(egui::DragValue::new(&mut p.jitter).speed(0.02).range(0.0..=1.0)));
+            changed |= row(ui, "density", |ui| ui.add(egui::DragValue::new(&mut p.density).speed(0.02).range(0.0..=1.0)));
             changed
         }
         NodeKind::PoissonDisk(p) => {
             let mut changed = false;
-            changed |= ui.add(egui::DragValue::new(&mut p.seed).prefix("seed ")).changed();
-            changed |= ui.add(egui::DragValue::new(&mut p.radius).speed(0.1).range(0.5..=64.0).prefix("radius ")).changed();
-            changed |= ui.add(egui::DragValue::new(&mut p.k).range(1..=64).prefix("k ")).changed();
+            changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "radius", |ui| ui.add(egui::DragValue::new(&mut p.radius).speed(0.1).range(0.5..=64.0)));
+            changed |= row(ui, "k", |ui| ui.add(egui::DragValue::new(&mut p.k).range(1..=64)));
             changed
         }
         NodeKind::FindFlat(p) => {
-            let mut changed = ui.add(egui::DragValue::new(&mut p.max_step).range(0..=16).prefix("max_step ")).changed();
+            let mut changed = row(ui, "max step", |ui| ui.add(egui::DragValue::new(&mut p.max_step).range(0..=16)));
             changed |= material_list_ui(ui, &mut p.on_materials);
             changed
         }
         NodeKind::PlaceTree(p) => {
             let mut changed = false;
-            changed |= ui.add(egui::DragValue::new(&mut p.seed).prefix("seed ")).changed();
-            ui.horizontal(|ui| {
-                changed |= ui.add(egui::DragValue::new(&mut p.trunk_min).range(1..=32).prefix("trunk≥ ")).changed();
-                changed |= ui.add(egui::DragValue::new(&mut p.trunk_max).range(1..=32).prefix("trunk≤ ")).changed();
-            });
-            changed |= ui.add(egui::DragValue::new(&mut p.canopy_radius).range(1..=8).prefix("canopy ")).changed();
+            changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "trunk min", |ui| ui.add(egui::DragValue::new(&mut p.trunk_min).range(1..=32)));
+            changed |= row(ui, "trunk max", |ui| ui.add(egui::DragValue::new(&mut p.trunk_max).range(1..=32)));
+            changed |= row(ui, "canopy radius", |ui| ui.add(egui::DragValue::new(&mut p.canopy_radius).range(1..=8)));
             changed |= material_id_ui(ui, &mut p.trunk_material, "trunk");
             changed |= material_id_ui(ui, &mut p.leaf_material, "leaf");
             changed
         }
-        NodeKind::PlacePrefab(p) => {
-            ui.horizontal(|ui| {
-                ui.label("prefab");
-                ui.text_edit_singleline(&mut p.prefab)
-            }).inner.changed()
-        }
+        NodeKind::PlacePrefab(p) => row(ui, "prefab", |ui| ui.text_edit_singleline(&mut p.prefab)),
         // Parameterless variants:
         NodeKind::WorldPos(_) | NodeKind::Add(_) | NodeKind::Multiply(_)
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)
         | NodeKind::Lerp(_) | NodeKind::Union(_) | NodeKind::Intersect(_)
         | NodeKind::DensitySubtract(_) | NodeKind::Mix(_) | NodeKind::Mask(_)
-        | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) | NodeKind::BuildTerrain(_) | NodeKind::SlopeRefiner(_) => {
+        | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) | NodeKind::BuildTerrain(_) => {
             ui.weak("(no parameters)");
             false
         }
@@ -92,36 +138,32 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
 
 fn noise_params_ui(ui: &mut Ui, p: &mut nodegraph_ir::NoiseParams) -> bool {
     let mut changed = false;
+    changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+    changed |= row(ui, "frequency", |ui| ui.add(egui::DragValue::new(&mut p.frequency).speed(0.001)));
+    changed |= row(ui, "octaves", |ui| ui.add(egui::DragValue::new(&mut p.octaves).range(1..=10)));
+    changed |= row(ui, "lacunarity", |ui| ui.add(egui::DragValue::new(&mut p.lacunarity).speed(0.05)));
+    changed |= row(ui, "gain", |ui| ui.add(egui::DragValue::new(&mut p.gain).speed(0.05)));
     ui.horizontal(|ui| {
-        changed |= ui.add(egui::DragValue::new(&mut p.seed).prefix("seed ")).changed();
-        changed |= ui.add(egui::DragValue::new(&mut p.frequency).speed(0.001).prefix("freq ")).changed();
-    });
-    ui.horizontal(|ui| {
-        changed |= ui.add(egui::DragValue::new(&mut p.octaves).range(1..=10).prefix("oct ")).changed();
-        changed |= ui.add(egui::DragValue::new(&mut p.lacunarity).speed(0.05).prefix("lac ")).changed();
-        changed |= ui.add(egui::DragValue::new(&mut p.gain).speed(0.05).prefix("gain ")).changed();
-    });
-    egui::ComboBox::from_id_salt("fractal_type")
-        .selected_text(format!("{:?}", p.fractal_type))
-        .show_ui(ui, |ui| {
-            for ft in [FractalType::FBm, FractalType::Ridged, FractalType::PingPong] {
-                if ui.selectable_value(&mut p.fractal_type, ft, format!("{:?}", ft)).clicked() {
-                    changed = true;
+        ui.label("fractal");
+        egui::ComboBox::from_id_salt("fractal_type")
+            .selected_text(format!("{:?}", p.fractal_type))
+            .show_ui(ui, |ui| {
+                for ft in [FractalType::FBm, FractalType::Ridged, FractalType::PingPong] {
+                    if ui.selectable_value(&mut p.fractal_type, ft, format!("{:?}", ft)).clicked() {
+                        changed = true;
+                    }
                 }
-            }
-        });
+            });
+    });
     changed
 }
 
 /// Inline drag-value for a `MaterialId` (just its u16). Authors can look up
 /// IDs in the preview's material color table.
 fn material_id_ui(ui: &mut Ui, id: &mut MaterialId, label: &str) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(label);
+    row(ui, label, |ui| {
         ui.add(egui::DragValue::new(&mut id.0).range(0..=u16::MAX))
-            .changed()
     })
-    .inner
 }
 
 /// Editor for a `Vec<MaterialId>` (the FindFlat allow-list). Empty = any.
@@ -131,12 +173,21 @@ fn material_list_ui(ui: &mut Ui, mats: &mut Vec<MaterialId>) -> bool {
     let mut remove: Option<usize> = None;
     for (i, m) in mats.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            changed |= ui.add(egui::DragValue::new(&mut m.0).prefix("mat ")).changed();
-            if ui.small_button("✕").clicked() { remove = Some(i); }
+            ui.label("mat");
+            changed |= ui.add(egui::DragValue::new(&mut m.0)).changed();
+            if ui.small_button("✕").clicked() {
+                remove = Some(i);
+            }
         });
     }
-    if let Some(i) = remove { mats.remove(i); changed = true; }
-    if ui.button("+ material").clicked() { mats.push(MaterialId(6)); changed = true; }
+    if let Some(i) = remove {
+        mats.remove(i);
+        changed = true;
+    }
+    if ui.button("+ material").clicked() {
+        mats.push(MaterialId(6));
+        changed = true;
+    }
     changed
 }
 
@@ -146,9 +197,11 @@ fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {
     let mut remove: Option<usize> = None;
     for (i, (mat, thickness)) in p.bands.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            changed |= ui.add(egui::DragValue::new(&mut mat.0).prefix("mat ")).changed();
+            ui.label("mat");
+            changed |= ui.add(egui::DragValue::new(&mut mat.0)).changed();
+            ui.label("×");
             changed |= ui
-                .add(egui::DragValue::new(thickness).range(1u32..=64).prefix("× "))
+                .add(egui::DragValue::new(thickness).range(1u32..=64))
                 .changed();
             if ui.small_button("✕").clicked() {
                 remove = Some(i);
@@ -164,7 +217,7 @@ fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {
         changed = true;
     }
     ui.separator();
-    changed |= material_id_ui(ui, &mut p.fill, "fill ");
+    changed |= material_id_ui(ui, &mut p.fill, "fill");
     changed
 }
 
@@ -173,8 +226,10 @@ fn curve_stops_ui(ui: &mut Ui, stops: &mut Vec<(f32, f32)>) -> bool {
     let mut remove: Option<usize> = None;
     for (i, (x, y)) in stops.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            changed |= ui.add(egui::DragValue::new(x).speed(0.02).prefix("x ")).changed();
-            changed |= ui.add(egui::DragValue::new(y).speed(0.02).prefix("y ")).changed();
+            ui.label("x");
+            changed |= ui.add(egui::DragValue::new(x).speed(0.02)).changed();
+            ui.label("y");
+            changed |= ui.add(egui::DragValue::new(y).speed(0.02)).changed();
             if ui.small_button("✕").clicked() {
                 remove = Some(i);
             }

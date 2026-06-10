@@ -5,7 +5,7 @@ use glam::Vec3;
 /// Edge length of a chunk field. Matches `voxel-core`'s default `ChunkBuffer`
 /// edge length (`N = 32`); kept as a local const to avoid a dependency on
 /// `voxel-core` (Phase 3 produces no voxels).
-pub const CHUNK_DIM: usize = 32;
+pub use voxel_core::CHUNK_DIM;
 
 /// Dense `CHUNK_DIM³` field of `f32`. Index order `x + y*N + z*N²`, matching
 /// `voxel-core`'s `ChunkBuffer` convention.

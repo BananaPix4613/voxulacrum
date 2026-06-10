@@ -34,8 +34,6 @@ pub enum NodeCategory {
     Scanners,
     /// Prop placement.
     Props,
-    /// Slope refinement.
-    Slope,
     /// Biome routing.
     Biome,
     /// Terminal output.
@@ -150,6 +148,26 @@ pub struct AddParams {}
 /// Parameters for [`NodeKind::WorldPos`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct WorldPosParams {}
+
+/// World coordinate axis selector for [`NodeKind::WorldAxis`].
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Axis {
+    /// World X.
+    X,
+    /// World Y (vertical) - the common case for elevation gradients.
+    #[default]
+    Y,
+    /// World Z.
+    Z,
+}
+
+/// Parameters for [`NodeKind::WorldAxis`]: emit one world-space coordinate
+/// axis as a scalar field. No inputs.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct WorldAxisParams {
+    /// Which world axis to emit.
+    pub axis: Axis,
+}
 
 /// Parameters for [`NodeKind::Clamp`].
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -275,8 +293,6 @@ impl Default for LayerParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct TerrainOutputParams {}
 /// Parameters for [`NodeKind::BuildTerrain`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct BuildTerrainParams {}
-/// Parameters for [`NodeKind::SlopeRefiner`] (no parameters yet).
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct SlopeRefinerParams {}
 
 /// Parameters for [`NodeKind::JitteredGrid`]: points on a regular XZ grid,
 /// each cell offset by a per-cell random jitter, kept with probability
@@ -387,6 +403,8 @@ pub enum NodeKind {
     Constant(ConstantParams),
     /// World-space position field.
     WorldPos(WorldPosParams),
+    /// World-space coordinate axis as a scalar field (no inputs).
+    WorldAxis(WorldAxisParams),
     // --- Math ---
     /// Sum of two density fields.
     Add(AddParams),
@@ -437,8 +455,6 @@ pub enum NodeKind {
     TerrainOutput(TerrainOutputParams),
     /// Builds a terrain (`ChunkBuffer<Voxel>`) from density + material fields.
     BuildTerrain(BuildTerrainParams),
-    /// Reclassifies surface cubes into slopes/corners based on neighbor patterns.
-    SlopeRefiner(SlopeRefinerParams),
     // --- Positions ---
     /// Jittered-grid point scatter.
     JitteredGrid(JitteredGridParams),
@@ -503,8 +519,6 @@ const BUILD_TERRAIN_IN: &[PinSpec] = &[
     PinSpec { name: "density",  ty: PinType::Density,  required: true },
     PinSpec { name: "material", ty: PinType::Material, required: true },
 ];
-const SLOPE_REFINER_IN: &[PinSpec] =
-    &[PinSpec { name: "terrain", ty: PinType::Terrain, required: true }];
 const TERRAIN_TERMINAL_IN: &[PinSpec] =
     &[PinSpec { name: "terrain", ty: PinType::Terrain, required: true }];
 const POSITIONS_OUT: &[PinSpec] =
@@ -570,6 +584,13 @@ impl NodeKind {
                 color: SRC,
                 inputs: NO_PINS,
                 outputs: VEC3_OUT
+            },
+            NodeKind::WorldAxis(_) => NodeDescriptor {
+                display_name: "World Axis",
+                category: NodeCategory::Source,
+                color: SRC,
+                inputs: NO_PINS,
+                outputs: SCALAR_OUT
             },
             // Math
             NodeKind::Add(_) => NodeDescriptor {
@@ -723,13 +744,6 @@ impl NodeKind {
                 inputs: BUILD_TERRAIN_IN,
                 outputs: TERRAIN_OUT,
             },
-            NodeKind::SlopeRefiner(_) => NodeDescriptor {
-                display_name: "Slope Refiner",
-                category: NodeCategory::Slope, // existing variant — see node.rs:37
-                color: [0x70, 0xa0, 0xb0],
-                inputs: SLOPE_REFINER_IN,
-                outputs: TERRAIN_OUT,
-            },
             NodeKind::JitteredGrid(_) => NodeDescriptor {
                 display_name: "Jittered Grid",
                 category: NodeCategory::Positions,
@@ -784,6 +798,7 @@ impl NodeKind {
             NodeKind::Simplex3D(_)        => "Simplex3D",
             NodeKind::Constant(_)         => "Constant",
             NodeKind::WorldPos(_)         => "WorldPos",
+            NodeKind::WorldAxis(_)        => "WorldAxis",
             NodeKind::Add(_)              => "Add",
             NodeKind::Multiply(_)         => "Multiply",
             NodeKind::Subtract(_)         => "Subtract",
@@ -806,7 +821,6 @@ impl NodeKind {
             NodeKind::Queue(_)            => "Queue",
             NodeKind::TerrainOutput(_)    => "TerrainOutput",
             NodeKind::BuildTerrain(_)     => "BuildTerrain",
-            NodeKind::SlopeRefiner(_)     => "SlopeRefiner",
             NodeKind::JitteredGrid(_)     => "JitteredGrid",
             NodeKind::PoissonDisk(_)      => "PoissonDisk",
             NodeKind::FindFlat(_)         => "FindFlat",

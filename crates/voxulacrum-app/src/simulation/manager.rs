@@ -2,7 +2,7 @@ use std::time::Instant;
 use glam::Mat4;
 use bevy_ecs::prelude::Resource;
 
-use crate::camera::{self, IsometricCamera, SnappedCamera};
+use crate::camera::{IsometricCamera, SnappedCamera};
 use crate::input::InputState;
 use crate::cloud_shadow::CloudShadowState;
 use crate::params::EngineParams;

@@ -21,13 +21,13 @@ use crate::rendering::vegetation_pass::VegetationPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::rendering::frustum::Frustum;
 use crate::shader_reload::ShaderWatcher;
+use crate::graph_reload::GraphWatcherRes;
 use crate::input::InputState;
 use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui;
 use crate::ui::panels::UiState;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::{compute_render_dimensions, palette, FrameCounter};
-use crate::meshing::MeshingPipeline;
 use crate::world::chunk::{Chunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
 use crate::world::persistence::WorldPersistence;
@@ -170,6 +170,52 @@ pub fn shader_hot_reload_system(
     }
 }
 
+/// Hot-reload the active world graph when `default_biome.graph.json` changes
+/// on disk (external edits / the standalone preview app saving). Skips the
+/// reload while the embedded editor has unsaved edits, so in-memory work and
+/// the rendered world stay consistent. Routes the new graph to regen via the
+/// same `UiState.pending_graph` transport the embedded editor uses.
+pub fn graph_hot_reload_system(
+    graph_watcher: Res<GraphWatcherRes>,
+    mut egui: NonSendMut<ui::EguiRenderer>,
+    mut ui_state: ResMut<UiState>,
+) {
+    let changed = graph_watcher.0.poll_changes();
+    if changed.is_empty() {
+        return;
+    }
+    let default_path = crate::world::world_generator::default_graph_path();
+    let default_name = default_path.file_name();
+
+    for path in changed {
+        // Only the active world graph drives regeneration.
+        if path.file_name() != default_name {
+            continue;
+        }
+        // Don't clobber unsaved embedded-editor edits.
+        if egui.editor.is_modified() {
+            log::warn!(
+                "{} changed on disk but the editor has unsaved edits; \
+                ignoring the disk change",
+                path.display()
+            );
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match nodegraph_ir::Graph::from_json(&text) {
+                Ok(graph) => {
+                    // Refresh the editor view, then hand the graph to regen.
+                    egui.editor = nodegraph_editor::EditorState::from_graph(&graph);
+                    ui_state.pending_graph = Some(graph);
+                    log::info!("Hot-reloaded {} from disk", path.display());
+                }
+                Err(e) => log::warn!("graph hot-reload parse error: {e}"),
+            },
+            Err(e) => log::warn!("graph hot-reload read error: {e}"),
+        }
+    }
+}
+
 // ==========================================================================
 // Simulation stage
 // ==========================================================================
@@ -236,7 +282,7 @@ pub fn streaming_tick_system(
     mut vegetation: ResMut<VegetationPass>,
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
-    ctx: Res<RenderContext>,
+    _ctx: Res<RenderContext>,
     persistence: Res<WorldPersistence>,
 ) {
     let cam_pos = sim.camera.smooth_target;
@@ -298,17 +344,14 @@ pub fn meshing_tick_system(
     // Phase 2: for each newly meshed chunk, build per-chunk vegetation
     // and water GPU buffers. world.0 is now borrowed immutably.
     if !meshed.is_empty() {
-        let water_level = ui.params.water.water_level;
-        let terrain_params = &ui.params.terrain_gen;
         let veg_params = &ui.params.vegetation;
 
         for pos in &meshed {
             vegetation.add_chunk_vegetation(
                 *pos, &world.0, veg_params, &ctx.device,
             );
-            water_pass.add_chunk_water(
-                *pos, &world.0.generator, terrain_params, water_level, &ctx.device,
-            );
+            // Water is a Phase 1 no-op; call retained to keep scheduling intact.
+            water_pass.add_chunk_water(*pos);
         }
     }
 }
@@ -624,6 +667,13 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             &surface_view,
             &window_arc,
         );
+        // Auto-regen: hand a dirty editor edit to the regen path. Coalesced by
+        // WorldRegenCoordinator - only the latest pending graph is applied, and
+        // only while no regen is in flight. No-op while the editor is hidden
+        // (its `show` isn't called, so it never goes dirty).
+        if egui.editor.consume_dirty() {
+            ui_state.pending_graph = Some(egui.editor.build_graph());
+        }
     });
 
     // --- Submit + present ---

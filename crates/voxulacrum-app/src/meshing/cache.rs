@@ -149,7 +149,7 @@ pub fn compute_cache_key(snapshot: &ChunkSnapshot, colors: &[[f32; 3]]) -> u64 {
 
     let mut hasher = SeaHasher::new();
     for &m in snapshot.materials.iter() {
-        hasher.write_u16(m);
+        hasher.write_u32(m.pack());
     }
     for color in colors {
         for &c in color {
@@ -455,7 +455,7 @@ pub fn world_cache_path(cache_dir: &Path, key: u64) -> PathBuf {
 /// `[u64 key][u32 format_ver=4][u32 _pad][u32 _pad][u32 chunk_count]`
 /// then per chunk: `[i32 x][i32 y][i32 z][u8 variant]` followed by either
 /// `[u16 material]` (Uniform) or `[u16 * CHUNK_VOLUME materials]` (Populated).
-const WORLD_CACHE_FORMAT: u32 = 4;
+const WORLD_CACHE_FORMAT: u32 = 5; // bumped: chunk payloads now store packed u32 Voxels
 
 pub fn save_world_cache(
     path: &Path,
@@ -487,11 +487,11 @@ pub fn save_world_cache(
 
         if chunk.storage.is_uniform() {
             buf.write_all(&[0u8])?;
-            buf.write_all(&chunk.storage.material(0).to_le_bytes())?;
+            buf.write_all(&chunk.storage.voxel(0).pack().to_le_bytes())?;
         } else {
             buf.write_all(&[1u8])?;
             for i in 0..CHUNK_VOLUME {
-                buf.write_all(&chunk.storage.material(i).to_le_bytes())?;
+                buf.write_all(&chunk.storage.voxel(i).pack().to_le_bytes())?;
             }
         }
     }
@@ -506,8 +506,8 @@ pub fn load_world_cache(
 ) -> Option<std::collections::HashMap<glam::IVec3, crate::world::chunk::Chunk>> {
     use crate::world::chunk::{Chunk, CHUNK_VOLUME};
     use crate::world::storage::{self, ChunkStorage};
-    use crate::world::voxel::MAT_AIR;
     use glam::IVec3;
+    use voxel_core::Voxel;
 
     let compressed = std::fs::read(path).ok()?;
     let data = lz4_flex::decompress_size_prepended(&compressed).ok()?;
@@ -548,23 +548,24 @@ pub fn load_world_cache(
         let pos = IVec3::new(px, py, pz);
 
         let chunk_storage = if variant_tag == 0 {
-            if offset + 2 > data.len() { return None; }
-            let material_id = u16::from_le_bytes(data[offset..offset + 2].try_into().ok()?);
-            offset += 2;
-            ChunkStorage::Uniform { material_id }
+            if offset + 4 > data.len() { return None; }
+            let packed = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?);
+            offset += 4;
+            ChunkStorage::Uniform { voxel: Voxel::unpack(packed).unwrap_or(Voxel::EMPTY) }
         } else {
-            let material_bytes = CHUNK_VOLUME * 2;
+            let material_bytes = CHUNK_VOLUME * 4;
             if offset + material_bytes > data.len() {
                 let _ = std::fs::remove_file(path);
                 return None;
             }
-            let mut material_arr = [MAT_AIR; CHUNK_VOLUME];
+            let mut voxel_arr = Box::new([Voxel::EMPTY; CHUNK_VOLUME]);
             for i in 0..CHUNK_VOLUME {
-                let base = offset + i * 2;
-                material_arr[i] = u16::from_le_bytes(data[base..base + 2].try_into().ok()?);
+                let base = offset + i * 4;
+                let packed = u32::from_le_bytes(data[base..base + 4].try_into().ok()?);
+                voxel_arr[i] = Voxel::unpack(packed).unwrap_or(Voxel::EMPTY);
             }
             offset += material_bytes;
-            storage::storage_from_arrays(&material_arr)
+            storage::storage_from_arrays(&voxel_arr)
         };
 
         let chunk = Chunk::new(pos, std::sync::Arc::new(chunk_storage));

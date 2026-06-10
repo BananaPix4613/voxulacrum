@@ -6,7 +6,7 @@ use static_assertions::const_assert;
 
 use crate::error::{VoxelCoreError, VoxelCoreResult};
 use crate::material::MaterialId;
-use crate::shape::{Rotation, ShapeId};
+use crate::shape::ShapeId;
 
 /// A single voxel.
 ///
@@ -14,25 +14,23 @@ use crate::shape::{Rotation, ShapeId};
 ///
 /// | field    | bits | offset |
 /// |----------|------|--------|
-/// | shape    | 5    | 0      |
-/// | rotation | 2    | 5      |
-/// | material | 16   | 7      |
-/// | flags    | 8    | 23     |
-/// | total    | 31   |        |
+/// | shape    | 3    | 0      |
+/// | material | 16   | 3      |
+/// | flags    | 8    | 19     |
+/// | total    | 27   |        |
 ///
-/// In-memory layout is `#[repr(C)]` with natural alignment - 6 bytes, not
-/// bit-packed. Use [`Voxel::pack`] / [`Voxel::unpack`] for the 31-bit form
-/// when serializing or uploading to a GPU buffer.
+/// In-memory layout is `#[repr(C)]` with fields ordered `material, shape,
+/// flags` so the struct is a tight 4 bytes with no alignment padding. Use
+/// [`Voxel::pack`] / [`Voxel::unpack`] for the 27-bit packed form when
+/// serializing or uploading to a GPU buffer.
 #[repr(C)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Voxel {
-    /// Geometric shape.
-    pub shape: ShapeId,
-    /// Quarter-turn rotation about Y.
-    pub rotation: Rotation,
     /// Material ID.
     pub material: MaterialId,
+    /// Geometric shape.
+    pub shape: ShapeId,
     /// Bitflags: bit 0 = light source, bit 1 = water-logged, others reserved.
     pub flags: u8,
 }
@@ -40,21 +38,19 @@ pub struct Voxel {
 // --- Bit-layout constants ------------------------------------------------
 
 const SHAPE_OFFSET: u32 = 0;
-const ROTATION_OFFSET: u32 = SHAPE_OFFSET + ShapeId::BIT_BUDGET;
-const MATERIAL_OFFSET: u32 = ROTATION_OFFSET + Rotation::BIT_BUDGET;
+const MATERIAL_OFFSET: u32 = SHAPE_OFFSET + ShapeId::BIT_BUDGET;
 const FLAGS_OFFSET: u32 = MATERIAL_OFFSET + 16;
 const TOTAL_BITS: u32 = FLAGS_OFFSET + 8;
 
 const SHAPE_MASK: u32 = (1 << ShapeId::BIT_BUDGET) - 1;
-const ROTATION_MASK: u32 = (1 << Rotation::BIT_BUDGET) - 1;
 const MATERIAL_MASK: u32 = (1 << 16) - 1;
 const FLAGS_MASK: u32 = (1 << 8) - 1;
 
 // Compile-time guarantees the spec is satisfied.
-const_assert!(TOTAL_BITS == 31);
+const_assert!(TOTAL_BITS == 27);
 const_assert!(TOTAL_BITS <= 32);
-// 6 bytes (`shape:u8` + `rotation:u8` + `material:u16` + `flags:u8` + pad to u16).
-const_assert!(std::mem::size_of::<Voxel>() == 6);
+// 4 bytes (`material:u16` + `shape:u8` + `flags:u8`), no padding.
+const_assert!(std::mem::size_of::<Voxel>() == 4);
 
 // --- Flag bit definitions ------------------------------------------------
 
@@ -66,9 +62,8 @@ impl Voxel {
 
     /// The empty / air voxel.
     pub const EMPTY: Self = Self {
-        shape: ShapeId::Empty,
-        rotation: Rotation::None,
         material: MaterialId::AIR,
+        shape: ShapeId::Empty,
         flags: 0,
     };
 
@@ -76,9 +71,8 @@ impl Voxel {
     #[inline]
     pub const fn cube(material: MaterialId) -> Self {
         Self {
-            shape: ShapeId::Cube,
-            rotation: Rotation::None,
             material,
+            shape: ShapeId::Cube,
             flags: 0,
         }
     }
@@ -89,30 +83,23 @@ impl Voxel {
         self.shape.is_solid()
     }
 
-    /// Pack into 31-bit form occupying a `u32`. High bit is reserved (always 0).
+    /// Pack into 27-bit form occupying a `u32`. High bits are reserved (0).
     #[inline]
     pub const fn pack(&self) -> u32 {
         ((self.shape as u32) & SHAPE_MASK) << SHAPE_OFFSET
-            | ((self.rotation as u32) & ROTATION_MASK) << ROTATION_OFFSET
             | ((self.material.raw() as u32) & MATERIAL_MASK) << MATERIAL_OFFSET
             | ((self.flags as u32) & FLAGS_MASK) << FLAGS_OFFSET
     }
 
-    /// Unpack from 31-bit form. Errors if the shape discriminant is invalid.
+    /// Unpack from 27-bit form. Errors if the shape discriminant is invalid.
     #[inline]
     pub fn unpack(bits: u32) -> VoxelCoreResult<Self> {
         let shape_raw = ((bits >> SHAPE_OFFSET) & SHAPE_MASK) as u8;
-        let rotation_raw = ((bits >> ROTATION_OFFSET) & ROTATION_MASK) as u8;
         let material_raw = ((bits >> MATERIAL_OFFSET) & MATERIAL_MASK) as u16;
         let flags = ((bits >> FLAGS_OFFSET) & FLAGS_MASK) as u8;
         let shape = ShapeId::from_raw(shape_raw)
             .ok_or(VoxelCoreError::InvalidShape(shape_raw))?;
-        Ok(Self {
-            shape,
-            rotation: Rotation::from_raw(rotation_raw),
-            material: MaterialId(material_raw),
-            flags,
-        })
+        Ok(Self { material: MaterialId(material_raw), shape, flags })
     }
 }
 
@@ -123,8 +110,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn voxel_struct_is_six_bytes() {
-        assert_eq!(std::mem::size_of::<Voxel>(), 6);
+    fn voxel_struct_is_four_bytes() {
+        assert_eq!(std::mem::size_of::<Voxel>(), 4);
     }
 
     #[test]
@@ -143,25 +130,23 @@ mod tests {
     #[test]
     fn pack_unpack_roundtrip_all_fields() {
         let v = Voxel {
-            shape: ShapeId::InnerCornerSE,
-            rotation: Rotation::Cw270,
+            shape: ShapeId::SlabTop,
             material: MaterialId(0xBEEF),
             flags: Voxel::FLAG_LIGHT_SOURCE | Voxel::FLAG_WATER_LOGGED,
         };
         let bits = v.pack();
         let back = Voxel::unpack(bits).unwrap();
         assert_eq!(back, v);
-        // High bit must be unused.
-        assert_eq!(bits & 0x8000_0000, 0);
+        assert_eq!(bits & 0xF800_0000, 0); // bits 27..=31 unused
     }
 
     #[test]
     fn unpack_invalid_shape_errors() {
-        // discriminant 31 (max in 5 bits) is unused.
-        let bits: u32 = 31;
+        // discriminant 7 (max in 3 bits) is unused.
+        let bits: u32 = 7;
         assert!(matches!(
             Voxel::unpack(bits),
-            Err(VoxelCoreError::InvalidShape(31))
+            Err(VoxelCoreError::InvalidShape(7))
         ));
     }
 }

@@ -4,9 +4,9 @@ use smallvec::SmallVec;
 use std::time::Instant;
 
 use super::storage::ChunkStorage;
-use super::voxel::MAT_AIR;
+use voxel_core::Voxel;
 
-pub const CHUNK_SIZE: usize = 32;
+pub const CHUNK_SIZE: usize = voxel_core::CHUNK_DIM;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 pub const VOXEL_SCALE: f32 = 1.0;
 pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 32.0
@@ -27,7 +27,7 @@ pub struct ChunkMesh {
 #[derive(Clone, Copy)]
 pub struct VoxelEdit {
     pub index: u16,
-    pub material_id: u16,
+    pub voxel: Voxel,
     // Optional fields (bitflag-controlled in serialization)
     pub moisture: Option<u8>,
     pub flora_id: Option<u16>,
@@ -90,8 +90,8 @@ impl Chunk {
     }
 
     #[inline]
-    pub fn material(&self, x: usize, y: usize, z: usize) -> u16 {
-        self.storage.material(Self::voxel_index(x, y, z))
+    pub fn voxel(&self, x: usize, y: usize, z: usize) -> Voxel {
+        self.storage.voxel(Self::voxel_index(x, y, z))
     }
 
     #[inline]
@@ -129,34 +129,34 @@ impl<'a> ChunkNeighbors<'a> {
 // ============================================================================
 
 /// Self-contained snapshot used by the cube mesher. Holds the chunk's 32^3
-/// materials plus a 1-voxel border copied from face/edge/corner neighbors.
-/// Missing neighbors fall back to MAT_AIR (closed-world boundary).
+/// voxels plus a 1-voxel border copied from face/edge/corner neighbors.
+/// Missing neighbors fall back to `Voxel::EMPTY` (closed-world boundary).
 pub struct ChunkSnapshot {
     pub position: IVec3,
-    pub materials: Box<[u16; SNAP_VOLUME]>, // 34*34*34 = 39_304
+    pub materials: Box<[Voxel; SNAP_VOLUME]>, // 34*34*34 = 39_304
     /// True per axis if this chunk is at the negative world border.
     pub border_min: [bool; 3],
 }
 
 impl ChunkSnapshot {
     pub fn extract(chunk: &Chunk, neighbors: &ChunkNeighbors, min_chunk_y: i32, _max_chunk_y: i32) -> Self {
-        let mut materials: Box<[u16; SNAP_VOLUME]> = unsafe {
-            let v: Vec<u16> = vec![MAT_AIR; SNAP_VOLUME];
+        let mut materials: Box<[Voxel; SNAP_VOLUME]> = unsafe {
+            let v: Vec<Voxel> = vec![Voxel::EMPTY; SNAP_VOLUME];
             let boxed_slice = v.into_boxed_slice();
-            Box::from_raw(Box::into_raw(boxed_slice) as *mut [u16; SNAP_VOLUME])
+            Box::from_raw(Box::into_raw(boxed_slice) as *mut [Voxel; SNAP_VOLUME])
         };
 
         // Fill interior: chunk's own 32^3 voxels at snapshot coords [PAD..CHUNK_SIZE+PAD).
         for z in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
-                    let m = chunk.storage.material(Chunk::voxel_index(x, y, z));
+                    let m = chunk.storage.voxel(Chunk::voxel_index(x, y, z));
                     materials[Self::snap_index(x + SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD)] = m;
                 }
             }
         }
 
-        // Fill 1-voxel border from face-adjacent neighbors (missing -> MAT_AIR).
+        // Fill 1-voxel border from face-adjacent neighbors (missing -> Voxel::EMPTY).
         for sz in 0..SNAP_SIZE {
             for sy in 0..SNAP_SIZE {
                 for sx in 0..SNAP_SIZE {
@@ -168,7 +168,7 @@ impl ChunkSnapshot {
                     let cy = sy as i32 - SNAP_PAD as i32;
                     let cz = sz as i32 - SNAP_PAD as i32;
                     materials[Self::snap_index(sx, sy, sz)] =
-                        resolve_material(neighbors, cx, cy, cz);
+                        resolve_voxel(neighbors, cx, cy, cz);
                 }
             }
         }
@@ -187,24 +187,24 @@ impl ChunkSnapshot {
         sx + sy * SNAP_SIZE + sz * SNAP_SIZE * SNAP_SIZE
     }
 
-    /// Read material at chunk-local coordinates (x in -PAD..CHUNK_SIZE+PAD).
+    /// Read the voxel at chunk-local coordinates (x in -PAD..CHUNK_SIZE+PAD).
     #[inline]
-    pub fn get_material(&self, x: i32, y: i32, z: i32) -> u16 {
+    pub fn get_voxel(&self, x: i32, y: i32, z: i32) -> Voxel {
         let pad = SNAP_PAD as i32;
         let sx = (x + pad) as usize;
         let sy = (y + pad) as usize;
         let sz = (z + pad) as usize;
         debug_assert!(
             sx < SNAP_SIZE && sy < SNAP_SIZE && sz < SNAP_SIZE,
-            "ChunkSnapshot::get_material out of range: ({}, {}, {})", x, y, z
+            "ChunkSnapshot::get_voxel out of range: ({}, {}, {})", x, y, z
         );
         self.materials[Self::snap_index(sx, sy, sz)]
     }
 }
 
-/// Resolve a material at a chunk-border coord by reading the appropriate neighbor.
-/// Missing neighbors (edge/corner slots) fall back to MAT_AIR.
-fn resolve_material(neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> u16 {
+/// Resolve a voxel at a chunk-border coord by reading the appropriate neighbor.
+/// Missing neighbors (edge/corner slots) fall back to `Voxel::EMPTY`.
+fn resolve_voxel(neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> Voxel {
     let cs = CHUNK_SIZE as i32;
     let (dx, lx) = if x < 0 { (-1, (x + cs) as usize) }
                 else if x >= cs { (1, (x - cs) as usize) }
@@ -217,12 +217,12 @@ fn resolve_material(neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> u16 {
                 else { (0, z as usize) };
 
     if dx == 0 && dy == 0 && dz == 0 {
-        return MAT_AIR;
+        return Voxel::EMPTY;
     }
 
     match neighbors.get(dx, dy, dz) {
-        Some(neighbor) => neighbor.storage.material(Chunk::voxel_index(lx, ly, lz)),
-        None => MAT_AIR,
+        Some(neighbor) => neighbor.storage.voxel(Chunk::voxel_index(lx, ly, lz)),
+        None => Voxel::EMPTY,
     }
 }
 

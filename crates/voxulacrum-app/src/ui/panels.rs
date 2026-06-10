@@ -3,6 +3,7 @@ use bevy_ecs::prelude::Resource;
 
 use crate::params::*;
 use crate::meshing::MeshingStats;
+use nodegraph_editor::EditorState;
 
 pub struct ShaderLogEntry {
     pub message: String,
@@ -31,6 +32,10 @@ pub struct UiState {
     pub meshing_stats: MeshingStats,
     pub clear_cache_requested: bool,
     pub regenerate_requested: bool,
+    /// Latest graph from the embedded editor awaiting regeneration. Set by the
+    /// render system whenever the editor reports a dirty edit; drained by
+    /// `WorldRegenCoordinator::tick`, which rebuilds the generator from it.
+    pub pending_graph: Option<nodegraph_ir::Graph>,
     pub remesh_requested: bool,
     pub mesh_params_pending: bool,
     pub regenerating: bool,
@@ -66,6 +71,7 @@ impl UiState {
             meshing_stats: MeshingStats::default(),
             clear_cache_requested: false,
             regenerate_requested: false,
+            pending_graph: None,
             remesh_requested: false,
             mesh_params_pending: false,
             regenerating: false,
@@ -177,6 +183,44 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_preset_controls(ui, state);
             });
+        });
+}
+
+/// Left-side node-graph editor panel. Hidden by default; toggled with F2.
+/// Renders the embedded `EditorState` canvas with an undo/redo/modified
+/// toolbar. Phase 1: edits accumulate here (with undo) but do not yet
+/// regenerate the world - that loop is wired in a later step.
+pub fn draw_graph_editor_panel(ctx: &egui::Context, editor: &mut EditorState) {
+    let default_w = ctx.screen_rect().width() * 0.45;
+    egui::SidePanel::left("graph_editor_panel")
+        .default_width(default_w)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Graph Editor");
+
+                let undo_label = editor.peek_undo().map(str::to_owned);
+                if ui
+                    .add_enabled(undo_label.is_some(), egui::Button::new("Undo"))
+                    .on_hover_text(undo_label.as_deref().unwrap_or(""))
+                    .clicked()
+                {
+                    editor.undo();
+                }
+                let redo_label = editor.peek_redo().map(str::to_owned);
+                if ui
+                    .add_enabled(redo_label.is_some(), egui::Button::new("Redo"))
+                    .on_hover_text(redo_label.as_deref().unwrap_or(""))
+                    .clicked()
+                {
+                    editor.redo();
+                }
+                if editor.is_modified() {
+                    ui.colored_label(egui::Color32::YELLOW, "● modified");
+                }
+            });
+            ui.separator();
+            editor.show(ui);
         });
 }
 
@@ -476,7 +520,7 @@ fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams, mesh_params_pend
     });
 }
 
-fn draw_meshing_params(ui: &mut egui::Ui, p: &mut MeshingParams, remeshing: bool, mesh_params_pending: bool) {
+fn draw_meshing_params(ui: &mut egui::Ui, _p: &mut MeshingParams, remeshing: bool, mesh_params_pending: bool) {
     ui.collapsing("Meshing", |ui| {
         ui.add_enabled_ui(!remeshing, |ui| {
             ui.label("(no cube-mesh tuning knobs yet)");

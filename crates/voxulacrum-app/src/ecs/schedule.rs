@@ -39,6 +39,7 @@ pub fn build_frame_schedule() -> Schedule {
         input::toggle_ui_system.in_set(FrameStage::Input),
         systems::frame_counter_system.in_set(FrameStage::Input),
         systems::shader_hot_reload_system.in_set(FrameStage::Input),
+        systems::graph_hot_reload_system.in_set(FrameStage::Input),
     ));
     // Simulation
     schedule.add_systems((

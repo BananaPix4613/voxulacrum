@@ -22,6 +22,7 @@ mod bridge;
 mod colors;
 mod params;
 mod state;
+mod style;
 mod viewer;
 
 pub use bridge::{graph_to_snarl, snarl_to_graph};

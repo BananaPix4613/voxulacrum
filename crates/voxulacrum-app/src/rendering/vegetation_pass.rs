@@ -7,7 +7,6 @@ use crate::rendering::pipelines::{GrassInstance, GrassVertex};
 use crate::params::VegetationParams;
 use crate::world::World;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
-use crate::world::voxel::MATERIAL_TABLE;
 
 /// Per-chunk GPU vegetation data.
 pub struct ChunkVegetation {
@@ -204,7 +203,9 @@ fn collect_chunk_grass_instances(
         None => return Vec::new(),
     };
 
-    let grass_color = MATERIAL_TABLE[6].color; // MAT_GRASS_SOIL
+    let registry = voxel_core::MaterialRegistry::load_initial();
+    let grass_id = registry.resolve("grass_soil").expect("grass_soil registered");
+    let grass_color = registry.get(grass_id).unwrap().color;
     let mut instances = Vec::new();
 
     let base_x = chunk.position.x * CHUNK_SIZE as i32;
@@ -216,8 +217,8 @@ fn collect_chunk_grass_instances(
             for lx in 0..CHUNK_SIZE {
                 // TODO: flora_id dropped from storage (Phase 3). Reconstruct
                 // eligibility from material type — matches generation logic.
-                let mat = chunk.material(lx, ly, lz);
-                if mat != crate::world::voxel::MAT_GRASS_SOIL { continue; }
+                let v = chunk.voxel(lx, ly, lz);
+                if v.material != grass_id { continue; }
 
                 let wx = base_x + lx as i32;
                 let wy = base_y + ly as i32;

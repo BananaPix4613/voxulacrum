@@ -26,6 +26,13 @@ pub enum VoxelCoreError {
     /// The packed `u32` Voxel form contained an invalid shape discriminant.
     #[error("invalid shape discriminant {0} in packed Voxel")]
     InvalidShape(u8),
+
+    /// RON-driven material loading is deferred to a later phase (Phase 5
+    /// modding); future asset path `assets/materials/*.ron`. Returned by
+    /// [`crate::MaterialRegistry::load_from_ron`] so the stub can never
+    /// silently fall back to a default registry.
+    #[error("RON material loading is deferred to a future phase (Phase 5 modding)")]
+    RonLoadingDeferredToFuturePhase,
 }
 
 /// Convenience alias for results in this crate.

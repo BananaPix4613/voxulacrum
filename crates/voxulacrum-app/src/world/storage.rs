@@ -1,7 +1,7 @@
 //! Chunk storage: SoA layout with Uniform/Populated variants and palette compression.
 
 use super::chunk::CHUNK_VOLUME;
-use super::voxel::MAT_AIR;
+use voxel_core::Voxel;
 
 // ============================================================================
 // PalettedBitArray
@@ -14,14 +14,14 @@ use super::voxel::MAT_AIR;
 /// and avoids cross-word bit manipulation.
 #[derive(Clone)]
 pub struct PalettedBitArray {
-    palette: Vec<u16>,
+    palette: Vec<u32>,   // packed Voxel (Voxel::pack)
     bits_per_entry: u8,
     data: Vec<u64>,
 }
 
 impl PalettedBitArray {
     /// Create a single-entry palette filled with `default_value`.
-    pub fn new(default_value: u16) -> Self {
+    pub fn new(default_value: u32) -> Self {
         let bits_per_entry = 1u8;
         let entries_per_word = 64 / bits_per_entry as usize;
         let word_count = (CHUNK_VOLUME + entries_per_word - 1) / entries_per_word;
@@ -33,9 +33,9 @@ impl PalettedBitArray {
     }
 
     /// Bulk construction from a flat array. Scans for unique values, builds palette, packs indices.
-    pub fn from_raw(values: &[u16; CHUNK_VOLUME]) -> Self {
+    pub fn from_raw(values: &[u32; CHUNK_VOLUME]) -> Self {
         // Collect unique values preserving insertion order
-        let mut palette: Vec<u16> = Vec::new();
+        let mut palette: Vec<u32> = Vec::new();
         for &v in values.iter() {
             if !palette.contains(&v) {
                 palette.push(v);
@@ -63,7 +63,7 @@ impl PalettedBitArray {
 
     /// Read the actual material ID at voxel index.
     #[inline]
-    pub fn get(&self, index: usize) -> u16 {
+    pub fn get(&self, index: usize) -> u32 {
         debug_assert!(index < CHUNK_VOLUME);
         let bits = self.bits_per_entry as usize;
         let entries_per_word = 64 / bits;
@@ -75,7 +75,7 @@ impl PalettedBitArray {
     }
 
     /// Set a value at voxel index, auto-growing the palette if needed.
-    pub fn set(&mut self, index: usize, value: u16) {
+    pub fn set(&mut self, index: usize, value: u32) {
         debug_assert!(index < CHUNK_VOLUME);
 
         // Find or insert into palette
@@ -108,7 +108,7 @@ impl PalettedBitArray {
 
     /// Total heap memory usage in bytes.
     pub fn memory_bytes(&self) -> usize {
-        self.palette.len() * std::mem::size_of::<u16>()
+        self.palette.len() * std::mem::size_of::<u32>()
             + self.data.len() * std::mem::size_of::<u64>()
             + std::mem::size_of::<Self>()
     }
@@ -118,7 +118,7 @@ impl PalettedBitArray {
         self.palette.len()
     }
 
-    /// Serialize internal state: [palette_len:u16][palette:u16...][bits_per_entry:u8][word_count:u32][data:u64...]
+    /// Serialize internal state: [palette_len:u16][palette:u32...][bits_per_entry:u8][word_count:u32][data:u64...]
     pub fn serialize_to_bytes(&self, buf: &mut Vec<u8>) {
         let palette_len = self.palette.len() as u16;
         buf.extend_from_slice(&palette_len.to_le_bytes());
@@ -136,14 +136,14 @@ impl PalettedBitArray {
     /// Deserialize from bytes at `offset`. Returns `(Self, new_offset)`.
     pub fn deserialize_from_bytes(bytes: &[u8], mut pos: usize) -> Option<(Self, usize)> {
         if pos + 2 > bytes.len() { return None; }
-        let palette_len = u16::from_le_bytes(bytes[pos..pos+2].try_into().ok()?) as usize;
+        let palette_len = u32::from_le_bytes(bytes[pos..pos+2].try_into().ok()?) as usize;
         pos += 2;
 
-        if pos + palette_len * 2 > bytes.len() { return None; }
+        if pos + palette_len * 4 > bytes.len() { return None; }
         let mut palette = Vec::with_capacity(palette_len);
         for _ in 0..palette_len {
-            palette.push(u16::from_le_bytes(bytes[pos..pos+2].try_into().ok()?));
-            pos += 2;
+            palette.push(u32::from_le_bytes(bytes[pos..pos+4].try_into().ok()?));
+            pos += 4;
         }
 
         if pos + 1 > bytes.len() { return None; }
@@ -219,7 +219,7 @@ fn next_power_bits(current: u8) -> u8 {
 #[derive(Clone)]
 pub enum ChunkStorage {
     /// Every voxel is identical. Near-zero memory.
-    Uniform { material_id: u16 },
+    Uniform { voxel: Voxel },
     /// Heterogeneous chunk with struct-of-arrays layout.
     Populated(Box<PopulatedChunk>),
 }
@@ -256,17 +256,16 @@ pub struct PopulatedChunk {
 impl ChunkStorage {
     /// Create a uniform air chunk.
     pub fn new_air() -> Self {
-        ChunkStorage::Uniform {
-            material_id: MAT_AIR,
-        }
+        ChunkStorage::Uniform { voxel: Voxel::EMPTY }
     }
 
     /// Read material at a flat index.
     #[inline]
-    pub fn material(&self, index: usize) -> u16 {
+    pub fn voxel(&self, index: usize) -> Voxel {
         match self {
-            ChunkStorage::Uniform { material_id, .. } => *material_id,
-            ChunkStorage::Populated(p) => p.material_id.get(index),
+            ChunkStorage::Uniform { voxel } => *voxel,
+            ChunkStorage::Populated(p) => Voxel::unpack(p.material_id.get(index))
+                .unwrap_or(Voxel::EMPTY),
         }
     }
 
@@ -277,18 +276,12 @@ impl ChunkStorage {
         }
     }
 
-    /// Write material at a flat index. Promotes Uniform -> Populated if needed.
-    pub fn set_material(&mut self, index: usize, value: u16) {
+    /// Write voxel at a flat index. Promotes Uniform -> Populated if needed.
+    pub fn set_voxel(&mut self, index: usize, value: Voxel) {
         self.ensure_populated();
         if let ChunkStorage::Populated(p) = self {
-            p.material_id.set(index, value);
+            p.material_id.set(index, value.pack());
         }
-    }
-
-    /// Alias kept for callers using the legacy "set this voxel" naming.
-    #[inline]
-    pub fn set_voxel(&mut self, index: usize, material: u16) {
-        self.set_material(index, material);
     }
 
     /// Check if this chunk is uniform.
@@ -299,7 +292,7 @@ impl ChunkStorage {
     /// Check if a voxel is solid
     #[inline]
     pub fn is_solid(&self, index: usize) -> bool {
-        self.material(index) != MAT_AIR
+        self.voxel(index).is_solid()
     }
     
     /// Try to collapse a Populated chunk back to Uniform if all values match.
@@ -308,7 +301,7 @@ impl ChunkStorage {
             let first_m = p.material_id.get(0);
             if (0..CHUNK_VOLUME).all(|i| p.material_id.get(i) == first_m) {
                 *self = ChunkStorage::Uniform {
-                    material_id: first_m,
+                    voxel: Voxel::unpack(first_m).unwrap_or(Voxel::EMPTY),
                 };
             }
         }
@@ -326,12 +319,9 @@ impl ChunkStorage {
 
     /// Promote from Uniform to Populated, filling arrays with the uniform values.
     pub(crate) fn ensure_populated(&mut self) {
-        if let ChunkStorage::Uniform {
-            material_id,
-        } = *self
-        {
+        if let ChunkStorage::Uniform { voxel } = *self {
             *self = ChunkStorage::Populated(Box::new(PopulatedChunk {
-                material_id: PalettedBitArray::new(material_id),
+                material_id: PalettedBitArray::new(voxel.pack()),
                 lighting: None,
                 simulation: None,
                 flora: None,
@@ -390,15 +380,22 @@ fn zeroed_u8_box() -> Box<[u8; CHUNK_VOLUME]> {
     }
 }
 
-/// Build a ChunkStorage from a flat material array.
+/// Build a ChunkStorage from a flat voxel array.
 /// Checks for uniformity and returns Uniform when possible.
-pub fn storage_from_arrays(material: &[u16; CHUNK_VOLUME]) -> ChunkStorage {
-    let first_m = material[0];
-    if material.iter().all(|&m| m == first_m) {
-        ChunkStorage::Uniform { material_id: first_m }
+pub fn storage_from_arrays(voxels: &[Voxel; CHUNK_VOLUME]) -> ChunkStorage {
+    let first = voxels[0];
+    if voxels.iter().all(|&v| v == first) {
+        ChunkStorage::Uniform { voxel: first }
     } else {
+        let packed: Box<[u32; CHUNK_VOLUME]> = {
+            let mut arr = Box::new([0u32; CHUNK_VOLUME]);
+            for (i, v) in voxels.iter().enumerate() {
+                arr[i] = v.pack();
+            }
+            arr
+        };
         ChunkStorage::Populated(Box::new(PopulatedChunk {
-            material_id: PalettedBitArray::from_raw(material),
+            material_id: PalettedBitArray::from_raw(&packed),
             lighting: None,
             simulation: None,
             flora: None,
@@ -420,13 +417,13 @@ mod tests {
 
     #[test]
     fn palette_from_raw_roundtrip() {
-        let mut raw = [0u16; CHUNK_VOLUME];
+        let mut raw = [0u32; CHUNK_VOLUME];
         for i in 0..CHUNK_VOLUME {
-            raw[i] = (i % 9) as u16; // 9 materials
+            raw[i] = (i % 9) as u32; // 9 materials
         }
         let p = PalettedBitArray::from_raw(&raw);
         for i in 0..CHUNK_VOLUME {
-            assert_eq!(p.get(i), (i % 9) as u16, "mismatch at index {}", i);
+            assert_eq!(p.get(i), (i % 9) as u32, "mismatch at index {}", i);
         }
         assert_eq!(p.palette_len(), 9);
     }
@@ -446,24 +443,79 @@ mod tests {
 
     #[test]
     fn storage_uniform_access() {
+        use voxel_core::MaterialId;
         let s = ChunkStorage::Uniform {
-            material_id: 3,
+            voxel: Voxel::cube(MaterialId(3)),
         };
-        assert_eq!(s.material(0), 3);
+        assert_eq!(s.voxel(0), Voxel::cube(MaterialId(3)));
         assert!(s.is_uniform());
     }
 
     #[test]
     fn storage_promote_and_collapse() {
-        let mut s = ChunkStorage::Uniform { material_id: 5 };
-        s.set_material(100, 7);
+        use voxel_core::MaterialId;
+        let five = Voxel::cube(MaterialId(5));
+        let seven = Voxel::cube(MaterialId(7));
+        let mut s = ChunkStorage::Uniform { voxel: five };
+        s.set_voxel(100, seven);
         assert!(!s.is_uniform());
-        assert_eq!(s.material(100), 7);
-        assert_eq!(s.material(0), 5);
+        assert_eq!(s.voxel(100), seven);
+        assert_eq!(s.voxel(0), five);
 
-        s.set_material(100, 5);
+        s.set_voxel(100, five);
         s.try_collapse();
         assert!(s.is_uniform());
+    }
+
+    /// Phase 0 contract: the engine container (`PalettedBitArray`) and the
+    /// evaluator container (`voxel_core::ChunkBuffer`) must be *semantically*
+    /// equivalent — NOT byte-identical. The same voxel sequence written into
+    /// each and read back must yield equal `Vec<Voxel>`. (Container
+    /// byte-identity is a later concern, once the engine adopts ChunkBuffer.)
+    #[test]
+    fn engine_and_eval_containers_are_semantically_equivalent() {
+        use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
+        const N: usize = voxel_core::CHUNK_DIM;
+
+        // Mean fixture: every ShapeId, the highest MaterialId, every flag combo.
+        let shapes = [ShapeId::Empty, ShapeId::Cube, ShapeId::SlabBottom, ShapeId::SlabTop];
+        let flags = [
+            0u8,
+            Voxel::FLAG_LIGHT_SOURCE,
+            Voxel::FLAG_WATER_LOGGED,
+            Voxel::FLAG_LIGHT_SOURCE | Voxel::FLAG_WATER_LOGGED,
+        ];
+        let seq: Vec<Voxel> = (0..CHUNK_VOLUME)
+            .map(|i| Voxel {
+                shape: shapes[i % shapes.len()],
+                material: if i == 0 { MaterialId(u16::MAX) } else { MaterialId((i % 9) as u16) },
+                flags: flags[i % flags.len()],
+            })
+            .collect();
+
+        // Engine container: packed-u32 palette.
+        let mut engine = PalettedBitArray::new(Voxel::EMPTY.pack());
+        for (i, v) in seq.iter().enumerate() {
+            engine.set(i, v.pack());
+        }
+        let engine_read: Vec<Voxel> =
+            (0..CHUNK_VOLUME).map(|i| Voxel::unpack(engine.get(i)).unwrap()).collect();
+
+        // Eval container: dense ChunkBuffer<Voxel, 32>, same flat index order.
+        let mut buf: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
+        for (i, v) in seq.iter().enumerate() {
+            let (x, y, z) = (i % N, (i / N) % N, i / (N * N));
+            buf.set(x, y, z, *v);
+        }
+        let eval_read: Vec<Voxel> = (0..CHUNK_VOLUME)
+            .map(|i| {
+                let (x, y, z) = (i % N, (i / N) % N, i / (N * N));
+                buf.get(x, y, z)
+            })
+            .collect();
+
+        assert_eq!(engine_read, eval_read);
+        assert_eq!(engine_read, seq);
     }
 
     #[test]

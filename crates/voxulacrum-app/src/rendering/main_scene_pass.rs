@@ -1,5 +1,3 @@
-use glam::IVec3;
-
 use crate::rendering::cap_pass::CapPass;
 use crate::rendering::debug_lines::DebugLinePass;
 use crate::rendering::frustum::Frustum;

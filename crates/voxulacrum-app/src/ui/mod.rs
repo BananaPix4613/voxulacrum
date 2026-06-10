@@ -3,12 +3,18 @@ pub mod panels;
 use egui_wgpu::ScreenDescriptor;
 
 use crate::rendering::render_context::RenderContext;
+use nodegraph_editor::EditorState;
 
 pub struct EguiRenderer {
     pub ctx: egui::Context,
     pub winit_state: egui_winit::State,
     pub renderer: egui_wgpu::Renderer,
     pub visible: bool,
+    /// The embedded node-graph editor. Initialized from the world's active
+    /// graph at startup (see `main.rs`); toggled with F2 (hidden by default).
+    pub editor: EditorState,
+    /// Whether the left-side graph editor panel is shown.
+    pub editor_visible: bool,
 }
 
 impl EguiRenderer {
@@ -40,6 +46,8 @@ impl EguiRenderer {
             winit_state,
             renderer,
             visible: true,
+            editor: EditorState::new(),
+            editor_visible: false,
         }
     }
     
@@ -54,6 +62,10 @@ impl EguiRenderer {
     
     pub fn toggle_visibility(&mut self) {
         self.visible = !self.visible;
+    }
+    
+    pub fn toggle_editor(&mut self) {
+        self.editor_visible = !self.editor_visible;
     }
     
     /// Run the egui UI and render it onto the given surface view.
@@ -78,6 +90,9 @@ impl EguiRenderer {
         let raw_input = self.winit_state.take_egui_input(window);
         let full_output = self.ctx.run(raw_input, |ctx| {
             if self.visible {
+                if self.editor_visible {
+                    panels::draw_graph_editor_panel(ctx, &mut self.editor);
+                }
                 panels::draw_engine_panel(ctx, ui_state);
             }
         });

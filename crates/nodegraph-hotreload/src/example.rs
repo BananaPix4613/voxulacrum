@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams,
                    DomainWarpParams, FindFlatParams, FractalType, Graph, JitteredGridParams, LayerParams,
                    MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef,
-                   PlaceTreeParams, SlopeRefinerParams, TerrainOutputParams, WorldPosParams};
+                   PlaceTreeParams, TerrainOutputParams, WorldPosParams};
 use voxel_core::MaterialId;
 
 use crate::error::HotReloadResult;
@@ -116,19 +116,14 @@ pub fn build_example_graph() -> Graph {
     g.connect(PinRef::new(final_density, 0), PinRef::new(layer, 0))
         .expect("density -> layer");
 
-    // Phase-9 terrain tail: density + material → BuildTerrain → SlopeRefiner
-    // → TerrainOutput. The refiner reclassifies surface cubes as
-    // slopes/corners; the terminal just passes its terrain through to the
-    // runtime cache.
+    // Phase-9 terrain tail: density + material → BuildTerrain → TerrainOutput.
+    // BuildTerrain packs density + material into a voxel chunk; the terminal
+    // passes its terrain through to the runtime cache.
     let build = g.add_node(NodeKind::BuildTerrain(BuildTerrainParams::default()));
     g.connect(PinRef::new(final_density, 0), PinRef::new(build, 0))
         .expect("density -> build.density");
     g.connect(PinRef::new(layer, 0), PinRef::new(build, 1))
         .expect("layer -> build.material");
-
-    let refiner = g.add_node(NodeKind::SlopeRefiner(SlopeRefinerParams::default()));
-    g.connect(PinRef::new(build, 0), PinRef::new(refiner, 0))
-        .expect("build -> refiner.terrain");
 
     // --- Phase-10 forest tail: scatter → find flat grass → place trees ----
     let scatter = g.add_node(NodeKind::JitteredGrid(JitteredGridParams {
@@ -142,8 +137,8 @@ pub fn build_example_graph() -> Graph {
         max_step: 1,
         on_materials: vec![MaterialId(6)], // grass-soil surfaces only
     }));
-    g.connect(PinRef::new(refiner, 0), PinRef::new(find, 0))
-        .expect("refiner -> find.terrain");
+    g.connect(PinRef::new(build, 0), PinRef::new(find, 0))
+        .expect("build -> find.terrain");
     g.connect(PinRef::new(scatter, 0), PinRef::new(find, 1))
         .expect("scatter -> find.points");
 
@@ -155,8 +150,8 @@ pub fn build_example_graph() -> Graph {
         trunk_material: MaterialId(9),  // Wood
         leaf_material: MaterialId(10),  // Leaves
     }));
-    g.connect(PinRef::new(refiner, 0), PinRef::new(trees, 0))
-        .expect("refiner -> trees.terrain");
+    g.connect(PinRef::new(build, 0), PinRef::new(trees, 0))
+        .expect("build -> trees.terrain");
     g.connect(PinRef::new(find, 0), PinRef::new(trees, 1))
         .expect("find -> trees.points");
 

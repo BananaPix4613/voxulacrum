@@ -2,9 +2,7 @@
 
 use std::path::PathBuf;
 
-use nodegraph_editor::{
-    snarl_to_graph, DiagnosticIndex, EditorState, GraphViewer,
-};
+use nodegraph_editor::EditorState;
 use nodegraph_eval::{ScalarField, CHUNK_DIM};
 
 use crate::render_3d::{ChunkRenderState, OrbitCamera, RenderCallback};
@@ -237,34 +235,7 @@ impl eframe::App for PreviewApp {
 
         // 6. Central panel: editor canvas.
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Capture the pre-mutation graph snapshot for undo, plus the
-            // diagnostic + id-map pair the viewer needs.
-            let (pre_graph, id_map) = snarl_to_graph(&self.editor.snarl);
-            let diagnostics = DiagnosticIndex::from_diagnostics(&pre_graph.validate());
-
-            let mut actions: Vec<nodegraph_editor::UndoLabel> = Vec::new();
-            let mut dirty_param = false;
-            let mut viewer = GraphViewer {
-                id_map: &id_map,
-                diagnostics: &diagnostics,
-                actions: &mut actions,
-                dirty_param: &mut dirty_param,
-            };
-            self.editor.snarl.show(
-                &mut viewer,
-                &egui_snarl::ui::SnarlStyle::default(),
-                egui::Id::new("snarl-editor"),
-                ui,
-            );
-
-            if !actions.is_empty() {
-                // Coalesce all structural actions in this frame into one
-                // undo entry against the pre-mutation snapshot.
-                let label = actions.join(", ");
-                self.editor.push_undo(label, pre_graph);
-            } else if dirty_param {
-                self.editor.mark_dirty();
-            }
+            self.editor.show(ui);
         });
 
         // 7. If anything changed this frame, push the new graph to the runtime.

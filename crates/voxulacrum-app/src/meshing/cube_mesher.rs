@@ -7,7 +7,7 @@
 use crate::meshing::MaterialConfig;
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::{ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, SNAP_PAD, SNAP_SIZE};
-use crate::world::voxel::MAT_AIR;
+use voxel_core::Voxel;
 
 /// Six axis-aligned face directions: (normal, four CCW corner offsets in [0,1]^3).
 const FACES: [([f32; 3], [[f32; 3]; 4]); 6] = [
@@ -39,7 +39,7 @@ const NEIGHBOR_OFFSETS: [[i32; 3]; 6] = [
 ];
 
 #[inline]
-fn snap_material(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> u16 {
+fn snap_voxel(snap: &ChunkSnapshot, x: i32, y: i32, z: i32) -> Voxel {
     let sx = (x + SNAP_PAD as i32) as usize;
     let sy = (y + SNAP_PAD as i32) as usize;
     let sz = (z + SNAP_PAD as i32) as usize;
@@ -63,19 +63,20 @@ pub fn generate_chunk_mesh(
     for z in 0..CHUNK_SIZE as i32 {
         for y in 0..CHUNK_SIZE as i32 {
             for x in 0..CHUNK_SIZE as i32 {
-                let mat = snap_material(snap, x, y, z);
-                if mat == MAT_AIR { continue; }
+                let v = snap_voxel(snap, x, y, z);
+                if !v.is_solid() { continue; }
+                // Any solid shape renders as a full cube in Phase 0; slab faces are Phase 3.
 
                 let color = mat_config
                     .colors
-                    .get(mat as usize)
+                    .get(v.material.0 as usize)
                     .copied()
                     .unwrap_or([1.0, 0.0, 1.0]);
 
                 for (face_idx, (normal, corners)) in FACES.iter().enumerate() {
                     let [dx, dy, dz] = NEIGHBOR_OFFSETS[face_idx];
-                    let neighbor = snap_material(snap, x + dx, y + dy, z + dz);
-                    if neighbor != MAT_AIR { continue; }
+                    let neighbor = snap_voxel(snap, x + dx, y + dy, z + dz);
+                    if neighbor.is_solid() { continue; }
 
                     let base = vertices.len() as u32;
                     for c in corners {
@@ -88,7 +89,7 @@ pub fn generate_chunk_mesh(
                             normal: *normal,
                             color,
                             ao: 1.0,
-                            material_id: mat as u32,
+                            material_id: v.material.0 as u32,
                             cell_flags: 0,
                             _pad_vert: [0; 2],
                         });

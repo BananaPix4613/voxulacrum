@@ -4,6 +4,7 @@ use egui_snarl::Snarl;
 use nodegraph_ir::{Graph, NodeKind};
 
 use crate::bridge::{graph_to_snarl, snarl_to_graph};
+use crate::viewer::{DiagnosticIndex, GraphViewer};
 
 /// Maximum entries kept in each of the undo and redo stacks.
 pub const UNDO_DEPTH: usize = 100;
@@ -56,6 +57,40 @@ impl EditorState {
         snarl_to_graph(&self.snarl).0
     }
 
+    /// Render the editor canvas into `ui`, folding this frame's structural
+    /// edits into a single undo entry (param drags coalesce via the dirty
+    /// flag). This is the embedding shown in the crate-level docs; call
+    /// [`Self::consume_dirty`] afterwards to react to changes.
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        // Snapshot the pre-mutation graph (for undo) plus the id-map and
+        // diagnostics the viewer needs this frame.
+        let (pre_graph, id_map) = snarl_to_graph(&self.snarl);
+        let diagnostics = DiagnosticIndex::from_diagnostics(&pre_graph.validate());
+        
+        let mut actions: Vec<UndoLabel> = Vec::new();
+        let mut dirty_param = false;
+        let mut viewer = GraphViewer {
+            id_map: &id_map,
+            diagnostics: &diagnostics,
+            actions: &mut actions,
+            dirty_param: &mut dirty_param,
+        };
+        self.snarl.show(
+            &mut viewer,
+            &crate::style::editor_snarl_style(),
+            egui::Id::new("nodegraph-editor-canvas"),
+            ui,
+        );
+        
+        if !actions.is_empty() {
+            // Coalesce this frame's structural actions into one undo entry.
+            let label = actions.join(", ");
+            self.push_undo(label, pre_graph);
+        } else if dirty_param {
+            self.mark_dirty();
+        }
+    }
+    
     /// Push a labeled undo entry whose `pre_snapshot` is the graph state
     /// *before* the user action took place. Clears the redo stack. Also
     /// marks the editor dirty + modified, so the host can pick up the new

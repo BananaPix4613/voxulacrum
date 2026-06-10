@@ -1,9 +1,9 @@
 //! Batched neighbor-chunk view for cross-chunk lookups.
 //!
 //! The single-shot closure form [`ChunkBuffer::get_with_neighbors`] is fine
-//! for ad-hoc queries. Meshing and slope-refinement walk every border voxel
-//! and would pay a heavy closure-call cost - [`NeighborView`] holds the
-//! adjacent chunk references once and offers direct indexed reads.
+//! for ad-hoc queries. Meshing walks every border voxel and would pay a heavy
+//! closure-call cost - [`NeighborView`] holds the adjacent chunk references
+//! once and offers direct indexed reads.
 
 use crate::buffer::ChunkBuffer;
 use crate::palette::Palettable;

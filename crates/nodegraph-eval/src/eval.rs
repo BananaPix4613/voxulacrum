@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
-use nodegraph_ir::{Graph, FractalType, NoiseParams, NodeId, NodeKind, Severity};
+use nodegraph_ir::{Axis, Graph, FractalType, NoiseParams, NodeId, NodeKind, Severity};
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
 use crate::cache::{CachedOutput, EvalCache};
@@ -214,6 +214,24 @@ impl<'g> Evaluator<'g> {
             NodeKind::WorldPos(_)   => CachedOutput::Vec3(Arc::new(
                 Vec3Field::from_fn(|x, y, z| self.ctx.world_pos(x, y, z))
             )),
+            NodeKind::WorldAxis(p) => {
+                let axis = p.axis;
+                let mut field = ScalarField::zeroed();
+                for z in 0..CHUNK_DIM {
+                    for y in 0..CHUNK_DIM {
+                        for x in 0..CHUNK_DIM {
+                            let w = self.ctx.world_pos(x, y, z);
+                            let v = match axis {
+                                Axis::X => w.x,
+                                Axis::Y => w.y,
+                                Axis::Z => w.z,
+                            };
+                            field.set(x, y, z, v);
+                        }
+                    }
+                }
+                CachedOutput::Scalar(Arc::new(field))
+            },
             // --- Math (all elementwise on density fields) ---
             NodeKind::Add(_) => {
                 let (a, b) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?);
@@ -394,7 +412,6 @@ impl<'g> Evaluator<'g> {
                                 let m = material.get(x, y, z);
                                 out.set(x, y, z, Voxel {
                                     shape: ShapeId::Cube,
-                                    rotation: voxel_core::Rotation::None,
                                     material: m,
                                     flags: 0,
                                 });
@@ -404,11 +421,6 @@ impl<'g> Evaluator<'g> {
                 }
                 out.try_collapse();
                 CachedOutput::Terrain(Arc::new(out))
-            }
-            NodeKind::SlopeRefiner(_) => {
-                let input = self.input_terrain(id, 0)?;
-                let refined = crate::slope_refine::refine_chunk(&input);
-                CachedOutput::Terrain(Arc::new(refined))
             }
             // --- Positions / Scanners / Props ---
             NodeKind::JitteredGrid(p) => {
@@ -454,6 +466,10 @@ impl<'g> Evaluator<'g> {
             NodeKind::Perlin3D(p)  => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::Perlin).get_noise_3d(w.x, w.y, w.z) }
             NodeKind::Simplex2D(p) => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::OpenSimplex2).get_noise_2d(w.x, w.z) }
             NodeKind::Simplex3D(p) => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::OpenSimplex2).get_noise_3d(w.x, w.y, w.z) }
+            NodeKind::WorldAxis(p) => {
+                let w = self.ctx.world_pos(x, y, z);
+                match p.axis { Axis::X => w.x, Axis::Y => w.y, Axis::Z => w.z }
+            }
             NodeKind::Add(_)       => self.sample_input(id, 0, x, y, z)? + self.sample_input(id, 1, x, y, z)?,
             NodeKind::Multiply(_)  => self.sample_input(id, 0, x, y, z)? * self.sample_input(id, 1, x, y, z)?,
             NodeKind::Subtract(_)  => self.sample_input(id, 0, x, y, z)? - self.sample_input(id, 1, x, y, z)?,
@@ -487,7 +503,6 @@ impl<'g> Evaluator<'g> {
             | NodeKind::Layer(_)
             | NodeKind::Queue(_)
             | NodeKind::BuildTerrain(_)
-            | NodeKind::SlopeRefiner(_)
             | NodeKind::TerrainOutput(_)
             | NodeKind::JitteredGrid(_)
             | NodeKind::PoissonDisk(_)

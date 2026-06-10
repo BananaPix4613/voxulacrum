@@ -2,14 +2,15 @@
 //! Only player-modified chunks are stored. Base terrain is regenerated from seed.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 use rusqlite::{params, Connection, OpenFlags};
 
-use super::chunk::{Chunk, VoxelEdit, CHUNK_VOLUME, DELTA_THRESHOLD};
+use super::chunk::{Chunk, VoxelEdit, DELTA_THRESHOLD};
 use super::storage::{ChunkStorage, PopulatedChunk, PalettedBitArray};
+use voxel_core::Voxel;
 
 // -- Error type --------------------------------------------------------------
 
@@ -35,7 +36,11 @@ impl From<std::io::Error> for PersistError { fn from(e: std::io::Error) -> Self 
 
 // -- Format constants --------------------------------------------------------
 
-const BLOB_VERSION: u8 = 3;
+const BLOB_VERSION: u8 = 4; // was 3 — chunk payloads now store packed u32 Voxels
+
+/// Bumped whenever the on-disk voxel encoding changes. A stored value older than
+/// this forces a one-shot save wipe on open (pre-release; saves are not migrated).
+const VOXEL_FORMAT_VERSION: u64 = 1;
 
 // Bitflags for optional VoxelEdit fields
 const EDIT_FLAG_MOISTURE: u8     = 0b0000_0001;
@@ -69,13 +74,13 @@ pub fn serialize_chunk_edits_raw(edits: &ChunkEdits) -> Result<Vec<u8>, PersistE
             raw.extend_from_slice(&(edits.len() as u32).to_le_bytes());
             for edit in edits {
                 raw.extend_from_slice(&edit.index.to_le_bytes());
-                raw.extend_from_slice(&edit.material_id.to_le_bytes());
+                raw.extend_from_slice(&edit.voxel.pack().to_le_bytes());
             }
         }
         ChunkEdits::Full(storage) => match storage {
-            ChunkStorage::Uniform { material_id } => {
+            ChunkStorage::Uniform { voxel } => {
                 raw.push(TAG_FULL_UNIFORM);
-                raw.extend_from_slice(&material_id.to_le_bytes());
+                raw.extend_from_slice(&voxel.pack().to_le_bytes());
             }
             ChunkStorage::Populated(pop) => {
                 raw.push(TAG_FULL_POPULATED);
@@ -101,16 +106,17 @@ pub fn deserialize_chunk_edits_raw(raw: &[u8]) -> Result<ChunkEdits, PersistErro
         TAG_DELTA => {
             if raw.len() < 6 { return Err(PersistError::Corrupt("delta header short".into())); }
             let count = u32::from_le_bytes(raw[2..6].try_into().unwrap()) as usize;
-            const EDIT_BYTES: usize = 4; // index:u16 + material_id:u16
+            const EDIT_BYTES: usize = 6; // index:u16 + voxel:u32 (packed)
             if raw.len() < 6 + count * EDIT_BYTES {
                 return Err(PersistError::Corrupt("delta data truncated".into()));
             }
             let mut edits = Vec::with_capacity(count);
             let mut off = 6;
             for _ in 0..count {
+                let packed = u32::from_le_bytes(raw[off+2..off+6].try_into().unwrap());
                 edits.push(VoxelEdit {
                     index: u16::from_le_bytes(raw[off..off+2].try_into().unwrap()),
-                    material_id: u16::from_le_bytes(raw[off+2..off+4].try_into().unwrap()),
+                    voxel: Voxel::unpack(packed).unwrap_or(Voxel::EMPTY),
                     moisture: None,
                     flora_id: None,
                     flora_growth: None,
@@ -120,9 +126,10 @@ pub fn deserialize_chunk_edits_raw(raw: &[u8]) -> Result<ChunkEdits, PersistErro
             Ok(ChunkEdits::Delta(edits))
         }
         TAG_FULL_UNIFORM => {
-            if raw.len() < 4 { return Err(PersistError::Corrupt("uniform short".into())); }
+            if raw.len() < 6 { return Err(PersistError::Corrupt("uniform short".into())); }
+            let packed = u32::from_le_bytes(raw[2..6].try_into().unwrap());
             Ok(ChunkEdits::Full(ChunkStorage::Uniform {
-                material_id: u16::from_le_bytes(raw[2..4].try_into().unwrap()),
+                voxel: Voxel::unpack(packed).unwrap_or(Voxel::EMPTY),
             }))
         }
         TAG_FULL_POPULATED => {
@@ -390,7 +397,7 @@ impl WorldDatabase {
 pub fn apply_edits_to_storage(base: &ChunkStorage, edits: &[VoxelEdit]) -> ChunkStorage {
     let mut storage = base.clone();
     for edit in edits {
-        storage.set_voxel(edit.index as usize, edit.material_id);
+        storage.set_voxel(edit.index as usize, edit.voxel);
         // Apply optional tier fields
         if edit.moisture.is_some() || edit.flora_id.is_some() || edit.flora_growth.is_some() {
             storage.ensure_populated();
@@ -399,7 +406,7 @@ pub fn apply_edits_to_storage(base: &ChunkStorage, edits: &[VoxelEdit]) -> Chunk
                     p.simulation_mut().moisture[edit.index as usize] = moisture;
                 }
                 if let Some(flora_id) = edit.flora_id {
-                    p.flora_mut().flora_id.set(edit.index as usize, flora_id);
+                    p.flora_mut().flora_id.set(edit.index as usize, flora_id as u32);
                 }
                 if let Some(flora_growth) = edit.flora_growth {
                     p.flora_mut().flora_growth[edit.index as usize] = flora_growth;
@@ -488,6 +495,21 @@ impl WorldPersistence {
             None => { db.set_meta_u64("seed", seed_u64)?; }
             _ => {}
         }
+
+        // One-shot save wipe when the on-disk voxel encoding is stale (pre-release;
+        // saves are intentionally not migrated). Mirrors the regen cache-clear path.
+        let stored_voxel_fmt = db.get_meta_u64("voxel_format_version")?.unwrap_or(0);
+        if stored_voxel_fmt < VOXEL_FORMAT_VERSION {
+            let cleared = db.clear_all_chunks()?;
+            let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
+            let _ = crate::meshing::cache::clear_world_cache(&cache_dir);
+            log::warn!(
+                "Voxel format changed (saved v{stored_voxel_fmt} < v{VOXEL_FORMAT_VERSION}); \
+                 wiped {cleared} saved chunks and the mesh cache. Pre-release: saves are not migrated."
+            );
+            db.set_meta_u64("voxel_format_version", VOXEL_FORMAT_VERSION)?;
+        }
+
         db.set_meta_u64("format_version", BLOB_VERSION as u64)?;
 
         log::info!("Persistence: {} ({} modified chunks)", db_path.display(), db.chunk_count()?);

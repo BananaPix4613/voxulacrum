@@ -5,6 +5,7 @@ mod meshing;
 mod params;
 mod rendering;
 mod shader_reload;
+mod graph_reload;
 mod simulation;
 mod ui;
 mod world;
@@ -247,7 +248,14 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Shaders
     let shader_dir = paths::asset_root().join("shaders");
     let shader_watcher = ShaderWatcher::new(&shader_dir);
-
+    
+    // Graph hot-reload: watch the directory containing the active world graph.
+    let graph_dir = world::world_generator::default_graph_path()
+        .parent()
+        .expect("default graph path has a parent directory")
+        .to_path_buf();
+    let graph_watcher = graph_reload::GraphWatcherRes::new(&graph_dir);
+    
     let post_process_bind_group_layout =
         uniforms::create_post_process_bind_group_layout(&ctx.device);
 
@@ -290,6 +298,11 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let min_y = initial_params.streaming.min_chunk_y;
     let max_y = initial_params.streaming.max_chunk_y;
 
+    // The single graph-backed generator, shared (via Arc) by the World, the
+    // streaming workers, and background regeneration.
+    let generator = world::world_generator::load_default(&initial_params.terrain_gen)
+        .expect("Failed to load default_biome graph generator");
+    
     let world = if let Some(chunks) =
         meshing::cache::load_world_cache(&world_cache_path, world_key)
     {
@@ -298,9 +311,9 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
             gen_start.elapsed(),
             chunks.len()
         );
-        world::World::from_cached_chunks(chunks, &initial_params.terrain_gen, min_y, max_y)
+        world::World::from_cached_chunks(chunks, generator.clone(), min_y, max_y)
     } else {
-        let w = world::World::generate(&initial_params.terrain_gen, min_y, max_y);
+        let w = world::World::generate(generator.clone(), min_y, max_y);
         log::info!("World generated in {:.2?}", gen_start.elapsed());
         if let Err(e) =
             meshing::cache::save_world_cache(&world_cache_path, world_key, &w)
@@ -316,13 +329,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Vegetation + water
     let vegetation_pass =
         VegetationPass::new(&ctx, &world, &initial_params.vegetation);
-    let water_pass = WaterPass::new(
-        &ctx,
-        &world.generator,
-        &initial_params.terrain_gen,
-        initial_params.water.water_level,
-        world.chunks.keys().copied(),
-    );
+    let water_pass = WaterPass::new();
 
     // Post-process pass
     let pp_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
@@ -364,7 +371,10 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     );
 
     // Egui
-    let egui_renderer = ui::EguiRenderer::new(&ctx, &window);
+    let mut egui_renderer = ui::EguiRenderer::new(&ctx, &window);
+    // Mirror the world's active graph into the embedded editor so the canvas
+    // opens showing the same default_biome graph the engine generated from.
+    egui_renderer.editor = nodegraph_editor::EditorState::from_graph(generator.graph());
     let ui_state = UiState::new(initial_params, presets_dir);
 
     // Meshing
@@ -407,6 +417,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(palette_pass);
     ecs.insert_resource(cap_pass);
     ecs.insert_resource(shader_watcher);
+    ecs.insert_resource(graph_watcher);
     ecs.insert_resource(meshing);
     ecs.insert_resource(WorldRegenCoordinator::new());
     let persistence = match WorldPersistence::open("default", ui_state.params.terrain_gen.seed) {
@@ -421,7 +432,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(persistence);
     let streaming_manager = world::streaming::ChunkStreamingManager::new(
         &ui_state.params.streaming,
-        &ui_state.params.terrain_gen,
+        generator.clone(),
         db_path,
         dict_bytes,
     );

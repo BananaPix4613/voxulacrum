@@ -7,7 +7,6 @@ mod place;
 mod png;
 mod scan;
 mod scatter;
-mod slope_refine;
 
 pub use cache::{CachedOutput, EvalCache};
 pub use context::EvalContext;

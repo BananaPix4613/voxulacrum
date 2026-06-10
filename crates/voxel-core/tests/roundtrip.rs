@@ -1,25 +1,21 @@
 //! Integration tests for voxel-core.
 
-use voxel_core::{ChunkBuffer, MaterialId, Rotation, ShapeId, StorageKind, Voxel};
+use voxel_core::{ChunkBuffer, MaterialId, MaterialRegistry, ShapeId, StorageKind, Voxel};
 
 #[test]
 fn voxel_pack_unpack_full_field_sweep() {
-    // Sweep through every shape × every rotation × a few materials × a few flags.
     let materials = [MaterialId(0), MaterialId(1), MaterialId(0xFFFF)];
     let flag_sets = [0u8, 0x01, 0x80, 0xFF];
-    
+
     for shape_disc in 0..=ShapeId::MAX_DISCRIMINANT {
         let shape = ShapeId::from_raw(shape_disc).unwrap();
-        for rot_raw in 0..=3u8 {
-            let rotation = Rotation::from_raw(rot_raw);
-            for &material in &materials {
-                for &flags in &flag_sets {
-                    let v = Voxel { shape, rotation, material, flags };
-                    let bits = v.pack();
-                    assert_eq!(bits & 0x8000_0000, 0, "high bit must be unused");
-                    let back = Voxel::unpack(bits).unwrap();
-                    assert_eq!(back, v);
-                }
+        for &material in &materials {
+            for &flags in &flag_sets {
+                let v = Voxel { shape, material, flags };
+                let bits = v.pack();
+                assert_eq!(bits & 0xF800_0000, 0, "bits 27..=31 must be unused");
+                let back = Voxel::unpack(bits).unwrap();
+                assert_eq!(back, v);
             }
         }
     }
@@ -62,4 +58,23 @@ fn dense_promotion_preserves_pattern() {
             }
         }
     }
+}
+
+#[test]
+fn shape_discriminants_are_stable() {
+    assert_eq!(ShapeId::Empty as u8, 0);
+    assert_eq!(ShapeId::Cube as u8, 1);
+    assert_eq!(ShapeId::SlabBottom as u8, 2);
+    assert_eq!(ShapeId::SlabTop as u8, 3);
+    assert_eq!(ShapeId::MAX_DISCRIMINANT, 3);
+}
+
+#[test]
+fn material_registry_load_initial() {
+    let reg = MaterialRegistry::load_initial();
+    assert_eq!(reg.len(), 9);
+    let grass = reg.resolve("grass_soil").expect("grass_soil resolves");
+    assert_eq!(grass, MaterialId(6));
+    assert_eq!(reg.get(grass).unwrap().display_name, "Grass Soil");
+    assert!(reg.resolve("nonexistent").is_none());
 }

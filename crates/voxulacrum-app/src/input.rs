@@ -22,6 +22,7 @@ pub enum GameAction {
     CameraZoomIn,
     CameraZoomOut,
     ToggleUI,
+    ToggleGraphEditor,
 }
 
 // ============================================================================
@@ -214,6 +215,8 @@ impl Default for InputMap {
                 InputBinding { trigger: InputTrigger::ScrollDown, action: CameraZoomOut, mode: Continuous },
                 // F1 UI toggle - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F1.into()), action: ToggleUI, mode: EdgeTriggered },
+                // F2 graph-editor toggle - edge triggered
+                InputBinding { trigger: InputTrigger::Key(KeyCode::F2.into()), action: ToggleGraphEditor, mode: EdgeTriggered },
             ],
         }
     }
@@ -429,12 +432,15 @@ pub fn process_input_system(
     }
 }
 
-/// Handles ToggleUI via InputState (needs NonSend access for EguiRenderer).
+/// Handles UI / editor toggles via InputState (needs NonSend access for EguiRenderer).
 pub fn toggle_ui_system(
     state: Res<InputState>,
     mut egui: NonSendMut<ui::EguiRenderer>,
 ) {
     if state.just_pressed(GameAction::ToggleUI) {
         egui.toggle_visibility();
+    }
+    if state.just_pressed(GameAction::ToggleGraphEditor) {
+        egui.toggle_editor();
     }
 }

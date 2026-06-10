@@ -1,15 +1,13 @@
-//! Per-voxel face-culled mesher. Dispatches each non-empty voxel to its
-//! per-`(ShapeId, Rotation)` triangle table from `shape_table.rs`; emits a
-//! triangle either unconditionally (slope surfaces, cut faces) or when the
-//! named face-neighbor is air.
+//! Per-voxel face-culled mesher. Emits cube faces for solid voxels, culling a
+//! face when its axis-neighbor is solid. `SlabBottom`/`SlabTop` emit a
+//! half-height box (Y range [0,0.5] / [0.5,1]) and always draw their faces.
 
 use bytemuck::{Pod, Zeroable};
-use voxel_core::{ChunkBuffer, Voxel};
+use voxel_core::{ChunkBuffer, ShapeId, Voxel};
 
 use crate::material_colors::material_color;
-use crate::render_3d::shape_table::{covers_face, shape_geometry, FaceCondition, NeighborDir};
 
-/// One vertex of one triangle. Three floats position, three normal, three color.
+/// One vertex: position, normal, color. Consumed as `TriangleList`.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable, Debug)]
 pub struct FaceVertex {
@@ -17,8 +15,7 @@ pub struct FaceVertex {
     pub normal:   [f32; 3],
     pub color:    [f32; 3],
 }
-
-/// CPU-side mesh: vertices for `wgpu::PrimitiveTopology::TriangleList`.
+/// CPU-side mesh.
 pub struct ChunkMesh {
     pub vertices: Vec<FaceVertex>,
 }
@@ -29,9 +26,20 @@ impl ChunkMesh {
 
 const N: usize = 32;
 
-/// Emit a face-culled mesh for `chunk`. Each non-empty voxel contributes
-/// its shape's triangles, with conditional faces culled against the
-/// neighbor's solidity (out-of-bounds counts as air).
+/// (normal, neighbor offset, 4 CCW corners of the unit-cube face). Corner y is
+/// in {0,1}; slabs rescale y into a half-height range.
+const FACES: [([f32; 3], [i32; 3], [[f32; 3]; 4]); 6] = [
+    ([ 1.0, 0.0, 0.0], [ 1, 0, 0], [[1.0,0.0,0.0],[1.0,1.0,0.0],[1.0,1.0,1.0],[1.0,0.0,1.0]]),
+    ([-1.0, 0.0, 0.0], [-1, 0, 0], [[0.0,0.0,1.0],[0.0,1.0,1.0],[0.0,1.0,0.0],[0.0,0.0,0.0]]),
+    ([ 0.0, 1.0, 0.0], [ 0, 1, 0], [[0.0,1.0,0.0],[1.0,1.0,0.0],[1.0,1.0,1.0],[0.0,1.0,1.0]]),
+    ([ 0.0,-1.0, 0.0], [ 0,-1, 0], [[0.0,0.0,1.0],[1.0,0.0,1.0],[1.0,0.0,0.0],[0.0,0.0,0.0]]),
+    ([ 0.0, 0.0, 1.0], [ 0, 0, 1], [[1.0,0.0,1.0],[1.0,1.0,1.0],[0.0,1.0,1.0],[0.0,0.0,1.0]]),
+    ([ 0.0, 0.0,-1.0], [ 0, 0,-1], [[0.0,0.0,0.0],[0.0,1.0,0.0],[1.0,1.0,0.0],[1.0,0.0,0.0]]),
+];
+
+/// Two triangles per quad: corners (0,1,2) and (0,2,3).
+const TRI: [usize; 6] = [0, 1, 2, 0, 2, 3];
+
 pub fn build_chunk_mesh(chunk: &ChunkBuffer<Voxel, 32>) -> ChunkMesh {
     let mut verts: Vec<FaceVertex> = Vec::with_capacity(8 * 1024);
 
@@ -41,24 +49,31 @@ pub fn build_chunk_mesh(chunk: &ChunkBuffer<Voxel, 32>) -> ChunkMesh {
                 let v = chunk.get(x, y, z);
                 if !v.is_solid() { continue; }
                 let color = material_color(v.material);
+                let (y_lo, y_hi) = match v.shape {
+                    ShapeId::SlabBottom => (0.0, 0.5),
+                    ShapeId::SlabTop    => (0.5, 1.0),
+                    _                   => (0.0, 1.0),
+                };
                 let base = [x as f32, y as f32, z as f32];
+                let cull = !v.shape.is_slab();
 
-                for tri in shape_geometry(v.shape, v.rotation) {
-                    let draw = match tri.condition {
-                        FaceCondition::Always => true,
-                        FaceCondition::WhenAirAt(dir) => {
-                            !neighbor_blocks_face(chunk, x as i32, y as i32, z as i32, dir)
-                        }
-                    };
-                    if !draw { continue; }
-                    for &vert in &tri.verts {
+                for (normal, off, corners) in FACES.iter() {
+                    if cull
+                        && neighbor_is_solid(
+                        chunk,
+                        x as i32 + off[0],
+                        y as i32 + off[1],
+                        z as i32 + off[2],
+                    )
+                    {
+                        continue;
+                    }
+                    for &ci in &TRI {
+                        let c = corners[ci];
+                        let cy = y_lo + c[1] * (y_hi - y_lo);
                         verts.push(FaceVertex {
-                            position: [
-                                base[0] + vert[0],
-                                base[1] + vert[1],
-                                base[2] + vert[2],
-                            ],
-                            normal: tri.normal,
+                            position: [base[0] + c[0], base[1] + cy, base[2] + c[2]],
+                            normal: *normal,
                             color,
                         });
                     }
@@ -70,41 +85,13 @@ pub fn build_chunk_mesh(chunk: &ChunkBuffer<Voxel, 32>) -> ChunkMesh {
     ChunkMesh { vertices: verts }
 }
 
-/// True iff the neighbor cell at `(x+dir.x, y+dir.y, z+dir.z)` is in-bounds,
-/// solid, AND its face facing back at us is a full 1×1 quad (per
-/// [`covers_face`]).
-///
-/// Stricter than a plain `is_solid` check: an outer-corner neighbor whose
-/// `-Z` side is a half-triangle does NOT block our `+Z` cube face. Without
-/// this, the cube on the back side of the corner culls its face and leaves
-/// a visible hole peeking through the corner's half-triangle.
 #[inline]
-fn neighbor_blocks_face(
-    buf: &ChunkBuffer<Voxel, 32>,
-    x: i32, y: i32, z: i32,
-    dir: NeighborDir,
-) -> bool {
-    let [dx, dy, dz] = dir.offset();
-    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+fn neighbor_is_solid(buf: &ChunkBuffer<Voxel, 32>, nx: i32, ny: i32, nz: i32) -> bool {
     if !(0..N as i32).contains(&nx)
         || !(0..N as i32).contains(&ny)
         || !(0..N as i32).contains(&nz)
     {
         return false;
     }
-    let n = buf.get(nx as usize, ny as usize, nz as usize);
-    if !n.is_solid() {
-        return false;
-    }
-    covers_face(n.shape, n.rotation, opposite_dir(dir))
-}
-
-#[inline]
-fn opposite_dir(d: NeighborDir) -> NeighborDir {
-    use NeighborDir::*;
-    match d {
-        PosX => NegX, NegX => PosX,
-        PosY => NegY, NegY => PosY,
-        PosZ => NegZ, NegZ => PosZ,
-    }
+    buf.get(nx as usize, ny as usize, nz as usize).is_solid()
 }

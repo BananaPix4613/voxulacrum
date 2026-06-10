@@ -10,9 +10,9 @@ use bevy_ecs::prelude::Resource;
 use glam::{IVec3, Vec3};
 
 use crate::meshing::coordinator::MeshingCoordinator;
-use crate::params::{StreamingParams, TerrainGenParams};
+use crate::params::StreamingParams;
 use crate::world::chunk::{VoxelEdit, CHUNK_WORLD_SIZE};
-use crate::world::generation::TerrainGenerator;
+use crate::world::world_generator::WorldGenerator;
 use crate::world::World;
 
 /// Shared work queue between main thread and generation workers.
@@ -89,7 +89,6 @@ impl CameraView {
     /// the horizontal direction, preventing pop-in when the camera moves forward.
     fn half_extents(&self, margin_fraction: f32) -> (f32, f32) {
         const MIN_MARGIN: f32 = 2.0; // minimum buffer in chunks, prevents pop-in at low zoom
-        let sin_theta = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
         let half_right_vis = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
         let half_up_vis    = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
 
@@ -146,7 +145,7 @@ pub struct ChunkStreamingManager {
 impl ChunkStreamingManager {
     pub fn new(
         params: &StreamingParams,
-        terrain_params: &TerrainGenParams,
+        generator: Arc<WorldGenerator>,
         db_path: Option<PathBuf>,
         dict_bytes: Option<Arc<Vec<u8>>>,
     ) -> Self {
@@ -157,16 +156,11 @@ impl ChunkStreamingManager {
         let in_flight: Arc<Mutex<HashSet<IVec3>>> = Arc::new(Mutex::new(HashSet::new()));
         let (result_tx, result_rx) = mpsc::channel::<GenResult>();
 
-        let terrain_params = Arc::new(terrain_params.clone());
-        // Build node graphs once; Arc<NoiseGraph> fields are Send + Sync
-        let generator = Arc::new(TerrainGenerator::new(&terrain_params));
-
         let mut workers = Vec::with_capacity(num_workers);
         for i in 0..num_workers {
             let wq = work_queue.clone();
             let flight = in_flight.clone();
             let tx = result_tx.clone();
-            let tp = terrain_params.clone();
             let gen = Arc::clone(&generator);
             let db_path_clone = db_path.clone();
             let dict_clone = dict_bytes.clone();
@@ -197,7 +191,7 @@ impl ChunkStreamingManager {
                         flight.lock().unwrap().insert(pos);
 
                         // Generate base terrain
-                        let mut storage = gen.generate_chunk_storage(pos, &tp);
+                        let mut storage = gen.generate_chunk_storage(pos);
 
                         // Overlay saved edits from DB
                         let mut edit_list = None;
@@ -207,7 +201,7 @@ impl ChunkStreamingManager {
                                     // Self-healing: skip edits that match base terrain (no-ops)
                                     let filtered: Vec<VoxelEdit> = delta.iter().filter(|e| {
                                         let idx = e.index as usize;
-                                        storage.material(idx) != e.material_id
+                                        storage.voxel(idx) != e.voxel
                                     }).cloned().collect();
 
                                     if !filtered.is_empty() {
@@ -254,14 +248,14 @@ impl ChunkStreamingManager {
         }
     }
 
-    /// Rebuild workers when terrain params change (new generator needed).
+    /// Rebuild workers to use a new shared generator (e.g. after regen).
     pub fn rebuild_for_new_params(
         &mut self,
-        terrain_params: &TerrainGenParams,
+        generator: Arc<WorldGenerator>,
         db_path: Option<PathBuf>,
         dict_bytes: Option<Arc<Vec<u8>>>,    
     ) {
-        *self = Self::new(&self.params, terrain_params, db_path, dict_bytes);
+        *self = Self::new(&self.params, generator, db_path, dict_bytes);
         self.last_camera_chunk = None;
     }
 

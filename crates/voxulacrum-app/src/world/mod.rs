@@ -1,10 +1,10 @@
-pub mod voxel;
 pub mod chunk;
 pub mod generation;
 pub mod regen;
 pub mod streaming;
 pub mod storage;
 pub mod persistence;
+pub mod world_generator;
 
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -15,24 +15,34 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
 use chunk::{Chunk, ChunkMesh, ChunkNeighbors, VoxelEdit, CHUNK_VOLUME, DELTA_THRESHOLD};
-use storage::ChunkStorage;
-use generation::TerrainGenerator;
-use voxel::{MATERIAL_COUNT, MATERIAL_TABLE};
+use world_generator::WorldGenerator;
 
 pub struct World {
     pub chunks: HashMap<IVec3, Chunk>,
-    pub generator: TerrainGenerator,
+    pub generator: Arc<WorldGenerator>,
     pub min_chunk_y: i32,
     pub max_chunk_y: i32, // exclusive upper bound
 }
 
 use crate::params::TerrainGenParams;
-use crate::world::voxel::MAT_AIR;
+use voxel_core::{MaterialId, MaterialRegistry};
 
 impl World {
-    pub fn generate(params: &TerrainGenParams, min_y: i32, max_y: i32) -> Self {
-        let generator = TerrainGenerator::new(params);
-        let chunks = generator.generate_world(params, min_y, max_y);
+    pub fn generate(generator: Arc<WorldGenerator>, min_y: i32, max_y: i32) -> Self {
+        let half_x = generation::WORLD_CHUNKS_X as i32 / 2;
+        let half_z = generation::WORLD_CHUNKS_Z as i32 / 2;
+        let mut chunks = HashMap::new();
+
+        for cz in -half_z..half_z {
+            for cy in min_y..max_y {
+                for cx in -half_x..half_x {
+                    let pos = IVec3::new(cx, cy, cz);
+                    let storage = generator.generate_chunk_storage(pos);
+                    let chunk = Chunk::new(pos, Arc::new(storage));
+                    chunks.insert(pos, chunk);
+                }
+            }
+        }
 
         Self {
             chunks,
@@ -45,13 +55,13 @@ impl World {
     /// Create a World from preloaded chunk data (from cache).
     pub fn from_cached_chunks(
         chunks: HashMap<IVec3, Chunk>,
-        params: &TerrainGenParams,
+        generator: Arc<WorldGenerator>,
         min_y: i32,
         max_y: i32,
     ) -> Self {
         Self {
             chunks,
-            generator: TerrainGenerator::new(params),
+            generator,
             min_chunk_y: min_y,
             max_chunk_y: max_y,
         }
@@ -137,7 +147,7 @@ impl World {
         if let Some(chunk) = self.chunks.get_mut(&chunk_pos) {
             // Apply the edit to storage
             let mut storage = (*chunk.storage).clone();
-            storage.set_voxel(edit.index as usize, edit.material_id);
+            storage.set_voxel(edit.index as usize, edit.voxel);
             chunk.storage = Arc::new(storage);
 
             // Track for persistence - deduplicate by index
@@ -189,9 +199,10 @@ impl World {
 
     /// Print debug statistics about the generated world.
     pub fn print_debug_stats(&self) {
+        let registry = MaterialRegistry::load_initial();
         let mut total_solid: u64 = 0;
         let mut total_air: u64 = 0;
-        let mut material_counts = [0u64; MATERIAL_COUNT];
+        let mut material_counts = vec![0u64; registry.len()];
         let mut uniform_count: usize = 0;
         let mut populated_count: usize = 0;
         let mut total_storage_bytes: usize = 0;
@@ -205,13 +216,14 @@ impl World {
             total_storage_bytes += chunk.storage.memory_bytes();
 
             for idx in 0..CHUNK_VOLUME {
-                let m = chunk.storage.material(idx) as usize;
-                if chunk.storage.material(idx) != MAT_AIR {
+                let v = chunk.storage.voxel(idx);
+                let m = v.material.0 as usize;
+                if v.is_solid() {
                     total_solid += 1;
                 } else {
                     total_air += 1;
                 }
-                if m < MATERIAL_COUNT {
+                if m < material_counts.len() {
                     material_counts[m] += 1;
                 }
             }
@@ -233,9 +245,13 @@ impl World {
         log::info!("--- Material distribution ---");
         for (id, count) in material_counts.iter().enumerate() {
             if *count > 0 {
+                let name = registry
+                    .get(MaterialId(id as u16))
+                    .map(|d| d.display_name.as_str())
+                    .unwrap_or("?");
                 log::info!(
                     "  [{}] {}: {} ({:.1}%)",
-                    id, MATERIAL_TABLE[id].name, count,
+                    id, name, count,
                     *count as f64 / total as f64 * 100.0
                 );
             }
@@ -260,8 +276,9 @@ pub struct WorldManager {
     regen_progress: Arc<AtomicU32>,
     regen_total: u32,
     regen_params: Option<TerrainGenParams>,
-    regen_min_y: i32,
-    regen_max_y: i32,
+    /// Generator the in-flight regen is using; adopted by `World` + streaming
+    /// on completion so all three share one `Arc`.
+    regen_generator: Option<Arc<WorldGenerator>>,
 }
 
 impl WorldManager {
@@ -271,8 +288,7 @@ impl WorldManager {
             regen_progress: Arc::new(AtomicU32::new(0)),
             regen_total: 0,
             regen_params: None,
-            regen_min_y: 0,
-            regen_max_y: 4,
+            regen_generator: None,
         }
     }
 
@@ -289,10 +305,12 @@ impl WorldManager {
     }
 
     /// Start background regeneration for the given chunk set.
-    /// `positions` defines which chunks to generate.
+    /// `positions` defines which chunks to generate; `generator` is the freshly
+    /// built generator the new world will adopt on completion.
     pub fn start_regeneration(
         &mut self,
         params: &TerrainGenParams,
+        generator: Arc<WorldGenerator>,
         positions: Vec<IVec3>,
     ) {
         let handle = self.regen_handle.get_mut().unwrap();
@@ -305,15 +323,16 @@ impl WorldManager {
         self.regen_total = total;
         self.regen_progress.store(0, Ordering::Relaxed);
         self.regen_params = Some(params.clone());
-        
-        let params_clone = params.clone();
+        self.regen_generator = Some(generator.clone());
+
         let progress = self.regen_progress.clone();
+        let gen_for_thread = generator;
         
         log::info!("Starting background terrain regeneration ({} chunks)", total);
         
         let new_handle = std::thread::Builder::new()
             .name("terrain-regen".to_string())
-            .spawn(move || generate_world_background(&params_clone, &positions, &progress))
+            .spawn(move || generate_world_background(gen_for_thread, &positions, &progress))
             .expect("Failed to spawn terrain regeneration thread");
         
         *handle = Some(new_handle);
@@ -321,7 +340,7 @@ impl WorldManager {
 
     pub fn poll_regeneration(
         &mut self,
-    ) -> Option<(HashMap<IVec3, Chunk>, TerrainGenParams)> {
+    ) -> Option<(HashMap<IVec3, Chunk>, TerrainGenParams, Arc<WorldGenerator>)> {
         let handle_opt = self.regen_handle.get_mut().unwrap();
         let handle_ref = handle_opt.as_ref()?;
         
@@ -331,6 +350,7 @@ impl WorldManager {
         
         let handle = handle_opt.take().unwrap();
         let params = self.regen_params.take().unwrap();
+        let generator = self.regen_generator.take().unwrap();
         
         match handle.join() {
             Ok(chunks) => {
@@ -338,7 +358,7 @@ impl WorldManager {
                     "Background regeneration complete ({} chunks)",
                     chunks.len()
                 );
-                Some((chunks, params))
+                Some((chunks, params, generator))
             }
             Err(e) => {
                 log::error!("Background regeneration thread panicked: {:?}", e);
@@ -349,18 +369,16 @@ impl WorldManager {
 }
 
 fn generate_world_background(
-    params: &TerrainGenParams,
+    generator: Arc<WorldGenerator>,
     positions: &[IVec3],
     progress: &Arc<AtomicU32>,
 ) -> HashMap<IVec3, Chunk> {
     use rayon::prelude::*;
-    
-    let generator = TerrainGenerator::new(params);
-    
+
     let chunks: Vec<Chunk> = positions
         .par_iter()
         .map(|&pos| {
-            let storage = generator.generate_chunk_storage(pos, params);
+            let storage = generator.generate_chunk_storage(pos);
             let chunk = Chunk::new(pos, std::sync::Arc::new(storage));
             progress.fetch_add(1, Ordering::Relaxed);
             chunk

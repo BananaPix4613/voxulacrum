@@ -1,2 +1,5 @@
 /target/
 /cache/
+
+# Editor-made stray duplicate graphs (must not reintroduce obsolete nodes).
+* - Copy.json
