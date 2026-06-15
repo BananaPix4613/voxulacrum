@@ -42,10 +42,12 @@ const BLOB_VERSION: u8 = 4; // was 3 — chunk payloads now store packed u32 Vox
 /// this forces a one-shot save wipe on open (pre-release; saves are not migrated).
 const VOXEL_FORMAT_VERSION: u64 = 1;
 
-// Bitflags for optional VoxelEdit fields
-const EDIT_FLAG_MOISTURE: u8     = 0b0000_0001;
-const EDIT_FLAG_FLORA_ID: u8     = 0b0000_0010;
-const EDIT_FLAG_FLORA_GROWTH: u8 = 0b0000_0100;
+// The TAG_DELTA payload serializes only `index:u16 + packed voxel:u32`. Per-voxel
+// moisture/flora state is intentionally NOT persisted yet: the moisture/flora
+// simulation model is a later-phase concern. When it lands, the delta format will
+// gain a per-edit flag byte selecting which optional fields follow each voxel.
+// The previously-unused EDIT_FLAG_* bitflag scaffolding was removed so the source
+// no longer implies a richer on-disk format than is actually written.
 
 const TAG_DELTA: u8 = 0;
 const TAG_FULL_UNIFORM: u8 = 1;
@@ -510,7 +512,12 @@ impl WorldPersistence {
             db.set_meta_u64("voxel_format_version", VOXEL_FORMAT_VERSION)?;
         }
 
-        db.set_meta_u64("format_version", BLOB_VERSION as u64)?;
+        // No `format_version` meta key is written: the per-chunk blob already
+        // carries BLOB_VERSION and rejects mismatches on read (deserialize_chunk_
+        // edits_raw), which semantic voxel-layout changes are gated by the
+        // `voxel_format_version` wipe above. A separate write-only meta key
+        // duplicated that and was never read, so it was removed. (Existing DBs may
+        // still hold a stale `format_version` row; it is simply ignored.)
 
         log::info!("Persistence: {} ({} modified chunks)", db_path.display(), db.chunk_count()?);
 
@@ -583,5 +590,94 @@ impl WorldPersistence {
             db.save_chunk(chunk.position, &edits)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::chunk::CHUNK_VOLUME;
+    use voxel_core::MaterialId;
+
+    fn vox(mat: u16) -> Voxel {
+        Voxel::cube(MaterialId(mat))
+    }
+
+    /// Delta payloads round-trip: index + packed voxel survive exactly, and the
+    /// deferred moisture/flora fields decode to None (they are not serialized).
+    #[test]
+    fn roundtrip_delta() {
+        let edits = vec![
+            VoxelEdit { index: 0,    voxel: vox(1),       moisture: None, flora_id: None, flora_growth: None },
+            VoxelEdit { index: 17,   voxel: vox(3),       moisture: None, flora_id: None, flora_growth: None },
+            VoxelEdit { index: 4095, voxel: Voxel::EMPTY, moisture: None, flora_id: None, flora_growth: None },
+        ];
+        let raw = serialize_chunk_edits_raw(&ChunkEdits::Delta(edits.clone())).unwrap();
+        match deserialize_chunk_edits_raw(&raw).unwrap() {
+            ChunkEdits::Delta(back) => {
+                assert_eq!(back.len(), edits.len());
+                for (a, b) in edits.iter().zip(back.iter()) {
+                    assert_eq!(a.index, b.index);
+                    assert_eq!(a.voxel, b.voxel);
+                    assert!(b.moisture.is_none() && b.flora_id.is_none() && b.flora_growth.is_none());
+                }
+            }
+            other => panic!("expected Delta, got a different variant: {}", variant_name(&other)),
+        }
+    }
+
+    // Full Uniform payloads round-trip the single voxel.
+    #[test]
+    fn roundtrip_full_uniform() {
+        let voxel = vox(5);
+        let raw = serialize_chunk_edits_raw(&ChunkEdits::Full(ChunkStorage::Uniform { voxel })).unwrap();
+        match deserialize_chunk_edits_raw(&raw).unwrap() {
+            ChunkEdits::Full(ChunkStorage::Uniform { voxel: back }) => assert_eq!(voxel, back),
+            other => panic!("expected Full Uniform, got: {}", variant_name(&other)),
+        }
+    }
+
+    /// Full Populated payloads round-trip every voxel's packed material id.
+    #[test]
+    fn roundtrip_full_populated() {
+        let mut material_id = PalettedBitArray::new(Voxel::EMPTY.pack());
+        material_id.set(0, vox(2).pack());
+        material_id.set(100, vox(6).pack());
+        material_id.set(CHUNK_VOLUME - 1, vox(4).pack());
+
+        let storage = ChunkStorage::Populated(Box::new(PopulatedChunk {
+            material_id: material_id.clone(),
+            lighting: None,
+            simulation: None,
+            flora: None,
+        }));
+        let raw = serialize_chunk_edits_raw(&ChunkEdits::Full(storage)).unwrap();
+        match deserialize_chunk_edits_raw(&raw).unwrap() {
+            ChunkEdits::Full(ChunkStorage::Populated(pop)) => {
+                for i in [0usize, 1, 100, CHUNK_VOLUME - 1] {
+                    assert_eq!(pop.material_id.get(i), material_id.get(i), "voxel {i} mismatch");
+                }
+            }
+            other => panic!("expected Full Populated, got: {}", variant_name(&other)),
+        }
+    }
+
+    /// A blob whose version byte does not match BLOB_VERSION is rejected, never
+    /// silently misinterpreted.
+    #[test]
+    fn rejects_unknown_blob_version() {
+        let mut raw = serialize_chunk_edits_raw(
+            &ChunkEdits::Full(ChunkStorage::Uniform { voxel: vox(1) }),
+        ).unwrap();
+        raw[0] = 0xFF; // clobber BLOB_VERSION
+        assert!(deserialize_chunk_edits_raw(&raw).is_err());
+    }
+
+    fn variant_name(edits: &ChunkEdits) -> &'static str {
+        match edits {
+            ChunkEdits::Delta(_) => "Delta",
+            ChunkEdits::Full(ChunkStorage::Uniform { .. }) => "Full Uniform",
+            ChunkEdits::Full(ChunkStorage::Populated(_)) => "Full Populated",
+        }
     }
 }

@@ -2,25 +2,24 @@
 //!
 //! `WorldGenerator` is the single source of voxel terrain: it holds an
 //! `Arc<Graph>` and produces a `ChunkStorage` per chunk by running the
-//! nodegraph evaluator and harvesting the `TerrainOutput` node, mirroring
-//! `voxulacrum-preview`'s runtime extraction.
+//! nodegraph evaluator and harvesting the `TerrainOutput` node.
 //!
-//! PHASE 3 SHIM: the evaluator yields a `ChunkBuffer<Voxel, 32>`, which is
-//! index-copied into the engine's `ChunkStorage`. The two containers are
-//! semantically equivalent (see the Phase-0 parity test in `storage.rs`).
-//! When the engine adopts `ChunkBuffer` directly (Phase 3), this copy is
-//! deleted.
+//! The evaluator yields a `ChunkBuffer<Voxel, 32>` (the evaluation-domain
+//! container); the engine stores `ChunkStorage` (the storage-domain container).
+//! Crossing between them is the job of [`StorageBoundary`] (see
+//! `storage_boundary.rs`) — a deliberate, permanent architectural seam, not a
+//! temporary copy. The two containers are kept distinct on purpose so each can
+//! be tuned for its side of the boundary.
 
 use std::sync::Arc;
 
 use glam::IVec3;
 use nodegraph_eval::{CachedOutput, EvalContext, Evaluator};
 use nodegraph_ir::{Graph, NodeId, NodeKind, Severity};
-use voxel_core::Voxel;
 
 use crate::params::TerrainGenParams;
-use super::chunk::{CHUNK_SIZE, CHUNK_VOLUME};
-use super::storage::{self, ChunkStorage};
+use super::storage::ChunkStorage;
+use super::storage_boundary::StorageBoundary;
 
 /// The single world generator. Evaluates one fixed graph per chunk.
 pub struct WorldGenerator {
@@ -29,6 +28,9 @@ pub struct WorldGenerator {
     /// Precomputed id of the graph's `TerrainOutput` node, so we don't
     /// re-scan the node set on every chunk.
     terrain_node: NodeId,
+    /// The evaluation -> storage domain boundary used to materialize each
+    /// evaluated chunk buffer into engine storage form.
+    storage_boundary: StorageBoundary,
 }
 
 impl WorldGenerator {
@@ -59,6 +61,7 @@ impl WorldGenerator {
             graph: Arc::new(graph),
             world_seed,
             terrain_node,
+            storage_boundary: StorageBoundary::new(),
         })
     }
     
@@ -91,17 +94,10 @@ impl WorldGenerator {
             }
         };
         
-        // PHASE 3 SHIM: index-copy ChunkBuffer<Voxel,32> -> flat engine array.
-        // Decode matches engine voxel_index(x,y,z) = x + y*32 + z*32^2, which
-        // the Phase-0 parity test proves equivalent to ChunkBuffer's order.
-        let mut voxel_arr = [Voxel::EMPTY; CHUNK_VOLUME];
-        for i in 0..CHUNK_VOLUME {
-            let x = i % CHUNK_SIZE;
-            let y = (i / CHUNK_SIZE) % CHUNK_SIZE;
-            let z = i / (CHUNK_SIZE * CHUNK_SIZE);
-            voxel_arr[i] = terrain.get(x, y, z);
-        }
-        storage::storage_from_arrays(&voxel_arr)
+        // Cross the evaluation -> storage boundary: the evaluator's ChunkBuffer is
+        // materialized into the engine's ChunkStorage form. This is a permanent,
+        // deliberate seam between two intentionally-distinct containers.
+        self.storage_boundary.materialize(terrain)
     }
 }
 

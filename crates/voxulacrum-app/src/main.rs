@@ -12,6 +12,7 @@ mod world;
 mod palette;
 mod input;
 mod paths;
+mod materials;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +47,7 @@ use camera::IsometricCamera;
 use cloud_shadow::CloudShadowState;
 use params::EngineParams;
 use ui::panels::UiState;
+use materials::MaterialRegistryRes;
 
 use ecs::resources::*;
 use ecs::events::*;
@@ -303,6 +305,21 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let generator = world::world_generator::load_default(&initial_params.terrain_gen)
         .expect("Failed to load default_biome graph generator");
     
+    // Data-driven material registry (RON primary, built-in fallback). Shared by
+    // the vegetation pass and any system needing material metadata.
+    let material_registry = materials::load_registry();
+
+    // One bounded rayon pool shared by the startup fill, streaming generation,
+    // and background regeneration - the single worker-pool model for all chunk
+    // generation (engine-design.md §12).
+    let gen_pool: Arc<rayon::ThreadPool> = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_cpus::get().saturating_sub(2).max(2))
+            .thread_name(|i| format!("chunk-gen-{i}"))
+            .build()
+            .expect("failed to build chunk generation thread pool"),
+    );
+    
     let world = if let Some(chunks) =
         meshing::cache::load_world_cache(&world_cache_path, world_key)
     {
@@ -313,7 +330,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         );
         world::World::from_cached_chunks(chunks, generator.clone(), min_y, max_y)
     } else {
-        let w = world::World::generate(generator.clone(), min_y, max_y);
+        let w = world::World::generate(generator.clone(), &gen_pool, min_y, max_y);
         log::info!("World generated in {:.2?}", gen_start.elapsed());
         if let Err(e) =
             meshing::cache::save_world_cache(&world_cache_path, world_key, &w)
@@ -324,11 +341,11 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         }
         w
     };
-    world.print_debug_stats();
+    world.print_debug_stats(&material_registry);
 
     // Vegetation + water
     let vegetation_pass =
-        VegetationPass::new(&ctx, &world, &initial_params.vegetation);
+        VegetationPass::new(&ctx, &world, &initial_params.vegetation, material_registry.clone());
     let water_pass = WaterPass::new();
 
     // Post-process pass
@@ -400,6 +417,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
+    ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
 
     // Direct Resource types
     ecs.insert_resource(ctx);
@@ -419,7 +437,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(shader_watcher);
     ecs.insert_resource(graph_watcher);
     ecs.insert_resource(meshing);
-    ecs.insert_resource(WorldRegenCoordinator::new());
+    ecs.insert_resource(WorldRegenCoordinator::new(gen_pool.clone()));
     let persistence = match WorldPersistence::open("default", ui_state.params.terrain_gen.seed) {
         Ok(p) => p,
         Err(e) => {
@@ -431,13 +449,15 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let dict_bytes = persistence.dictionary_bytes().map(|b| Arc::new(b));
     ecs.insert_resource(persistence);
     let streaming_manager = world::streaming::ChunkStreamingManager::new(
+        gen_pool.clone(),
         &ui_state.params.streaming,
         generator.clone(),
         db_path,
-        dict_bytes,
+        dict_bytes, 
     );
     ecs.insert_resource(streaming_manager);
     ecs.insert_resource(ui_state);
+    ecs.insert_resource(ui::field_probe::FieldProbe::new(gen_pool.clone()));
     ecs.insert_resource(FrameCounter::new());
     ecs.insert_resource(RawInputBuffer::default());
     ecs.insert_resource(InputMap::default());
@@ -654,10 +674,16 @@ impl ApplicationHandler for App {
                     buf.egui_wants_keyboard = wants_kb;
                     buf.egui_wants_pointer = wants_ptr;
                 }
-                self.schedule
-                    .as_mut()
-                    .unwrap()
-                    .run(self.ecs_world.as_mut().unwrap());
+                {
+                    // Mark this thread as the schedule thread so any accidental
+                    // inline graph evaluation trips the debug assertion in
+                    // Evaluator::evaluate (generation must run on the pool).
+                    let _schedule_guard = nodegraph_eval::enter_schedule_thread();
+                    self.schedule
+                        .as_mut()
+                        .unwrap()
+                        .run(self.ecs_world.as_mut().unwrap());
+                }
             }
 
             ref other => {

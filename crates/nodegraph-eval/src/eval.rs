@@ -32,6 +32,11 @@ impl<'g> Evaluator<'g> {
 
     /// Validate, then fill every node's output once in topological order.
     pub fn evaluate(&mut self) -> EvalResult<()> {
+        debug_assert!(
+            !crate::guard::on_schedule_thread(),
+            "graph evaluated on the frame-schedule thread; chunk generation must \
+             run on the worker pool, not inline in a schedule system",
+        );
         let errors = self
             .graph
             .validate()

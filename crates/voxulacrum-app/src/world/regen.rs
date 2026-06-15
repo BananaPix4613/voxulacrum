@@ -17,9 +17,9 @@ pub struct WorldRegenCoordinator {
 }
 
 impl WorldRegenCoordinator {
-    pub fn new() -> Self {
+    pub fn new(pool: std::sync::Arc<rayon::ThreadPool>) -> Self {
         Self {
-            manager: WorldManager::new(),
+            manager: WorldManager::new(pool),
         }
     }
     
@@ -52,7 +52,8 @@ impl WorldRegenCoordinator {
             }
             meshing.pipeline.submit_all_dirty(world);
 
-            *vegetation_pass = VegetationPass::new(ctx, world, &ui_state.params.vegetation);
+            let material_registry = vegetation_pass.registry.clone();
+            *vegetation_pass = VegetationPass::new(ctx, world, &ui_state.params.vegetation, material_registry);
             log::info!("Vegetation pass rebuilt after regeneration");
 
             // Water is a Phase 1 no-op; just clear any retained meshes.

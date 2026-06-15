@@ -27,12 +27,23 @@ pub enum VoxelCoreError {
     #[error("invalid shape discriminant {0} in packed Voxel")]
     InvalidShape(u8),
 
-    /// RON-driven material loading is deferred to a later phase (Phase 5
-    /// modding); future asset path `assets/materials/*.ron`. Returned by
-    /// [`crate::MaterialRegistry::load_from_ron`] so the stub can never
-    /// silently fall back to a default registry.
-    #[error("RON material loading is deferred to a future phase (Phase 5 modding)")]
-    RonLoadingDeferredToFuturePhase,
+    /// Failed to read a material RON file from disk.
+    #[error("failed to read material RON file {path}: {source}")]
+    MaterialRonRead {
+        /// Path that could not be read.
+        path: String,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+
+    /// A material RON document could not be parsed.
+    #[error("failed to parse material RON: {0}")]
+    MaterialRonParse(String),
+
+    /// A material RON document parsed but failed semantic validation
+    /// (duplicate id, duplicate id_name, or non-contiguous id range from 0).
+    #[error("invalid material registry: {0}")]
+    MaterialRonValidation(String),
 }
 
 /// Convenience alias for results in this crate.

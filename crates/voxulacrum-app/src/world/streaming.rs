@@ -1,10 +1,10 @@
-use std::collections::{BinaryHeap, HashSet};
+use std::cell::RefCell;
 use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
 
 use bevy_ecs::prelude::Resource;
 use glam::{IVec3, Vec3};
@@ -12,32 +12,59 @@ use glam::{IVec3, Vec3};
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::StreamingParams;
 use crate::world::chunk::{VoxelEdit, CHUNK_WORLD_SIZE};
+use crate::world::persistence::WorldDatabase;
 use crate::world::world_generator::WorldGenerator;
 use crate::world::World;
 
-/// Shared work queue between main thread and generation workers.
-/// The main thread clears and rebuilds this every frame with current
-/// priorities. Workers pop the highest-priority (lowest distance) item.
-struct SharedWorkQueue {
-    /// Min-heap by squared distance from camera. Item: (priority, [x, y, z]).
-    /// IVec3 doesn't implement Ord, so we store as [i32; 3].
-    queue: Mutex<BinaryHeap<Reverse<(i32, [i32; 3])>>>,
-    condvar: Condvar,
-    shutdown: AtomicBool,
-}
-
-impl SharedWorkQueue {
-    fn new() -> Self {
-        Self {
-            queue: Mutex::new(BinaryHeap::new()),
-            condvar: Condvar::new(),
-            shutdown: AtomicBool::new(false),
-        }
-    }
-}
+/// Monotonic, process-global token identifying the current DB configuration.
+/// Each `ChunkStreamingManager` (including every rebuild after a regen) claims a
+/// fresh value via `fetch_add`. Generation tasks carry the token they were
+/// spawned under; a pool worker's thread-local DB handle (see `with_worker_db`)
+/// reopens whenever the token it cached differs from the task's token. Because
+/// the counter only ever increases, a rebuilt manager can never collide with a
+/// handle a worker cached for a previous manager instance.
+static NEXT_DB_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 struct GenResult {
     chunk: crate::world::chunk::Chunk,
+}
+
+/// Run `f` with this pool worker's cached read-only DB handle for `generation`.
+///
+/// Chunk generation now runs as fire-and-forget tasks on the shared rayon pool
+/// rather than on dedicated threads that each owned a DB handle for life. To
+/// keep the "one reused read-only handle per worker" property, each pool worker
+/// memoizes its handle in a thread-local, keyed by the DB generation token. When
+/// a task arrives carrying a newer token (after a regen rebuilt the manager with
+/// a possibly-different DB path/dictionary), the worker transparently reopens.
+/// A `None` handle (no DB path, or open failure) is cached too, so a failed open
+/// is not retried on every chunk.
+fn with_worker_db<R>(
+    generation: u64,
+    db_path: &Option<PathBuf>,
+    dict: Option<&[u8]>,
+    f: impl FnOnce(Option<&WorldDatabase>) -> R,
+) -> R {
+    thread_local! {
+        static WORKER_DB: RefCell<Option<(u64, Option<WorldDatabase>)>> = RefCell::new(None);
+    }
+    WORKER_DB.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let stale = match &*slot {
+            Some((cached_gen, _)) => *cached_gen != generation,
+            None => true,
+        };
+        if stale {
+            let db = db_path.as_ref().and_then(|path| {
+                WorldDatabase::open_readonly(path, dict)
+                    .map_err(|e| log::warn!("Streaming worker DB open failed: {e}"))
+                    .ok()
+            });
+            *slot = Some((generation, db));
+        }
+        let db_ref = slot.as_ref().unwrap().1.as_ref();
+        f(db_ref)
+    })
 }
 
 /// Camera state needed for frustum-based chunk loading.
@@ -89,6 +116,7 @@ impl CameraView {
     /// the horizontal direction, preventing pop-in when the camera moves forward.
     fn half_extents(&self, margin_fraction: f32) -> (f32, f32) {
         const MIN_MARGIN: f32 = 2.0; // minimum buffer in chunks, prevents pop-in at low zoom
+        let sin_theta = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
         let half_right_vis = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
         let half_up_vis    = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
 
@@ -133,130 +161,131 @@ pub struct StreamingTickResult {
 pub struct ChunkStreamingManager {
     pub params: StreamingParams,
     last_camera_chunk: Option<IVec3>,
-    work_queue: Arc<SharedWorkQueue>,
-    /// Tracks chunks that workers have popped from the queue and are actively
-    /// generating. Main thread removes entries when it receives results.
-    /// This prevents re-queuing chunks that are mid-generation.
-    in_flight: Arc<Mutex<HashSet<IVec3>>>,
+    /// Shared chunk-generation pool (also used by the startup fill and regen).
+    pool: Arc<rayon::ThreadPool>,
+    /// Current generator; cloned into each spawned generation task.
+    generator: Arc<WorldGenerator>,
+    /// Read-only voxel-edit DB inputs handed to each task's worker handle.
+    db_path: Option<PathBuf>,
+    dict_bytes: Option<Arc<Vec<u8>>>,
+    /// DB generation token for this manager instance (see `NEXT_DB_GENERATION`).
+    db_generation: u64,
+    /// Positions with a generation task in flight. Main-thread-only: tasks are
+    /// recorded here on spawn and cleared when their result arrives, so no lock
+    /// is needed. Doubles as the dedup set when rebuilding the per-frame queue.
+    in_flight: HashSet<IVec3>,
+    /// Upper bound on concurrent in-flight generations. Self-bounds streaming's
+    /// share of the shared pool so it cannot starve regen or the startup fill.
+    max_in_flight: usize,
+    result_tx: mpsc::Sender<GenResult>,
     gen_result_rx: Mutex<mpsc::Receiver<GenResult>>,
-    _workers: Vec<JoinHandle<()>>,
 }
 
 impl ChunkStreamingManager {
     pub fn new(
+        pool: Arc<rayon::ThreadPool>,
         params: &StreamingParams,
         generator: Arc<WorldGenerator>,
         db_path: Option<PathBuf>,
         dict_bytes: Option<Arc<Vec<u8>>>,
     ) -> Self {
         let usable = num_cpus::get().saturating_sub(2).max(2);
-        let num_workers = (usable / 3).max(2);
-
-        let work_queue = Arc::new(SharedWorkQueue::new());
-        let in_flight: Arc<Mutex<HashSet<IVec3>>> = Arc::new(Mutex::new(HashSet::new()));
+        let max_in_flight = (usable / 3).max(2);
+        let db_generation = NEXT_DB_GENERATION.fetch_add(1, Ordering::Relaxed);
         let (result_tx, result_rx) = mpsc::channel::<GenResult>();
 
-        let mut workers = Vec::with_capacity(num_workers);
-        for i in 0..num_workers {
-            let wq = work_queue.clone();
-            let flight = in_flight.clone();
-            let tx = result_tx.clone();
-            let gen = Arc::clone(&generator);
-            let db_path_clone = db_path.clone();
-            let dict_clone = dict_bytes.clone();
-
-            let handle = std::thread::Builder::new()
-                .name(format!("chunk-gen-{}", i))
-                .spawn(move || {
-                    let worker_db = db_path_clone.as_ref().and_then(|path| {
-                        crate::world::persistence::WorldDatabase::open_readonly(
-                            path,
-                            dict_clone.as_deref().map(|v| v.as_slice()),
-                        )
-                        .map_err(|e| log::warn!("Worker {i} DB open failed: {e}"))
-                        .ok()
-                    });
-
-                    loop {
-                        let pos = {
-                            let mut q = wq.queue.lock().unwrap();
-                            loop {
-                                if wq.shutdown.load(Ordering::Relaxed) { return; }
-                                if let Some(Reverse((_, arr))) = q.pop() {
-                                    break IVec3::new(arr[0], arr[1], arr[2]);
-                                }
-                                q = wq.condvar.wait(q).unwrap();
-                            }
-                        };
-                        flight.lock().unwrap().insert(pos);
-
-                        // Generate base terrain
-                        let mut storage = gen.generate_chunk_storage(pos);
-
-                        // Overlay saved edits from DB
-                        let mut edit_list = None;
-                        if let Some(ref db) = worker_db {
-                            match db.load_chunk_edits(pos) {
-                                Ok(Some(crate::world::persistence::ChunkEdits::Delta(ref delta))) => {
-                                    // Self-healing: skip edits that match base terrain (no-ops)
-                                    let filtered: Vec<VoxelEdit> = delta.iter().filter(|e| {
-                                        let idx = e.index as usize;
-                                        storage.voxel(idx) != e.voxel
-                                    }).cloned().collect();
-
-                                    if !filtered.is_empty() {
-                                        storage = crate::world::persistence::apply_edits_to_storage(&storage, &filtered);
-                                    }
-                                    edit_list = Some(filtered);
-
-                                    // If all edits were no-ops, mark for re-save to clean up DB
-                                    if edit_list.as_ref().map_or(false, |l| l.is_empty()) && !delta.is_empty() {
-                                        // persist_dirty will cause re-save with empty list -> None -> row deleted or skipped
-                                    }
-                                }
-                                Ok(Some(crate::world::persistence::ChunkEdits::Full(full))) => {
-                                    storage = full;
-                                    // Full replacement: no individual edit tracking
-                                }
-                                Ok(None) => {}
-                                Err(e) => log::warn!("Worker: load edits for {pos:?} failed: {e}"),
-                            }
-                        }
-
-                        let mut chunk = crate::world::chunk::Chunk::new(pos, std::sync::Arc::new(storage));
-                        chunk.edit_list = edit_list;
-                        // Not dirty - matches what's in DB
-                        chunk.persist_dirty = false;
-
-                        if tx.send(GenResult { chunk }).is_err() { return; }
-                    }
-                })
-                .expect("Failed to spawn chunk generation worker");
-
-            workers.push(handle);
-        }
-
-        log::info!("ChunkStreamingManager: {} generation workers", num_workers);
+        log::info!(
+            "ChunkStreamingManager: pool-backed generation (max {} in flight, db gen {})",
+            max_in_flight, db_generation
+        );
 
         Self {
             params: params.clone(),
             last_camera_chunk: None,
-            work_queue,
-            in_flight,
+            pool,
+            generator,
+            db_path,
+            dict_bytes,
+            db_generation,
+            in_flight: HashSet::new(),
+            max_in_flight,
+            result_tx,
             gen_result_rx: Mutex::new(result_rx),
-            _workers: workers,
         }
     }
 
-    /// Rebuild workers to use a new shared generator (e.g. after regen).
+    /// Rebuild to use a new shared generator (e.g. after regen). Recreating the
+    /// manager drops the old result channel - generation tasks still in flight
+    /// from the previous generator find their sender disconnected and discard
+    /// their output - and claims a fresh DB generation token so pool workers
+    /// reopen their handles against the new DB inputs.
     pub fn rebuild_for_new_params(
         &mut self,
         generator: Arc<WorldGenerator>,
         db_path: Option<PathBuf>,
         dict_bytes: Option<Arc<Vec<u8>>>,    
     ) {
-        *self = Self::new(&self.params, generator, db_path, dict_bytes);
+        *self = Self::new(self.pool.clone(), &self.params, generator, db_path, dict_bytes);
         self.last_camera_chunk = None;
+    }
+
+    /// Submit one chunk-generation task to the shared pool. Records `pos` in the
+    /// in-flight set; the task generates base terrain, overlays saved voxel
+    /// edits via this worker's cached read-only DB handle, and returns the chunk
+    /// over the result channel. If the manager has since been rebuilt, the send
+    /// fails and the result is silently dropped.
+    fn spawn_generation(&mut self, pos: IVec3) {
+        self.in_flight.insert(pos);
+
+        let gen = Arc::clone(&self.generator);
+        let db_path = self.db_path.clone();
+        let dict = self.dict_bytes.clone();
+        let generation = self.db_generation;
+        let tx = self.result_tx.clone();
+
+        self.pool.spawn(move || {
+            // Generate base terrain.
+            let mut storage = gen.generate_chunk_storage(pos);
+
+            // Overlay saved edits from this worker's cached read-only DB handle.
+            let mut edit_list = None;
+            with_worker_db(
+                generation,
+                &db_path,
+                dict.as_deref().map(|v| v.as_slice()),
+                |db| {
+                    if let Some(db) = db {
+                        match db.load_chunk_edits(pos) {
+                            Ok(Some(crate::world::persistence::ChunkEdits::Delta(ref delta))) => {
+                                // Self-healing: skip edits that match base terrain (no-ops).
+                                let filtered: Vec<VoxelEdit> = delta.iter().filter(|e| {
+                                    let idx = e.index as usize;
+                                    storage.voxel(idx) != e.voxel
+                                }).cloned().collect();
+
+                                if !filtered.is_empty() {
+                                    storage = crate::world::persistence::apply_edits_to_storage(&storage, &filtered);
+                                }
+                                edit_list = Some(filtered);
+                            }
+                            Ok(Some(crate::world::persistence::ChunkEdits::Full(full))) => {
+                                storage = full;
+                                // Full replacement: no individual edit tracking.
+                            }
+                            Ok(None) => {}
+                            Err(e) => log::warn!("Streaming: load edits for {pos:?} failed: {e}"),
+                        }
+                    }
+                },
+            );
+
+            let mut chunk = crate::world::chunk::Chunk::new(pos, std::sync::Arc::new(storage));
+            chunk.edit_list = edit_list;
+            // Not dirty - matches what's in DB.
+            chunk.persist_dirty = false;
+
+            let _ = tx.send(GenResult { chunk });
+        });
     }
 
     /// Main tick: load/unload chunks based on camera position and frustum.
@@ -286,10 +315,12 @@ impl ChunkStreamingManager {
 
         // --- Poll completed chunk generations (capped per frame) ---
         //
-        // Without a cap, burst chunk completions can insert dozens of chunks
-        // in a single frame, each marking 6 neighbors dirty. This overwhelms
-        // the meshing pipeline and causes main-thread stalls during snapshot
-        // creation. Cap insertions to spread the load across frames.
+        // Without a cap, burst chunk completions can insert dozens of chunks in
+        // a single frame, each marking 6 neighbors dirty. This overwhelms the
+        // meshing pipeline and causes main-thread stalls during snapshot
+        // creation. Cap insertions to spread the load across frames; undrained
+        // results stay in the channel and their positions stay in `in_flight`,
+        // so they are neither re-queued nor lost.
         let max_insertions = self.params.max_gen_per_frame as usize;
         let meshing_backlog = meshing.pipeline.pending_count();
         // Reduce insertion rate when meshing is already backlogged
@@ -302,11 +333,10 @@ impl ChunkStreamingManager {
         };
         {
             let rx = self.gen_result_rx.get_mut().unwrap();
-            let mut flight = self.in_flight.lock().unwrap();
             let mut inserted_count = 0usize;
             while let Ok(gen_result) = rx.try_recv() {
                 let pos = gen_result.chunk.position;
-                flight.remove(&pos);
+                self.in_flight.remove(&pos);
 
                 // Discard if chunk is now outside the view rect (camera moved)
                 if !camera_view.is_in_view_rect(pos.x, pos.z, unload_margin) {
@@ -315,7 +345,6 @@ impl ChunkStreamingManager {
 
                 world.insert_chunk(gen_result.chunk);
                 result.inserted.push(pos);
-
                 inserted_count += 1;
 
                 // Mark the 6 face-adjacent neighbors dirty so their boundary
@@ -328,10 +357,9 @@ impl ChunkStreamingManager {
                     }
                 }
 
-                // Stop draining channel when cap is hit. Remaining results
-                // stay in the channel and their chunks stay in in_flight,
-                // so they won't be re-queued. Next frame picks up where
-                // we left off — no work is ever discarded.
+                // Stop draining channel when cap is hit. Remaining results stay in
+                // the channel and their chunks stay in `in_flight`, so they are
+                // not re-queued. Next frame picks up where we left off.
                 if inserted_count >= effective_cap {
                     break;
                 }
@@ -342,13 +370,18 @@ impl ChunkStreamingManager {
             meshing.pipeline.submit_all_dirty(world);
         }
 
-        // --- Rebuild the work queue with current priorities ---
-        // Snapshot in_flight first, then lock queue (consistent lock ordering).
-        let in_flight_snapshot: HashSet<IVec3> = self.in_flight.lock().unwrap().clone();
-        {
-            let mut q = self.work_queue.queue.lock().unwrap();
-            q.clear();
+        // --- Spawn new generation tasks, nearest-first, up to the budget ---
+        //
+        // The priority queue is rebuilt every frame on the main thread: it is a
+        // pure function of camera position, currently-loaded chunks, and the
+        // in-flight set, so there is no shared queue to keep in sync. We pop the
+        // nearest candidates and spawn them onto the shared pool until the
+        // in-flight budget is full; the rest are reconsidered next frame.
+        self.last_camera_chunk = Some(IVec3::new(cam_cx, 0, cam_cz));
 
+        let budget = self.max_in_flight.saturating_sub(self.in_flight.len());
+        if budget > 0 {
+            let mut queue: BinaryHeap<Reverse<(i32, [i32; 3])>> = BinaryHeap::new();
             let radius = camera_view.bounding_radius(load_margin);
             for dz in -radius..=radius {
                 for dx in -radius..=radius {
@@ -360,21 +393,22 @@ impl ChunkStreamingManager {
                     for cy in min_y..max_y {
                         let pos = IVec3::new(cx, cy, cz);
                         if !world.chunks.contains_key(&pos)
-                            && !in_flight_snapshot.contains(&pos)
+                            && !self.in_flight.contains(&pos)
                         {
                             let priority = dx * dx + dz * dz;
-                            q.push(Reverse((priority, [cx, cy, cz])));
+                            queue.push(Reverse((priority, [cx, cy, cz])));
                         }
                     }
                 }
             }
+
+            for _ in 0..budget {
+                let Some(Reverse((_, arr))) = queue.pop() else { break };
+                self.spawn_generation(IVec3::new(arr[0], arr[1], arr[2]));
+            }
         }
-        // Wake all workers so they grab new high-priority items
-        self.work_queue.condvar.notify_all();
 
         // --- Unload chunks outside the view rectangle ---
-        self.last_camera_chunk = Some(IVec3::new(cam_cx, 0, cam_cz));
-
         let to_unload: Vec<IVec3> = world
             .chunks
             .keys()
@@ -399,18 +433,6 @@ impl ChunkStreamingManager {
     }
 
     pub fn pending_gen_count(&self) -> usize {
-        let in_flight = self.in_flight.lock().unwrap().len();
-        let queued = self.work_queue.queue.lock().unwrap().len();
-        in_flight + queued
-    }
-}
-
-impl Drop for ChunkStreamingManager {
-    fn drop(&mut self) {
-        // Signal workers to exit and wake them from condvar wait
-        self.work_queue.shutdown.store(true, Ordering::Relaxed);
-        self.work_queue.condvar.notify_all();
-        // JoinHandles drop here, detaching threads.
-        // Workers will see the shutdown flag and return.
+        self.in_flight.len()
     }
 }

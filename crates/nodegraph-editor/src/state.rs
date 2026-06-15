@@ -1,7 +1,7 @@
 //! Editor state: the Snarl model, undo/redo stack, and dirty tracking.
 
-use egui_snarl::Snarl;
-use nodegraph_ir::{Graph, NodeKind};
+use egui_snarl::{NodeId as SnarlNodeId, Snarl};
+use nodegraph_ir::{Graph, NodeId, NodeKind};
 
 use crate::bridge::{graph_to_snarl, snarl_to_graph};
 use crate::viewer::{DiagnosticIndex, GraphViewer};
@@ -29,6 +29,13 @@ pub struct EditorState {
     redo: Vec<UndoEntry>,
     /// Transient toast: a short message + frames remaining to display.
     toast: Option<(String, u32)>,
+    /// Monotonic counter bumped whenever the editor's inspectable state
+    /// changes - a graph edit *or* a change in canvas selection. Derived
+    /// views (e.g. the field probe) poll it to know when to recompute.
+    revision: u64,
+    /// First node currently selected on the canvas, captured during `show`.
+    /// `None` when nothing is selected.
+    selected_node: Option<SnarlNodeId>,
 }
 
 impl EditorState {
@@ -41,6 +48,8 @@ impl EditorState {
             undo: Vec::new(),
             redo: Vec::new(),
             toast: None,
+            revision: 0,
+            selected_node: None,
         }
     }
 
@@ -56,6 +65,22 @@ impl EditorState {
     pub fn build_graph(&self) -> Graph {
         snarl_to_graph(&self.snarl).0
     }
+    
+    /// The current revision (see the `revision` field). Increments on every
+    /// graph edit and on every change in canvas selection.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    
+    /// Build the live graph together with the IR id of the node currently
+    /// selected on the canvas, if any. The id is valid within the returned
+    /// graph. Used by the field probe to evaluate and display whichever node
+    /// the author has selected.
+    pub fn build_graph_with_selection(&self) -> (Graph, Option<NodeId>) {
+        let (graph, id_map) = snarl_to_graph(&self.snarl);
+        let selected = self.selected_node.and_then(|s| id_map.get(&s).copied());
+        (graph, selected)
+    }
 
     /// Render the editor canvas into `ui`, folding this frame's structural
     /// edits into a single undo entry (param drags coalesce via the dirty
@@ -69,11 +94,14 @@ impl EditorState {
         
         let mut actions: Vec<UndoLabel> = Vec::new();
         let mut dirty_param = false;
+        let mut clicked: Option<SnarlNodeId> = None;
         let mut viewer = GraphViewer {
             id_map: &id_map,
             diagnostics: &diagnostics,
             actions: &mut actions,
             dirty_param: &mut dirty_param,
+            selected: self.selected_node,
+            clicked: &mut clicked,
         };
         self.snarl.show(
             &mut viewer,
@@ -88,6 +116,18 @@ impl EditorState {
             self.push_undo(label, pre_graph);
         } else if dirty_param {
             self.mark_dirty();
+        }
+
+        // Selection is author-driven: left-clicking a node's header records it
+        // as the inspected node. egui-snarl's built-in selection only fires on
+        // shift/ctrl-click, which isn't the gesture we want here, so the viewer
+        // reports plain clicks via `clicked` instead. Sticky: the selection
+        // only changes when a different node is clicked.
+        if let Some(node) = clicked {
+            if Some(node) != self.selected_node {
+                self.selected_node = Some(node);
+                self.revision = self.revision.wrapping_add(1);
+            }
         }
     }
     
@@ -106,6 +146,7 @@ impl EditorState {
         self.redo.clear();
         self.dirty = true;
         self.modified = true;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Mark that the canvas changed this frame (e.g. param drag). Does not
@@ -114,6 +155,7 @@ impl EditorState {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
         self.modified = true;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Pop a dirty flag (returns `true` once per actual change).
@@ -135,6 +177,7 @@ impl EditorState {
         self.snarl = graph_to_snarl(&entry.snapshot);
         self.dirty = true;
         self.modified = true;
+        self.revision = self.revision.wrapping_add(1);
         Some(entry.label)
     }
 
@@ -146,6 +189,7 @@ impl EditorState {
         self.snarl = graph_to_snarl(&entry.snapshot);
         self.dirty = true;
         self.modified = true;
+        self.revision = self.revision.wrapping_add(1);
         Some(entry.label)
     }
 

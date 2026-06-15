@@ -136,7 +136,8 @@ impl PalettedBitArray {
     /// Deserialize from bytes at `offset`. Returns `(Self, new_offset)`.
     pub fn deserialize_from_bytes(bytes: &[u8], mut pos: usize) -> Option<(Self, usize)> {
         if pos + 2 > bytes.len() { return None; }
-        let palette_len = u32::from_le_bytes(bytes[pos..pos+2].try_into().ok()?) as usize;
+        // palette_len is written as a u16 by serialize_to_bytes; read the same width.
+        let palette_len = u16::from_le_bytes(bytes[pos..pos+2].try_into().ok()?) as usize;
         pos += 2;
 
         if pos + palette_len * 4 > bytes.len() { return None; }
@@ -467,11 +468,13 @@ mod tests {
         assert!(s.is_uniform());
     }
 
-    /// Phase 0 contract: the engine container (`PalettedBitArray`) and the
-    /// evaluator container (`voxel_core::ChunkBuffer`) must be *semantically*
-    /// equivalent — NOT byte-identical. The same voxel sequence written into
-    /// each and read back must yield equal `Vec<Voxel>`. (Container
-    /// byte-identity is a later concern, once the engine adopts ChunkBuffer.)
+    /// Boundary contract: the engine container (`PalettedBitArray`) and the
+    /// evaluator container (`voxel_core::ChunkBuffer`) are deliberately distinct
+    /// and must be *semantically* equivalent - NOT byte-identical. The same
+    /// voxel sequence written into each and read back must yield equal
+    /// `Vec<Voxel>`. This is the invariant `StorageBoundary::materialize` relies
+    /// on; the two containers stay separate by design, so byte-identity is
+    /// neither required nor expected.
     #[test]
     fn engine_and_eval_containers_are_semantically_equivalent() {
         use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};

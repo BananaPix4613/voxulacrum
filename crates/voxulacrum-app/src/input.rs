@@ -23,6 +23,7 @@ pub enum GameAction {
     CameraZoomOut,
     ToggleUI,
     ToggleGraphEditor,
+    ToggleFieldProbe,
 }
 
 // ============================================================================
@@ -217,6 +218,8 @@ impl Default for InputMap {
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F1.into()), action: ToggleUI, mode: EdgeTriggered },
                 // F2 graph-editor toggle - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F2.into()), action: ToggleGraphEditor, mode: EdgeTriggered },
+                // F3 field-probe toggle - edge triggered
+                InputBinding { trigger: InputTrigger::Key(KeyCode::F3.into()), action: ToggleFieldProbe, mode: EdgeTriggered },
             ],
         }
     }
@@ -436,11 +439,15 @@ pub fn process_input_system(
 pub fn toggle_ui_system(
     state: Res<InputState>,
     mut egui: NonSendMut<ui::EguiRenderer>,
+    mut probe: ResMut<ui::field_probe::FieldProbe>,
 ) {
     if state.just_pressed(GameAction::ToggleUI) {
         egui.toggle_visibility();
     }
     if state.just_pressed(GameAction::ToggleGraphEditor) {
         egui.toggle_editor();
+    }
+    if state.just_pressed(GameAction::ToggleFieldProbe) {
+        probe.enabled = !probe.enabled;
     }
 }

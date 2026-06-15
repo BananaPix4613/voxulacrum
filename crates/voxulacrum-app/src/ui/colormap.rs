@@ -1,17 +1,21 @@
-//! The five Phase 5 colormaps. Each maps `t ∈ [0, 1]` to opaque RGBA.
+//! Value -> color ramps for debug data visualization.
+//!
+//! Maps a normalized scalar `t ∈ [0, 1]` to opaque RGBA. Used by the graph
+//! field-probe debug panel to render scalar-field slices as heatmaps. Kept
+//! egui-free so it stays a pure, testable color utility.
 
 /// Selectable colormap.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Colormap {
-    /// Linear blue → red.
+    /// Linear blue -> red.
     BlueRed,
-    /// Linear black → white.
+    /// Linear black -> white.
     Grayscale,
-    /// Geological ramp (water → sand → grass → rock → snow).
+    /// Geological ramp (water -> sand -> grass -> rock -> snow).
     Terrain,
     /// Approximation of the matplotlib "viridis" ramp (11-stop).
     Viridis,
-    /// Linear red → black.
+    /// Linear red -> black.
     RedBlack,
 }
 
@@ -80,7 +84,7 @@ fn ramp(stops: &[(f32, [u8; 3])], t: f32) -> [u8; 4] {
     [last[0], last[1], last[2], 255]
 }
 
-/// Six-stop geological ramp: deep water → shallow water → sand → grass → rock → snow.
+/// Six-stop geological ramp: deep water -> shallow water -> sand -> grass -> rock -> snow.
 const TERRAIN_STOPS: &[(f32, [u8; 3])] = &[
     (0.00, [30, 50, 110]),
     (0.30, [60, 110, 180]),
@@ -90,7 +94,7 @@ const TERRAIN_STOPS: &[(f32, [u8; 3])] = &[
     (1.00, [240, 240, 245]),
 ];
 
-/// 11-stop hand-picked viridis approximation (matplotlib-like purple→green→yellow).
+/// 11-stop hand-picked viridis approximation (matplotlib-like purple->green->yellow).
 const VIRIDIS_STOPS: &[(f32, [u8; 3])] = &[
     (0.00, [68, 1, 84]),
     (0.10, [72, 36, 117]),

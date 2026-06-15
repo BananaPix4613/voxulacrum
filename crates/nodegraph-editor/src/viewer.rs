@@ -112,6 +112,10 @@ pub struct GraphViewer<'a> {
     /// Set whenever a parameter changed this frame (no undo entry, but
     /// triggers a re-eval).
     pub dirty_param: &'a mut bool,
+    /// The node currently selected for inspection, used for highlighting.
+    pub selected: Option<NodeId>,
+    /// Out-param: the node whose header was left-clicked this frame, if any.
+    pub clicked: &'a mut Option<NodeId>,
 }
 
 impl SnarlViewer<NodeKind> for GraphViewer<'_> {
@@ -140,10 +144,15 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         snarl: &Snarl<NodeKind>,
     ) -> egui::Frame {
         let cat = snarl[node_id].descriptor().category;
-        frame
+        let frame = frame
             .fill(category_fill(cat))
             .inner_margin(egui::Margin::symmetric(8, 4))
-            .corner_radius(egui::CornerRadius::same(4))
+            .corner_radius(egui::CornerRadius::same(4));
+        if Some(node_id) == self.selected {
+            frame.stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 210, 90)))
+        } else {
+            frame
+        }
     }
 
     fn show_header(
@@ -158,7 +167,20 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         let text = egui::RichText::new(desc.display_name)
             .color(header_text_color(desc.category))
             .strong();
-        ui.label(text);
+        // The title text plus a transparent strip spanning the rest of the
+        // header width together make the whole colored band a click target.
+        // The collapse arrow is allocated by snarl *before* this content and
+        // has its own click handler, so it keeps priority - this strip never
+        // overlaps it. `Sense::click` (not drag) means dragging the header
+        // still moves the node.
+        let title = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+        let strip_w = ui.available_width();
+        let strip_h = title.rect.height();
+        let (_strip_rect, strip) =
+            ui.allocate_exact_size(egui::vec2(strip_w, strip_h), egui::Sense::click());
+        if title.clicked() || strip.clicked() {
+            *self.clicked = Some(node_id);
+        }
     }
 
     fn inputs(&mut self, node: &NodeKind) -> usize { node.descriptor().inputs.len() }

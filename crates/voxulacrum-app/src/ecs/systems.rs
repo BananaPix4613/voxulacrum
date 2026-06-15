@@ -31,6 +31,7 @@ use crate::{compute_render_dimensions, palette, FrameCounter};
 use crate::world::chunk::{Chunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
 use crate::world::persistence::WorldPersistence;
+use crate::materials::MaterialRegistryRes;
 
 // ==========================================================================
 // Input stage
@@ -658,22 +659,27 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
     // --- Egui draw ---
     let window_arc = ecs.resource::<WindowHandle>().0.clone();
+    let registry = ecs.resource::<MaterialRegistryRes>().0.clone();
     ecs.resource_scope::<UiState, _>(|ecs, mut ui_state| {
-        let mut egui = ecs.non_send_resource_mut::<ui::EguiRenderer>();
-        egui.draw(
-            &mut *ui_state,
-            &ctx,
-            &mut encoder,
-            &surface_view,
-            &window_arc,
-        );
-        // Auto-regen: hand a dirty editor edit to the regen path. Coalesced by
-        // WorldRegenCoordinator - only the latest pending graph is applied, and
-        // only while no regen is in flight. No-op while the editor is hidden
-        // (its `show` isn't called, so it never goes dirty).
-        if egui.editor.consume_dirty() {
-            ui_state.pending_graph = Some(egui.editor.build_graph());
-        }
+        ecs.resource_scope::<ui::field_probe::FieldProbe, _>(|ecs, mut probe| {
+            let mut egui = ecs.non_send_resource_mut::<ui::EguiRenderer>();
+            egui.draw(
+                &mut *ui_state,
+                &mut *probe,
+                &registry,
+                &ctx,
+                &mut encoder,
+                &surface_view,
+                &window_arc,
+            );
+            // Auto-regen: hand a dirty editor edit to the regen path. Coalesced by
+            // WorldRegenCoordinator - only the latest pending graph is applied, and
+            // only while no regen is in flight. No-op while the editor is hidden
+            // (its `show` isn't called, so it never goes dirty).
+            if egui.editor.consume_dirty() {
+                ui_state.pending_graph = Some(egui.editor.build_graph());
+            }
+        });
     });
 
     // --- Submit + present ---

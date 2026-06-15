@@ -1,9 +1,28 @@
 pub mod panels;
+pub mod colormap;
+pub mod field_probe;
 
 use egui_wgpu::ScreenDescriptor;
 
 use crate::rendering::render_context::RenderContext;
+use colormap::Colormap;
 use nodegraph_editor::EditorState;
+
+/// Cache key for the field-probe slice texture. The texture is rebuilt only
+/// when one of these changes (data capture, slice, colormap, or value range).
+#[derive(Clone, Copy, PartialEq)]
+struct ProbeTexKey {
+    data_version: u64,
+    y_slice: i32,
+    colormap: Colormap,
+    range_bits: (u32, u32),
+}
+
+/// A cached, uploaded field-probe slice texture plus the key it was built from.
+struct ProbeTexture {
+    key: ProbeTexKey,
+    handle: egui::TextureHandle,
+}
 
 pub struct EguiRenderer {
     pub ctx: egui::Context,
@@ -15,6 +34,8 @@ pub struct EguiRenderer {
     pub editor: EditorState,
     /// Whether the left-side graph editor panel is shown.
     pub editor_visible: bool,
+    /// Cached field-probe slice texture; re-uploaded only on key change.
+    probe_texture: Option<ProbeTexture>,
 }
 
 impl EguiRenderer {
@@ -48,6 +69,7 @@ impl EguiRenderer {
             visible: true,
             editor: EditorState::new(),
             editor_visible: false,
+            probe_texture: None,
         }
     }
     
@@ -67,12 +89,50 @@ impl EguiRenderer {
     pub fn toggle_editor(&mut self) {
         self.editor_visible = !self.editor_visible;
     }
-    
+
+    /// Rebuild + re-upload the field-probe slice texture when its cache key
+    /// changes. No-op when the probe has no captured data.
+    fn refresh_probe_texture(
+        &mut self,
+        probe: &field_probe::FieldProbe,
+        registry: &voxel_core::MaterialRegistry,
+    ) {
+        let Some(data) = &probe.data else {
+            self.probe_texture = None;
+            return;
+        };
+        let key = ProbeTexKey {
+            data_version: probe.data_version,
+            y_slice: probe.y_slice,
+            colormap: probe.colormap,
+            range_bits: (probe.range_min.to_bits(), probe.range_max.to_bits()),
+        };
+        if self.probe_texture.as_ref().map(|t| t.key) == Some(key) {
+            return;
+        }
+        let y = probe.y_slice.clamp(0, field_probe::SLICE_DIM as i32 - 1) as usize;
+        let image = field_probe::build_color_image(
+            data,
+            y,
+            probe.colormap,
+            (probe.range_min, probe.range_max),
+            registry,
+        );
+        let handle = self.ctx.load_texture(
+            "field_probe_slice",
+            image,
+            egui::TextureOptions::NEAREST,
+        );
+        self.probe_texture = Some(ProbeTexture { key, handle });
+    }
+
     /// Run the egui UI and render it onto the given surface view.
     /// The surface view should already contain the post-processed scene.
     pub fn draw(
         &mut self,
         ui_state: &mut panels::UiState,
+        probe: &mut field_probe::FieldProbe,
+        registry: &voxel_core::MaterialRegistry,
         ctx: &RenderContext,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
@@ -86,6 +146,12 @@ impl EguiRenderer {
             size_in_pixels: [size.width, size.height],
             pixels_per_point: window.scale_factor() as f32,
         };
+
+        // Refresh the probe's slice texture before tessellation so the upload
+        // is flushed in this frame's `textures_delta`.
+        if probe.enabled {
+            self.refresh_probe_texture(probe, registry);
+        }
         
         let raw_input = self.winit_state.take_egui_input(window);
         let full_output = self.ctx.run(raw_input, |ctx| {
@@ -94,6 +160,10 @@ impl EguiRenderer {
                     panels::draw_graph_editor_panel(ctx, &mut self.editor);
                 }
                 panels::draw_engine_panel(ctx, ui_state);
+            }
+            if probe.enabled {
+                let tex = self.probe_texture.as_ref().map(|t| &t.handle);
+                field_probe::draw_field_probe_window(ctx, probe, registry, tex);
             }
         });
         

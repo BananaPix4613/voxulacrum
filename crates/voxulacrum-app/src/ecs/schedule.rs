@@ -54,6 +54,10 @@ pub fn build_frame_schedule() -> Schedule {
             .before(systems::meshing_tick_system),
         systems::meshing_tick_system.in_set(FrameStage::Meshing),
     ));
+    // Field probe (debug): poll/dispatch graph-node inspection eval.
+    schedule.add_systems(
+        crate::ui::field_probe::field_probe_system.in_set(FrameStage::Meshing),
+    );
     // UniformWrite
     schedule.add_systems((
         systems::write_uniforms_system.in_set(FrameStage::UniformWrite),

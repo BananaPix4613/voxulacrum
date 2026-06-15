@@ -8,12 +8,13 @@ description = "Voxel and chunk primitives for the voxulacrum world-generation en
 [dependencies]
 glam.workspace = true
 serde = { workspace = true, optional = true }
+ron = { workspace = true, optional = true }
 thiserror.workspace = true
 static_assertions.workspace = true
 
 [features]
 default = ["serde"]
-serde = ["dep:serde", "glam/serde"]
+serde = ["dep:serde", "glam/serde", "dep:ron"]
 
 [dev-dependencies]
 criterion.workspace = true

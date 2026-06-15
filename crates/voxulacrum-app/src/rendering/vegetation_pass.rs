@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
+use voxel_core::MaterialRegistry;
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::pipelines::{GrassInstance, GrassVertex};
 use crate::params::VegetationParams;
@@ -21,6 +23,9 @@ pub struct VegetationPass {
     pub grass_index_count: u32,
     /// Per-chunk vegetation GPU buffers, keyed by chunk positions.
     pub chunk_vegetation: HashMap<IVec3, ChunkVegetation>,
+    /// Shared material registry, used to resolve grass eligibility/color.
+    /// `pub(crate)` so terrain regen can reuse it when rebuilding the pass.
+    pub(crate) registry: Arc<MaterialRegistry>,
 }
 
 impl VegetationPass {
@@ -29,6 +34,7 @@ impl VegetationPass {
         ctx: &RenderContext,
         world: &World,
         params: &VegetationParams,
+        registry: Arc<MaterialRegistry>,
     ) -> Self {
         let (vertices, indices) = create_grass_blade_mesh(params);
 
@@ -48,7 +54,7 @@ impl VegetationPass {
         let mut chunk_vegetation = HashMap::new();
         let mut total_instances = 0u32;
         for (&pos, _) in &world.chunks {
-            let instances = collect_chunk_grass_instances(pos, world, params);
+            let instances = collect_chunk_grass_instances(pos, world, params, &registry);
             if !instances.is_empty() {
                 total_instances += instances.len() as u32;
                 let buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -73,6 +79,7 @@ impl VegetationPass {
             grass_index_buffer,
             grass_index_count: indices.len() as u32,
             chunk_vegetation,
+            registry,
         }
     }
 
@@ -84,7 +91,7 @@ impl VegetationPass {
         params: &VegetationParams,
         device: &wgpu::Device,
     ) {
-        let instances = collect_chunk_grass_instances(pos, world, params);
+        let instances = collect_chunk_grass_instances(pos, world, params, &self.registry);
         if !instances.is_empty() {
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("grass_instance_buffer_chunk"),
@@ -197,13 +204,13 @@ fn collect_chunk_grass_instances(
     chunk_pos: IVec3,
     world: &World,
     params: &VegetationParams,
+    registry: &MaterialRegistry,
 ) -> Vec<GrassInstance> {
     let chunk = match world.chunks.get(&chunk_pos) {
         Some(c) => c,
         None => return Vec::new(),
     };
 
-    let registry = voxel_core::MaterialRegistry::load_initial();
     let grass_id = registry.resolve("grass_soil").expect("grass_soil registered");
     let grass_color = registry.get(grass_id).unwrap().color;
     let mut instances = Vec::new();

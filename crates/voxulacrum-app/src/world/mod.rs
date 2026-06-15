@@ -3,6 +3,7 @@ pub mod generation;
 pub mod regen;
 pub mod streaming;
 pub mod storage;
+pub mod storage_boundary;
 pub mod persistence;
 pub mod world_generator;
 
@@ -10,7 +11,7 @@ use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread::JoinHandle;
+use std::sync::mpsc;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
@@ -28,21 +29,38 @@ use crate::params::TerrainGenParams;
 use voxel_core::{MaterialId, MaterialRegistry};
 
 impl World {
-    pub fn generate(generator: Arc<WorldGenerator>, min_y: i32, max_y: i32) -> Self {
+    /// Build the initial world synchronously (blocks boot), fanning the per-chunk
+    /// graph evaluation across the shared generation pool. This runs outside the
+    /// frame schedule, so it is exempt from the schedule-thread eval guard.
+    pub fn generate(
+        generator: Arc<WorldGenerator>,
+        pool: &rayon::ThreadPool,
+        min_y: i32,
+        max_y: i32
+    ) -> Self {
+        use rayon::prelude::*;
+
         let half_x = generation::WORLD_CHUNKS_X as i32 / 2;
         let half_z = generation::WORLD_CHUNKS_Z as i32 / 2;
-        let mut chunks = HashMap::new();
 
+        let mut positions = Vec::new();
         for cz in -half_z..half_z {
             for cy in min_y..max_y {
                 for cx in -half_x..half_x {
-                    let pos = IVec3::new(cx, cy, cz);
-                    let storage = generator.generate_chunk_storage(pos);
-                    let chunk = Chunk::new(pos, Arc::new(storage));
-                    chunks.insert(pos, chunk);
+                    positions.push(IVec3::new(cx, cy, cz));
                 }
             }
         }
+
+        let chunks: HashMap<IVec3, Chunk> = pool.install(|| {
+            positions
+                .par_iter()
+                .map(|&pos| {
+                    let storage = generator.generate_chunk_storage(pos);
+                    (pos, Chunk::new(pos, Arc::new(storage)))
+                })
+                .collect()
+        });
 
         Self {
             chunks,
@@ -198,8 +216,7 @@ impl World {
     }
 
     /// Print debug statistics about the generated world.
-    pub fn print_debug_stats(&self) {
-        let registry = MaterialRegistry::load_initial();
+    pub fn print_debug_stats(&self, registry: &MaterialRegistry) {
         let mut total_solid: u64 = 0;
         let mut total_air: u64 = 0;
         let mut material_counts = vec![0u64; registry.len()];
@@ -266,13 +283,20 @@ impl World {
 
 /// Manages background terrain regeneration.
 /// 
-/// When `start_regeneration` is called, a background thread generates a fresh
-/// `Vec<Chunk>` (with `mesh: None`) using rayon for per-chunk parallelism.
-/// The main thread polls `poll_regeneration` each frame: when complete, the
-/// caller swaps the new chunks into the active `World`.
+/// `start_regeneration` submits one fan-out task to the shared generation pool;
+/// it builds a fresh `HashMap<IVec3, Chunk>` (with `mesh: None`) using rayon for
+/// per-chunk parallelism and delivers the result over a channel. The main thread
+/// polls `poll_regeneration` each frame and, when a result arrives, swaps the new
+/// chunks into the active `World`.
 #[derive(Resource)]
 pub struct WorldManager {
-    regen_handle: Mutex<Option<JoinHandle<HashMap<IVec3, Chunk>>>>,
+    /// Shared chunk-generation pool (also used by the startup fill and streaming).
+    pool: Arc<rayon::ThreadPool>,
+    /// Receiver for the in-flight regeneration's finished chunk set. `Some` while
+    /// a regen is running, `None` when idle. Wrapped in a `Mutex` because
+    /// `mpsc::Receiver` is `Send` but not `Sync`, and `WorldManager` is a bevy_ecs
+    /// `Resource` (which requires `Sync`); the `Mutex` supplies the `Sync` bound.
+    regen_rx: Mutex<Option<mpsc::Receiver<HashMap<IVec3, Chunk>>>>,
     regen_progress: Arc<AtomicU32>,
     regen_total: u32,
     regen_params: Option<TerrainGenParams>,
@@ -282,9 +306,10 @@ pub struct WorldManager {
 }
 
 impl WorldManager {
-    pub fn new() -> Self {
+    pub fn new(pool: Arc<rayon::ThreadPool>) -> Self {
         Self {
-            regen_handle: Mutex::new(None),
+            pool,
+            regen_rx: Mutex::new(None),
             regen_progress: Arc::new(AtomicU32::new(0)),
             regen_total: 0,
             regen_params: None,
@@ -293,11 +318,11 @@ impl WorldManager {
     }
 
     pub fn is_regenerating(&self) -> bool {
-        self.regen_handle.lock().unwrap().is_some()
+        self.regen_rx.lock().unwrap().is_some()
     }
 
     pub fn progress(&self) -> (u32, u32) {
-        if self.regen_handle.lock().unwrap().is_some() {
+        if self.regen_rx.lock().unwrap().is_some() {
             (self.regen_progress.load(Ordering::Relaxed), self.regen_total)
         } else {
             (0, 0)
@@ -313,8 +338,7 @@ impl WorldManager {
         generator: Arc<WorldGenerator>,
         positions: Vec<IVec3>,
     ) {
-        let handle = self.regen_handle.get_mut().unwrap();
-        if handle.is_some() {
+        if self.regen_rx.get_mut().unwrap().is_some() {
             log::warn!("Regeneration already in progress, ignoring request");
             return;
         }
@@ -326,44 +350,66 @@ impl WorldManager {
         self.regen_generator = Some(generator.clone());
 
         let progress = self.regen_progress.clone();
-        let gen_for_thread = generator;
+        let gen_for_pool = generator;
+        let (tx, rx) = mpsc::channel();
+        *self.regen_rx.get_mut().unwrap() = Some(rx);
         
         log::info!("Starting background terrain regeneration ({} chunks)", total);
         
-        let new_handle = std::thread::Builder::new()
-            .name("terrain-regen".to_string())
-            .spawn(move || generate_world_background(gen_for_thread, &positions, &progress))
-            .expect("Failed to spawn terrain regeneration thread");
-        
-        *handle = Some(new_handle);
+        // One fan-out task on the shared pool: its internal `par_iter` runs on the
+        // same pool. Result is delivered over the channel; the main thread polls.
+        self.pool.spawn(move || {
+            let chunks = generate_world_background(gen_for_pool, &positions, &progress);
+            let _ = tx.send(chunks);
+        });
     }
 
     pub fn poll_regeneration(
         &mut self,
     ) -> Option<(HashMap<IVec3, Chunk>, TerrainGenParams, Arc<WorldGenerator>)> {
-        let handle_opt = self.regen_handle.get_mut().unwrap();
-        let handle_ref = handle_opt.as_ref()?;
-        
-        if !handle_ref.is_finished() {
-            return None;
+        use std::sync::mpsc::TryRecvError;
+
+        // What the channel told us. Computed inside a scope that holds a mutable
+        // borrow of `regen_rx`; we resolve to one of these before releasing it so
+        // the sibling-field cleanup below isn't fighting the borrow checker.
+        enum Outcome {
+            Got(HashMap<IVec3, Chunk>),
+            Empty,
+            Done,
         }
-        
-        let handle = handle_opt.take().unwrap();
-        let params = self.regen_params.take().unwrap();
-        let generator = self.regen_generator.take().unwrap();
-        
-        match handle.join() {
-            Ok(chunks) => {
-                log::info!(
-                    "Background regeneration complete ({} chunks)",
-                    chunks.len()
-                );
+
+        let outcome = {
+            let slot = self.regen_rx.get_mut().unwrap();
+            match slot.as_ref() {
+                Some(rx) => match rx.try_recv() {
+                    Ok(chunks) => {
+                        *slot = None;
+                        Outcome::Got(chunks)
+                    }
+                    Err(TryRecvError::Empty) => Outcome::Empty,
+                    Err(TryRecvError::Disconnected) => {
+                        *slot = None;
+                        Outcome::Done
+                    }
+                },
+                None => Outcome::Empty,
+            }
+        };
+
+        match outcome {
+            Outcome::Got(chunks) => {
+                let params = self.regen_params.take().unwrap();
+                let generator = self.regen_generator.take().unwrap();
+                log::info!("Background regeneration complete ({} chunks)", chunks.len());
                 Some((chunks, params, generator))
             }
-            Err(e) => {
-                log::error!("Background regeneration thread panicked: {:?}", e);
+            Outcome::Done => {
+                log::error!("Background regeneration task ended without a result");
+                self.regen_params = None;
+                self.regen_generator = None;
                 None
             }
+            Outcome::Empty => None,
         }
     }
 }
