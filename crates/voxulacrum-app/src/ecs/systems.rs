@@ -28,7 +28,7 @@ use crate::ui;
 use crate::ui::panels::UiState;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::{compute_render_dimensions, palette, FrameCounter};
-use crate::world::chunk::{Chunk, CHUNK_WORLD_SIZE};
+use crate::world::chunk::{LoadedChunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
 use crate::world::persistence::WorldPersistence;
 use crate::materials::MaterialRegistryRes;
@@ -302,10 +302,10 @@ pub fn streaming_tick_system(
         &mut meshing,
         &camera_view,
         frame.dt,
-        &mut |chunk: &crate::world::chunk::Chunk| {
+        &mut |chunk: &crate::world::chunk::LoadedChunk| {
             if chunk.persist_dirty {
                 if let Err(e) = persistence.save_chunk_on_unload(chunk) {
-                    log::error!("Save on unload {:?}: {e}", chunk.position);
+                    log::error!("Save on unload {:?}: {e}", chunk.data.coord);
                 }
             }
         },
@@ -405,7 +405,7 @@ pub fn compute_stats_system(
     for chunk in world.0.chunks.values() {
         if chunk.mesh.is_some() {
             chunks_total += 1;
-            if sim.frustum.is_chunk_visible(chunk.position) {
+            if sim.frustum.is_chunk_visible(chunk.data.coord.into()) {
                 chunks_visible += 1;
                 total_tris += chunk.mesh.as_ref().unwrap().index_count as u64 / 3;
             }
@@ -504,7 +504,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
                 .0
                 .chunks
                 .keys()
-                .copied()
+                .map(|c| IVec3::from(*c))
                 .collect();
             ecs.resource_scope::<DebugLinePass, _>(|ecs, mut debug| {
                 let sim = ecs.resource::<SimulationManager>();
@@ -580,11 +580,11 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
         // Pre-filter chunks: one list for the camera frustum (main scene),
         // one for the shadow frustum (shadow pass).
-        let visible_chunks: Vec<&Chunk> = world.0.chunks.values()
-            .filter(|c| c.mesh.is_some() && sim.frustum.is_chunk_visible(c.position))
+        let visible_chunks: Vec<&LoadedChunk> = world.0.chunks.values()
+            .filter(|c| c.mesh.is_some() && sim.frustum.is_chunk_visible(c.data.coord.into()))
             .collect();
-        let shadow_chunks: Vec<&Chunk> = world.0.chunks.values()
-            .filter(|c| c.mesh.is_some() && shadow_frustum.is_chunk_visible(c.position))
+        let shadow_chunks: Vec<&LoadedChunk> = world.0.chunks.values()
+            .filter(|c| c.mesh.is_some() && shadow_frustum.is_chunk_visible(c.data.coord.into()))
             .collect();
 
         let shadow_node = ShadowPassNode {

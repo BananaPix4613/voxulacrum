@@ -8,9 +8,17 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 use rusqlite::{params, Connection, OpenFlags};
 
-use super::chunk::{Chunk, VoxelEdit, DELTA_THRESHOLD};
+use smallvec::SmallVec;
+
+use super::chunk::{LoadedChunk, DELTA_THRESHOLD};
+use super::layers::{
+    DecalEntry, DetailLayerId, DetailTexel, FluidCell, FluidId, PrefabId,
+    ScatterFlags, ScatterInstance, StableInstanceId,
+};
+use super::overrides::ChunkOverrides;
 use super::storage::{ChunkStorage, PopulatedChunk, PalettedBitArray};
-use voxel_core::Voxel;
+use super::tags::{BiomeId, ChunkTags, LibraryGraphId, ZoneId};
+use voxel_core::{FaceAxis, LocalPos, Voxel};
 
 // -- Error type --------------------------------------------------------------
 
@@ -36,18 +44,23 @@ impl From<std::io::Error> for PersistError { fn from(e: std::io::Error) -> Self 
 
 // -- Format constants --------------------------------------------------------
 
-const BLOB_VERSION: u8 = 4; // was 3 — chunk payloads now store packed u32 Voxels
+const BLOB_VERSION: u8 = 5; // v5 - multi-layer overrides + ChunkTags appended
 
 /// Bumped whenever the on-disk voxel encoding changes. A stored value older than
 /// this forces a one-shot save wipe on open (pre-release; saves are not migrated).
-const VOXEL_FORMAT_VERSION: u64 = 1;
+const VOXEL_FORMAT_VERSION: u64 = 2;
 
-// The TAG_DELTA payload serializes only `index:u16 + packed voxel:u32`. Per-voxel
-// moisture/flora state is intentionally NOT persisted yet: the moisture/flora
-// simulation model is a later-phase concern. When it lands, the delta format will
-// gain a per-edit flag byte selecting which optional fields follow each voxel.
-// The previously-unused EDIT_FLAG_* bitflag scaffolding was removed so the source
-// no longer implies a richer on-disk format than is actually written.
+// A v5 blob is `[BLOB_VERSION][variant_tag]<variant payload><tags section>`.
+// The variant payload is one of:
+//   TAG_DELTA          -> every ChunkOverrides field, each a u32-count-prefixed
+//                         section; map-backed sections are key-sorted so an
+//                         identical override set always produces identical bytes.
+//   TAG_FULL_UNIFORM   -> the single packed u32 voxel.
+//   TAG_FULL_POPULATED -> the palette-compressed material array (self-delimiting).
+// The tags section (zone + biomes + library refs) is appended after the payload
+// in every variant, so each chunk round-trips its identity tags. In Phase 3 only
+// `voxel_diffs` and the trivial tags are non-empty; the remaining override layers
+// round-trip but have no runtime consumer until their systems land.
 
 const TAG_DELTA: u8 = 0;
 const TAG_FULL_UNIFORM: u8 = 1;
@@ -57,96 +70,359 @@ const TAG_FULL_POPULATED: u8 = 2;
 
 /// What we store per modified chunk.
 pub enum ChunkEdits {
-    /// Sparse voxel changes (< DELTA_THRESHOLD edits).
-    Delta(Vec<VoxelEdit>),
+    /// Sparse voxel overrides (< DELTA_THRESHOLD voxel diffs).
+    Delta(ChunkOverrides),
     /// Full chunk replacement (heavily modified or non-deterministic).
     Full(ChunkStorage),
 }
 
+/// The full per-chunk persisted unit: a chunk's edits plus its identity tags.
+/// This is the value the blob serializer round-trips.
+pub struct ChunkRecord {
+    /// Voxel edits (sparse delta or full snapshot).
+    pub edits: ChunkEdits,
+    /// Zone / biome / library identity (design doc §16 targeted invalidation).
+    pub tags: ChunkTags,
+}
+
 // -- Serialization -----------------------------------------------------------
 
-/// Serialize ChunkEdits -> raw bytes -> zstd compress.
-pub fn serialize_chunk_edits_raw(edits: &ChunkEdits) -> Result<Vec<u8>, PersistError> {
+// Little-endian write helpers (kept terse; the matching reads live on `Reader`).
+fn w_u16(buf: &mut Vec<u8>, v: u16) { buf.extend_from_slice(&v.to_le_bytes()); }
+fn w_u32(buf: &mut Vec<u8>, v: u32) { buf.extend_from_slice(&v.to_le_bytes()); }
+fn w_u64(buf: &mut Vec<u8>, v: u64) { buf.extend_from_slice(&v.to_le_bytes()); }
+
+/// A bounds-checked cursor over a raw blob. Every read advances `pos` and errors
+/// (rather than panicking) when the buffer is too short, so a truncated or
+/// corrupt blob is rejected cleanly.
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], PersistError> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| PersistError::Corrupt("length overflow".into()))?;
+        if end > self.buf.len() {
+            return Err(PersistError::Corrupt("unexpected end of blob".into()));
+        }
+        let slice = &self.buf[self.pos..end];
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn u8(&mut self) -> Result<u8, PersistError> {
+        Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, PersistError> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+    }
+    fn u32(&mut self) -> Result<u32, PersistError> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Result<u64, PersistError> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+}
+
+/// Stable on-disk encoding for a face axis (decoupled from the enum's in-memory
+/// discriminants, so reordering the enum can't silently corrupt saves).
+fn face_to_u8(face: FaceAxis) -> u8 {
+    match face {
+        FaceAxis::PosX => 0,
+        FaceAxis::NegX => 1,
+        FaceAxis::PosY => 2,
+        FaceAxis::NegY => 3,
+        FaceAxis::PosZ => 4,
+        FaceAxis::NegZ => 5,
+    }
+}
+
+fn face_from_u8(v: u8) -> Result<FaceAxis, PersistError> {
+    Ok(match v {
+        0 => FaceAxis::PosX,
+        1 => FaceAxis::NegX,
+        2 => FaceAxis::PosY,
+        3 => FaceAxis::NegY,
+        4 => FaceAxis::PosZ,
+        5 => FaceAxis::NegZ,
+        other => return Err(PersistError::Corrupt(format!("bad face axis {other}"))),
+    })
+}
+
+// A scatter instance encodes to a fixed 12 bytes:
+//   anchor index u16 | sub_offset 3xi8 | rotation_y u8 | scale_variant u8
+//   | prefab_id u32 | flags u8
+fn write_scatter_instance(buf: &mut Vec<u8>, inst: &ScatterInstance) {
+    w_u16(buf, inst.anchor.to_index() as u16);
+    buf.push(inst.sub_offset[0] as u8);
+    buf.push(inst.sub_offset[1] as u8);
+    buf.push(inst.sub_offset[2] as u8);
+    buf.push(inst.rotation_y);
+    buf.push(inst.scale_variant);
+    w_u32(buf, inst.prefab_id.0);
+    buf.push(inst.flags.0);
+}
+
+fn read_scatter_instance(r: &mut Reader) -> Result<ScatterInstance, PersistError> {
+    let anchor = LocalPos::from_index(r.u16()? as usize);
+    let sub_offset = [r.u8()? as i8, r.u8()? as i8, r.u8()? as i8];
+    let rotation_y = r.u8()?;
+    let scale_variant = r.u8()?;
+    let prefab_id = PrefabId(r.u32()?);
+    let flags = ScatterFlags(r.u8()?);
+    Ok(ScatterInstance { anchor, sub_offset, rotation_y, scale_variant, prefab_id, flags })
+}
+
+/// Encode all seven `ChunkOverrides` fields. Each is a `u32` count followed by
+/// its entries; map-backed sections are sorted by key so identical override sets
+/// serialize to identical bytes regardless of `HashMap` iteration order.
+fn write_overrides(buf: &mut Vec<u8>, ovr: &ChunkOverrides) {
+    // 1. voxel_diffs: index u16 + packed voxel u32
+    let mut voxel_diffs: Vec<(u16, u32)> = ovr
+        .voxel_diffs
+        .iter()
+        .map(|(pos, v)| (pos.to_index() as u16, v.pack()))
+        .collect();
+    voxel_diffs.sort_unstable_by_key(|&(index, _)| index);
+    w_u32(buf, voxel_diffs.len() as u32);
+    for (index, packed) in voxel_diffs {
+        w_u16(buf, index);
+        w_u32(buf, packed);
+    }
+
+    // 2. voxel_removed: index u16
+    let mut voxel_removed: Vec<u16> =
+        ovr.voxel_removed.iter().map(|pos| pos.to_index() as u16).collect();
+    voxel_removed.sort_unstable();
+    w_u32(buf, voxel_removed.len() as u32);
+    for index in voxel_removed {
+        w_u16(buf, index);
+    }
+
+    // 3. scatter_removed: stable instance id u64
+    let mut scatter_removed: Vec<u64> =
+        ovr.scatter_removed.iter().map(|id| id.0).collect();
+    scatter_removed.sort_unstable();
+    w_u32(buf, scatter_removed.len() as u32);
+    for id in scatter_removed {
+        w_u64(buf, id);
+    }
+
+    // 4. scatter_added: Vec order is meaningful, so it is preserved verbatim.
+    w_u32(buf, ovr.scatter_added.len() as u32);
+    for inst in &ovr.scatter_added {
+        write_scatter_instance(buf, inst);
+    }
+
+    // 5. detail_diffs: layer u16 + index u16 + texel(species,density,tint,flags)
+    let mut detail: Vec<(u16, u16, DetailTexel)> = ovr
+        .detail_diffs
+        .iter()
+        .map(|((layer, pos), texel)| (layer.0, pos.to_index() as u16, *texel))
+        .collect();
+    detail.sort_unstable_by_key(|&(layer, index, _)| (layer, index));
+    w_u32(buf, detail.len() as u32);
+    for (layer, index, texel) in detail {
+        w_u16(buf, layer);
+        w_u16(buf, index);
+        buf.push(texel.species);
+        buf.push(texel.density);
+        buf.push(texel.tint);
+        buf.push(texel.flags);
+    }
+
+    // 6. fluid_diffs: index u16 + fluid_id u16 + mass u16 + flags u8
+    let mut fluids: Vec<(u16, FluidCell)> = ovr
+        .fluid_diffs
+        .iter()
+        .map(|(pos, cell)| (pos.to_index() as u16, *cell))
+        .collect();
+    fluids.sort_unstable_by_key(|&(index, _)| index);
+    w_u32(buf, fluids.len() as u32);
+    for (index, cell) in fluids {
+        w_u16(buf, index);
+        w_u16(buf, cell.fluid_id.0);
+        w_u16(buf, cell.mass);
+        buf.push(cell.flags);
+    }
+
+    // 7. decal_diffs: index u16 + face u8 + decal_id u16 + flags u8
+    let mut decals: Vec<(u16, u8, DecalEntry)> = ovr
+        .decal_diffs
+        .iter()
+        .map(|((pos, face), entry)| (pos.to_index() as u16, face_to_u8(*face), *entry))
+        .collect();
+    decals.sort_unstable_by_key(|&(index, face, _)| (index, face));
+    w_u32(buf, decals.len() as u32);
+    for (index, face, entry) in decals {
+        w_u16(buf, index);
+        buf.push(face);
+        w_u16(buf, entry.decal_id);
+        buf.push(entry.flags);
+    }
+}
+
+fn read_overrides(r: &mut Reader) -> Result<ChunkOverrides, PersistError> {
+    let mut ovr = ChunkOverrides::default();
+
+    // 1. voxel_diffs
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        let index = r.u16()? as usize;
+        let packed = r.u32()?;
+        ovr.voxel_diffs.insert(
+            LocalPos::from_index(index),
+            Voxel::unpack(packed).unwrap_or(Voxel::EMPTY),
+        );
+    }
+
+    // 2. voxel_removed
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        ovr.voxel_removed.insert(LocalPos::from_index(r.u16()? as usize));
+    }
+
+    // 3. scatter_removed
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        ovr.scatter_removed.insert(StableInstanceId(r.u64()?));
+    }
+
+    // 4. scatter_added
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        ovr.scatter_added.push(read_scatter_instance(r)?);
+    }
+
+    // 5. detail_diffs
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        let layer = DetailLayerId(r.u16()?);
+        let pos = LocalPos::from_index(r.u16()? as usize);
+        let texel = DetailTexel {
+            species: r.u8()?,
+            density: r.u8()?,
+            tint: r.u8()?,
+            flags: r.u8()?,
+        };
+        ovr.detail_diffs.insert((layer, pos), texel);
+    }
+
+    // 6. fluid_diffs
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        let pos = LocalPos::from_index(r.u16()? as usize);
+        let cell = FluidCell {
+            fluid_id: FluidId(r.u16()?),
+            mass: r.u16()?,
+            flags: r.u8()?,
+        };
+        ovr.fluid_diffs.insert(pos, cell);
+    }
+
+    // 7. decal_diffs
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        let pos = LocalPos::from_index(r.u16()? as usize);
+        let face = face_from_u8(r.u8()?)?;
+        let entry = DecalEntry { decal_id: r.u16()?, flags: r.u8()? };
+        ovr.decal_diffs.insert((pos, face), entry);
+    }
+
+    Ok(ovr)
+}
+
+fn write_tags(buf: &mut Vec<u8>, tags: &ChunkTags) {
+    w_u16(buf, tags.zone.0);
+    w_u32(buf, tags.biomes.len() as u32);
+    for biome in &tags.biomes {
+        w_u16(buf, biome.0);
+    }
+    w_u32(buf, tags.library_refs.len() as u32);
+    for r in &tags.library_refs {
+        w_u32(buf, r.0);
+    }
+}
+
+fn read_tags(r: &mut Reader) -> Result<ChunkTags, PersistError> {
+    let zone = ZoneId(r.u16()?);
+    let mut biomes: SmallVec<[BiomeId; 4]> = SmallVec::new();
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        biomes.push(BiomeId(r.u16()?));
+    }
+    let mut library_refs: SmallVec<[LibraryGraphId; 8]> = SmallVec::new();
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        library_refs.push(LibraryGraphId(r.u32()?));
+    }
+    Ok(ChunkTags { zone, biomes, library_refs })
+}
+
+/// Serialize a ChunkRecord -> raw bytes (caller zstd-compress).
+pub fn serialize_chunk_record_raw(record: &ChunkRecord) -> Result<Vec<u8>, PersistError> {
     let mut raw = Vec::new();
     raw.push(BLOB_VERSION);
 
-    match edits {
-        ChunkEdits::Delta(edits) => {
+    match &record.edits {
+        ChunkEdits::Delta(overrides) => {
             raw.push(TAG_DELTA);
-            raw.extend_from_slice(&(edits.len() as u32).to_le_bytes());
-            for edit in edits {
-                raw.extend_from_slice(&edit.index.to_le_bytes());
-                raw.extend_from_slice(&edit.voxel.pack().to_le_bytes());
-            }
+            write_overrides(&mut raw, overrides);
         }
-        ChunkEdits::Full(storage) => match storage {
-            ChunkStorage::Uniform { voxel } => {
-                raw.push(TAG_FULL_UNIFORM);
-                raw.extend_from_slice(&voxel.pack().to_le_bytes());
-            }
-            ChunkStorage::Populated(pop) => {
-                raw.push(TAG_FULL_POPULATED);
-                // material: palette-compressed
-                pop.material_id.serialize_to_bytes(&mut raw);
-            }
-        },
+        ChunkEdits::Full(ChunkStorage::Uniform { voxel }) => {
+            raw.push(TAG_FULL_UNIFORM);
+            w_u32(&mut raw, voxel.pack());
+        }
+        ChunkEdits::Full(ChunkStorage::Populated(pop)) => {
+            raw.push(TAG_FULL_POPULATED);
+            // material: palette-compressed (self-delimiting)
+            pop.material_id.serialize_to_bytes(&mut raw);
+        }
     }
 
+    write_tags(&mut raw, &record.tags);
     Ok(raw)
 }
 
-/// Decompress zstd -> deserialize raw bytes -> ChunkEdits.
-pub fn deserialize_chunk_edits_raw(raw: &[u8]) -> Result<ChunkEdits, PersistError> {
-    if raw.len() < 2 {
-        return Err(PersistError::Corrupt("blob too short".into()));
-    }
-    if raw[0] != BLOB_VERSION {
-        return Err(PersistError::Corrupt(format!("unknown blob version {}", raw[0])));
+/// Deserialize raw bytes (post zstd-decompress) -> ChunkRecord.
+pub fn deserialize_chunk_record_raw(raw: &[u8]) -> Result<ChunkRecord, PersistError> {
+    let mut r = Reader::new(raw);
+    let version = r.u8()?;
+    if version != BLOB_VERSION {
+        return Err(PersistError::Corrupt(format!("unknown blob version {version}")));
     }
 
-    match raw[1] {
-        TAG_DELTA => {
-            if raw.len() < 6 { return Err(PersistError::Corrupt("delta header short".into())); }
-            let count = u32::from_le_bytes(raw[2..6].try_into().unwrap()) as usize;
-            const EDIT_BYTES: usize = 6; // index:u16 + voxel:u32 (packed)
-            if raw.len() < 6 + count * EDIT_BYTES {
-                return Err(PersistError::Corrupt("delta data truncated".into()));
-            }
-            let mut edits = Vec::with_capacity(count);
-            let mut off = 6;
-            for _ in 0..count {
-                let packed = u32::from_le_bytes(raw[off+2..off+6].try_into().unwrap());
-                edits.push(VoxelEdit {
-                    index: u16::from_le_bytes(raw[off..off+2].try_into().unwrap()),
-                    voxel: Voxel::unpack(packed).unwrap_or(Voxel::EMPTY),
-                    moisture: None,
-                    flora_id: None,
-                    flora_growth: None,
-                });
-                off += EDIT_BYTES;
-            }
-            Ok(ChunkEdits::Delta(edits))
-        }
+    let variant_tag = r.u8()?;
+    let edits = match variant_tag {
+        TAG_DELTA => ChunkEdits::Delta(read_overrides(&mut r)?),
         TAG_FULL_UNIFORM => {
-            if raw.len() < 6 { return Err(PersistError::Corrupt("uniform short".into())); }
-            let packed = u32::from_le_bytes(raw[2..6].try_into().unwrap());
-            Ok(ChunkEdits::Full(ChunkStorage::Uniform {
+            let packed = r.u32()?;
+            ChunkEdits::Full(ChunkStorage::Uniform {
                 voxel: Voxel::unpack(packed).unwrap_or(Voxel::EMPTY),
-            }))
+            })
         }
         TAG_FULL_POPULATED => {
-            let (material_id, _) = PalettedBitArray::deserialize_from_bytes(raw, 2)
-                .ok_or_else(|| PersistError::Corrupt("material palette failed".into()))?;
-
-            Ok(ChunkEdits::Full(ChunkStorage::Populated(Box::new(PopulatedChunk {
-                material_id,
-                lighting: None,
-                simulation: None,
-                flora: None,
-            }))))
+            // Bridge to the palette array's self-delimiting decoder, then resync
+            // the cursor to the absolute offset it reports.
+            let (material_id, new_pos) =
+                PalettedBitArray::deserialize_from_bytes(r.buf, r.pos)
+                    .ok_or_else(|| PersistError::Corrupt("material palette failed".into()))?;
+            r.pos = new_pos;
+            ChunkEdits::Full(ChunkStorage::Populated(Box::new(PopulatedChunk { material_id })))
         }
-        tag => Err(PersistError::Corrupt(format!("unknown tag {tag}"))),
-    }
+        other => return Err(PersistError::Corrupt(format!("unknown tag {other}"))),
+    };
+
+    let tags = read_tags(&mut r)?;
+    Ok(ChunkRecord { edits, tags })
 }
 
 // -- WorldDatabase -----------------------------------------------------------
@@ -324,7 +600,7 @@ impl WorldDatabase {
         Ok(deleted)
     }
 
-    pub fn load_chunk_edits(&self, pos: IVec3) -> Result<Option<ChunkEdits>, PersistError> {
+    pub fn load_chunk_record(&self, pos: IVec3) -> Result<Option<ChunkRecord>, PersistError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached(
             "SELECT flags, data FROM chunks WHERE cx = ?1 AND cy = ?2 AND cz = ?3"
@@ -336,15 +612,15 @@ impl WorldDatabase {
                 drop(stmt);
                 drop(conn); // Release Mutex before calling decompress_blob (which locks conn)
                 let raw = self.decompress_blob(&blob, flags)?;
-                Ok(Some(deserialize_chunk_edits_raw(&raw)?))
+                Ok(Some(deserialize_chunk_record_raw(&raw)?))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
-    pub fn save_chunk(&self, pos: IVec3, edits: &ChunkEdits) -> Result<(), PersistError> {
-        let raw = serialize_chunk_edits_raw(edits)?;
+    pub fn save_chunk(&self, pos: IVec3, edits: &ChunkRecord) -> Result<(), PersistError> {
+        let raw = serialize_chunk_record_raw(edits)?;
         let (blob, flags) = self.compress_blob(&raw)?;
         let conn = self.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
@@ -358,11 +634,11 @@ impl WorldDatabase {
         Ok(())
     }
 
-    pub fn save_chunks_batch(&self, chunks: &[(IVec3, ChunkEdits)]) -> Result<usize, PersistError> {
+    pub fn save_chunks_batch(&self, chunks: &[(IVec3, ChunkRecord)]) -> Result<usize, PersistError> {
         // Pre-compress all chunks outside the conn lock
         let mut prepared: Vec<(IVec3, Vec<u8>, i64)> = Vec::with_capacity(chunks.len());
         for (pos, edits) in chunks {
-            let raw = serialize_chunk_edits_raw(edits)?;
+            let raw = serialize_chunk_record_raw(edits)?;
             let (blob, flags) = self.compress_blob(&raw)?;
             prepared.push((*pos, blob, flags));
         }
@@ -395,66 +671,42 @@ impl WorldDatabase {
 
 // -- Edit helpers ------------------------------------------------------------
 
-/// Apply delta edits onto a base-generated ChunkStorage, returning a new one.
-pub fn apply_edits_to_storage(base: &ChunkStorage, edits: &[VoxelEdit]) -> ChunkStorage {
+/// Apply a chunk's voxel overrides onto a base-generated ChunkStorage,
+/// returning a new one. Only `voxel_diffs` is applied in Phase 3.
+pub fn apply_overrides_to_storage(base: &ChunkStorage, overrides: &ChunkOverrides) -> ChunkStorage {
     let mut storage = base.clone();
-    for edit in edits {
-        storage.set_voxel(edit.index as usize, edit.voxel);
-        // Apply optional tier fields
-        if edit.moisture.is_some() || edit.flora_id.is_some() || edit.flora_growth.is_some() {
-            storage.ensure_populated();
-            if let ChunkStorage::Populated(ref mut p) = storage {
-                if let Some(moisture) = edit.moisture {
-                    p.simulation_mut().moisture[edit.index as usize] = moisture;
-                }
-                if let Some(flora_id) = edit.flora_id {
-                    p.flora_mut().flora_id.set(edit.index as usize, flora_id as u32);
-                }
-                if let Some(flora_growth) = edit.flora_growth {
-                    p.flora_mut().flora_growth[edit.index as usize] = flora_growth;
-                }
-            }
-        }
+    for (pos, voxel) in &overrides.voxel_diffs {
+        storage.set_voxel(pos.to_index(), *voxel);
     }
     storage.try_collapse();
     storage
 }
 
-fn deduplicate_edits(edits: &[VoxelEdit]) -> Vec<VoxelEdit> {
-    use std::collections::HashMap;
-    // Map index -> position in result vec
-    let mut seen: HashMap<u16, usize> = HashMap::with_capacity(edits.len());
-    let mut result: Vec<VoxelEdit> = Vec::with_capacity(edits.len());
-    for edit in edits {
-        if let Some(&pos) = seen.get(&edit.index) {
-            result[pos] = edit.clone();
-        } else {
-            seen.insert(edit.index, result.len());
-            result.push(edit.clone());
-        }
-    }
-    result
-}
-
-/// Build ChunkEdits from a Chunk's edit_list. Returns None if unmodified.
-pub fn build_chunk_edits(chunk: &Chunk) -> Option<ChunkEdits> {
+/// Build ChunkEdits from a Chunk's overrides. Returns None if unmodified.
+pub fn build_chunk_edits(chunk: &LoadedChunk) -> Option<ChunkEdits> {
     if !chunk.persist_dirty { return None; }
-    match &chunk.edit_list {
+    match &chunk.data.overrides {
         None => {
             // Promoted or full replacement - save entire storage
-            // Only if persist_dirty (which we checked above)
-            Some(ChunkEdits::Full((*chunk.storage).clone()))
+            // (persist_dirty already checked above).
+            Some(ChunkEdits::Full((*chunk.data.voxels).clone()))
         }
-        Some(list) if list.is_empty() => None,
-        Some(list) => {
-            let deduped = deduplicate_edits(list);
-            if deduped.len() > DELTA_THRESHOLD {
-                Some(ChunkEdits::Full((*chunk.storage).clone()))
+        Some(ovr) if ovr.is_empty() => None,
+        Some(ovr) => {
+            if ovr.voxel_override_count() > DELTA_THRESHOLD {
+                Some(ChunkEdits::Full((*chunk.data.voxels).clone()))
             } else {
-                Some(ChunkEdits::Delta(deduped))
+                Some(ChunkEdits::Delta(ovr.clone()))
             }
         }
     }
+}
+
+/// Build the full persisted record (edits + a snapshot of the chunk's tags).
+/// Returns None when the chunk has no edits to save.
+pub fn build_chunk_record(chunk: &LoadedChunk) -> Option<ChunkRecord> {
+    let edits = build_chunk_edits(chunk)?;
+    Some(ChunkRecord { edits, tags: chunk.data.tags.clone() })
 }
 
 // -- WorldPersistence (Bevy Resource) ----------------------------------------
@@ -549,11 +801,11 @@ impl WorldPersistence {
     /// Save all dirty chunks in a batch transaction. Clears persist_dirty flags.
     pub fn save_dirty_chunks(&self, world: &mut super::World) -> Result<usize, PersistError> {
         let db = match &self.db { Some(db) => db, None => return Ok(0) };
-        let mut batch: Vec<(IVec3, ChunkEdits)> = Vec::new();
+        let mut batch: Vec<(IVec3, ChunkRecord)> = Vec::new();
         for chunk in world.chunks.values_mut() {
             if !chunk.persist_dirty { continue; }
-            if let Some(edits) = build_chunk_edits(chunk) {
-                batch.push((chunk.position, edits));
+            if let Some(record) = build_chunk_record(chunk) {
+                batch.push((chunk.data.coord.into(), record));
                 chunk.persist_dirty = false;
             }
         }
@@ -583,11 +835,11 @@ impl WorldPersistence {
     }
 
     /// Save a single chunk before unload.
-    pub fn save_chunk_on_unload(&self, chunk: &Chunk) -> Result<(), PersistError> {
+    pub fn save_chunk_on_unload(&self, chunk: &LoadedChunk) -> Result<(), PersistError> {
         let db = match &self.db { Some(db) => db, None => return Ok(()) };
         if !chunk.persist_dirty { return Ok(()); }
-        if let Some(edits) = build_chunk_edits(chunk) {
-            db.save_chunk(chunk.position, &edits)?;
+        if let Some(record) = build_chunk_record(chunk) {
+            db.save_chunk(chunk.data.coord.into(), &record)?;
         }
         Ok(())
     }
@@ -603,41 +855,108 @@ mod tests {
         Voxel::cube(MaterialId(mat))
     }
 
-    /// Delta payloads round-trip: index + packed voxel survive exactly, and the
-    /// deferred moisture/flora fields decode to None (they are not serialized).
+    /// Overrides exercising every field, with at least two entries in the sortable
+    /// sections so key-ordering is actually tested.
+    fn sample_overrides() -> ChunkOverrides {
+        let mut ovr = ChunkOverrides::default();
+
+        ovr.voxel_diffs.insert(LocalPos::from_index(0), vox(1));
+        ovr.voxel_diffs.insert(LocalPos::from_index(50), Voxel::EMPTY);
+
+        ovr.voxel_removed.insert(LocalPos::from_index(7));
+        ovr.voxel_removed.insert(LocalPos::from_index(9000));
+
+        ovr.scatter_removed.insert(StableInstanceId(0xDEAD_BEEF));
+        ovr.scatter_removed.insert(StableInstanceId(42));
+
+        ovr.scatter_added.push(ScatterInstance {
+            anchor: LocalPos::from_index(123),
+            sub_offset: [-1, 2, -3],
+            rotation_y: 200,
+            scale_variant: 4,
+            prefab_id: PrefabId(77),
+            flags: ScatterFlags(ScatterFlags::PLAYER_PLACED),
+        });
+        ovr.scatter_added.push(ScatterInstance {
+            anchor: LocalPos::from_index(456),
+            sub_offset: [0, 0, 0],
+            rotation_y: 0,
+            scale_variant: 0,
+            prefab_id: PrefabId(1),
+            flags: ScatterFlags::default(),
+        });
+
+        ovr.detail_diffs.insert(
+            (DetailLayerId(2), LocalPos::from_index(33)),
+            DetailTexel { species: 5, density: 200, tint: 3, flags: 1 },
+        );
+        ovr.detail_diffs.insert(
+            (DetailLayerId(0), LocalPos::from_index(33)),
+            DetailTexel { species: 9, density: 1, tint: 0, flags: 0 },
+        );
+
+        ovr.fluid_diffs.insert(
+            LocalPos::from_index(64),
+            FluidCell { fluid_id: FluidId(1), mass: 65535, flags: FluidCell::FLAG_SOURCE },
+        );
+
+        ovr.decal_diffs.insert(
+            (LocalPos::from_index(88), FaceAxis::PosY),
+            DecalEntry { decal_id: 9, flags: 2 },
+        );
+        ovr.decal_diffs.insert(
+            (LocalPos::from_index(88), FaceAxis::NegX),
+            DecalEntry { decal_id: 4, flags: 0 },
+        );
+
+        ovr
+    }
+
+    fn sample_tags() -> ChunkTags {
+        let mut tags = ChunkTags::single_biome(ZoneId(3), BiomeId(7));
+        tags.biomes.push(BiomeId(8));
+        tags.library_refs.push(LibraryGraphId(100));
+        tags.library_refs.push(LibraryGraphId(200));
+        tags
+    }
+
+    /// A Delta record round-trips every override field and its tags exactly.
     #[test]
-    fn roundtrip_delta() {
-        let edits = vec![
-            VoxelEdit { index: 0,    voxel: vox(1),       moisture: None, flora_id: None, flora_growth: None },
-            VoxelEdit { index: 17,   voxel: vox(3),       moisture: None, flora_id: None, flora_growth: None },
-            VoxelEdit { index: 4095, voxel: Voxel::EMPTY, moisture: None, flora_id: None, flora_growth: None },
-        ];
-        let raw = serialize_chunk_edits_raw(&ChunkEdits::Delta(edits.clone())).unwrap();
-        match deserialize_chunk_edits_raw(&raw).unwrap() {
-            ChunkEdits::Delta(back) => {
-                assert_eq!(back.len(), edits.len());
-                for (a, b) in edits.iter().zip(back.iter()) {
-                    assert_eq!(a.index, b.index);
-                    assert_eq!(a.voxel, b.voxel);
-                    assert!(b.moisture.is_none() && b.flora_id.is_none() && b.flora_growth.is_none());
-                }
-            }
-            other => panic!("expected Delta, got a different variant: {}", variant_name(&other)),
+    fn roundtrip_delta_all_fields() {
+        let overrides = sample_overrides();
+        let tags = sample_tags();
+        let record = ChunkRecord {
+            edits: ChunkEdits::Delta(overrides.clone()),
+            tags: tags.clone(),
+        };
+        let raw = serialize_chunk_record_raw(&record).unwrap();
+        let back = deserialize_chunk_record_raw(&raw).unwrap();
+        assert_eq!(back.tags, tags);
+        match back.edits {
+            ChunkEdits::Delta(b) => assert_eq!(b, overrides),
+            other => panic!("expected Delta, got: {}", variant_name(&other)),
         }
     }
 
-    // Full Uniform payloads round-trip the single voxel.
+    /// Full Uniform records round-trip the single voxel and the tags.
     #[test]
     fn roundtrip_full_uniform() {
         let voxel = vox(5);
-        let raw = serialize_chunk_edits_raw(&ChunkEdits::Full(ChunkStorage::Uniform { voxel })).unwrap();
-        match deserialize_chunk_edits_raw(&raw).unwrap() {
-            ChunkEdits::Full(ChunkStorage::Uniform { voxel: back }) => assert_eq!(voxel, back),
+        let tags = sample_tags();
+        let record = ChunkRecord {
+            edits: ChunkEdits::Full(ChunkStorage::Uniform { voxel }),
+            tags: tags.clone(),
+        };
+        let raw = serialize_chunk_record_raw(&record).unwrap();
+        let back = deserialize_chunk_record_raw(&raw).unwrap();
+        assert_eq!(back.tags, tags);
+        match back.edits {
+            ChunkEdits::Full(ChunkStorage::Uniform { voxel: b }) => assert_eq!(voxel, b),
             other => panic!("expected Full Uniform, got: {}", variant_name(&other)),
         }
     }
 
-    /// Full Populated payloads round-trip every voxel's packed material id.
+    /// Full Populated records round-trip every voxel's packed material id + tags.
     #[test]
     fn roundtrip_full_populated() {
         let mut material_id = PalettedBitArray::new(Voxel::EMPTY.pack());
@@ -645,14 +964,17 @@ mod tests {
         material_id.set(100, vox(6).pack());
         material_id.set(CHUNK_VOLUME - 1, vox(4).pack());
 
-        let storage = ChunkStorage::Populated(Box::new(PopulatedChunk {
-            material_id: material_id.clone(),
-            lighting: None,
-            simulation: None,
-            flora: None,
-        }));
-        let raw = serialize_chunk_edits_raw(&ChunkEdits::Full(storage)).unwrap();
-        match deserialize_chunk_edits_raw(&raw).unwrap() {
+        let tags = sample_tags();
+        let record = ChunkRecord {
+            edits: ChunkEdits::Full(ChunkStorage::Populated(Box::new(PopulatedChunk {
+                material_id: material_id.clone(),
+            }))),
+            tags: tags.clone(),
+        };
+        let raw = serialize_chunk_record_raw(&record).unwrap();
+        let back = deserialize_chunk_record_raw(&raw).unwrap();
+        assert_eq!(back.tags, tags);
+        match back.edits {
             ChunkEdits::Full(ChunkStorage::Populated(pop)) => {
                 for i in [0usize, 1, 100, CHUNK_VOLUME - 1] {
                     assert_eq!(pop.material_id.get(i), material_id.get(i), "voxel {i} mismatch");
@@ -662,15 +984,64 @@ mod tests {
         }
     }
 
+    /// An empty Delta with default tags is the minimal blob: version + tag, seven
+    /// zero-count override sections, then zone u16 + two zero-count tag sections.
+    #[test]
+    fn roundtrip_empty_is_compact() {
+        let record = ChunkRecord {
+            edits: ChunkEdits::Delta(ChunkOverrides::default()),
+            tags: ChunkTags::default(),
+        };
+        let raw = serialize_chunk_record_raw(&record).unwrap();
+        assert_eq!(raw.len(), 2 + 7 * 4 + 2 + 4 + 4, "empty v5 blob should be 40 bytes");
+
+        let back = deserialize_chunk_record_raw(&raw).unwrap();
+        assert_eq!(back.tags, ChunkTags::default());
+        match back.edits {
+            ChunkEdits::Delta(b) => assert!(b.is_empty()),
+            other => panic!("expected Delta, got: {}", variant_name(&other)),
+        }
+    }
+
+    /// Identical override sets built in different insertion orders must serialize
+    /// to byte-identical blobs (HashMap iteration order is not stable).
+    #[test]
+    fn serialization_is_order_independent() {
+        let mut a = ChunkOverrides::default();
+        a.voxel_diffs.insert(LocalPos::from_index(5), vox(1));
+        a.voxel_diffs.insert(LocalPos::from_index(1), vox(2));
+        a.voxel_diffs.insert(LocalPos::from_index(9), vox(3));
+
+        let mut b = ChunkOverrides::default();
+        b.voxel_diffs.insert(LocalPos::from_index(9), vox(3));
+        b.voxel_diffs.insert(LocalPos::from_index(1), vox(2));
+        b.voxel_diffs.insert(LocalPos::from_index(5), vox(1));
+
+        let tags = ChunkTags::default();
+        let ra = serialize_chunk_record_raw(&ChunkRecord {
+            edits: ChunkEdits::Delta(a),
+            tags: tags.clone(),
+        })
+            .unwrap();
+        let rb = serialize_chunk_record_raw(&ChunkRecord {
+            edits: ChunkEdits::Delta(b),
+            tags,
+        })
+            .unwrap();
+        assert_eq!(ra, rb);
+    }
+
     /// A blob whose version byte does not match BLOB_VERSION is rejected, never
     /// silently misinterpreted.
     #[test]
     fn rejects_unknown_blob_version() {
-        let mut raw = serialize_chunk_edits_raw(
-            &ChunkEdits::Full(ChunkStorage::Uniform { voxel: vox(1) }),
-        ).unwrap();
+        let mut raw = serialize_chunk_record_raw(&ChunkRecord {
+            edits: ChunkEdits::Full(ChunkStorage::Uniform { voxel: vox(1) }),
+            tags: ChunkTags::default(),
+        })
+            .unwrap();
         raw[0] = 0xFF; // clobber BLOB_VERSION
-        assert!(deserialize_chunk_edits_raw(&raw).is_err());
+        assert!(deserialize_chunk_record_raw(&raw).is_err());
     }
 
     fn variant_name(edits: &ChunkEdits) -> &'static str {

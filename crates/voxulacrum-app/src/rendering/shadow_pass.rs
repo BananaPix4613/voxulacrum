@@ -1,12 +1,12 @@
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::world::chunk::Chunk;
+use crate::world::chunk::LoadedChunk;
 
 /// Transient per-frame node - borrows from AppState.
 pub struct ShadowPassNode<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub bind_group: &'a wgpu::BindGroup,
     pub shadow_depth_view: &'a wgpu::TextureView,
-    pub chunks: &'a [&'a Chunk],
+    pub chunks: &'a [&'a LoadedChunk],
 }
 
 impl<'a> RenderPassNode for ShadowPassNode<'a> {

@@ -4,7 +4,7 @@ use crate::rendering::frustum::Frustum;
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::vegetation_pass::VegetationPass;
 use crate::rendering::water_pass::WaterPass;
-use crate::world::chunk::Chunk;
+use crate::world::chunk::LoadedChunk;
 
 /// Configuration for cross-section cap rendering within the main scene pass.
 pub struct CapConfig {
@@ -18,7 +18,7 @@ pub struct MainScenePassNode<'a> {
     pub sky_color: wgpu::Color,
     pub terrain_pipeline: &'a wgpu::RenderPipeline,
     pub uniform_bind_group: &'a wgpu::BindGroup,
-    pub chunks: &'a [&'a Chunk],
+    pub chunks: &'a [&'a LoadedChunk],
     pub frustum: &'a Frustum,
     // Sub-passes
     pub cap_pass: &'a CapPass,

@@ -481,17 +481,17 @@ pub fn save_world_cache(
     buf.write_all(&chunk_count.to_le_bytes())?;
 
     for chunk in world.chunks.values() {
-        buf.write_all(&chunk.position.x.to_le_bytes())?;
-        buf.write_all(&chunk.position.y.to_le_bytes())?;
-        buf.write_all(&chunk.position.z.to_le_bytes())?;
+        buf.write_all(&chunk.data.coord.x.to_le_bytes())?;
+        buf.write_all(&chunk.data.coord.y.to_le_bytes())?;
+        buf.write_all(&chunk.data.coord.z.to_le_bytes())?;
 
-        if chunk.storage.is_uniform() {
+        if chunk.data.voxels.is_uniform() {
             buf.write_all(&[0u8])?;
-            buf.write_all(&chunk.storage.voxel(0).pack().to_le_bytes())?;
+            buf.write_all(&chunk.data.voxels.voxel(0).pack().to_le_bytes())?;
         } else {
             buf.write_all(&[1u8])?;
             for i in 0..CHUNK_VOLUME {
-                buf.write_all(&chunk.storage.voxel(i).pack().to_le_bytes())?;
+                buf.write_all(&chunk.data.voxels.voxel(i).pack().to_le_bytes())?;
             }
         }
     }
@@ -503,8 +503,8 @@ pub fn save_world_cache(
 pub fn load_world_cache(
     path: &Path,
     expected_key: u64,
-) -> Option<std::collections::HashMap<glam::IVec3, crate::world::chunk::Chunk>> {
-    use crate::world::chunk::{Chunk, CHUNK_VOLUME};
+) -> Option<std::collections::HashMap<voxel_core::ChunkCoord, crate::world::chunk::LoadedChunk>> {
+    use crate::world::chunk::{LoadedChunk, CHUNK_VOLUME};
     use crate::world::storage::{self, ChunkStorage};
     use glam::IVec3;
     use voxel_core::Voxel;
@@ -568,8 +568,8 @@ pub fn load_world_cache(
             storage::storage_from_arrays(&voxel_arr)
         };
 
-        let chunk = Chunk::new(pos, std::sync::Arc::new(chunk_storage));
-        chunks.insert(pos, chunk);
+        let chunk = LoadedChunk::new(pos, std::sync::Arc::new(chunk_storage));
+        chunks.insert(pos.into(), chunk);
     }
 
     Some(chunks)

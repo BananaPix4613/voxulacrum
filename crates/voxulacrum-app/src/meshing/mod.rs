@@ -181,15 +181,16 @@ impl MeshingPipeline {
     /// incrementally in drain_pending_submissions() to avoid blocking the main thread.
     pub fn submit_all_dirty(&mut self, world: &crate::world::World) {
         const DEBOUNCE_MS: u128 = 50;
-        for (pos, chunk) in &world.chunks {
+        for (coord, chunk) in &world.chunks {
             if !chunk.mesh_dirty { continue; }
             if let Some(t) = chunk.mesh_debounce {
                 if t.elapsed().as_millis() < DEBOUNCE_MS { continue; }
             }
-            let state = self.chunk_states.get(pos).copied().unwrap_or(ChunkMeshState::Idle);
+            let pos: IVec3 = (*coord).into();
+            let state = self.chunk_states.get(&pos).copied().unwrap_or(ChunkMeshState::Idle);
             if state != ChunkMeshState::Idle { continue; }
-            if self.pending_set.insert(*pos) {
-                self.pending_submissions.push(*pos);
+            if self.pending_set.insert(pos) {
+                self.pending_submissions.push(pos);
             }
         }
         if !self.pending_submissions.is_empty() && self.batch_start.is_none() {
@@ -212,7 +213,7 @@ impl MeshingPipeline {
                 continue;
             }
 
-            let chunk = match world.chunks.get(&pos) {
+            let chunk = match world.get_chunk(pos) {
                 Some(c) => c,
                 None => {
                     self.pending_submissions.swap_remove(i);

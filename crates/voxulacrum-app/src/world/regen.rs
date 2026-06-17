@@ -96,7 +96,7 @@ impl WorldRegenCoordinator {
                 log::info!("Terrain params changed during regeneration, restarting");
                 match crate::world::world_generator::load_default(&ui_state.params.terrain_gen) {
                     Ok(gen) => {
-                        let positions: Vec<IVec3> = world.chunks.keys().copied().collect();
+                        let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
                         self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
                     }
                     Err(e) => log::error!("Regen restart: failed to load generator: {e}"),
@@ -110,7 +110,7 @@ impl WorldRegenCoordinator {
             if !self.manager.is_regenerating() {
                 match crate::world::world_generator::load_default(&ui_state.params.terrain_gen) {
                     Ok(gen) => {
-                        let positions: Vec<IVec3> = world.chunks.keys().copied().collect();
+                        let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
                         self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
                     }
                     Err(e) => log::error!("Regenerate: failed to load generator: {e}"),
@@ -131,7 +131,7 @@ impl WorldRegenCoordinator {
                 let seed = ui_state.params.terrain_gen.seed as u64;
                 match crate::world::world_generator::WorldGenerator::new(graph, seed) {
                     Ok(gen) => {
-                        let positions: Vec<IVec3> = world.chunks.keys().copied().collect();
+                        let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
                         self.manager.start_regeneration(
                             &ui_state.params.terrain_gen,
                             std::sync::Arc::new(gen),

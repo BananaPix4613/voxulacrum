@@ -225,33 +225,11 @@ pub enum ChunkStorage {
     Populated(Box<PopulatedChunk>),
 }
 
-#[derive(Clone)]
-pub struct LightingData {
-    pub light_sun: Box<[u8; CHUNK_VOLUME]>,
-    pub light_emit: Box<[u8; CHUNK_VOLUME]>,
-}
-
-#[derive(Clone)]
-pub struct SimulationData {
-    pub moisture: Box<[u8; CHUNK_VOLUME]>,
-    pub temperature: Box<[u8; CHUNK_VOLUME]>,
-}
-
-#[derive(Clone)]
-pub struct FloraData {
-    pub flora_id: PalettedBitArray,
-    pub flora_growth: Box<[u8; CHUNK_VOLUME]>,
-    pub hidden_flags: Box<[u8; CHUNK_VOLUME]>,
-}
-
-/// Material-only hot tier; lighting/simulation/flora stay defined so future
-/// systems can populate them without re-plumbing storage.
+/// Material-only hot tier. All sidecar layers (lighting, fluids, detail,
+/// scatter, decals) live on the data-model `Chunk`, not in storage.
 #[derive(Clone)]
 pub struct PopulatedChunk {
     pub material_id: PalettedBitArray,
-    pub lighting: Option<Box<LightingData>>,
-    pub simulation: Option<Box<SimulationData>>,
-    pub flora: Option<Box<FloraData>>,
 }
 
 impl ChunkStorage {
@@ -267,13 +245,6 @@ impl ChunkStorage {
             ChunkStorage::Uniform { voxel } => *voxel,
             ChunkStorage::Populated(p) => Voxel::unpack(p.material_id.get(index))
                 .unwrap_or(Voxel::EMPTY),
-        }
-    }
-
-    pub fn simulation(&self) -> Option<&SimulationData> {
-        match self {
-            ChunkStorage::Populated(p) => p.simulation(),
-            ChunkStorage::Uniform { .. } => None,
         }
     }
 
@@ -323,61 +294,14 @@ impl ChunkStorage {
         if let ChunkStorage::Uniform { voxel } = *self {
             *self = ChunkStorage::Populated(Box::new(PopulatedChunk {
                 material_id: PalettedBitArray::new(voxel.pack()),
-                lighting: None,
-                simulation: None,
-                flora: None,
             }));
         }
     }
 }
 
 impl PopulatedChunk {
-    pub fn lighting_mut(&mut self) -> &mut LightingData {
-        self.lighting.get_or_insert_with(|| Box::new(LightingData {
-            light_sun: zeroed_u8_box(),
-            light_emit: zeroed_u8_box(),
-        }))
-    }
-
-    pub fn simulation_mut(&mut self) -> &mut SimulationData {
-        self.simulation.get_or_insert_with(|| Box::new(SimulationData {
-            moisture: zeroed_u8_box(),
-            temperature: zeroed_u8_box(),
-        }))
-    }
-
-    pub fn flora_mut(&mut self) -> &mut FloraData {
-        self.flora.get_or_insert_with(|| Box::new(FloraData {
-            flora_id: PalettedBitArray::new(0),
-            flora_growth: zeroed_u8_box(),
-            hidden_flags: zeroed_u8_box(),
-        }))
-    }
-
-    pub fn lighting(&self) -> Option<&LightingData> { self.lighting.as_deref() }
-    pub fn simulation(&self) -> Option<&SimulationData> { self.simulation.as_deref() }
-    pub fn flora(&self) -> Option<&FloraData> { self.flora.as_deref() }
-
     pub fn memory_bytes(&self) -> usize {
-        let mut total = self.material_id.memory_bytes();
-        if let Some(ref l) = self.lighting {
-            total += std::mem::size_of_val(l.as_ref());
-        }
-        if let Some(ref s) = self.simulation {
-            total += std::mem::size_of_val(s.as_ref());
-        }
-        if let Some(ref f) = self.flora {
-            total += f.flora_id.memory_bytes() + CHUNK_VOLUME * 2;
-        }
-        total
-    }
-}
-
-fn zeroed_u8_box() -> Box<[u8; CHUNK_VOLUME]> {
-    unsafe {
-        let v: Vec<u8> = vec![0u8; CHUNK_VOLUME];
-        let boxed_slice = v.into_boxed_slice();
-        Box::from_raw(Box::into_raw(boxed_slice) as *mut [u8; CHUNK_VOLUME])
+        self.material_id.memory_bytes()
     }
 }
 
@@ -397,9 +321,6 @@ pub fn storage_from_arrays(voxels: &[Voxel; CHUNK_VOLUME]) -> ChunkStorage {
         };
         ChunkStorage::Populated(Box::new(PopulatedChunk {
             material_id: PalettedBitArray::from_raw(&packed),
-            lighting: None,
-            simulation: None,
-            flora: None,
         }))
     }
 }

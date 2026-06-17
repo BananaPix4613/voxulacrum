@@ -247,9 +247,10 @@ fn loaded_voxel_bounds(world: &World) -> (i32, i32, i32, i32, i32, i32) {
     }
     let mut min = IVec3::splat(i32::MAX);
     let mut max = IVec3::splat(i32::MIN);
-    for pos in world.chunks.keys() {
-        min = min.min(*pos);
-        max = max.max(*pos);
+    for coord in world.chunks.keys() {
+        let pos = IVec3::from(*coord);
+        min = min.min(pos);
+        max = max.max(pos);
     }
     (
         min.x * CHUNK_SIZE as i32,

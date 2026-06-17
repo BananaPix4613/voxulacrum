@@ -97,7 +97,12 @@ impl WorldGenerator {
         // Cross the evaluation -> storage boundary: the evaluator's ChunkBuffer is
         // materialized into the engine's ChunkStorage form. This is a permanent,
         // deliberate seam between two intentionally-distinct containers.
-        self.storage_boundary.materialize(terrain)
+        let mut storage = self.storage_boundary.materialize(terrain);
+        
+        // Worldgen stage 7: halve single-cube walkable steps into slab transitions.
+        super::slab_smoothing::smooth_slabs(&mut storage);
+        
+        storage
     }
 }
 

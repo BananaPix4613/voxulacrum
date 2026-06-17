@@ -3,8 +3,11 @@ use glam::IVec3;
 use smallvec::SmallVec;
 use std::time::Instant;
 
+use super::layers::{DecalLayer, DetailLayer, DetailLayers, FluidLayer, LightData, ScatterInstance, ScatterStore};
+use super::overrides::ChunkOverrides;
+use super::tags::{BiomeId, ChunkTags, ZoneId};
 use super::storage::ChunkStorage;
-use voxel_core::Voxel;
+use voxel_core::{ChunkCoord, Voxel};
 
 pub const CHUNK_SIZE: usize = voxel_core::CHUNK_DIM;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
@@ -23,20 +26,54 @@ pub struct ChunkMesh {
     pub index_count: u32,
 }
 
-/// A single voxel modification for delta persistence.
-#[derive(Clone, Copy)]
-pub struct VoxelEdit {
-    pub index: u16,
-    pub voxel: Voxel,
-    // Optional fields (bitflag-controlled in serialization)
-    pub moisture: Option<u8>,
-    pub flora_id: Option<u16>,
-    pub flora_growth: Option<u8>,
+/// Serializable chunk content: voxels plus the sidecar layers. This is the
+/// data-model `Chunk` from the engine design (§3); persistence, serialization,
+/// and the generation pipeline operate on this. Runtime state (meshing, dirty
+/// flags) lives on [`LoadedChunk`], which wraps this as its `data` field.
+pub struct Chunk {
+    pub coord: ChunkCoord,
+    pub voxels: Arc<ChunkStorage>,
+    pub detail_layers: DetailLayers,
+    pub scatter_instances: ScatterStore,
+    pub fluids: FluidLayer,
+    pub decals: DecalLayer,
+    pub lighting: LightData,
+    /// Zone / biome / library identity for targeted invalidation. Phase 3 tags
+    /// every chunk `ZoneId(0)` + `[BiomeId(0)]`; see [`super::tags::ChunkTags`].
+    pub tags: ChunkTags,
+    /// Player edits layered on top of generated terrain, or `None` when the
+    /// chunk is persisted as a full-storage snapshot (after promotion past
+    /// `DELTA_THRESHOLD`, or when loaded from a `Full` save). Canonical edit
+    /// model; see [`super::overrides::ChunkOverrides`].
+    pub overrides: Option<ChunkOverrides>,
 }
 
-pub struct Chunk {
-    pub position: IVec3,
-    pub storage: Arc<ChunkStorage>,
+impl Chunk {
+    /// Build a data chunk from materialized storage with default-empty layers,
+    pub fn new(coord: IVec3, voxels: Arc<ChunkStorage>) -> Self {
+        Self {
+            coord: coord.into(),
+            voxels,
+            detail_layers: DetailLayers::default(),
+            scatter_instances: ScatterStore::default(),
+            fluids: FluidLayer::default(),
+            decals: DecalLayer::default(),
+            lighting: LightData::default(),
+            tags: ChunkTags::single_biome(ZoneId(0), BiomeId(0)),
+            overrides: None,
+        }
+    }
+
+    #[inline]
+    pub fn voxel_index(x: usize, y: usize, z: usize) -> usize {
+        x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+    }
+}
+
+/// A chunk in the live set: the data-model [`Chunk`] plus the runtime state the
+/// engine needs while it is loaded (meshing handles, dirty flags, debounce).
+pub struct LoadedChunk {
+    pub data: Chunk,
     pub mesh_dirty: bool,
     /// Monotonic counter incremented each time mesh_dirty is set to true.
     /// Used to detect stale mesh results: if a neighbor loads while this chunk
@@ -46,22 +83,19 @@ pub struct Chunk {
     pub mesh: Option<ChunkMesh>,
     pub generation: u64,
     pub persist_dirty: bool,
-    pub edit_list: Option<Vec<VoxelEdit>>,
     /// When the last edit occurred. None = generation-triggered dirty (no debounce).
     pub mesh_debounce: Option<Instant>,
 }
 
-impl Chunk {
+impl LoadedChunk {
     pub fn new(position: IVec3, storage: Arc<ChunkStorage>) -> Self {
         Self {
-            position,
-            storage,
+            data: Chunk::new(position, storage),
             mesh_dirty: true,
             mesh_seq: 0,
             mesh: None,
             generation: 0,
             persist_dirty: false,
-            edit_list: None,
             mesh_debounce: None,
         }
     }
@@ -76,7 +110,7 @@ impl Chunk {
         self.mesh_dirty = true;
         self.mesh_seq = self.mesh_seq.wrapping_add(1);
     }
-    
+
     /// Mark dirty due to a voxel edit (applies debounce timer).
     pub fn mark_mesh_dirty_from_edit(&mut self) {
         self.mesh_dirty = true;
@@ -85,25 +119,20 @@ impl Chunk {
     }
 
     #[inline]
-    pub fn voxel_index(x: usize, y: usize, z: usize) -> usize {
-        x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
-    }
-
-    #[inline]
     pub fn voxel(&self, x: usize, y: usize, z: usize) -> Voxel {
-        self.storage.voxel(Self::voxel_index(x, y, z))
+        self.data.voxels.voxel(Chunk::voxel_index(x, y, z))
     }
 
     #[inline]
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
-        self.storage.is_solid(Self::voxel_index(x, y, z))
+        self.data.voxels.is_solid(Chunk::voxel_index(x, y, z))
     }
 }
 
 pub struct ChunkNeighbors<'a> {
     /// 27-entry array: index = (dx+1)*9 + (dy+1)*3 + (dz+1)
     /// where dx,dy,dz ∈ {-1, 0, 1}. Index 13 = (0,0,0) = self, unused.
-    pub neighbors: [Option<&'a Chunk>; 27],
+    pub neighbors: [Option<&'a LoadedChunk>; 27],
 }
 
 impl<'a> ChunkNeighbors<'a> {
@@ -112,13 +141,13 @@ impl<'a> ChunkNeighbors<'a> {
     }
 
     #[inline]
-    pub fn set(&mut self, dx: i32, dy: i32, dz: i32, chunk: Option<&'a Chunk>) {
+    pub fn set(&mut self, dx: i32, dy: i32, dz: i32, chunk: Option<&'a LoadedChunk>) {
         let idx = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
         self.neighbors[idx] = chunk;
     }
 
     #[inline]
-    pub fn get(&self, dx: i32, dy: i32, dz: i32) -> Option<&'a Chunk> {
+    pub fn get(&self, dx: i32, dy: i32, dz: i32) -> Option<&'a LoadedChunk> {
         let idx = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
         self.neighbors[idx]
     }
@@ -139,7 +168,7 @@ pub struct ChunkSnapshot {
 }
 
 impl ChunkSnapshot {
-    pub fn extract(chunk: &Chunk, neighbors: &ChunkNeighbors, min_chunk_y: i32, _max_chunk_y: i32) -> Self {
+    pub fn extract(chunk: &LoadedChunk, neighbors: &ChunkNeighbors, min_chunk_y: i32, _max_chunk_y: i32) -> Self {
         let mut materials: Box<[Voxel; SNAP_VOLUME]> = unsafe {
             let v: Vec<Voxel> = vec![Voxel::EMPTY; SNAP_VOLUME];
             let boxed_slice = v.into_boxed_slice();
@@ -150,7 +179,7 @@ impl ChunkSnapshot {
         for z in 0..CHUNK_SIZE {
             for y in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
-                    let m = chunk.storage.voxel(Chunk::voxel_index(x, y, z));
+                    let m = chunk.data.voxels.voxel(Chunk::voxel_index(x, y, z));
                     materials[Self::snap_index(x + SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD)] = m;
                 }
             }
@@ -173,10 +202,10 @@ impl ChunkSnapshot {
             }
         }
 
-        let border_min = [false, chunk.position.y == min_chunk_y, false];
+        let border_min = [false, chunk.data.coord.y == min_chunk_y, false];
 
         Self {
-            position: chunk.position,
+            position: chunk.data.coord.into(),
             materials,
             border_min,
         }
@@ -221,7 +250,7 @@ fn resolve_voxel(neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> Voxel {
     }
 
     match neighbors.get(dx, dy, dz) {
-        Some(neighbor) => neighbor.storage.voxel(Chunk::voxel_index(lx, ly, lz)),
+        Some(neighbor) => neighbor.data.voxels.voxel(Chunk::voxel_index(lx, ly, lz)),
         None => Voxel::EMPTY,
     }
 }

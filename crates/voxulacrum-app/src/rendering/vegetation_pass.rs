@@ -53,7 +53,8 @@ impl VegetationPass {
         // Build per-chunk GPU buffers
         let mut chunk_vegetation = HashMap::new();
         let mut total_instances = 0u32;
-        for (&pos, _) in &world.chunks {
+        for (&coord, _) in &world.chunks {
+            let pos = IVec3::from(coord);
             let instances = collect_chunk_grass_instances(pos, world, params, &registry);
             if !instances.is_empty() {
                 total_instances += instances.len() as u32;
@@ -206,7 +207,7 @@ fn collect_chunk_grass_instances(
     params: &VegetationParams,
     registry: &MaterialRegistry,
 ) -> Vec<GrassInstance> {
-    let chunk = match world.chunks.get(&chunk_pos) {
+    let chunk = match world.get_chunk(chunk_pos) {
         Some(c) => c,
         None => return Vec::new(),
     };
@@ -215,9 +216,9 @@ fn collect_chunk_grass_instances(
     let grass_color = registry.get(grass_id).unwrap().color;
     let mut instances = Vec::new();
 
-    let base_x = chunk.position.x * CHUNK_SIZE as i32;
-    let base_y = chunk.position.y * CHUNK_SIZE as i32;
-    let base_z = chunk.position.z * CHUNK_SIZE as i32;
+    let base_x = chunk.data.coord.x * CHUNK_SIZE as i32;
+    let base_y = chunk.data.coord.y * CHUNK_SIZE as i32;
+    let base_z = chunk.data.coord.z * CHUNK_SIZE as i32;
 
     for lz in 0..CHUNK_SIZE {
         for ly in 0..CHUNK_SIZE {

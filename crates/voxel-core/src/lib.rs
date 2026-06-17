@@ -47,6 +47,7 @@
 #![warn(missing_docs)]
 
 mod buffer;
+mod coord;
 mod error;
 mod material;
 mod material_registry;
@@ -56,6 +57,7 @@ mod shape;
 mod voxel;
 
 pub use buffer::{ChunkBuffer, StorageKind};
+pub use coord::{ChunkCoord, FaceAxis, LocalPos};
 pub use error::{VoxelCoreError, VoxelCoreResult};
 pub use material::MaterialId;
 pub use material_registry::{MaterialDef, MaterialRegistry};

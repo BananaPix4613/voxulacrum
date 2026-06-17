@@ -1,5 +1,10 @@
 pub mod chunk;
 pub mod generation;
+pub mod layers;
+pub mod overrides;
+pub mod tags;
+pub mod walkability;
+pub mod slab_smoothing;
 pub mod regen;
 pub mod streaming;
 pub mod storage;
@@ -15,18 +20,20 @@ use std::sync::mpsc;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
-use chunk::{Chunk, ChunkMesh, ChunkNeighbors, VoxelEdit, CHUNK_VOLUME, DELTA_THRESHOLD};
+use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_VOLUME, DELTA_THRESHOLD};
+use storage::ChunkStorage;
+use overrides::ChunkOverrides;
 use world_generator::WorldGenerator;
 
 pub struct World {
-    pub chunks: HashMap<IVec3, Chunk>,
+    pub chunks: HashMap<ChunkCoord, LoadedChunk>,
     pub generator: Arc<WorldGenerator>,
     pub min_chunk_y: i32,
     pub max_chunk_y: i32, // exclusive upper bound
 }
 
 use crate::params::TerrainGenParams;
-use voxel_core::{MaterialId, MaterialRegistry};
+use voxel_core::{ChunkCoord, MaterialId, MaterialRegistry, Voxel};
 
 impl World {
     /// Build the initial world synchronously (blocks boot), fanning the per-chunk
@@ -52,16 +59,16 @@ impl World {
             }
         }
 
-        let chunks: HashMap<IVec3, Chunk> = pool.install(|| {
+        let chunks: HashMap<ChunkCoord, LoadedChunk> = pool.install(|| {
             positions
                 .par_iter()
                 .map(|&pos| {
                     let storage = generator.generate_chunk_storage(pos);
-                    (pos, Chunk::new(pos, Arc::new(storage)))
+                    (ChunkCoord::from(pos), LoadedChunk::new(pos, Arc::new(storage)))
                 })
                 .collect()
         });
-
+        
         Self {
             chunks,
             generator,
@@ -72,7 +79,7 @@ impl World {
 
     /// Create a World from preloaded chunk data (from cache).
     pub fn from_cached_chunks(
-        chunks: HashMap<IVec3, Chunk>,
+        chunks: HashMap<ChunkCoord, LoadedChunk>,
         generator: Arc<WorldGenerator>,
         min_y: i32,
         max_y: i32,
@@ -95,7 +102,7 @@ impl World {
                               IVec3::new(0,0,1), IVec3::new(0,0,-1)] {
             let n = pos + offset;
             if n.y < self.min_chunk_y || n.y >= self.max_chunk_y { continue; }
-            if !self.chunks.contains_key(&n) { return false; }
+            if !self.chunks.contains_key(&ChunkCoord::from(n)) { return false; }
         }
         true
     }
@@ -109,7 +116,7 @@ impl World {
         device: &wgpu::Device,
         mesh_seq: u64,
     ) {
-        let chunk = match self.chunks.get_mut(&chunk_key) {
+        let chunk = match self.chunks.get_mut(&ChunkCoord::from(chunk_key)) {
             Some(c) => c,
             None => return, // Chunk was unloaded while mesh was in flight
         };
@@ -152,7 +159,7 @@ impl World {
                 for dx in -1i32..=1 {
                     if dx == 0 && dy == 0 && dz == 0 { continue; }
                     let n_pos = pos + IVec3::new(dx, dy, dz);
-                    neighbors.set(dx, dy, dz, self.chunks.get(&n_pos));
+                    neighbors.set(dx, dy, dz, self.chunks.get(&ChunkCoord::from(n_pos)));
                 }
             }
         }
@@ -161,25 +168,23 @@ impl World {
 
     /// Apply a voxel edit to a chunk, propagating mesh-dirty to border neighbors.
     /// Sets persist_dirty on the edited chunk only.
-    pub fn apply_edit(&mut self, chunk_pos: IVec3, edit: VoxelEdit) {
-        if let Some(chunk) = self.chunks.get_mut(&chunk_pos) {
+    pub fn apply_edit(&mut self, chunk_pos: IVec3, index: u16, voxel: Voxel) {
+        if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
             // Apply the edit to storage
-            let mut storage = (*chunk.storage).clone();
-            storage.set_voxel(edit.index as usize, edit.voxel);
-            chunk.storage = Arc::new(storage);
+            let mut storage = (*chunk.data.voxels).clone();
+            storage.set_voxel(index as usize, voxel);
+            chunk.data.voxels = Arc::new(storage);
 
-            // Track for persistence - deduplicate by index
-            let list = chunk.edit_list.get_or_insert_with(Vec::new);
-            if let Some(existing) = list.iter_mut().find(|e| e.index == edit.index) {
-                *existing = edit;
-            } else {
-                list.push(edit);
-            }
+            // Track for persistence. voxel_diffs is a map, so repeated edits to
+            // the same cell are last-write-wins for free.
+            let ovr = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
+            ovr.set_voxel(index as usize, voxel);
 
-            // Auto-promote: if over threshold, drop delta list entirely.
-            // build_chunk_edits sees edit_list==None + persist_dirty==true -> saves Full.
-            if list.len() >= DELTA_THRESHOLD {
-                chunk.edit_list = None;
+            // Auto-promote: past the threshold, drop the per-voxel overrides and
+            // let build_chunk_edits persist the whole storage as a Full snapshot
+            // (overrides == None + persist_dirty == true -> Full).
+            if ovr.voxel_override_count() >= DELTA_THRESHOLD {
+                chunk.data.overrides = None;
             }
 
             chunk.persist_dirty = true;
@@ -187,32 +192,32 @@ impl World {
         }
 
         // Propagate mesh-dirty to border neighbors
-        for offset in chunk::border_dirty_neighbors(edit.index) {
+        for offset in chunk::border_dirty_neighbors(index) {
             let neighbor_pos = chunk_pos + offset;
-            if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
+            if let Some(neighbor) = self.chunks.get_mut(&ChunkCoord::from(neighbor_pos)) {
                 neighbor.mark_mesh_dirty_from_edit();
             }
         }
     }
 
     /// Get a chunk by its chunk-space IVec3 position.
-    pub fn get_chunk(&self, pos: IVec3) -> Option<&Chunk> {
-        self.chunks.get(&pos)
+    pub fn get_chunk(&self, pos: IVec3) -> Option<&LoadedChunk> {
+        self.chunks.get(&ChunkCoord::from(pos))
     }
 
     /// Get a mutable chunk by its chunk-space IVec3 position.
-    pub fn get_chunk_mut(&mut self, pos: IVec3) -> Option<&mut Chunk> {
-        self.chunks.get_mut(&pos)
+    pub fn get_chunk_mut(&mut self, pos: IVec3) -> Option<&mut LoadedChunk> {
+        self.chunks.get_mut(&ChunkCoord::from(pos))
     }
 
     /// Insert a chunk into the world.
-    pub fn insert_chunk(&mut self, chunk: Chunk) {
-        self.chunks.insert(chunk.position, chunk);
+    pub fn insert_chunk(&mut self, chunk: LoadedChunk) {
+        self.chunks.insert(chunk.data.coord, chunk);
     }
 
     /// Remove a chunk. GPU buffers freed on drop.
-    pub fn remove_chunk(&mut self, pos: IVec3) -> Option<Chunk> {
-        self.chunks.remove(&pos)
+    pub fn remove_chunk(&mut self, pos: IVec3) -> Option<LoadedChunk> {
+        self.chunks.remove(&ChunkCoord::from(pos))
     }
 
     /// Print debug statistics about the generated world.
@@ -225,15 +230,15 @@ impl World {
         let mut total_storage_bytes: usize = 0;
 
         for chunk in self.chunks.values() {
-            if chunk.storage.is_uniform() {
+            if chunk.data.voxels.is_uniform() {
                 uniform_count += 1;
             } else {
                 populated_count += 1;
             }
-            total_storage_bytes += chunk.storage.memory_bytes();
+            total_storage_bytes += chunk.data.voxels.memory_bytes();
 
             for idx in 0..CHUNK_VOLUME {
-                let v = chunk.storage.voxel(idx);
+                let v = chunk.data.voxels.voxel(idx);
                 let m = v.material.0 as usize;
                 if v.is_solid() {
                     total_solid += 1;
@@ -296,13 +301,15 @@ pub struct WorldManager {
     /// a regen is running, `None` when idle. Wrapped in a `Mutex` because
     /// `mpsc::Receiver` is `Send` but not `Sync`, and `WorldManager` is a bevy_ecs
     /// `Resource` (which requires `Sync`); the `Mutex` supplies the `Sync` bound.
-    regen_rx: Mutex<Option<mpsc::Receiver<HashMap<IVec3, Chunk>>>>,
+    regen_rx: Mutex<Option<mpsc::Receiver<HashMap<ChunkCoord, LoadedChunk>>>>,
     regen_progress: Arc<AtomicU32>,
     regen_total: u32,
     regen_params: Option<TerrainGenParams>,
     /// Generator the in-flight regen is using; adopted by `World` + streaming
     /// on completion so all three share one `Arc`.
     regen_generator: Option<Arc<WorldGenerator>>,
+    regen_min_y: i32,
+    regen_max_y: i32,
 }
 
 impl WorldManager {
@@ -314,6 +321,8 @@ impl WorldManager {
             regen_total: 0,
             regen_params: None,
             regen_generator: None,
+            regen_min_y: 0,
+            regen_max_y: 4,
         }
     }
 
@@ -348,7 +357,7 @@ impl WorldManager {
         self.regen_progress.store(0, Ordering::Relaxed);
         self.regen_params = Some(params.clone());
         self.regen_generator = Some(generator.clone());
-
+        
         let progress = self.regen_progress.clone();
         let gen_for_pool = generator;
         let (tx, rx) = mpsc::channel();
@@ -366,14 +375,14 @@ impl WorldManager {
 
     pub fn poll_regeneration(
         &mut self,
-    ) -> Option<(HashMap<IVec3, Chunk>, TerrainGenParams, Arc<WorldGenerator>)> {
+    ) -> Option<(HashMap<ChunkCoord, LoadedChunk>, TerrainGenParams, Arc<WorldGenerator>)> {
         use std::sync::mpsc::TryRecvError;
 
         // What the channel told us. Computed inside a scope that holds a mutable
         // borrow of `regen_rx`; we resolve to one of these before releasing it so
         // the sibling-field cleanup below isn't fighting the borrow checker.
         enum Outcome {
-            Got(HashMap<IVec3, Chunk>),
+            Got(HashMap<ChunkCoord, LoadedChunk>),
             Empty,
             Done,
         }
@@ -418,18 +427,18 @@ fn generate_world_background(
     generator: Arc<WorldGenerator>,
     positions: &[IVec3],
     progress: &Arc<AtomicU32>,
-) -> HashMap<IVec3, Chunk> {
+) -> HashMap<ChunkCoord, LoadedChunk> {
     use rayon::prelude::*;
-
-    let chunks: Vec<Chunk> = positions
+    
+    let chunks: Vec<LoadedChunk> = positions
         .par_iter()
         .map(|&pos| {
             let storage = generator.generate_chunk_storage(pos);
-            let chunk = Chunk::new(pos, std::sync::Arc::new(storage));
+            let chunk = LoadedChunk::new(pos, std::sync::Arc::new(storage));
             progress.fetch_add(1, Ordering::Relaxed);
             chunk
         })
         .collect();
     
-    chunks.into_iter().map(|c| (c.position, c)).collect()
+    chunks.into_iter().map(|c| (c.data.coord, c)).collect()
 }

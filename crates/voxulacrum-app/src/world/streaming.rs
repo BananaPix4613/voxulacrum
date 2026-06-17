@@ -11,8 +11,9 @@ use glam::{IVec3, Vec3};
 
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::StreamingParams;
-use crate::world::chunk::{VoxelEdit, CHUNK_WORLD_SIZE};
-use crate::world::persistence::WorldDatabase;
+use crate::world::chunk::CHUNK_WORLD_SIZE;
+use crate::world::overrides::ChunkOverrides;
+use crate::world::persistence::{ChunkEdits, ChunkRecord, WorldDatabase};
 use crate::world::world_generator::WorldGenerator;
 use crate::world::World;
 
@@ -26,7 +27,7 @@ use crate::world::World;
 static NEXT_DB_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 struct GenResult {
-    chunk: crate::world::chunk::Chunk,
+    chunk: crate::world::chunk::LoadedChunk,
 }
 
 /// Run `f` with this pool worker's cached read-only DB handle for `generation`.
@@ -248,39 +249,54 @@ impl ChunkStreamingManager {
             let mut storage = gen.generate_chunk_storage(pos);
 
             // Overlay saved edits from this worker's cached read-only DB handle.
-            let mut edit_list = None;
+            let mut overrides = None;
+            let mut loaded_tags = None;
             with_worker_db(
                 generation,
                 &db_path,
                 dict.as_deref().map(|v| v.as_slice()),
                 |db| {
                     if let Some(db) = db {
-                        match db.load_chunk_edits(pos) {
-                            Ok(Some(crate::world::persistence::ChunkEdits::Delta(ref delta))) => {
-                                // Self-healing: skip edits that match base terrain (no-ops).
-                                let filtered: Vec<VoxelEdit> = delta.iter().filter(|e| {
-                                    let idx = e.index as usize;
-                                    storage.voxel(idx) != e.voxel
-                                }).cloned().collect();
+                        match db.load_chunk_record(pos) {
+                            Ok(Some(ChunkRecord { edits, tags })) => {
+                                match edits {
+                                    ChunkEdits::Delta(delta) => {
+                                        // Self-healing: drop overrides that already
+                                        // match base terrain (no-ops). Phase 3 only
+                                        // re-applies voxel_diffs; the other override
+                                        // layers round-trip in the blob but have no
+                                        // runtime consumer yet.
+                                        let mut filtered = ChunkOverrides::default();
+                                        for (cell, voxel) in &delta.voxel_diffs {
+                                            if storage.voxel(cell.to_index()) != *voxel {
+                                                filtered.voxel_diffs.insert(*cell, *voxel);
+                                            }
+                                        }
 
-                                if !filtered.is_empty() {
-                                    storage = crate::world::persistence::apply_edits_to_storage(&storage, &filtered);
+                                        if !filtered.voxel_diffs.is_empty() {
+                                            storage = crate::world::persistence::apply_overrides_to_storage(&storage, &filtered);
+                                        }
+                                        overrides = Some(filtered);
+                                    }
+                                    ChunkEdits::Full(full) => {
+                                        storage = full;
+                                        // Full replacement: no individual edit tracking.
+                                    }
                                 }
-                                edit_list = Some(filtered);
-                            }
-                            Ok(Some(crate::world::persistence::ChunkEdits::Full(full))) => {
-                                storage = full;
-                                // Full replacement: no individual edit tracking.
+                                loaded_tags = Some(tags);
                             }
                             Ok(None) => {}
-                            Err(e) => log::warn!("Streaming: load edits for {pos:?} failed: {e}"),
+                            Err(e) => log::warn!("Streaming: load record for {pos:?} failed: {e}"),
                         }
                     }
                 },
             );
 
-            let mut chunk = crate::world::chunk::Chunk::new(pos, std::sync::Arc::new(storage));
-            chunk.edit_list = edit_list;
+            let mut chunk = crate::world::chunk::LoadedChunk::new(pos, std::sync::Arc::new(storage));
+            chunk.data.overrides = overrides;
+            if let Some(tags) = loaded_tags {
+                chunk.data.tags = tags;
+            }
             // Not dirty - matches what's in DB.
             chunk.persist_dirty = false;
 
@@ -298,7 +314,7 @@ impl ChunkStreamingManager {
         meshing: &mut MeshingCoordinator,
         camera_view: &CameraView,
         _dt: f32,
-        on_unload: &mut dyn FnMut(&crate::world::chunk::Chunk),
+        on_unload: &mut dyn FnMut(&crate::world::chunk::LoadedChunk),
     ) -> StreamingTickResult {
         let min_y = self.params.min_chunk_y;
         let max_y = self.params.max_chunk_y;
@@ -335,7 +351,7 @@ impl ChunkStreamingManager {
             let rx = self.gen_result_rx.get_mut().unwrap();
             let mut inserted_count = 0usize;
             while let Ok(gen_result) = rx.try_recv() {
-                let pos = gen_result.chunk.position;
+                let pos: IVec3 = gen_result.chunk.data.coord.into();
                 self.in_flight.remove(&pos);
 
                 // Discard if chunk is now outside the view rect (camera moved)
@@ -352,7 +368,7 @@ impl ChunkStreamingManager {
                 for offset in [IVec3::new( 1, 0, 0), IVec3::new(-1, 0, 0),
                                IVec3::new( 0, 1, 0), IVec3::new( 0,-1, 0),
                                IVec3::new( 0, 0, 1), IVec3::new( 0, 0,-1)] {
-                    if let Some(neighbor) = world.chunks.get_mut(&(pos + offset)) {
+                    if let Some(neighbor) = world.get_chunk_mut(pos + offset) {
                         neighbor.mark_mesh_dirty();
                     }
                 }
@@ -392,7 +408,7 @@ impl ChunkStreamingManager {
                     }
                     for cy in min_y..max_y {
                         let pos = IVec3::new(cx, cy, cz);
-                        if !world.chunks.contains_key(&pos)
+                        if world.get_chunk(pos).is_none()
                             && !self.in_flight.contains(&pos)
                         {
                             let priority = dx * dx + dz * dz;
@@ -412,8 +428,8 @@ impl ChunkStreamingManager {
         let to_unload: Vec<IVec3> = world
             .chunks
             .keys()
-            .filter(|pos| !camera_view.is_in_view_rect(pos.x, pos.z, unload_margin))
-            .copied()
+            .filter(|c| !camera_view.is_in_view_rect(c.x, c.z, unload_margin))
+            .map(|c| IVec3::from(*c))
             .collect();
 
         for pos in to_unload {
@@ -422,7 +438,7 @@ impl ChunkStreamingManager {
             }
             meshing.pipeline.remove_chunk_state(pos);
             // Save dirty chunk before dropping
-            if let Some(chunk) = world.chunks.get(&pos) {
+            if let Some(chunk) = world.get_chunk(pos) {
                 on_unload(chunk);
             }
             world.remove_chunk(pos);
