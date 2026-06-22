@@ -1,5 +1,6 @@
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
+use crate::world::world_generator::GraphSlot;
 
 use crate::meshing;
 use crate::meshing::coordinator::MeshingCoordinator;
@@ -10,6 +11,7 @@ use crate::ui::panels::UiState;
 use crate::world::{World, WorldManager};
 use crate::world::persistence::WorldPersistence;
 use crate::world::streaming::ChunkStreamingManager;
+use crate::world::tags::{BiomeId, ChunkTags, ZoneId};
 
 #[derive(Resource)]
 pub struct WorldRegenCoordinator {
@@ -41,8 +43,11 @@ impl WorldRegenCoordinator {
         
         // Poll for completed background regeneration
         if let Some((new_chunks, regen_params, regen_generator)) = self.manager.poll_regeneration() {
-            // Swap new voxel data into the world and adopt the shared generator.
-            world.chunks = new_chunks;
+            // Merge regenerated voxel data into the world and adopt the shared
+            // generator. Targeted invalidation regenerates a subset, so we merge
+            // (not replace) to retain chunks the edit didn't touch; a full regen
+            // produces every loaded position and overwrites all of them.
+            world.chunks.extend(new_chunks);
             world.generator = regen_generator.clone();
             
             // Reset meshing pipeline
@@ -123,15 +128,25 @@ impl WorldRegenCoordinator {
         // edit. Rebuild the generator from that graph and regenerate the loaded
         // world. Only drain while idle: edits arriving mid-regen stay queued
         // (latest wins) and fire on the next tick after completion, so the
-        // final edit is never lost. WorldGenerator::new validates that the
-        // graph still has a TerrainOutput; if not, we log and keep the old
-        // world rather than wiping it.
+        // final edit is never lost. If reassembling from the manifest fails
+        // (e.g. a missing file), we log and keep the old world.
         if !self.manager.is_regenerating() {
-            if let Some(graph) = ui_state.pending_graph.take() {
+            if let Some((slot, graph)) = ui_state.pending_graph.take() {
+                // Tag-driven invalidation: classify the edit by its hierarchy
+                // slot, then regenerate only the chunks whose tags match (§4).
+                let target = classify_edit(slot);
                 let seed = ui_state.params.terrain_gen.seed as u64;
-                match crate::world::world_generator::WorldGenerator::new(graph, seed) {
+                // Reassemble the full hierarchy from the manifest, swapping in the
+                // edited graph for its slot so the rest of the hierarchy persists.
+                match crate::world::world_generator::WorldGenerator::from_manifest_with_override(
+                    &crate::world::world_generator::world_manifest_path(),
+                    seed,
+                    ui_state.params.terrain_gen.traversal_smoothing_distance,
+                    slot,
+                    graph,
+                ) {
                     Ok(gen) => {
-                        let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
+                        let positions = select_invalidated(world, &target);
                         self.manager.start_regeneration(
                             &ui_state.params.terrain_gen,
                             std::sync::Arc::new(gen),
@@ -142,5 +157,92 @@ impl WorldRegenCoordinator {
                 }
             }
         }
+    }
+}
+
+/// Which loaded chunks a graph edit invalidates (design doc §4 invalidation
+/// table). `ChunkTags` makes this a tag-set lookup rather than a full scan.
+enum InvalidationTarget {
+    /// Every loaded chunk (a WorldGraph edit, or a conservative fallback).
+    AllChunks,
+    /// Chunks tagged with a specific zone.
+    Zone(ZoneId),
+    /// Chunks tagged with a specific biome.
+    Biome(BiomeId),
+}
+
+impl InvalidationTarget {
+    /// Whether a chunk carrying `tags` must regenerate for this edit.
+    fn matches(&self, tags: &ChunkTags) -> bool {
+        match self {
+            InvalidationTarget::AllChunks => true,
+            InvalidationTarget::Zone(z) => tags.zone == *z,
+            InvalidationTarget::Biome(b) => tags.biomes.contains(b),
+        }
+    }
+}
+
+/// Classify which chunks an edit to a graph of `kind` invalidates: a World
+/// edit touches every chunk, a Zone edit its zone (single zone for now), a Biome
+/// edit only chunks tagged with that biome id.
+fn classify_edit(slot: GraphSlot) -> InvalidationTarget {
+    match slot {
+        GraphSlot::World => InvalidationTarget::AllChunks,
+        GraphSlot::Zone => InvalidationTarget::Zone(ZoneId(0)),
+        GraphSlot::Biome(id) => InvalidationTarget::Biome(BiomeId(id)),
+    }
+}
+
+/// Loaded chunk positions invalidated by an edit, found by tag-set lookup.
+fn select_invalidated(world: &World, target: &InvalidationTarget) -> Vec<IVec3> {
+    world
+        .chunks
+        .iter()
+        .filter(|(_, chunk)| target.matches(&chunk.data.tags))
+        .map(|(&coord, _)| IVec3::from(coord))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tags(zone: u16, biomes: &[u16]) -> ChunkTags {
+        ChunkTags {
+            zone: ZoneId(zone),
+            biomes: biomes.iter().map(|&b| BiomeId(b)).collect(),
+            library_refs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn all_chunks_matches_everything() {
+        let t = InvalidationTarget::AllChunks;
+        assert!(t.matches(&tags(0, &[0])));
+        assert!(t.matches(&tags(3, &[7, 9])));
+    }
+
+    #[test]
+    fn zone_target_matches_by_zone() {
+        let t = InvalidationTarget::Zone(ZoneId(2));
+        assert!(t.matches(&tags(2, &[0])));
+        assert!(!t.matches(&tags(1, &[0])));
+    }
+
+    #[test]
+    fn biome_target_matches_membership() {
+        let t = InvalidationTarget::Biome(BiomeId(5));
+        assert!(t.matches(&tags(0, &[1, 5])));
+        assert!(!t.matches(&tags(0, &[1, 2])));
+    }
+
+    #[test]
+    fn edits_classify_by_graph_kind() {
+        assert!(matches!(classify_edit(GraphSlot::World), InvalidationTarget::AllChunks));
+        assert!(matches!(classify_edit(GraphSlot::Zone), InvalidationTarget::Zone(_)));
+        assert!(matches!(
+            classify_edit(GraphSlot::Biome(1)),
+            InvalidationTarget::Biome(BiomeId(1))
+        ));
     }
 }

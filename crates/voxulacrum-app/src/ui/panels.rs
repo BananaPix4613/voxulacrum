@@ -3,7 +3,7 @@ use bevy_ecs::prelude::Resource;
 
 use crate::params::*;
 use crate::meshing::MeshingStats;
-use nodegraph_editor::EditorState;
+use crate::ui::hierarchy_editor::HierarchyEditor;
 
 pub struct ShaderLogEntry {
     pub message: String,
@@ -35,7 +35,7 @@ pub struct UiState {
     /// Latest graph from the embedded editor awaiting regeneration. Set by the
     /// render system whenever the editor reports a dirty edit; drained by
     /// `WorldRegenCoordinator::tick`, which rebuilds the generator from it.
-    pub pending_graph: Option<nodegraph_ir::Graph>,
+    pub pending_graph: Option<(crate::world::world_generator::GraphSlot, nodegraph_ir::Graph)>,
     pub remesh_requested: bool,
     pub mesh_params_pending: bool,
     pub regenerating: bool,
@@ -190,7 +190,7 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
 /// Renders the embedded `EditorState` canvas with an undo/redo/modified
 /// toolbar. Phase 1: edits accumulate here (with undo) but do not yet
 /// regenerate the world - that loop is wired in a later step.
-pub fn draw_graph_editor_panel(ctx: &egui::Context, editor: &mut EditorState) {
+pub fn draw_graph_editor_panel(ctx: &egui::Context, hierarchy: &mut HierarchyEditor) {
     let default_w = ctx.screen_rect().width() * 0.45;
     egui::SidePanel::left("graph_editor_panel")
         .default_width(default_w)
@@ -199,6 +199,7 @@ pub fn draw_graph_editor_panel(ctx: &egui::Context, editor: &mut EditorState) {
             ui.horizontal(|ui| {
                 ui.heading("Graph Editor");
 
+                let editor = hierarchy.editor_mut();
                 let undo_label = editor.peek_undo().map(str::to_owned);
                 if ui
                     .add_enabled(undo_label.is_some(), egui::Button::new("Undo"))
@@ -220,7 +221,8 @@ pub fn draw_graph_editor_panel(ctx: &egui::Context, editor: &mut EditorState) {
                 }
             });
             ui.separator();
-            editor.show(ui);
+            // Graph selector dropdown + the selected graph's canvas.
+            hierarchy.show(ui);
         });
 }
 

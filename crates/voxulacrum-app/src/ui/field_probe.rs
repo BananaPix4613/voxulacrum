@@ -172,7 +172,7 @@ pub fn field_probe_system(
 
     // 2. Re-evaluate when the editor's inspectable state or the chunk changes,
     //    or when we have nothing to show yet.
-    let revision = egui.editor.revision();
+    let revision = egui.graph_editor.revision();
     if revision != probe.last_revision {
         probe.last_revision = revision;
         probe.needs_eval = true;
@@ -187,7 +187,7 @@ pub fn field_probe_system(
 
     // 3. Dispatch onto the shared pool (never the schedule thread).
     if probe.needs_eval && !probe.in_flight {
-        let (graph, selected) = egui.editor.build_graph_with_selection();
+        let (graph, selected) = egui.graph_editor.build_graph_with_selection();
         probe.needs_eval = false;
         let Some(selected) = selected else {
             probe.data = None;

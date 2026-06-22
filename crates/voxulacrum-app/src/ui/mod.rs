@@ -1,12 +1,13 @@
 pub mod panels;
 pub mod colormap;
 pub mod field_probe;
+pub mod hierarchy_editor;
 
 use egui_wgpu::ScreenDescriptor;
 
 use crate::rendering::render_context::RenderContext;
 use colormap::Colormap;
-use nodegraph_editor::EditorState;
+use hierarchy_editor::HierarchyEditor;
 
 /// Cache key for the field-probe slice texture. The texture is rebuilt only
 /// when one of these changes (data capture, slice, colormap, or value range).
@@ -29,9 +30,10 @@ pub struct EguiRenderer {
     pub winit_state: egui_winit::State,
     pub renderer: egui_wgpu::Renderer,
     pub visible: bool,
-    /// The embedded node-graph editor. Initialized from the world's active
-    /// graph at startup (see `main.rs`); toggled with F2 (hidden by default).
-    pub editor: EditorState,
+    /// The embedded node-graph editor + the world's graph hierarchy/selector.
+    /// Loaded from the world manifest at startup (see `main.rs`); the panel is
+    /// toggled with F2 (hidden by default).
+    pub graph_editor: HierarchyEditor,
     /// Whether the left-side graph editor panel is shown.
     pub editor_visible: bool,
     /// Cached field-probe slice texture; re-uploaded only on key change.
@@ -67,7 +69,7 @@ impl EguiRenderer {
             winit_state,
             renderer,
             visible: true,
-            editor: EditorState::new(),
+            graph_editor: HierarchyEditor::new(),
             editor_visible: false,
             probe_texture: None,
         }
@@ -157,7 +159,7 @@ impl EguiRenderer {
         let full_output = self.ctx.run(raw_input, |ctx| {
             if self.visible {
                 if self.editor_visible {
-                    panels::draw_graph_editor_panel(ctx, &mut self.editor);
+                    panels::draw_graph_editor_panel(ctx, &mut self.graph_editor);
                 }
                 panels::draw_engine_panel(ctx, ui_state);
             }

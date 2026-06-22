@@ -22,8 +22,9 @@ pub struct ZoneId(pub u16);
 pub struct BiomeId(pub u16);
 
 /// Identifies a Library graph referenced during a chunk's generation.
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
-pub struct LibraryGraphId(pub u32);
+/// Re-exported from `nodegraph-ir` so chunk tags and graph nodes share one
+/// `LibraryGraphId` type.
+pub use nodegraph_ir::LibraryGraphId;
 
 /// Per-chunk identity used for targeted regeneration. Defaults to empty
 /// (zone `0`, no biomes, no library refs) so absent saves load forward-compatibly;

@@ -1,4 +1,7 @@
+mod border;
 mod cache;
+mod column;
+mod column_eval;
 mod context;
 mod error;
 mod eval;
@@ -8,8 +11,12 @@ mod place;
 mod png;
 mod scan;
 mod scatter;
+mod world_eval;
 
+pub use border::{analyze_biome_borders, biome_border_fade, blend_density, BorderAnalysis};
 pub use cache::{CachedOutput, EvalCache};
+pub use column::{ColumnCache, ColumnField, ColumnOutput, IdColumn};
+pub use column_eval::{ColumnEvaluator, ColumnSample};
 pub use context::EvalContext;
 pub use error::{EvalError, EvalResult};
 pub use eval::Evaluator;
@@ -17,3 +24,4 @@ pub use field::{ScalarField, Vec3Field, CHUNK_DIM};
 pub use guard::{enter_schedule_thread, on_schedule_thread, ScheduleThreadGuard};
 pub use png::{ascii_heightmap, render_graph_to_png, write_heightmap_png};
 pub use scatter::{ScatterPoint, PROP_MARGIN};
+pub use world_eval::{ChunkEvaluation, WorldEvaluator};

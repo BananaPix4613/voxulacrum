@@ -1,0 +1,363 @@
+//! The per-column evaluator: fills a World/Zone graph's per-column nodes
+//! (`SurfaceNoise`, `WorldOutput`, `ZoneOutput`) into a [`ColumnCache`].
+//!
+//! This is the 2D analog of [`Evaluator`](crate::Evaluator): same topological
+//! whole-graph fill, but each node produces a per-`(x, z)` output rather than a
+//! whole-chunk 3D field. Voxel-domain nodes have no per-column evaluation and
+//! raise [`EvalError::WrongGraphDomain`].
+//!
+//! [`ColumnEvaluator::sample_column`] additionally offers a pointwise,
+//! chunk-independent evaluation at any absolute world column - the basis for
+//! cross-chunk biome-boundary access (a chunk querying a neighbor's columns).
+
+use std::sync::Arc;
+
+use fastnoise_lite::NoiseType;
+use nodegraph_ir::{Graph, NodeId, NodeKind, Severity};
+
+use crate::column::{ColumnCache, ColumnField, ColumnOutput, IdColumn};
+use crate::context::EvalContext;
+use crate::error::{EvalError, EvalResult};
+use crate::eval::configured_noise;
+use crate::field::CHUNK_DIM;
+
+/// Evaluates a World/Zone graph for one chunk, producing per-column outputs.
+pub struct ColumnEvaluator<'g> {
+    graph: &'g Graph,
+    ctx: EvalContext,
+    cache: ColumnCache,
+}
+
+impl<'g> ColumnEvaluator<'g> {
+    /// New evaluator over a graph and chunk context.
+    pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
+        Self { graph, ctx, cache: ColumnCache::new() }
+    }
+
+    /// Borrow the per-column cache (populated by [`ColumnEvaluator::evaluate`]).
+    pub fn cache(&self) -> &ColumnCache {
+        &self.cache
+    }
+
+    /// Consume the evaluator, returning its populated per-column cache.
+    pub fn into_cache(self) -> ColumnCache {
+        self.cache
+    }
+
+    /// Validate, then fill every node's per-column output in topological order.
+    pub fn evaluate(&mut self) -> EvalResult<()> {
+        let errors = self
+            .graph
+            .validate()
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count();
+        if errors > 0 {
+            return Err(EvalError::InvalidGraph(errors));
+        }
+        let order = self.graph.topological_order().map_err(|_| EvalError::Cyclic)?;
+        for id in order {
+            if self.cache.contains(id) {
+                continue;
+            }
+            let out = self.fill_node(id)?;
+            self.cache.insert(id, out);
+        }
+        Ok(())
+    }
+
+    /// Compute one node's per-column output.
+    fn fill_node(&self, id: NodeId) -> EvalResult<ColumnOutput> {
+        let node = self.graph.nodes.get(id).ok_or(EvalError::MissingOutput(id))?;
+        Ok(match &node.kind {
+            NodeKind::SurfaceNoise(p) => {
+                let n = configured_noise(
+                    self.ctx.noise_seed(p.seed),
+                    p,
+                    NoiseType::OpenSimplex2,
+                );
+                let mut field = ColumnField::zeroed();
+                for z in 0..CHUNK_DIM {
+                    for x in 0..CHUNK_DIM {
+                        let w = self.ctx.world_pos(x, 0, z);
+                        field.set(x, z, n.get_noise_2d(w.x, w.z));
+                    }
+                }
+                ColumnOutput::Surface(Arc::new(field))
+            }
+            NodeKind::WorldOutput(p) => {
+                let field = self.input_surface(id, 0)?;
+                ColumnOutput::Id(Arc::new(quantize_bands(&field, &p.zone_bands)))
+            }
+            NodeKind::ZoneOutput(p) => {
+                let field = self.input_surface(id, 0)?;
+                ColumnOutput::Id(Arc::new(quantize_bands(&field, &p.biome_bands)))
+            }
+            // Every other kind is a voxel-domain node with no per-column fill.
+            _ => return Err(EvalError::WrongGraphDomain { node: id }),
+        })
+    }
+
+    /// Resolve the surface field feeding `(node, pin)`.
+    fn input_surface(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ColumnField>> {
+        let edge = self
+            .graph
+            .edges
+            .iter()
+            .find(|e| e.to.node == node && e.to.pin == pin)
+            .ok_or(EvalError::MissingInput { node, pin })?;
+        let src = self
+            .cache
+            .get(edge.from.node)
+            .ok_or(EvalError::MissingOutput(edge.from.node))?;
+        match src.as_surface() {
+            Some(f) => Ok(f.clone()),
+            None => Err(EvalError::WrongInputType {
+                node,
+                expected: "surface",
+                got: src.kind_name(),
+            }),
+        }
+    }
+
+    /// Pointwise per-column evaluation at an absolute world column `(world_x,
+    /// world_z)`, recomputed from the graph rather than read from the cache.
+    ///
+    /// Unlike the bulk fill, this is independent of which chunk the evaluator
+    /// was built for: the result derives purely from the world column coords
+    /// and the chunk-independent [`EvalContext::noise_seed`]. Two chunks that
+    /// share a border therefore sample the same world column identically - the
+    /// basis for cross-chunk biome-boundary blending.
+    pub fn sample_column(
+        &self,
+        id: NodeId,
+        world_x: i32,
+        world_z: i32,
+    ) -> EvalResult<ColumnSample> {
+        let node = self.graph.nodes.get(id).ok_or(EvalError::MissingOutput(id))?;
+        Ok(match &node.kind {
+            NodeKind::SurfaceNoise(p) => {
+                let n = configured_noise(self.ctx.noise_seed(p.seed), p, NoiseType::OpenSimplex2);
+                ColumnSample::Surface(n.get_noise_2d(world_x as f32, world_z as f32))
+            }
+            NodeKind::WorldOutput(p) => {
+                let v = self.sample_input_surface(id, 0, world_x, world_z)?;
+                ColumnSample::Id(quantize_one(v, &p.zone_bands))
+            }
+            NodeKind::ZoneOutput(p) => {
+                let v = self.sample_input_surface(id, 0, world_x, world_z)?;
+                ColumnSample::Id(quantize_one(v, &p.biome_bands))
+            }
+            _ => return Err(EvalError::WrongGraphDomain { node: id }),
+        })
+    }
+
+    /// Pointwise-resolve the surface value feeding `(node, pin)` at a world
+    /// column. The pointwise analog of [`ColumnEvaluator::input_surface`].
+    fn sample_input_surface(
+        &self,
+        node: NodeId,
+        pin: u16,
+        world_x: i32,
+        world_z: i32,
+    ) -> EvalResult<f32> {
+        let edge = self
+            .graph
+            .edges
+            .iter()
+            .find(|e| e.to.node == node && e.to.pin == pin)
+            .ok_or(EvalError::MissingInput { node, pin })?;
+        match self.sample_column(edge.from.node, world_x, world_z)? {
+            ColumnSample::Surface(v) => Ok(v),
+            ColumnSample::Id(_) => Err(EvalError::WrongInputType {
+                node,
+                expected: "surface",
+                got: "id",
+            }),
+        }
+    }
+}
+
+/// A single column's value from a pointwise [`ColumnEvaluator::sample_column`].
+/// The scalar analog of [`ColumnOutput`](crate::ColumnOutput).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColumnSample {
+    /// A continuous per-column scalar (a climate channel value).
+    Surface(f32),
+    /// A discrete per-column id (zone or biome).
+    Id(u16),
+}
+
+/// The id a band-quantizing terminal assigns to one column: the number of
+/// ascending `bands` thresholds the value meets or exceeds. Empty bands => 0.
+fn quantize_one(value: f32, bands: &[f32]) -> u16 {
+    bands.iter().filter(|&&b| value >= b).count() as u16
+}
+
+/// Quantize a per-column surface field into a discrete id column, applying
+/// [`quantize_one`] per column. Shared by the World (zone) and Zone (biome)
+/// terminals so the selection logic lives in one place.
+fn quantize_bands(field: &ColumnField, bands: &[f32]) -> IdColumn {
+    let mut ids = IdColumn::zeroed();
+    for z in 0..CHUNK_DIM {
+        for x in 0..CHUNK_DIM {
+            ids.set(x, z, quantize_one(field.get(x, z), bands));
+        }
+    }
+    ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::IVec3;
+    use nodegraph_ir::{NoiseParams, PinRef, WorldOutputParams, ZoneOutputParams};
+
+    /// WorldGraph shape: a SurfaceNoise climate channel driving a WorldOutput.
+    fn world_graph() -> Graph {
+        let mut g = Graph::new();
+        let noise = g.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let out = g.add_node(NodeKind::WorldOutput(WorldOutputParams::default()));
+        g.connect(PinRef::new(noise, 0), PinRef::new(out, 0)).unwrap();
+        g
+    }
+
+    /// ZoneGraph shape: a SurfaceNoise climate channel driving a ZoneOutput
+    /// with `biome_bands`.
+    fn zone_graph(biome_bands: Vec<f32>) -> Graph {
+        let mut g = Graph::new();
+        let noise = g.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands }));
+        g.connect(PinRef::new(noise, 0), PinRef::new(out, 0)).unwrap();
+        g
+    }
+
+    #[test]
+    fn world_output_assigns_zone_zero_with_no_bands() {
+        let g = world_graph();
+        let out_id = g
+            .nodes
+            .iter()
+            .find(|(_, n)| matches!(n.kind, NodeKind::WorldOutput(_)))
+            .map(|(id, _)| id)
+            .unwrap();
+        let mut e = ColumnEvaluator::new(&g, EvalContext::new(7, IVec3::ZERO));
+        e.evaluate().unwrap();
+        let ids = e.cache().get(out_id).unwrap().as_id().unwrap();
+        assert!(ids.data().iter().all(|&z| z == 0), "no bands => single zone 0");
+    }
+
+    #[test]
+    fn surface_and_zone_columns_are_deterministic() {
+        let g = world_graph();
+        let run = || {
+            let mut e = ColumnEvaluator::new(&g, EvalContext::new(42, IVec3::new(1, 0, 2)));
+            e.evaluate().unwrap();
+            e.into_cache()
+        };
+        let (a, b) = (run(), run());
+        for (id, _) in g.nodes.iter() {
+            match (a.get(id), b.get(id)) {
+                (Some(ColumnOutput::Surface(fa)), Some(ColumnOutput::Surface(fb))) => {
+                    assert_eq!(fa.data(), fb.data(), "surface field not deterministic");
+                }
+                (Some(ColumnOutput::Id(ia)), Some(ColumnOutput::Id(ib))) => {
+                    assert_eq!(ia.data(), ib.data(), "id column not deterministic");
+                }
+                _ => panic!("cache mismatch between runs"),
+            }
+        }
+    }
+
+    #[test]
+    fn voxel_node_in_column_graph_is_rejected() {
+        let mut g = Graph::new();
+        g.add_node(NodeKind::Constant(nodegraph_ir::ConstantParams::default()));
+        let mut e = ColumnEvaluator::new(&g, EvalContext::new(0, IVec3::ZERO));
+        assert!(matches!(e.evaluate(), Err(EvalError::WrongGraphDomain { .. })));
+    }
+
+    #[test]
+    fn sample_column_matches_whole_chunk_fill() {
+        // The pointwise sampler must agree with the bulk fill for the chunk's
+        // own columns.
+        let g = world_graph();
+        let surf_id = g
+            .nodes
+            .iter()
+            .find(|(_, n)| matches!(n.kind, NodeKind::SurfaceNoise(_)))
+            .map(|(id, _)| id)
+            .unwrap();
+        let ctx = EvalContext::new(3, IVec3::new(2, 0, 1));
+        let mut e = ColumnEvaluator::new(&g, ctx);
+        e.evaluate().unwrap();
+        let field = e.cache().get(surf_id).unwrap().as_surface().unwrap();
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let wx = ctx.chunk.x * CHUNK_DIM as i32 + x as i32;
+                let wz = ctx.chunk.z * CHUNK_DIM as i32 + z as i32;
+                match e.sample_column(surf_id, wx, wz).unwrap() {
+                    ColumnSample::Surface(v) => assert_eq!(v, field.get(x, z)),
+                    other => panic!("expected surface, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sample_column_is_chunk_independent() {
+        // Two evaluators built for different chunks must agree on any shared
+        // world column - the cross-chunk seam guarantee.
+        let g = zone_graph(vec![0.0]);
+        let out_id = g
+            .nodes
+            .iter()
+            .find(|(_, n)| matches!(n.kind, NodeKind::ZoneOutput(_)))
+            .map(|(id, _)| id)
+            .unwrap();
+        let ea = ColumnEvaluator::new(&g, EvalContext::new(5, IVec3::new(0, 0, 0)));
+        let eb = ColumnEvaluator::new(&g, EvalContext::new(5, IVec3::new(10, 0, -3)));
+        for (wx, wz) in [(0, 0), (32, 0), (-1, 5), (1000, -250)] {
+            let a = ea.sample_column(out_id, wx, wz).unwrap();
+            let b = eb.sample_column(out_id, wx, wz).unwrap();
+            assert_eq!(a, b, "world column ({wx}, {wz}) differs across chunks");
+        }
+    }
+
+    #[test]
+    fn zone_output_assigns_biome_zero_with_no_bands() {
+        let g = zone_graph(vec![]);
+        let out_id = g
+            .nodes
+            .iter()
+            .find(|(_, n)| matches!(n.kind, NodeKind::ZoneOutput(_)))
+            .map(|(id, _)| id)
+            .unwrap();
+        let mut e = ColumnEvaluator::new(&g, EvalContext::new(7, IVec3::ZERO));
+        e.evaluate().unwrap();
+        let ids = e.cache().get(out_id).unwrap().as_id().unwrap();
+        assert!(ids.data().iter().all(|&b| b == 0), "no bands => single biome 0");
+    }
+
+    #[test]
+    fn zone_output_with_one_band_is_deterministic_and_bounded() {
+        // A single threshold partitions columns into biome 0 and biome 1.
+        let g = zone_graph(vec![0.0]);
+        let run = || {
+            let mut e = ColumnEvaluator::new(&g, EvalContext::new(9, IVec3::new(3, 0, -1)));
+            e.evaluate().unwrap();
+            e.into_cache()
+        };
+        let out_id = g
+            .nodes
+            .iter()
+            .find(|(_, n)| matches!(n.kind, NodeKind::ZoneOutput(_)))
+            .map(|(id, _)| id)
+            .unwrap();
+        let (a, b) = (run(), run());
+        let ia = a.get(out_id).unwrap().as_id().unwrap();
+        let ib = b.get(out_id).unwrap().as_id().unwrap();
+        assert_eq!(ia.data(), ib.data(), "biome column not deterministic");
+        assert!(ia.data().iter().all(|&b| b <= 1), "one band => ids in {{0, 1}}");
+    }
+}

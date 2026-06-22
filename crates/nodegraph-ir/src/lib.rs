@@ -44,6 +44,7 @@ mod diagnostic;
 mod edge;
 mod error;
 mod graph;
+mod library;
 mod node;
 mod pin;
 mod prefab;
@@ -51,16 +52,17 @@ mod prefab;
 pub use diagnostic::{Diagnostic, Severity};
 pub use edge::{Edge, PinRef};
 pub use error::{GraphError, GraphResult};
-pub use graph::Graph;
+pub use graph::{Graph, GraphKind};
+pub use library::{LibraryGraphId, LibraryGraphRegistry};
 pub use node::{
     AddParams, Axis, ClampParams, ConstantMaterialParams, ConstantParams, CurveMapperParams,
     DensitySubtractParams, DomainWarpParams, FractalType, IntersectParams, LayerParams,
-    LerpParams, MaskParams, MaxParams, MinParams, MixParams, MultiplyParams, Node,
-    NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams,
+    LerpParams, LibraryRefParams, MaskParams, MaxParams, MinParams, MixParams, MultiplyParams,
+    Node, NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams,
     Perlin2DParams, PinSpec, QueueParams, RemapParams, SubtractParams,
     TerrainOutputParams, ThresholdParams, UnionParams, WorldAxisParams, WorldPosParams,
     BuildTerrainParams, JitteredGridParams, PoissonDiskParams, FindFlatParams,
-    PlaceTreeParams, PlacePrefabParams,
+    PlaceTreeParams, PlacePrefabParams, WorldOutputParams, ZoneOutputParams, YBandParams,
 };
 pub use pin::PinType;
 pub use prefab::{PrefabTemplate, PrefabVoxel};

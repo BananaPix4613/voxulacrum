@@ -95,3 +95,29 @@ fn threshold_below_above() {
     g.connect(PinRef::new(k, 0), PinRef::new(t, 0)).unwrap();
     assert_eq!(eval_uniform(g, t), 1.0);
 }
+
+#[test]
+fn yband_gates_by_world_y() {
+    // CTX is chunk 0, so world Y == local y.
+    let mut g = Graph::new();
+    let yb = g.add_node(NodeKind::YBand(YBandParams { min: 8.0, max: 16.0 }));
+    let mut eval = Evaluator::new(&g, CTX);
+    eval.evaluate().unwrap();
+    let field = eval.cache().get(yb).unwrap().as_scalar().unwrap();
+    assert_eq!(field.get(0, 0, 0), 0.0);   // below band
+    assert_eq!(field.get(0, 8, 0), 1.0);   // lower edge (inclusive)
+    assert_eq!(field.get(0, 15, 0), 1.0);  // inside
+    assert_eq!(field.get(0, 16, 0), 0.0);  // upper edge (exclusive)
+}
+
+#[test]
+fn yband_is_deterministic() {
+    let mut g = Graph::new();
+    let yb = g.add_node(NodeKind::YBand(YBandParams { min: 4.0, max: 20.0 }));
+    let run = || {
+        let mut e = Evaluator::new(&g, CTX);
+        e.evaluate().unwrap();
+        e.cache().get(yb).unwrap().as_scalar().unwrap().data().to_vec()
+    };
+    assert_eq!(run(), run());
+}

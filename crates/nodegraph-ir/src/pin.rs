@@ -10,9 +10,17 @@ pub enum PinType {
     Scalar,
     /// 3D scalar field; solid where `> 0`.
     Density,
+    /// 2D field over the world `(x, z)` plane - e.g. a surface height or a
+    /// climate channel. Distinct from [`Density`](PinType::Density), which is
+    /// fully 3D.
+    SurfaceField,
     /// Material provider - answers "what block goes here?".
     Material,
-    /// A set of `(x, y, z)` points for prop placement.
+    /// Fluid provider - answers "what fluid is here, and to what level?".
+    FluidProvider,
+    /// A set of `(x, y, z)` points for prop placement. (The design doc names
+    /// this type `ScatterPoints`; the code keeps the more general name
+    /// `Positions`.)
     Positions,
     /// Position -> prop bindings.
     Assignments,
@@ -22,6 +30,8 @@ pub enum PinType {
     Vec3,
     /// Discrete biome identifier.
     BiomeId,
+    /// Discrete zone identifier - the top-level region above biomes.
+    ZoneId,
     /// `ChunkBuffer<Voxel>` - the final output type. Makes terrain a real flowing pin type.
     Terrain,
 }
@@ -72,5 +82,17 @@ mod tests {
     fn unrelated_types_incompatible() {
         assert!(!PinType::is_compatible(Material, Density));
         assert!(!PinType::is_compatible(Positions, Terrain));
+    }
+
+    #[test]
+    fn new_types_are_strict() {
+        // Each new type matches only itself; nothing coerces into or out of it.
+        for t in [SurfaceField, FluidProvider, ZoneId] {
+            assert!(PinType::is_compatible(t, t));
+        }
+        assert!(!PinType::is_compatible(Scalar, SurfaceField));
+        assert!(!PinType::is_compatible(SurfaceField, Density));
+        assert!(!PinType::is_compatible(ZoneId, BiomeId));
+        assert!(!PinType::is_compatible(FluidProvider, Material));
     }
 }

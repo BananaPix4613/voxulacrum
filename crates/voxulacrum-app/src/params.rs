@@ -398,6 +398,10 @@ pub struct TerrainGenParams {
     pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
     pub water_level: f32,
     pub seed: i32,
+    /// Worldgen slab-smoothing distance (design doc §"Traversal smoothing
+    /// distance"). `0` disables smoothing; `>= 1` enables single-step smoothing.
+    /// Intended to vary per biome; a single global value for now.
+    pub traversal_smoothing_distance: u32,
 }
 
 impl Default for TerrainGenParams {
@@ -423,6 +427,7 @@ impl Default for TerrainGenParams {
             cave_y_squash: 0.5,
             water_level: 30.0,
             seed: 54321,
+            traversal_smoothing_distance: 1,
         }
     }
 }

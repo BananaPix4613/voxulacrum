@@ -1,0 +1,28 @@
+{
+  "kind": "Biome",
+  "nodes": [
+    { "value": null, "version": 0 },
+    { "value": { "kind": { "type": "Simplex2D", "seed": 1, "frequency": 0.0025, "octaves": 5, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [0.0, 0.0] }, "version": 1 },
+    { "value": { "kind": { "type": "Remap", "src_lo": -1.0, "src_hi": 1.0, "dst_lo": 20.0, "dst_hi": 80.0 }, "position": [220.0, 0.0] }, "version": 1 },
+    { "value": { "kind": { "type": "Simplex2D", "seed": 2, "frequency": 0.012, "octaves": 4, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "Ridged" }, "position": [0.0, 160.0] }, "version": 1 },
+    { "value": { "kind": { "type": "Remap", "src_lo": -1.0, "src_hi": 1.0, "dst_lo": -16.0, "dst_hi": 16.0 }, "position": [220.0, 160.0] }, "version": 1 },
+    { "value": { "kind": { "type": "Add" }, "position": [440.0, 80.0] }, "version": 1 },
+    { "value": { "kind": { "type": "WorldAxis", "axis": "Y" }, "position": [440.0, 240.0] }, "version": 1 },
+    { "value": { "kind": { "type": "Subtract" }, "position": [660.0, 120.0] }, "version": 1 },
+    { "value": { "kind": { "type": "Layer", "bands": [[1, 1]], "fill": 1 }, "position": [880.0, 240.0] }, "version": 1 },
+    { "value": { "kind": { "type": "BuildTerrain" }, "position": [1100.0, 120.0] }, "version": 1 },
+    { "value": { "kind": { "type": "TerrainOutput" }, "position": [1320.0, 120.0] }, "version": 1 }
+  ],
+  "edges": [
+    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 2, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 3, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 4, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 2, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 4, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 1 } },
+    { "from": { "node": { "idx": 5, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 7, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 6, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 7, "version": 1 }, "pin": 1 } },
+    { "from": { "node": { "idx": 7, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 8, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 7, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 9, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 8, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 9, "version": 1 }, "pin": 1 } },
+    { "from": { "node": { "idx": 9, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 10, "version": 1 }, "pin": 0 } }
+  ]
+}

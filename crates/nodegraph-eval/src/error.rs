@@ -46,6 +46,23 @@ pub enum EvalError {
         node: NodeId,
     },
 
+    /// A `LibraryRef` node was evaluated. Library expansion is not implemented
+    /// in this phase (the node is a typed scaffold only).
+    #[error("node {node:?} is an unresolved library reference")]
+    UnresolvedLibraryRef {
+        /// The offending node.
+        node: NodeId,
+    },
+
+    /// A node was evaluated in the wrong graph domain - a per-column node
+    /// (`SurfaceNoise`, `WorldOutput`) in a voxel graph, or a voxel node in a
+    /// per-column (World/Zone) graph.
+    #[error("node {node:?} cannot be evaluated in this graph domain")]
+    WrongGraphDomain {
+        /// The offending node.
+        node: NodeId,
+    },
+    
     /// PNG encoding failed.
     #[error("image write failed: {0}")]
     Image(#[from] image::ImageError),

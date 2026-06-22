@@ -4,6 +4,7 @@ use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 
+use crate::library::LibraryGraphId;
 use crate::pin::PinType;
 use crate::prefab::PrefabTemplate;
 
@@ -36,6 +37,8 @@ pub enum NodeCategory {
     Props,
     /// Biome routing.
     Biome,
+    /// Library graph references.
+    Library,
     /// Terminal output.
     Output,
 }
@@ -385,6 +388,52 @@ impl Default for PlacePrefabParams {
     fn default() -> Self { Self { prefab: "rock".to_string(), template: None } }
 }
 
+/// Parameters for [`NodeKind::LibraryRef`]: a reference to a reusable library
+/// graph by id. Boundary pins are a static placeholder (none) this phase; the
+/// dynamic pins mirroring the library's declared inputs/outputs arrive later.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct LibraryRefParams {
+    /// The library graph this node instantiates.
+    pub library: LibraryGraphId,
+}
+
+/// Parameters for [`NodeKind::WorldOutput`]: the WorldGraph's terminal. Maps a
+/// per-column climate [`SurfaceField`](crate::PinType::SurfaceField) to a
+/// discrete zone id by counting how many ascending `zone_bands` thresholds each
+/// column value meets or exceeds. Empty bands => zone 0 everywhere (single zone).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct WorldOutputParams {
+    /// Ascending climate thresholds. A column whose climate value is `>= k`
+    /// of these bands is assigned zone `k`.
+    pub zone_bands: Vec<f32>,
+}
+
+/// Parameters for [`NodeKind::ZoneOutput`]: the ZoneGraph's terminal. Maps a
+/// per-column climate [`SurfaceField`](crate::PinType::SurfaceField) to a
+/// discrete biome id by counting how many ascending `biome_bands` thresholds
+/// each column value meets or exceeds. Empty bands => biome 0 everywhere.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct ZoneOutputParams {
+    /// Ascending climate thresholds. A column whose climate value is `>= k`
+    /// of these bands is assigned biome `k`.
+    pub biome_bands: Vec<f32>,
+}
+
+/// Parameters for [`NodeKind::YBand`]: a vertical density gate. Emits `1.0`
+/// where `min <= worldY < max` and `0.0` elsewhere - multiply or mask it
+/// against a shape to confine that shape to a vertical band. Open-ended bands
+/// (everything below / above a height) use an extreme `min` or `max`.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct YBandParams {
+    /// Inclusive lower world-Y bound.
+    pub min: f32,
+    /// Exclusive upper world-Y bound.
+    pub max: f32,
+}
+impl Default for YBandParams {
+    fn default() -> Self { Self { min: 0.0, max: 64.0 } }
+}
+
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -405,6 +454,8 @@ pub enum NodeKind {
     WorldPos(WorldPosParams),
     /// World-space coordinate axis as a scalar field (no inputs).
     WorldAxis(WorldAxisParams),
+    /// Vertical density gate: `1.0` inside `[min, max)` world-Y, else `0.0`.
+    YBand(YBandParams),
     // --- Math ---
     /// Sum of two density fields.
     Add(AddParams),
@@ -468,6 +519,18 @@ pub enum NodeKind {
     PlaceTree(PlaceTreeParams),
     /// Stamp a named prefab template at each point.
     PlacePrefab(PlacePrefabParams),
+    // --- Per-column (World/Zone graphs) ---
+    /// 2D world-space noise emitting a per-column `SurfaceField` (a climate
+    /// channel). Evaluated by the column evaluator, not the voxel evaluator.
+    SurfaceNoise(NoiseParams),
+    /// WorldGraph terminal: assigns a per-column zone id from a climate field.
+    WorldOutput(WorldOutputParams),
+    /// ZoneGraph terminal: assigns a per-column biome id from a climate field
+    ZoneOutput(ZoneOutputParams),
+    // --- Library ---
+    /// References a reusable library graph by id. Boundary pins are a static
+    /// placeholder (none) this phase.
+    LibraryRef(LibraryRefParams),
     /// Terminal node; consumes one density input.
     Output(OutputParams),
 }
@@ -531,6 +594,12 @@ const PLACE_IN: &[PinSpec] = &[
     PinSpec { name: "terrain", ty: PinType::Terrain,   required: true },
     PinSpec { name: "points",  ty: PinType::Positions, required: true },
 ];
+const SURFACE_OUT: &[PinSpec] =
+    &[PinSpec { name: "surface", ty: PinType::SurfaceField, required: false }];
+const SURFACE_IN_REQUIRED: &[PinSpec] =
+    &[PinSpec { name: "zone field", ty: PinType::SurfaceField, required: true }];
+const SURFACE_IN_BIOME: &[PinSpec] =
+    &[PinSpec { name: "biome field", ty: PinType::SurfaceField, required: true }];
 
 impl NodeKind {
     /// Static descriptor (display, color, typed pins) for this kind.
@@ -786,6 +855,41 @@ impl NodeKind {
                 inputs: TERRAIN_TERMINAL_IN, // shrunk from (density, material) to (terrain)
                 outputs: NO_PINS,
             },
+            NodeKind::LibraryRef(_) => NodeDescriptor {
+                display_name: "Library Ref",
+                category: NodeCategory::Library,
+                color: [0xb0, 0x80, 0xff],
+                inputs: NO_PINS,  // scaffold: dynamic boundary pins deferred
+                outputs: NO_PINS,
+            },
+            NodeKind::SurfaceNoise(_) => NodeDescriptor {
+                display_name: "Surface Noise",
+                category: NodeCategory::Source,
+                color: SRC,
+                inputs: NO_PINS,
+                outputs: SURFACE_OUT,
+            },
+            NodeKind::WorldOutput(_) => NodeDescriptor {
+                display_name: "World Output",
+                category: NodeCategory::Output,
+                color: OUT,
+                inputs: SURFACE_IN_REQUIRED,
+                outputs: NO_PINS,
+            },
+            NodeKind::ZoneOutput(_) => NodeDescriptor {
+                display_name: "Zone Output",
+                category: NodeCategory::Output,
+                color: OUT,
+                inputs: SURFACE_IN_BIOME,
+                outputs: NO_PINS,
+            },
+            NodeKind::YBand(_) => NodeDescriptor {
+                display_name: "Y Band",
+                category: NodeCategory::Source,
+                color: SRC,
+                inputs: NO_PINS,
+                outputs: DENSITY_OUT,
+            },
         }
     }
 
@@ -826,6 +930,11 @@ impl NodeKind {
             NodeKind::FindFlat(_)         => "FindFlat",
             NodeKind::PlaceTree(_)        => "PlaceTree",
             NodeKind::PlacePrefab(_)      => "PlacePrefab",
+            NodeKind::LibraryRef(_)       => "LibraryRef",
+            NodeKind::SurfaceNoise(_)     => "SurfaceNoise",
+            NodeKind::WorldOutput(_)      => "WorldOutput",
+            NodeKind::ZoneOutput(_)       => "ZoneOutput",
+            NodeKind::YBand(_)            => "YBand",
         }
     }
 }

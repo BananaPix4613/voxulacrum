@@ -5,15 +5,18 @@ use nodegraph_ir::{NodeCategory, PinType};
 /// Distinct color per pin type. Used for both pin markers and connection wires.
 pub fn pin_color(ty: PinType) -> Color32 {
     match ty {
-        PinType::Scalar     => Color32::from_rgb(180, 220, 255),
-        PinType::Density    => Color32::from_rgb(120, 200, 120),
-        PinType::Material   => Color32::from_rgb(220,  90,  90),
-        PinType::Positions  => Color32::from_rgb(230, 200,  70),
-        PinType::Assignments=> Color32::from_rgb(230, 160,  70),
-        PinType::Curve      => Color32::from_rgb(255, 200, 120),
-        PinType::Vec3       => Color32::from_rgb(255, 140, 200),
-        PinType::BiomeId    => Color32::from_rgb(180, 130, 255),
-        PinType::Terrain    => Color32::from_rgb(230, 230, 230),
+        PinType::Scalar        => Color32::from_rgb(180, 220, 255),
+        PinType::Density       => Color32::from_rgb(120, 200, 120),
+        PinType::SurfaceField  => Color32::from_rgb(110, 205, 200),
+        PinType::Material      => Color32::from_rgb(220,  90,  90),
+        PinType::FluidProvider => Color32::from_rgb( 80, 160, 235),
+        PinType::Positions     => Color32::from_rgb(230, 200,  70),
+        PinType::Assignments   => Color32::from_rgb(230, 160,  70),
+        PinType::Curve         => Color32::from_rgb(255, 200, 120),
+        PinType::Vec3          => Color32::from_rgb(255, 140, 200),
+        PinType::BiomeId       => Color32::from_rgb(180, 130, 255),
+        PinType::ZoneId        => Color32::from_rgb(150, 110, 215),
+        PinType::Terrain       => Color32::from_rgb(230, 230, 230),
     }
 }
 
@@ -30,6 +33,7 @@ pub fn category_fill(cat: NodeCategory) -> Color32 {
         NodeCategory::Scanners  => Color32::from_rgb(0xb0, 0xb0, 0xc0),
         NodeCategory::Props     => Color32::from_rgb(0xc8, 0x90, 0x60),
         NodeCategory::Biome     => Color32::from_rgb(0xb0, 0x80, 0xff),
+        NodeCategory::Library   => Color32::from_rgb(0xb0, 0x80, 0xff),
         NodeCategory::Output    => Color32::from_rgb(0xe0, 0x4c, 0x4c),
     }
 }
@@ -54,9 +58,15 @@ pub fn header_text_color(cat: NodeCategory) -> Color32 {
 pub fn pin_shape(ty: PinType) -> PinShape {
     match ty {
         // Continuous scalar fields & transfer functions.
-        PinType::Scalar | PinType::Density | PinType::Curve => PinShape::Circle,
-        // Discrete material / category data.
-        PinType::Material | PinType::BiomeId | PinType::Assignments => PinShape::Square,
+        PinType::Scalar | PinType::Density | PinType::Curve | PinType::SurfaceField => {
+            PinShape::Circle
+        }
+        // Discrete provider / category / id data.
+        PinType::Material
+        | PinType::FluidProvider
+        | PinType::BiomeId
+        | PinType::ZoneId
+        | PinType::Assignments => PinShape::Square,
         // Spatial / positional data.
         PinType::Positions | PinType::Vec3 => PinShape::Triangle,
         // Terminal terrain payload.

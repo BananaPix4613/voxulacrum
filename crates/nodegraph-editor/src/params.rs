@@ -124,6 +124,17 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
             changed
         }
         NodeKind::PlacePrefab(p) => row(ui, "prefab", |ui| ui.text_edit_singleline(&mut p.prefab)),
+        NodeKind::LibraryRef(p) => row(ui, "library id", |ui| {
+            ui.add(egui::DragValue::new(&mut p.library.0))
+        }),
+        NodeKind::SurfaceNoise(p) => noise_params_ui(ui, p),
+        NodeKind::WorldOutput(p) => band_list_ui(ui, "zone bands (ascending)", &mut p.zone_bands),
+        NodeKind::ZoneOutput(p) => band_list_ui(ui, "biome bands (ascending)", &mut p.biome_bands),
+        NodeKind::YBand(p) => row2(
+            ui,
+            "min y", |ui| ui.add(egui::DragValue::new(&mut p.min).speed(0.5)),
+            "max y", |ui| ui.add(egui::DragValue::new(&mut p.max).speed(0.5)),
+        ),
         // Parameterless variants:
         NodeKind::WorldPos(_) | NodeKind::Add(_) | NodeKind::Multiply(_)
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)
@@ -134,6 +145,33 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
             false
         }
     }
+}
+
+/// Editor for an ascending list of band thresholds (zone or biome selection),
+/// labeled by `label`. Returns `true` if edited this frame.
+fn band_list_ui(ui: &mut Ui, label: &str, bands: &mut Vec<f32>) -> bool {
+    let mut changed = false;
+    ui.weak(label);
+    let mut remove = None;
+    for (i, b) in bands.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            if ui.add(egui::DragValue::new(b).speed(0.01)).changed() {
+                changed = true;
+            }
+            if ui.small_button("✕").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        bands.remove(i);
+        changed = true;
+    }
+    if ui.small_button("+ band").clicked() {
+        bands.push(0.0);
+        changed = true;
+    }
+    changed
 }
 
 fn noise_params_ui(ui: &mut Ui, p: &mut nodegraph_ir::NoiseParams) -> bool {

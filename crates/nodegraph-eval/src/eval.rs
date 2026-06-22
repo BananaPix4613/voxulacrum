@@ -12,6 +12,28 @@ use crate::error::{EvalError, EvalResult};
 use crate::field::{ScalarField, Vec3Field, CHUNK_DIM};
 use crate::scatter::ScatterPoint;
 
+/// Build a configured `FastNoiseLite` from a resolved seed + noise params.
+/// Shared by the voxel evaluator and the per-column evaluator so both derive
+/// identical fields from the same parameters.
+pub(crate) fn configured_noise(
+    seed: i32,
+    p: &NoiseParams,
+    noise_type: NoiseType,
+) -> FastNoiseLite {
+    let mut n = FastNoiseLite::with_seed(seed);
+    n.set_noise_type(Some(noise_type));
+    n.set_frequency(Some(p.frequency));
+    n.set_fractal_type(Some(match p.fractal_type {
+        FractalType::FBm => FnlFractalType::FBm,
+        FractalType::Ridged => FnlFractalType::Ridged,
+        FractalType::PingPong => FnlFractalType::PingPong,
+    }));
+    n.set_fractal_octaves(Some(p.octaves as i32));
+    n.set_fractal_lacunarity(Some(p.lacunarity));
+    n.set_fractal_gain(Some(p.gain));
+    n
+}
+
 /// Evaluates a graph for one chunk. Holds a chunk-scoped CSE cache.
 pub struct Evaluator<'g> {
     graph: &'g Graph,
@@ -28,6 +50,11 @@ impl<'g> Evaluator<'g> {
     /// Borrow the CSE cache (populated by [`Evaluator::evaluate`]).
     pub fn cache(&self) -> &EvalCache {
         &self.cache
+    }
+    
+    /// Consume the evaluator, returning its populated CSE cache.
+    pub fn into_cache(self) -> EvalCache {
+        self.cache
     }
 
     /// Validate, then fill every node's output once in topological order.
@@ -57,20 +84,10 @@ impl<'g> Evaluator<'g> {
         Ok(())
     }
 
-    /// Build a configured FastNoiseLite for any (params, noise_type) pair.
+    /// Build a configured FastNoiseLite for any (params, noise_type) pair,
+    /// seeded seam-safely (no chunk coords) via [`EvalContext::noise_seed`].
     fn noise(&self, p: &NoiseParams, noise_type: NoiseType) -> FastNoiseLite {
-        let mut n = FastNoiseLite::with_seed(self.ctx.noise_seed(p.seed));
-        n.set_noise_type(Some(noise_type));
-        n.set_frequency(Some(p.frequency));
-        n.set_fractal_type(Some(match p.fractal_type {
-            FractalType::FBm => FnlFractalType::FBm,
-            FractalType::Ridged => FnlFractalType::Ridged,
-            FractalType::PingPong => FnlFractalType::PingPong,
-        }));
-        n.set_fractal_octaves(Some(p.octaves as i32));
-        n.set_fractal_lacunarity(Some(p.lacunarity));
-        n.set_fractal_gain(Some(p.gain));
-        n
+        configured_noise(self.ctx.noise_seed(p.seed), p, noise_type)
     }
 
     /// Optional Vec3 override on input pin 0 of a noise source.
@@ -237,6 +254,19 @@ impl<'g> Evaluator<'g> {
                 }
                 CachedOutput::Scalar(Arc::new(field))
             },
+            NodeKind::YBand(p) => {
+                let mut field = ScalarField::zeroed();
+                for z in 0..CHUNK_DIM {
+                    for y in 0..CHUNK_DIM {
+                        for x in 0..CHUNK_DIM {
+                            let wy = self.ctx.world_pos(x, y, z).y;
+                            let v = if wy >= p.min && wy < p.max { 1.0 } else { 0.0 };
+                            field.set(x, y, z, v);
+                        }
+                    }
+                }
+                CachedOutput::Scalar(Arc::new(field))
+            }
             // --- Math (all elementwise on density fields) ---
             NodeKind::Add(_) => {
                 let (a, b) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?);
@@ -455,6 +485,14 @@ impl<'g> Evaluator<'g> {
             NodeKind::TerrainOutput(_) => {
                 CachedOutput::Terrain(self.input_terrain(id, 0)?)
             }
+            // --- Library (scaffold: not yet expandable) ---
+            NodeKind::LibraryRef(_) => {
+                return Err(EvalError::UnresolvedLibraryRef { node: id });
+            }
+            // --- Per-column nodes belong to the World/Zone graphs ---
+            NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_) => {
+                return Err(EvalError::WrongGraphDomain { node: id });
+            }
             // --- Terminal ---
             NodeKind::Output(_) => CachedOutput::Scalar(self.input_scalar(id, 0)?),
         })
@@ -474,6 +512,10 @@ impl<'g> Evaluator<'g> {
             NodeKind::WorldAxis(p) => {
                 let w = self.ctx.world_pos(x, y, z);
                 match p.axis { Axis::X => w.x, Axis::Y => w.y, Axis::Z => w.z }
+            }
+            NodeKind::YBand(p) => {
+                let wy = self.ctx.world_pos(x, y, z).y;
+                if wy >= p.min && wy < p.max { 1.0 } else { 0.0 }
             }
             NodeKind::Add(_)       => self.sample_input(id, 0, x, y, z)? + self.sample_input(id, 1, x, y, z)?,
             NodeKind::Multiply(_)  => self.sample_input(id, 0, x, y, z)? * self.sample_input(id, 1, x, y, z)?,
@@ -504,6 +546,9 @@ impl<'g> Evaluator<'g> {
             NodeKind::WorldPos(_) | NodeKind::DomainWarp(_) => {
                 return Err(EvalError::WrongInputType { node: id, expected: "scalar", got: "vec3" });
             }
+            NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_) => {
+                return Err(EvalError::WrongGraphDomain { node: id });
+            }
             NodeKind::ConstantMaterial(_)
             | NodeKind::Layer(_)
             | NodeKind::Queue(_)
@@ -517,6 +562,9 @@ impl<'g> Evaluator<'g> {
                 return Err(EvalError::WrongInputType {
                     node: id, expected: "scalar", got: "material/terrain/positions",
                 });
+            }
+            NodeKind::LibraryRef(_) => {
+                return Err(EvalError::UnresolvedLibraryRef { node: id });
             }
         })
     }

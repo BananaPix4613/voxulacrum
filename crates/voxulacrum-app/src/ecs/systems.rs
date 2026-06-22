@@ -171,7 +171,7 @@ pub fn shader_hot_reload_system(
     }
 }
 
-/// Hot-reload the active world graph when `default_biome.graph.json` changes
+/// Hot-reload the active world graph when `biome_meadow.graph.json` changes
 /// on disk (external edits / the standalone preview app saving). Skips the
 /// reload while the embedded editor has unsaved edits, so in-memory work and
 /// the rendered world stay consistent. Routes the new graph to regen via the
@@ -194,7 +194,7 @@ pub fn graph_hot_reload_system(
             continue;
         }
         // Don't clobber unsaved embedded-editor edits.
-        if egui.editor.is_modified() {
+        if egui.graph_editor.is_modified() {
             log::warn!(
                 "{} changed on disk but the editor has unsaved edits; \
                 ignoring the disk change",
@@ -206,8 +206,10 @@ pub fn graph_hot_reload_system(
             Ok(text) => match nodegraph_ir::Graph::from_json(&text) {
                 Ok(graph) => {
                     // Refresh the editor view, then hand the graph to regen.
-                    egui.editor = nodegraph_editor::EditorState::from_graph(&graph);
-                    ui_state.pending_graph = Some(graph);
+                    let slot = crate::world::world_generator::GraphSlot::Biome(0);
+                    // The watched file is the primary biome (biome 0).
+                    egui.graph_editor.refresh(slot, graph.clone());
+                    ui_state.pending_graph = Some((slot, graph));
                     log::info!("Hot-reloaded {} from disk", path.display());
                 }
                 Err(e) => log::warn!("graph hot-reload parse error: {e}"),
@@ -676,8 +678,9 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             // WorldRegenCoordinator - only the latest pending graph is applied, and
             // only while no regen is in flight. No-op while the editor is hidden
             // (its `show` isn't called, so it never goes dirty).
-            if egui.editor.consume_dirty() {
-                ui_state.pending_graph = Some(egui.editor.build_graph());
+            if let Some((slot, graph)) = egui.graph_editor.consume_dirty() {
+                // The selector reports which hierarchy graph was edited.
+                ui_state.pending_graph = Some((slot, graph));
             }
         });
     });

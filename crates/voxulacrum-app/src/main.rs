@@ -389,9 +389,12 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // Egui
     let mut egui_renderer = ui::EguiRenderer::new(&ctx, &window);
-    // Mirror the world's active graph into the embedded editor so the canvas
-    // opens showing the same default_biome graph the engine generated from.
-    egui_renderer.editor = nodegraph_editor::EditorState::from_graph(generator.graph());
+    // Load the world's graph hierarchy into the embedded editor's selector;
+    // the canvas opens on the primary biome.
+    match world::world_generator::load_world_graphs(&world::world_generator::world_manifest_path()) {
+        Ok(graphs) => egui_renderer.graph_editor.load(graphs),
+        Err(e) => log::error!("Failed to load editor graph hierarchy: {e}"),
+    }
     let ui_state = UiState::new(initial_params, presets_dir);
 
     // Meshing

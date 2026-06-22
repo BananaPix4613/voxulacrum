@@ -8,12 +8,43 @@ use slotmap::SlotMap;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::edge::{Edge, PinRef};
 use crate::error::{GraphError, GraphResult};
+use crate::library::LibraryGraphId;
 use crate::node::{Node, NodeId, NodeKind};
 use crate::pin::PinType;
 
-/// A typed dataflow graph: a slotmap of nodes plus typed edges.
+/// The role a [`Graph`] plays in the five-graph hierarchy (design doc §4).
+///
+/// The variant does not change a graph's structure - every kind is the same
+/// slotmap-of-nodes-plus-edges - only the rules it is validated against and the
+/// root output(s) it is expected to produce. Those per-kind rules are filled in
+/// alongside the functional graph kinds in later substeps; see
+/// [`Graph::validate`].
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum GraphKind {
+    /// Singleton top-level graph: climate and zone assignment for the world.
+    World,
+    /// A region graph: terrain framing and biome assignment within one zone.
+    Zone,
+    /// A terrain graph: density, materials, and per-biome parameters. This is
+    /// the shape of the legacy flat terrain graph, so it is the [`Default`].
+    #[default]
+    Biome,
+    /// A fine-detail graph (texel / decal scaffolding). Type-only this phase:
+    /// a detail graph may be authored but produces nothing yet.
+    Detail,
+    /// A reusable sub-graph referenced by other graphs (instanced / shared).
+    Library,
+}
+
+/// A typed dataflow graph: a slotmap of nodes plus typed edges, tagged with the
+/// [`GraphKind`] it plays in the hierarchy.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Graph {
+    /// The role this graph plays in the five-graph hierarchy. Serialized graphs
+    /// that predate this field deserialize as [`GraphKind::Biome`], so the
+    /// legacy flat terrain graph loads unchanged.
+    #[serde(default)]
+    pub kind: GraphKind,
     /// Nodes keyed by stable [`NodeId`].
     pub nodes: SlotMap<NodeId, Node>,
     /// Directed edges (output pin -> input pin).
@@ -24,6 +55,11 @@ impl Graph {
     /// Empty graph.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Empty graph of an explicit [`GraphKind`].
+    pub fn of_kind(kind: GraphKind) -> Self {
+        Self { kind, ..Self::default() }
     }
 
     /// Insert a node at the origin; returns its stable id.
@@ -80,6 +116,16 @@ impl Graph {
         let before = self.edges.len();
         self.edges.retain(|e| e.to != to);
         self.edges.len() != before
+    }
+    
+    /// The library ids referenced by `LibraryRef` nodes in this graph.
+    /// Iteration order follows the slotmap and is unspecified; callers that
+    /// need determinism should sort.
+    pub fn library_refs(&self) -> impl Iterator<Item = LibraryGraphId> + '_ {
+        self.nodes.values().filter_map(|n| match &n.kind {
+            NodeKind::LibraryRef(p) => Some(p.library),
+            _ => None,
+        })
     }
 
     /// Validate the whole graph. Returns all findings; an empty result (or
@@ -177,7 +223,30 @@ impl Graph {
             diags.push(d);
         }
 
+        // 5. Per-kind structural rules (root outputs, etc.).
+        self.validate_kind_rules(&mut diags);
+
         diags
+    }
+
+    /// Append diagnostics for rules specific to this graph's [`GraphKind`],
+    /// beyond the generic checks above (edge integrity, single-input,
+    /// required-inputs, acyclicity).
+    ///
+    /// This is a scaffold. The functional root-output node kinds for
+    /// World/Zone/Biome graphs (and the Detail scaffold) arrive in later
+    /// substeps, so there is nothing kind-specific to enforce yet and every
+    /// kind currently validates as a generic dataflow graph. The dispatch lives
+    /// here so a later substep adds one match arm rather than re-threading the
+    /// call site. Library graphs are intentionally rule-free (no single root).
+    fn validate_kind_rules(&self, _diags: &mut Vec<Diagnostic>) {
+        match self.kind {
+            GraphKind::World
+            | GraphKind::Zone
+            | GraphKind::Biome
+            | GraphKind::Detail
+            | GraphKind::Library => {}
+        }
     }
 
     /// True if validation produces any [`Severity::Error`].
@@ -238,5 +307,40 @@ impl Graph {
     /// Deserialize from JSON.
     pub fn from_json(s: &str) -> GraphResult<Self> {
         Ok(serde_json::from_str(s)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_kind_is_biome() {
+        assert_eq!(Graph::new().kind, GraphKind::Biome);
+        assert_eq!(GraphKind::default(), GraphKind::Biome);
+    }
+
+    #[test]
+    fn of_kind_sets_kind() {
+        assert_eq!(Graph::of_kind(GraphKind::World).kind, GraphKind::World);
+        assert_eq!(Graph::of_kind(GraphKind::Library).kind, GraphKind::Library);
+    }
+
+    #[test]
+    fn kind_round_trips_through_json() {
+        let g = Graph::of_kind(GraphKind::Zone);
+        let json = g.to_json().unwrap();
+        let back = Graph::from_json(&json).unwrap();
+        assert_eq!(back.kind, GraphKind::Zone);
+    }
+
+    #[test]
+    fn legacy_json_without_kind_defaults_to_biome() {
+        // Drop the `kind` field to mimic a document authored before it existed.
+        let mut v: serde_json::Value =
+            serde_json::from_str(&Graph::new().to_json().unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("kind");
+        let g: Graph = serde_json::from_value(v).unwrap();
+        assert_eq!(g.kind, GraphKind::Biome);
     }
 }

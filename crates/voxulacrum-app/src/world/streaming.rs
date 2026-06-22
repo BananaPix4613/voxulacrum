@@ -14,7 +14,7 @@ use crate::params::StreamingParams;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
 use crate::world::overrides::ChunkOverrides;
 use crate::world::persistence::{ChunkEdits, ChunkRecord, WorldDatabase};
-use crate::world::world_generator::WorldGenerator;
+use crate::world::world_generator::{GeneratedChunk, WorldGenerator};
 use crate::world::World;
 
 /// Monotonic, process-global token identifying the current DB configuration.
@@ -245,8 +245,8 @@ impl ChunkStreamingManager {
         let tx = self.result_tx.clone();
 
         self.pool.spawn(move || {
-            // Generate base terrain.
-            let mut storage = gen.generate_chunk_storage(pos);
+            // Generate base terrain + identity tags.
+            let GeneratedChunk { mut storage, tags: generated_tags } = gen.generate_chunk(pos);
 
             // Overlay saved edits from this worker's cached read-only DB handle.
             let mut overrides = None;
@@ -294,9 +294,9 @@ impl ChunkStreamingManager {
 
             let mut chunk = crate::world::chunk::LoadedChunk::new(pos, std::sync::Arc::new(storage));
             chunk.data.overrides = overrides;
-            if let Some(tags) = loaded_tags {
-                chunk.data.tags = tags;
-            }
+            // DB-persisted tags win for loaded chunks; otherwise use the freshly
+            // generated tags.
+            chunk.data.tags = loaded_tags.unwrap_or(generated_tags);
             // Not dirty - matches what's in DB.
             chunk.persist_dirty = false;
 

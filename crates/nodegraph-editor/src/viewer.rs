@@ -35,6 +35,8 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Source, "Constant",     || NodeKind::Constant(ConstantParams::default())),
         (NodeCategory::Source, "World Position", || NodeKind::WorldPos(WorldPosParams::default())),
         (NodeCategory::Source, "World Axis",   || NodeKind::WorldAxis(WorldAxisParams::default())),
+        (NodeCategory::Source, "Surface Noise", || NodeKind::SurfaceNoise(NoiseParams::default())),
+        (NodeCategory::Source, "Y Band",       || NodeKind::YBand(YBandParams::default())),
         (NodeCategory::Math, "Add",            || NodeKind::Add(AddParams::default())),
         (NodeCategory::Math, "Multiply",       || NodeKind::Multiply(MultiplyParams::default())),
         (NodeCategory::Math, "Subtract",       || NodeKind::Subtract(SubtractParams::default())),
@@ -62,6 +64,8 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Props, "Place Prefab",  || NodeKind::PlacePrefab(PlacePrefabParams::default())),
         (NodeCategory::Output, "Output",       || NodeKind::Output(OutputParams::default())),
         (NodeCategory::Output, "Terrain Output", || NodeKind::TerrainOutput(TerrainOutputParams::default())),
+        (NodeCategory::Output, "World Output", || NodeKind::WorldOutput(WorldOutputParams::default())),
+        (NodeCategory::Output, "Zone Output",  || NodeKind::ZoneOutput(ZoneOutputParams::default())),
     ]
 }
 

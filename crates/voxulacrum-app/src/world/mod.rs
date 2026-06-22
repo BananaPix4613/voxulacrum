@@ -63,8 +63,10 @@ impl World {
             positions
                 .par_iter()
                 .map(|&pos| {
-                    let storage = generator.generate_chunk_storage(pos);
-                    (ChunkCoord::from(pos), LoadedChunk::new(pos, Arc::new(storage)))
+                    let generated = generator.generate_chunk(pos);
+                    let mut chunk = LoadedChunk::new(pos, Arc::new(generated.storage));
+                    chunk.data.tags = generated.tags;
+                    (ChunkCoord::from(pos), chunk)
                 })
                 .collect()
         });
@@ -433,8 +435,9 @@ fn generate_world_background(
     let chunks: Vec<LoadedChunk> = positions
         .par_iter()
         .map(|&pos| {
-            let storage = generator.generate_chunk_storage(pos);
-            let chunk = LoadedChunk::new(pos, std::sync::Arc::new(storage));
+            let generated = generator.generate_chunk(pos);
+            let mut chunk = LoadedChunk::new(pos, std::sync::Arc::new(generated.storage));
+            chunk.data.tags = generated.tags;
             progress.fetch_add(1, Ordering::Relaxed);
             chunk
         })
