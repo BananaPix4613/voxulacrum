@@ -3917,6 +3917,7 @@ dependencies = [
  "num_cpus",
  "pollster",
  "rayon",
+ "ron",
  "rusqlite",
  "seahash",
  "serde",

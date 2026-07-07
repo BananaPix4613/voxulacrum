@@ -5,7 +5,7 @@ use bevy_ecs::prelude::Resource;
 
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::frustum::Frustum;
-use crate::world::chunk::CHUNK_WORLD_SIZE;
+use crate::world::chunk::{CHUNK_WORLD_SIZE, VOXEL_SCALE};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -83,11 +83,53 @@ pub fn generate_chunk_boundary_lines(
     lines
 }
 
+/// 12-edge wireframe box (24 verts) spanning `[min, max]` in one color.
+fn box_edges(min: Vec3, max: Vec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
+    let corners = [
+        [min.x, min.y, min.z],
+        [max.x, min.y, min.z],
+        [max.x, min.y, max.z],
+        [min.x, min.y, max.z],
+        [min.x, max.y, min.z],
+        [max.x, max.y, min.z],
+        [max.x, max.y, max.z],
+        [min.x, max.y, max.z],
+    ];
+    let edges: [(usize, usize); 12] = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ];
+    let mut lines = Vec::with_capacity(24);
+    for (a, b) in edges {
+        lines.push(DebugLineVertex { position: corners[a], color });
+        lines.push(DebugLineVertex { position: corners[b], color });
+    }
+    lines
+}
+
+/// Wireframe box hugging a single world voxel, slightly outset to avoid z-fighting.
+fn voxel_box_lines(v: IVec3) -> Vec<DebugLineVertex> {
+    let s = VOXEL_SCALE;
+    let eps = s * 0.03;
+    let min = Vec3::new(v.x as f32 * s - eps, v.y as f32 * s - eps, v.z as f32 * s - eps);
+    let max = Vec3::new(
+        (v.x as f32 + 1.0) * s + eps,
+        (v.y as f32 + 1.0) * s + eps,
+        (v.z as f32 + 1.0) * s + eps,
+    );
+    box_edges(min, max, [1.0, 1.0, 0.2])
+}
+
 #[derive(Resource)]
 pub struct DebugLinePass {
     pub pipeline: wgpu::RenderPipeline,
     pub vertex_buffer: Option<wgpu::Buffer>,
     pub vertex_count: u32,
+    /// Optional single-voxel pick highlight, drawn independently of the chunk
+    /// boundary lines (and of `show_debug_lines`).
+    pub highlight_buffer: Option<wgpu::Buffer>,
+    pub highlight_count: u32,
 }
 
 impl DebugLinePass {
@@ -162,6 +204,8 @@ impl DebugLinePass {
             pipeline,
             vertex_buffer: None,
             vertex_count: 0,
+            highlight_buffer: None,
+            highlight_count: 0,
         }
     }
 
@@ -186,5 +230,26 @@ impl DebugLinePass {
                 usage: wgpu::BufferUsages::VERTEX,
             },
         ));
+    }
+
+    /// Set (or clear) the pick highlight box around a single world voxel.
+    pub fn set_highlight(&mut self, ctx: &RenderContext, anchor: Option<IVec3>) {
+        match anchor {
+            Some(v) => {
+                let lines = voxel_box_lines(v);
+                self.highlight_count = lines.len() as u32;
+                self.highlight_buffer = Some(ctx.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("pick_highlight_vertex_buffer"),
+                        contents: bytemuck::cast_slice(&lines),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+            None => {
+                self.highlight_buffer = None;
+                self.highlight_count = 0;
+            }
+        }
     }
 }

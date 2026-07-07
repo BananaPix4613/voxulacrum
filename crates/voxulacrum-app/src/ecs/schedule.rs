@@ -46,6 +46,12 @@ pub fn build_frame_schedule() -> Schedule {
         systems::simulation_tick_system.in_set(FrameStage::Simulation),
         systems::param_change_detection_system.in_set(FrameStage::Simulation),
         systems::palette_load_system.in_set(FrameStage::Simulation),
+        crate::interaction::picking_system
+            .in_set(FrameStage::Simulation)
+            .after(systems::simulation_tick_system),
+        crate::interaction::scatter_edit_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::interaction::picking_system),
     ));
     // Streaming + Meshing
     schedule.add_systems((

@@ -2,7 +2,7 @@
   "world": "world.graph.json",
   "zone": "zone.graph.json",
   "biomes": [
-    { "id": 0, "graph": "biome_meadow.graph.json" },
+    { "id": 0, "graph": "biome_meadow.graph.json", "detail": "biome_meadow.detail.json" },
     { "id": 1, "graph": "biome_rocky.graph.json" }
   ]
 }

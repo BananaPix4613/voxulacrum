@@ -135,6 +135,38 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
             "min y", |ui| ui.add(egui::DragValue::new(&mut p.min).speed(0.5)),
             "max y", |ui| ui.add(egui::DragValue::new(&mut p.max).speed(0.5)),
         ),
+        NodeKind::PoissonDistribution(p) => {
+            let mut changed = row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "radius", |ui| ui.add(egui::DragValue::new(&mut p.radius).speed(0.1).range(0.5..=64.0)));
+            changed |= row(ui, "jitter", |ui| ui.add(egui::DragValue::new(&mut p.jitter).speed(0.02).range(0.0..=1.0)));
+            changed
+        }
+        NodeKind::SurfaceFilter(p) => {
+            let mut changed = row(ui, "max slope", |ui| ui.add(egui::DragValue::new(&mut p.max_slope).speed(0.05).range(0.0..=10.0)));
+            changed |= row(ui, "min height", |ui| ui.add(egui::DragValue::new(&mut p.min_height).speed(0.5)));
+            changed |= row(ui, "max height", |ui| ui.add(egui::DragValue::new(&mut p.max_height).speed(0.5)));
+            changed |= material_list_ui(ui, &mut p.materials);
+            changed
+        }
+        NodeKind::BiomeContextMask(p) => row(ui, "biome", |ui| ui.add(egui::DragValue::new(&mut p.biome))),
+        NodeKind::SpeciesPicker(p) => {
+            let mut changed = row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= band_list_ui(ui, "species weights", &mut p.weights);
+            changed
+        }
+        NodeKind::PaintDensity(p) => {
+            let mut changed = row(ui, "layer id", |ui| ui.add(egui::DragValue::new(&mut p.layer_id)));
+            changed |= row(ui, "species", |ui| ui.add(egui::DragValue::new(&mut p.species)));
+            changed |= row(ui, "density", |ui| ui.add(egui::DragValue::new(&mut p.density)));
+            changed |= row(ui, "tint", |ui| ui.add(egui::DragValue::new(&mut p.tint)));
+            changed
+        }
+        NodeKind::ScatterPlace(p) => {
+            let mut changed = row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "type id", |ui| ui.add(egui::DragValue::new(&mut p.type_id)));
+            changed |= row(ui, "prefab id", |ui| ui.add(egui::DragValue::new(&mut p.prefab_id)));
+            changed
+        }
         // Parameterless variants:
         NodeKind::WorldPos(_) | NodeKind::Add(_) | NodeKind::Multiply(_)
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)

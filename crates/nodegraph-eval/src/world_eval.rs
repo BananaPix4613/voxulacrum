@@ -9,16 +9,20 @@ use crate::cache::CachedOutput;
 use crate::column::{ColumnCache, IdColumn};
 use crate::column_eval::ColumnEvaluator;
 use crate::context::EvalContext;
+use crate::detail_eval::DetailEvaluator;
 use crate::error::EvalResult;
 use crate::eval::Evaluator;
 use crate::field::CHUNK_DIM;
+use crate::foliage::ChunkFoliage;
 
 /// One biome's terrain graph, the biome id it renders, and its located
-/// `TerrainOutput` (absent if the graph has none - such a biome produces air).
+/// `TerrainOutput` (absent if the graph has none - such a biome produces air),
+/// and an optional `DetailGraph` producing the biome's foliage.
 struct BiomeGraph {
     id: u16,
     graph: Graph,
     terrain_node: Option<NodeId>,
+    detail: Option<Graph>,
 }
 
 /// Owns the graph set for one world - the World and Zone graphs, the biome
@@ -46,7 +50,7 @@ impl WorldEvaluator {
         let this = Self {
             world: Graph::of_kind(GraphKind::World),
             zone: Graph::of_kind(GraphKind::Zone),
-            biomes: vec![BiomeGraph { id: 0, graph: biome, terrain_node }],
+            biomes: vec![BiomeGraph { id: 0, graph: biome, terrain_node, detail: None }],
             libraries: LibraryGraphRegistry::new(),
         };
         this.log_validation();
@@ -73,9 +77,21 @@ impl WorldEvaluator {
             .into_iter()
             .map(|(id, graph)| {
                 let terrain_node = find_terrain_node(&graph);
-                BiomeGraph { id, graph, terrain_node }
+                BiomeGraph { id, graph, terrain_node, detail: None }
             })
             .collect();
+        self
+    }
+
+    /// Attach a `DetailGraph` to each biome by id (builder-style). Entries whose
+    /// id has no matching biome are ignored; biomes without a detail graph
+    /// produce no foliage.
+    pub fn with_biome_details(mut self, details: Vec<(u16, Graph)>) -> Self {
+        for (id, detail) in details {
+            if let Some(bg) = self.biomes.iter_mut().find(|b| b.id == id) {
+                bg.detail = Some(detail);
+            }
+        }
         self
     }
 
@@ -133,8 +149,27 @@ impl WorldEvaluator {
 
         let biome_col = self.biome_id_column(&zone_columns);
         let terrain = self.composite_terrain(ctx, biome_col.as_deref())?;
+        let foliage = self.evaluate_foliage(ctx, &terrain, biome_col.as_deref())?;
 
-        Ok(ChunkEvaluation { terrain, world_columns, zone_columns })
+        Ok(ChunkEvaluation { terrain, world_columns, zone_columns, foliage })
+    }
+
+    /// Run each present biome's `DetailGraph` (if any) against the composited
+    /// terrain, restricting each to its own columns, and union the results.
+    fn evaluate_foliage(
+        &self,
+        ctx: EvalContext,
+        terrain: &ChunkBuffer<Voxel, 32>,
+        biome_col: Option<&IdColumn>,
+    ) -> EvalResult<ChunkFoliage> {
+        let mut foliage = ChunkFoliage::default();
+        for bid in present_biomes(biome_col) {
+            let Some(bg) = self.biomes.iter().find(|b| b.id == bid) else { continue };
+            let Some(detail) = &bg.detail else { continue };
+            let mut de = DetailEvaluator::new(detail, ctx, terrain, biome_col, bid);
+            foliage.merge(de.evaluate()?);
+        }
+        Ok(foliage)
     }
 
     /// The Zone graph's per-column biome assignment for this chunk, if any.
@@ -154,17 +189,7 @@ impl WorldEvaluator {
         biome_col: Option<&IdColumn>,
     ) -> EvalResult<Arc<ChunkBuffer<Voxel, 32>>> {
         let biome_at = |x: usize, z: usize| biome_col.map_or(0u16, |c| c.get(x, z));
-
-        // Distinct biome ids present in this chunk.
-        let mut present: Vec<u16> = Vec::new();
-        for z in 0..CHUNK_DIM {
-            for x in 0..CHUNK_DIM {
-                let b = biome_at(x, z);
-                if !present.contains(&b) {
-                    present.push(b);
-                }
-            }
-        }
+        let present = present_biomes(biome_col);
 
         // Fast path: the whole chunk is one biome - return its terrain directly,
         // no per-voxel copy (the single-biome world's path).
@@ -263,8 +288,23 @@ fn empty_terrain() -> Arc<ChunkBuffer<Voxel, 32>> {
     Arc::new(ChunkBuffer::uniform(Voxel::EMPTY))
 }
 
-/// The result of evaluating the graph set for one chunk: the composited terrain
-/// plus the World and Zone per-column caches.
+/// Distinct biome ids present across a chunk's columns (`None` => `[0]`).
+fn present_biomes(biome_col: Option<&IdColumn>) -> Vec<u16> {
+    let biome_at = |x: usize, z: usize| biome_col.map_or(0u16, |c| c.get(x, z));
+    let mut present: Vec<u16> = Vec::new();
+    for z in 0..CHUNK_DIM {
+        for x in 0..CHUNK_DIM {
+            let b = biome_at(x, z);
+            if !present.contains(&b) {
+                present.push(b);
+            }
+        }
+    }
+    present
+}
+
+/// The result of evaluating the graph set for one chunk: the composited terrain,
+/// the World and Zone per-column caches, and the composited foliage.
 pub struct ChunkEvaluation {
     /// Composited chunk terrain (per-column biome selection).
     pub terrain: Arc<ChunkBuffer<Voxel, 32>>,
@@ -274,16 +314,16 @@ pub struct ChunkEvaluation {
     /// ZoneGraph per-column outputs (climate channels + biome ids). Empty when
     /// the ZoneGraph has no nodes.
     pub zone_columns: ColumnCache,
+    /// Per-biome foliage (paint + scatter), unioned across the chunk's biomes.
+    /// Empty when no biome has a `DetailGraph`.
+    pub foliage: ChunkFoliage,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use glam::IVec3;
-    use nodegraph_ir::{
-        BuildTerrainParams, ConstantMaterialParams, ConstantParams, NoiseParams, PinRef,
-        TerrainOutputParams, ZoneOutputParams,
-    };
+    use nodegraph_ir::{BuildTerrainParams, ConstantMaterialParams, ConstantParams, NoiseParams, PinRef, PoissonDistributionParams, TerrainOutputParams, ZoneOutputParams};
 
     /// A biome graph filling the chunk with uniform `density` + a constant
     /// material: Constant -> BuildTerrain <- ConstantMaterial -> TerrainOutput.
@@ -399,5 +439,39 @@ mod tests {
         let biome_node = we.zone_output_node().expect("zone output present");
         let ids = eval.zone_columns.get(biome_node).unwrap().as_id().unwrap();
         assert!(ids.data().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn no_detail_graph_produces_empty_foliage() {
+        let we = WorldEvaluator::new(terrain_graph(1.0));
+        let eval = we.evaluate_chunk(EvalContext::new(0, IVec3::ZERO)).unwrap();
+        assert!(eval.foliage.is_empty());
+    }
+
+    #[test]
+    fn biome_detail_graph_produces_foliage() {
+        use nodegraph_ir::{PoissonDistributionParams, ScatterPlaceParams, SpeciesPickerParams};
+
+        // A scatter DetailGraph: Poisson -> SpeciesPicker -> ScatterPlace.
+        let mut detail = Graph::of_kind(GraphKind::Detail);
+        let pois = detail.add_node(NodeKind::PoissonDistribution(PoissonDistributionParams {
+            seed: 1,
+            radius: 8.0,
+            jitter: 0.5,
+        }));
+        let pick = detail.add_node(NodeKind::SpeciesPicker(SpeciesPickerParams::default()));
+        let place = detail.add_node(NodeKind::ScatterPlace(ScatterPlaceParams {
+            seed: 2,
+            type_id: 0,
+            prefab_id: 5,
+        }));
+        detail.connect(PinRef::new(pois, 0), PinRef::new(pick, 0)).unwrap();
+        detail.connect(PinRef::new(pick, 0), PinRef::new(place, 0)).unwrap();
+
+        // terrain_graph(1.0) is fully solid -> every column has a surface.
+        let we = WorldEvaluator::new(terrain_graph(1.0)).with_biome_details(vec![(0, detail)]);
+        let eval = we.evaluate_chunk(EvalContext::new(7, IVec3::ZERO)).unwrap();
+        assert!(!eval.foliage.scatter.is_empty());
+        assert!(!eval.foliage.scatter[0].instances.is_empty());
     }
 }

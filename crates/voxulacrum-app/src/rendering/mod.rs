@@ -6,7 +6,10 @@ pub mod render_targets;
 pub mod uniforms;
 pub mod terrain_pass;
 pub mod upscale_pass;
-pub mod vegetation_pass;
+pub mod detail_paint_pass;
+pub mod scatter_pass;
+// `vegetation_pass` retired in Phase 5 4a-2i (replaced by detail_paint_pass).
+// File kept on disk, no longer compiled; deletion is a deferred cleanup.
 pub mod water_pass;
 pub mod post_process;
 pub mod palette_pass;

@@ -66,26 +66,13 @@ impl World {
                     let generated = generator.generate_chunk(pos);
                     let mut chunk = LoadedChunk::new(pos, Arc::new(generated.storage));
                     chunk.data.tags = generated.tags;
+                    chunk.data.detail_layers = generated.detail_layers;
+                    chunk.data.scatter_instances = generated.scatter;
                     (ChunkCoord::from(pos), chunk)
                 })
                 .collect()
         });
         
-        Self {
-            chunks,
-            generator,
-            min_chunk_y: min_y,
-            max_chunk_y: max_y,
-        }
-    }
-
-    /// Create a World from preloaded chunk data (from cache).
-    pub fn from_cached_chunks(
-        chunks: HashMap<ChunkCoord, LoadedChunk>,
-        generator: Arc<WorldGenerator>,
-        min_y: i32,
-        max_y: i32,
-    ) -> Self {
         Self {
             chunks,
             generator,
@@ -438,6 +425,8 @@ fn generate_world_background(
             let generated = generator.generate_chunk(pos);
             let mut chunk = LoadedChunk::new(pos, std::sync::Arc::new(generated.storage));
             chunk.data.tags = generated.tags;
+            chunk.data.detail_layers = generated.detail_layers;
+            chunk.data.scatter_instances = generated.scatter;
             progress.fetch_add(1, Ordering::Relaxed);
             chunk
         })

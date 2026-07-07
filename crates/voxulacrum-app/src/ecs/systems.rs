@@ -17,7 +17,8 @@ use crate::rendering::render_graph::{RenderGraph, ResourceId, ResourceMap};
 use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::shadow_pass::ShadowPassNode;
 use crate::rendering::upscale_pass::UpscalePass;
-use crate::rendering::vegetation_pass::VegetationPass;
+use crate::rendering::detail_paint_pass::DetailPaintPass;
+use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::rendering::frustum::Frustum;
 use crate::shader_reload::ShaderWatcher;
@@ -282,7 +283,8 @@ pub fn streaming_tick_system(
     mut meshing: ResMut<MeshingCoordinator>,
     sim: Res<SimulationManager>,
     frame: Res<FrameState>,
-    mut vegetation: ResMut<VegetationPass>,
+    mut detail_paint: ResMut<DetailPaintPass>,
+    mut scatter: ResMut<ScatterPass>,
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
     _ctx: Res<RenderContext>,
@@ -313,9 +315,10 @@ pub fn streaming_tick_system(
         },
     );
 
-    // Remove vegetation and water for unloaded chunks
+    // Remove detail paint and water for unloaded chunks
     for pos in &tick_result.unloaded {
-        vegetation.remove_chunk_vegetation(*pos);
+        detail_paint.remove_chunk(*pos);
+        scatter.remove_chunk(*pos);
         water_pass.remove_chunk_water(*pos);
     }
 
@@ -338,7 +341,8 @@ pub fn meshing_tick_system(
     mut world: ResMut<VoxelWorld>,
     ctx: Res<RenderContext>,
     mut ui: ResMut<UiState>,
-    mut vegetation: ResMut<VegetationPass>,
+    mut detail_paint: ResMut<DetailPaintPass>,
+    mut scatter: ResMut<ScatterPass>,
     mut water_pass: ResMut<WaterPass>,
 ) {
     // Phase 1: tick meshing with &mut world - collects meshed positions.
@@ -347,12 +351,9 @@ pub fn meshing_tick_system(
     // Phase 2: for each newly meshed chunk, build per-chunk vegetation
     // and water GPU buffers. world.0 is now borrowed immutably.
     if !meshed.is_empty() {
-        let veg_params = &ui.params.vegetation;
-
         for pos in &meshed {
-            vegetation.add_chunk_vegetation(
-                *pos, &world.0, veg_params, &ctx.device,
-            );
+            detail_paint.add_chunk(*pos, &world.0, &ctx.device);
+            scatter.add_chunk(*pos, &world.0, &ctx.device);
             // Water is a Phase 1 no-op; call retained to keep scheduling intact.
             water_pass.add_chunk_water(*pos);
         }
@@ -560,7 +561,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let shadow_depth_view = ecs.resource::<ShadowDepthView>();
         let uniform_bind_group = ecs.resource::<GlobalUniformBindGroup>();
         let render_targets = ecs.resource::<RenderTargets>();
-        let vegetation_pass = ecs.resource::<VegetationPass>();
+        let detail_paint_pass = ecs.resource::<DetailPaintPass>();
+        let scatter_pass = ecs.resource::<ScatterPass>();
         let water_pass = ecs.resource::<WaterPass>();
         let debug_line_pass = ecs.resource::<DebugLinePass>();
         let cap_pass = ecs.resource::<CapPass>();
@@ -618,8 +620,10 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
                 ],
                 clip_pos: [0.0; 3],
             },
-            vegetation_pass: &vegetation_pass,
-            vegetation_pipeline: &pipeline_registry.vegetation_pipeline,
+            detail_paint_pass: &detail_paint_pass,
+            detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
+            scatter_pass: &scatter_pass,
+            scatter_pipeline: &pipeline_registry.scatter_pipeline,
             water_pass: &water_pass,
             water_pipeline: &pipeline_registry.water_pipeline,
             debug_line_pass: &debug_line_pass,
@@ -698,7 +702,8 @@ pub fn world_regen_system(
     mut regen: ResMut<WorldRegenCoordinator>,
     mut world: ResMut<VoxelWorld>,
     mut meshing: ResMut<MeshingCoordinator>,
-    mut vegetation: ResMut<VegetationPass>,
+    mut detail_paint: ResMut<DetailPaintPass>,
+    mut scatter: ResMut<ScatterPass>,
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
     ctx: Res<RenderContext>,
@@ -708,7 +713,8 @@ pub fn world_regen_system(
     regen.tick(
         &mut world.0,
         &mut meshing,
-        &mut vegetation,
+        &mut detail_paint,
+        &mut scatter,
         &mut water_pass,
         &mut ui,
         &ctx,

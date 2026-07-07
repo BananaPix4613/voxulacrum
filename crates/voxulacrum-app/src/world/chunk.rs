@@ -3,7 +3,7 @@ use glam::IVec3;
 use smallvec::SmallVec;
 use std::time::Instant;
 
-use super::layers::{DecalLayer, DetailLayer, DetailLayers, FluidLayer, LightData, ScatterInstance, ScatterStore};
+use super::layers::{DecalLayer, DetailLayers, FluidLayer, LightData, ScatterStore};
 use super::overrides::ChunkOverrides;
 use super::tags::{BiomeId, ChunkTags, ZoneId};
 use super::storage::ChunkStorage;

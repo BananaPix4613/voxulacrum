@@ -39,6 +39,8 @@ pub enum NodeCategory {
     Biome,
     /// Library graph references.
     Library,
+    /// Foliage placement (DetailGraph).
+    Foliage,
     /// Terminal output.
     Output,
 }
@@ -434,6 +436,90 @@ impl Default for YBandParams {
     fn default() -> Self { Self { min: 0.0, max: 64.0 } }
 }
 
+/// Parameters for [`NodeKind::PoissonDistribution`]: blue-noise candidate points
+/// over the chunk's XZ footprint.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PoissonDistributionParams {
+    /// Per-node seed (combined with world seed + chunk for determinism).
+    pub seed: u32,
+    /// Minimum spacing between points, world units.
+    pub radius: f32,
+    /// Per-point positional jitter as a fraction of `radius` (`0..1`).
+    pub jitter: f32,
+}
+impl Default for PoissonDistributionParams {
+    fn default() -> Self { Self { seed: 0, radius: 4.0, jitter: 0.6 } }
+}
+
+/// Parameters for [`NodeKind::SurfaceFilter`]: keep candidates whose surface is
+/// shallow enough, within a height band, and (optionally) on allowed materials.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SurfaceFilterParams {
+    /// Max surface slope to keep (steeper rejected).
+    pub max_slope: f32,
+    /// Minimum surface world-Y to keep.
+    pub min_height: f32,
+    /// Maximum surface world-Y to keep.
+    pub max_height: f32,
+    /// Allowed surface materials. Empty = any solid surface.
+    pub materials: Vec<voxel_core::MaterialId>,
+}
+impl Default for SurfaceFilterParams {
+    fn default() -> Self {
+        Self { max_slope: 1.0, min_height: -1024.0, max_height: 1024.0, materials: Vec::new() }
+    }
+}
+
+/// Parameters for [`NodeKind::BiomeContextMask`]: keep only candidates whose
+/// column is assigned this biome id.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct BiomeContextMaskParams {
+    /// Biome id candidates must match.
+    pub biome: u16,
+}
+
+/// Parameters for [`NodeKind::SpeciesPicker`]: assign each candidate a species
+/// index by weighted random choice.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SpeciesPickerParams {
+    /// Per-node seed.
+    pub seed: u32,
+    /// Weight per species index (`weights[i]` weights species `i`).
+    pub weights: Vec<f32>,
+}
+impl Default for SpeciesPickerParams {
+    fn default() -> Self { Self { seed: 0, weights: vec![1.0] } }
+}
+
+/// Parameters for [`NodeKind::PaintDensity`]: a Tier-1 terminal writing a detail
+/// (foliage paint) layer. The optional `SurfaceField` input modulates density.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PaintDensityParams {
+    /// Target detail layer id (app `DetailLayerId`).
+    pub layer_id: u16,
+    /// Species variant within the layer (`0` = none).
+    pub species: u8,
+    /// Base density `0..=255` (scaled by the optional input field).
+    pub density: u8,
+    /// Tint palette index.
+    pub tint: u8,
+}
+impl Default for PaintDensityParams {
+    fn default() -> Self { Self { layer_id: 0, species: 1, density: 255, tint: 0 } }
+}
+
+/// Parameters for [`NodeKind::ScatterPlace`]: a Tier-2/3 terminal writing scatter
+/// instances for each assigned candidate.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct ScatterPlaceParams {
+    /// Per-node seed (rotation/scale variation).
+    pub seed: u32,
+    /// Scatter type bucket (app `ScatterTypeId`).
+    pub type_id: u16,
+    /// Prefab to instance (app `PrefabId`).
+    pub prefab_id: u32,
+}
+
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -533,6 +619,19 @@ pub enum NodeKind {
     LibraryRef(LibraryRefParams),
     /// Terminal node; consumes one density input.
     Output(OutputParams),
+    // --- Foliage (DetailGraph) ---
+    /// Blue-noise candidate points over the chunk footprint.
+    PoissonDistribution(PoissonDistributionParams),
+    /// Filter candidate points by surface slope / height / material.
+    SurfaceFilter(SurfaceFilterParams),
+    /// Filter candidate points to a biome.
+    BiomeContextMask(BiomeContextMaskParams),
+    /// Assign each candidate a species by weighted choice.
+    SpeciesPicker(SpeciesPickerParams),
+    /// Tier-1 terminal: write a detail (foliage paint) layer.
+    PaintDensity(PaintDensityParams),
+    /// Tier-2/3 terminal: write scatter instances.
+    ScatterPlace(ScatterPlaceParams),
 }
 
 // Static pin layouts, shared by all instances of a kind.
@@ -600,6 +699,18 @@ const SURFACE_IN_REQUIRED: &[PinSpec] =
     &[PinSpec { name: "zone field", ty: PinType::SurfaceField, required: true }];
 const SURFACE_IN_BIOME: &[PinSpec] =
     &[PinSpec { name: "biome field", ty: PinType::SurfaceField, required: true }];
+const POSITIONS_IN: &[PinSpec] =
+    &[PinSpec { name: "points", ty: PinType::Positions, required: true }];
+const ASSIGNMENTS_OUT: &[PinSpec] =
+    &[PinSpec { name: "assignments", ty: PinType::Assignments, required: false }];
+const ASSIGNMENTS_IN: &[PinSpec] =
+    &[PinSpec { name: "assignments", ty: PinType::Assignments, required: true }];
+const SURFACE_IN_OPTIONAL: &[PinSpec] =
+    &[PinSpec { name: "density", ty: PinType::SurfaceField, required: false }];
+const PAINT_OUT: &[PinSpec] =
+    &[PinSpec { name: "paint", ty: PinType::PaintOutput, required: false }];
+const SCATTER_OUT: &[PinSpec] =
+    &[PinSpec { name: "scatter", ty: PinType::ScatterOutput, required: false }];
 
 impl NodeKind {
     /// Static descriptor (display, color, typed pins) for this kind.
@@ -610,6 +721,7 @@ impl NodeKind {
         const DOM: [u8;3]   = [0xff, 0x7c, 0xc4];
         const DENS: [u8;3]  = [0x6c, 0xc0, 0x6c];
         const OUT: [u8;3]   = [0xe0, 0x4c, 0x4c];
+        const FOLIAGE: [u8;3] = [0x6c, 0xb0, 0x4c];
         match self {
             // Sources - all four take an optional Vec3 position override.
             NodeKind::Perlin2D(_) => NodeDescriptor {
@@ -890,51 +1002,99 @@ impl NodeKind {
                 inputs: NO_PINS,
                 outputs: DENSITY_OUT,
             },
+            NodeKind::PoissonDistribution(_) => NodeDescriptor {
+                display_name: "Poisson Distribution",
+                category: NodeCategory::Foliage,
+                color: FOLIAGE,
+                inputs: NO_PINS,
+                outputs: POSITIONS_OUT,
+            },
+            NodeKind::SurfaceFilter(_) => NodeDescriptor {
+                display_name: "Surface Filter",
+                category: NodeCategory::Foliage,
+                color: FOLIAGE,
+                inputs: POSITIONS_IN,
+                outputs: POSITIONS_OUT,
+            },
+            NodeKind::BiomeContextMask(_) => NodeDescriptor {
+                display_name: "Biome Context Mask",
+                category: NodeCategory::Foliage,
+                color: FOLIAGE,
+                inputs: POSITIONS_IN,
+                outputs: POSITIONS_OUT,
+            },
+            NodeKind::SpeciesPicker(_) => NodeDescriptor {
+                display_name: "Species Picker",
+                category: NodeCategory::Foliage,
+                color: FOLIAGE,
+                inputs: POSITIONS_IN,
+                outputs: ASSIGNMENTS_OUT,
+            },
+            NodeKind::PaintDensity(_) => NodeDescriptor {
+                display_name: "Paint Density",
+                category: NodeCategory::Foliage,
+                color: FOLIAGE,
+                inputs: SURFACE_IN_OPTIONAL,
+                outputs: PAINT_OUT,
+            },
+            NodeKind::ScatterPlace(_) => NodeDescriptor {
+                display_name: "Scatter Place",
+                category: NodeCategory::Foliage,
+                color: FOLIAGE,
+                inputs: ASSIGNMENTS_IN,
+                outputs: SCATTER_OUT,
+            },
         }
     }
 
     /// Stable string identifier matching the serde `"type"` tag.
     pub fn type_name(&self) -> &'static str {
         match self {
-            NodeKind::Perlin2D(_)         => "Perlin2D",
-            NodeKind::Perlin3D(_)         => "Perlin3D",
-            NodeKind::Simplex2D(_)        => "Simplex2D",
-            NodeKind::Simplex3D(_)        => "Simplex3D",
-            NodeKind::Constant(_)         => "Constant",
-            NodeKind::WorldPos(_)         => "WorldPos",
-            NodeKind::WorldAxis(_)        => "WorldAxis",
-            NodeKind::Add(_)              => "Add",
-            NodeKind::Multiply(_)         => "Multiply",
-            NodeKind::Subtract(_)         => "Subtract",
-            NodeKind::Min(_)              => "Min",
-            NodeKind::Max(_)              => "Max",
-            NodeKind::Clamp(_)            => "Clamp",
-            NodeKind::Lerp(_)             => "Lerp",
-            NodeKind::Remap(_)            => "Remap",
-            NodeKind::Threshold(_)        => "Threshold",
-            NodeKind::CurveMapper(_)      => "CurveMapper",
-            NodeKind::DomainWarp(_)       => "DomainWarp",
-            NodeKind::Union(_)            => "Union",
-            NodeKind::Intersect(_)        => "Intersect",
-            NodeKind::DensitySubtract(_)  => "DensitySubtract",
-            NodeKind::Mix(_)              => "Mix",
-            NodeKind::Mask(_)             => "Mask",
-            NodeKind::Output(_)           => "Output",
-            NodeKind::ConstantMaterial(_) => "ConstantMaterial",
-            NodeKind::Layer(_)            => "Layer",
-            NodeKind::Queue(_)            => "Queue",
-            NodeKind::TerrainOutput(_)    => "TerrainOutput",
-            NodeKind::BuildTerrain(_)     => "BuildTerrain",
-            NodeKind::JitteredGrid(_)     => "JitteredGrid",
-            NodeKind::PoissonDisk(_)      => "PoissonDisk",
-            NodeKind::FindFlat(_)         => "FindFlat",
-            NodeKind::PlaceTree(_)        => "PlaceTree",
-            NodeKind::PlacePrefab(_)      => "PlacePrefab",
-            NodeKind::LibraryRef(_)       => "LibraryRef",
-            NodeKind::SurfaceNoise(_)     => "SurfaceNoise",
-            NodeKind::WorldOutput(_)      => "WorldOutput",
-            NodeKind::ZoneOutput(_)       => "ZoneOutput",
-            NodeKind::YBand(_)            => "YBand",
+            NodeKind::Perlin2D(_)            => "Perlin2D",
+            NodeKind::Perlin3D(_)            => "Perlin3D",
+            NodeKind::Simplex2D(_)           => "Simplex2D",
+            NodeKind::Simplex3D(_)           => "Simplex3D",
+            NodeKind::Constant(_)            => "Constant",
+            NodeKind::WorldPos(_)            => "WorldPos",
+            NodeKind::WorldAxis(_)           => "WorldAxis",
+            NodeKind::Add(_)                 => "Add",
+            NodeKind::Multiply(_)            => "Multiply",
+            NodeKind::Subtract(_)            => "Subtract",
+            NodeKind::Min(_)                 => "Min",
+            NodeKind::Max(_)                 => "Max",
+            NodeKind::Clamp(_)               => "Clamp",
+            NodeKind::Lerp(_)                => "Lerp",
+            NodeKind::Remap(_)               => "Remap",
+            NodeKind::Threshold(_)           => "Threshold",
+            NodeKind::CurveMapper(_)         => "CurveMapper",
+            NodeKind::DomainWarp(_)          => "DomainWarp",
+            NodeKind::Union(_)               => "Union",
+            NodeKind::Intersect(_)           => "Intersect",
+            NodeKind::DensitySubtract(_)     => "DensitySubtract",
+            NodeKind::Mix(_)                 => "Mix",
+            NodeKind::Mask(_)                => "Mask",
+            NodeKind::Output(_)              => "Output",
+            NodeKind::ConstantMaterial(_)    => "ConstantMaterial",
+            NodeKind::Layer(_)               => "Layer",
+            NodeKind::Queue(_)               => "Queue",
+            NodeKind::TerrainOutput(_)       => "TerrainOutput",
+            NodeKind::BuildTerrain(_)        => "BuildTerrain",
+            NodeKind::JitteredGrid(_)        => "JitteredGrid",
+            NodeKind::PoissonDisk(_)         => "PoissonDisk",
+            NodeKind::FindFlat(_)            => "FindFlat",
+            NodeKind::PlaceTree(_)           => "PlaceTree",
+            NodeKind::PlacePrefab(_)         => "PlacePrefab",
+            NodeKind::LibraryRef(_)          => "LibraryRef",
+            NodeKind::SurfaceNoise(_)        => "SurfaceNoise",
+            NodeKind::WorldOutput(_)         => "WorldOutput",
+            NodeKind::ZoneOutput(_)          => "ZoneOutput",
+            NodeKind::YBand(_)               => "YBand",
+            NodeKind::PoissonDistribution(_) => "PoissonDistribution",
+            NodeKind::SurfaceFilter(_)       => "SurfaceFilter",
+            NodeKind::BiomeContextMask(_)    => "BiomeContextMask",
+            NodeKind::SpeciesPicker(_)       => "SpeciesPicker",
+            NodeKind::PaintDensity(_)        => "PaintDensity",
+            NodeKind::ScatterPlace(_)        => "ScatterPlace",
         }
     }
 }

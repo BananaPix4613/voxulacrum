@@ -383,7 +383,7 @@ fn worker_loop(
             req.snapshot.position.z,
             cache_key,
         );
-
+        
         if let Some((vertices, indices)) = cache::load_cached_mesh(&cache_path, cache_key, &mat_config.colors) {
             cache_config.stats.hits.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut lru) = cache_config.lru.lock() {

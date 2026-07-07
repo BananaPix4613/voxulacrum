@@ -300,6 +300,38 @@ impl InputState {
 }
 
 // ============================================================================
+// Pointer (mouse) state
+// ============================================================================
+
+/// Press/edge state for a single mouse button.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ButtonEdges {
+    pub pressed: bool,
+    pub just_pressed: bool,
+    pub just_released: bool,
+}
+
+/// Mouse cursor + button state, produced by `process_input_system` and consumed
+/// by world-interaction systems (picking, edits). Cursor is in window pixels.
+#[derive(Resource, Default)]
+pub struct PointerState {
+    /// Cursor position in window pixels; `None` until the first cursor move.
+    pub cursor: Option<(f32, f32)>,
+    pub left: ButtonEdges,
+    pub right: ButtonEdges,
+}
+
+impl PointerState {
+    /// Clear per-frame button edges (call at frame start).
+    fn begin_frame(&mut self) {
+        self.left.just_pressed = false;
+        self.left.just_released = false;
+        self.right.just_pressed = false;
+        self.right.just_released = false;
+    }
+}
+
+// ============================================================================
 // Raw event buffer (filled by main.rs event loop)
 // ============================================================================
 
@@ -309,6 +341,17 @@ pub enum RawInputEvent {
     KeyReleased(KeyCode),
     /// Scroll amount: positive = up (zoom in), negative = down (zoom out).
     Scroll(f32),
+    /// Cursor moved to window-pixel position `(x, y)`.
+    CursorMoved(f32, f32),
+    /// Mouse button changed: `true` = pressed, `false` = released.
+    MouseButton(PointerButton, bool),
+}
+
+/// A mouse button the game cares about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerButton {
+    Left,
+    Right,
 }
 
 /// Buffer of raw input events, drained each frame by `process_input_system`.
@@ -346,8 +389,10 @@ pub fn process_input_system(
     mut buffer: ResMut<RawInputBuffer>,
     map: Res<InputMap>,
     mut state: ResMut<InputState>,
+    mut pointer: ResMut<PointerState>,
 ) {
     state.begin_frame();
+    pointer.begin_frame();
 
     // Take ownership of buffered events to avoid double-borrow on `buffer`.
     let events = std::mem::take(&mut buffer.events);
@@ -362,6 +407,26 @@ pub fn process_input_system(
             }
             RawInputEvent::Scroll(amount) => {
                 buffer.scroll_accumulator += amount;
+            }
+            RawInputEvent::CursorMoved(x, y) => {
+                pointer.cursor = Some((x, y));
+            }
+            RawInputEvent::MouseButton(button, pressed) => {
+                let edges = match button {
+                    PointerButton::Left => &mut pointer.left,
+                    PointerButton::Right => &mut pointer.right,
+                };
+                if pressed {
+                    if !edges.pressed {
+                        edges.just_pressed = true;
+                    }
+                    edges.pressed = true;
+                } else {
+                    if edges.pressed {
+                        edges.just_released = true;
+                    }
+                    edges.pressed = false;
+                }
             }
         }
     }

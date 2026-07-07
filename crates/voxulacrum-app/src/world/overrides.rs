@@ -16,7 +16,8 @@ use std::collections::{HashMap, HashSet};
 use voxel_core::{FaceAxis, LocalPos, Voxel};
 
 use super::layers::{
-    DecalEntry, DetailLayerId, DetailTexel, FluidCell, ScatterInstance, StableInstanceId,
+    DecalEntry, DetailLayerId, DetailTexel, FluidCell, ScatterInstance, ScatterStore,
+    StableInstanceId,
 };
 
 /// All player edits to a single chunk, layered on top of generated content.
@@ -61,5 +62,54 @@ impl ChunkOverrides {
     /// Repeated edits to the same cell are last-write-wins for free.
     pub fn set_voxel(&mut self, index: usize, voxel: Voxel) {
         self.voxel_diffs.insert(LocalPos::from_index(index), voxel);
+    }
+
+    /// The effective scatter for a chunk after applying overrides: every
+    /// generated instance whose `stable_id` was not removed, followed by the
+    /// player-added instances. Shared by rendering and (later) interaction.
+    pub fn effective_scatter<'a>(
+        &'a self,
+        generated: &'a ScatterStore,
+    ) -> impl Iterator<Item = &'a ScatterInstance> + 'a {
+        generated
+            .by_type
+            .values()
+            .flatten()
+            .filter(move |si| !self.scatter_removed.contains(&si.stable_id))
+            .chain(self.scatter_added.iter())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::layers::{PrefabId, ScatterFlags, ScatterStore, ScatterTypeId};
+    
+    fn inst(stable: u64) -> ScatterInstance {
+        ScatterInstance {
+            anchor: LocalPos::from_index(0),
+            sub_offset: [0, 0, 0],
+            rotation_y: 0,
+            scale_variant: 0,
+            prefab_id: PrefabId(0),
+            flags: ScatterFlags::default(),
+            stable_id: StableInstanceId(stable),
+        }
+    }
+    
+    #[test]
+    fn effective_scatter_filters_removed_and_appends_added() {
+        let mut generated = ScatterStore::default();
+        generated.by_type.insert(ScatterTypeId(0), vec![inst(10), inst(20), inst(30)]);
+        
+        let mut ovr = ChunkOverrides::default();
+        ovr.scatter_removed.insert(StableInstanceId(20));
+        ovr.scatter_added.push(inst(99));
+        
+        let ids: Vec<u64> = ovr.effective_scatter(&generated).map(|si| si.stable_id.0).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&10) && ids.contains(&30));  // survivors
+        assert!(!ids.contains(&20));                         // removed
+        assert!(ids.contains(&99));                          // player-added
     }
 }

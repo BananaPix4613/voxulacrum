@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voxulacrum Shape Visualizer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #ui {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    background: rgba(0,0,0,0.7); border-radius: 8px; padding: 16px;
+    backdrop-filter: blur(8px); min-width: 220px;
+  }
+  #ui h2 { font-size: 14px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  .shape-btn {
+    display: block; width: 100%; padding: 8px 12px; margin-bottom: 4px;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+    color: #ccc; border-radius: 4px; cursor: pointer; text-align: left; font-size: 13px;
+    transition: all 0.15s;
+  }
+  .shape-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+  .shape-btn.active { background: rgba(100,180,255,0.2); border-color: rgba(100,180,255,0.5); color: #fff; }
+  #info {
+    position: absolute; bottom: 16px; left: 16px; z-index: 10;
+    background: rgba(0,0,0,0.7); border-radius: 8px; padding: 16px;
+    backdrop-filter: blur(8px); max-width: 400px; font-size: 13px; line-height: 1.5;
+  }
+  #info h3 { color: #7cb8ff; margin-bottom: 6px; }
+  #info .verts { color: #aaa; font-family: monospace; font-size: 12px; }
+  #controls {
+    position: absolute; top: 16px; right: 16px; z-index: 10;
+    background: rgba(0,0,0,0.7); border-radius: 8px; padding: 12px;
+    backdrop-filter: blur(8px); font-size: 12px; color: #888;
+  }
+  label { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; cursor: pointer; }
+  input[type=checkbox] { accent-color: #7cb8ff; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h2>Shapes</h2>
+  <button class="shape-btn active" data-shape="micro_wedge">Micro Wedge</button>
+  <button class="shape-btn" data-shape="anti_tetra">Anti-Tetra (Chamfer)</button>
+  <button class="shape-btn" data-shape="slope">Slope</button>
+  <button class="shape-btn" data-shape="outer_corner">Outer Corner</button>
+  <button class="shape-btn" data-shape="inner_corner">Inner Corner Fill</button>
+  <button class="shape-btn" data-shape="vert_wedge">Vertical Wedge</button>
+  <button class="shape-btn" data-shape="compound">Compound</button>
+  <button class="shape-btn" data-shape="full_block">Full Block</button>
+</div>
+
+<div id="controls">
+  <label><input type="checkbox" id="showWireframe" checked> Wireframe</label>
+  <label><input type="checkbox" id="showGhost" checked> Ghost cube</label>
+  <label><input type="checkbox" id="showLabels" checked> Corner labels</label>
+  <label><input type="checkbox" id="autoRotate" checked> Auto-rotate</label>
+  <div style="margin-top:8px; color:#666;">Drag to orbit &bull; Scroll to zoom</div>
+</div>
+
+<div id="info">
+  <h3 id="shapeName">Micro Wedge</h3>
+  <div id="shapeDesc"></div>
+  <div id="shapeVerts" class="verts" style="margin-top:6px;"></div>
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+// ============================================================================
+// Shape definitions (matching shape_catalog.rs)
+// ============================================================================
+// Corner names: A=(0,0,0) B=(1,0,0) C=(1,1,0) D=(0,1,0) E=(0,0,1) F=(1,0,1) G=(1,1,1) H=(0,1,1)
+const V = {
+  A: [0,0,0], B: [1,0,0], C: [1,1,0], D: [0,1,0],
+  E: [0,0,1], F: [1,0,1], G: [1,1,1], H: [0,1,1]
+};
+
+const SHAPES = {
+  micro_wedge: {
+    name: "Micro Wedge (Corner Tetrahedron)",
+    desc: "The smallest possible solid — a tetrahedron occupying one corner of the cube. Apex at D, base triangle A-C-H. Used when 3 faces are air and the opposite corner's edges are all air.",
+    faces: [
+      { verts: [V.D, V.C, V.A], color: [0.35, 0.65, 0.95], label: "Z=0 face" },
+      { verts: [V.D, V.H, V.C], color: [0.45, 0.75, 0.95], label: "Y=1 face (top)" },
+      { verts: [V.D, V.A, V.H], color: [0.30, 0.60, 0.90], label: "X=0 face" },
+      { verts: [V.A, V.C, V.H], color: [0.90, 0.55, 0.25], label: "Diagonal base (always)" },
+    ],
+    corners: ["D", "A", "C", "H"]
+  },
+  anti_tetra: {
+    name: "Anti-Tetra (Corner Chamfer)",
+    desc: "A full cube with one corner chamfered off. Corner A=(0,0,0) is removed, leaving a diagonal triangular face. Used when all faces are solid but one corner is air with its 3 edges solid.",
+    faces: [
+      // 5 quad faces (as two tris each) + 1 diagonal tri
+      { verts: [V.B, V.C, V.D], color: [0.35, 0.65, 0.95], label: "Z=0 quad part1" },
+      { verts: [V.B, V.D, V.E], color: [0.35, 0.65, 0.95], label: "Z=0 quad part2" }, // actually this is the chamfer approach
+      // Simplification: show the key chamfer face + remaining faces
+      { verts: [V.D, V.C, V.G], color: [0.30, 0.60, 0.90], label: "+Y top part1" },
+      { verts: [V.D, V.G, V.H], color: [0.30, 0.60, 0.90], label: "+Y top part2" },
+      { verts: [V.F, V.G, V.C], color: [0.35, 0.63, 0.88], label: "+X part1" },
+      { verts: [V.F, V.C, V.B], color: [0.35, 0.63, 0.88], label: "+X part2" },
+      { verts: [V.E, V.H, V.G], color: [0.32, 0.62, 0.92], label: "+Z part1" },
+      { verts: [V.E, V.G, V.F], color: [0.32, 0.62, 0.92], label: "+Z part2" },
+      { verts: [V.E, V.D, V.H], color: [0.28, 0.58, 0.88], label: "-X part1" },
+      // -Y bottom: B, F, E (triangle, not full quad since A is removed)
+      { verts: [V.B, V.F, V.E], color: [0.25, 0.55, 0.85], label: "-Y bottom (trimmed)" },
+      // -Z back: B, D, C → but D-B edge doesn't exist on a cube... let me redo properly
+      // Chamfer diagonal face
+      { verts: [V.B, V.E, V.D], color: [0.90, 0.55, 0.25], label: "Chamfer face (diagonal)" },
+    ],
+    corners: ["B","C","D","E","F","G","H"]
+  },
+  slope: {
+    name: "Slope (Ramp)",
+    desc: "Half-block ramp. The plane y + z = 1 cuts the cube, keeping corners A, B, C, D below/behind the cut. Connects to a surface going uphill in the +Z direction.",
+    faces: [
+      { verts: [V.A, V.C, V.D], color: [0.35, 0.65, 0.95], label: "Z=0 back face" },
+      { verts: [V.A, V.B, V.C], color: [0.35, 0.65, 0.95], label: "Z=0 back face 2" },
+      { verts: [V.A, V.D, V.E], color: [0.30, 0.60, 0.90], label: "X=0 side tri" },
+      { verts: [V.B, V.F, V.C], color: [0.32, 0.62, 0.92], label: "X=1 side tri" },
+      { verts: [V.A, V.E, V.F], color: [0.25, 0.55, 0.85], label: "-Y bottom part1" },
+      { verts: [V.A, V.F, V.B], color: [0.25, 0.55, 0.85], label: "-Y bottom part2" },
+      { verts: [V.D, V.C, V.F], color: [0.90, 0.55, 0.25], label: "Slope face part1" },
+      { verts: [V.D, V.F, V.E], color: [0.90, 0.55, 0.25], label: "Slope face part2" },
+    ],
+    corners: ["A","B","C","D","E","F"]
+  },
+  outer_corner: {
+    name: "Outer Corner",
+    desc: "Slope corner piece — the intersection of two perpendicular slopes. A triangular pyramid occupying one octant. Apex at D, base triangle A-B-E.",
+    faces: [
+      { verts: [V.D, V.B, V.A], color: [0.35, 0.65, 0.95], label: "Z=0 face" },
+      { verts: [V.D, V.A, V.E], color: [0.30, 0.60, 0.90], label: "X=0 face" },
+      { verts: [V.A, V.B, V.E], color: [0.25, 0.55, 0.85], label: "-Y bottom" },
+      { verts: [V.D, V.E, V.B], color: [0.90, 0.55, 0.25], label: "Slope face (diagonal)" },
+    ],
+    corners: ["D","A","B","E"]
+  },
+  inner_corner: {
+    name: "Inner Corner Fill",
+    desc: "Fills the concave gap where two slopes meet at an inside corner. A cube with one corner (G) removed by the diagonal plane. The complement of an outer corner.",
+    faces: [
+      // Full block minus corner G=(1,1,1). Diagonal face cuts through C, H, F.
+      { verts: [V.A, V.B, V.C], color: [0.35, 0.65, 0.95], label: "Z=0 part1" },
+      { verts: [V.A, V.C, V.D], color: [0.35, 0.65, 0.95], label: "Z=0 part2" },
+      { verts: [V.A, V.D, V.H], color: [0.30, 0.60, 0.90], label: "X=0 part1" },
+      { verts: [V.A, V.H, V.E], color: [0.30, 0.60, 0.90], label: "X=0 part2" },
+      { verts: [V.A, V.E, V.F], color: [0.25, 0.55, 0.85], label: "-Y bottom part1" },
+      { verts: [V.A, V.F, V.B], color: [0.25, 0.55, 0.85], label: "-Y bottom part2" },
+      { verts: [V.D, V.C, V.B], color: [0.32, 0.62, 0.88], label: "+Y top (trimmed)" },
+      // The trimmed +Z face
+      { verts: [V.E, V.H, V.F], color: [0.28, 0.58, 0.88], label: "+Z (trimmed tri)" },
+      // The trimmed +X face
+      { verts: [V.B, V.F, V.C], color: [0.33, 0.63, 0.90], label: "+X (trimmed tri)" },
+      // Diagonal cut face
+      { verts: [V.C, V.F, V.H], color: [0.90, 0.55, 0.25], label: "Diagonal cut face" },
+    ],
+    corners: ["A","B","C","D","E","F","H"]
+  },
+  vert_wedge: {
+    name: "Vertical Wedge",
+    desc: "A vertical edge chamfer. The plane x = y cuts the cube diagonally on the vertical axis, keeping corners where x <= y. Used for vertical slope-to-slope transitions.",
+    faces: [
+      { verts: [V.A, V.D, V.H], color: [0.30, 0.60, 0.90], label: "X=0 part1" },
+      { verts: [V.A, V.H, V.E], color: [0.30, 0.60, 0.90], label: "X=0 part2" },
+      { verts: [V.A, V.E, V.D], color: [0.35, 0.65, 0.95], label: "Z=0 tri" },
+      { verts: [V.D, V.E, V.H], color: [0.32, 0.62, 0.92], label: "Z=1 tri" },
+      { verts: [V.D, V.A, V.E], color: [0.90, 0.55, 0.25], label: "Diagonal face part1" },
+      { verts: [V.D, V.E, V.H], color: [0.90, 0.55, 0.25], label: "Diagonal face part2" },
+    ],
+    corners: ["A","D","E","H"]
+  },
+  compound: {
+    name: "Compound (Slope + Vert Wedge)",
+    desc: "Intersection of a slope and a vertical wedge — a complex transition piece. Surviving corners: A, C, D, E. Has both a slope face and a vertical diagonal.",
+    faces: [
+      { verts: [V.D, V.E, V.C], color: [0.90, 0.55, 0.25], label: "Slope face" },
+      { verts: [V.A, V.D, V.C], color: [0.90, 0.40, 0.20], label: "Vertical diagonal" },
+      { verts: [V.A, V.E, V.D], color: [0.30, 0.60, 0.90], label: "-X face" },
+      { verts: [V.A, V.C, V.E], color: [0.25, 0.55, 0.85], label: "Bottom/back base" },
+    ],
+    corners: ["A","C","D","E"]
+  },
+  full_block: {
+    name: "Full Block",
+    desc: "Standard voxel cube. All 8 corners present, 6 quad faces. Used for interior voxels with no exposed diagonal geometry.",
+    faces: [
+      { verts: [V.A, V.B, V.C], color: [0.35, 0.65, 0.95], label: "-Z part1" },
+      { verts: [V.A, V.C, V.D], color: [0.35, 0.65, 0.95], label: "-Z part2" },
+      { verts: [V.E, V.H, V.G], color: [0.32, 0.62, 0.92], label: "+Z part1" },
+      { verts: [V.E, V.G, V.F], color: [0.32, 0.62, 0.92], label: "+Z part2" },
+      { verts: [V.A, V.D, V.H], color: [0.30, 0.60, 0.90], label: "-X part1" },
+      { verts: [V.A, V.H, V.E], color: [0.30, 0.60, 0.90], label: "-X part2" },
+      { verts: [V.B, V.F, V.G], color: [0.33, 0.63, 0.90], label: "+X part1" },
+      { verts: [V.B, V.G, V.C], color: [0.33, 0.63, 0.90], label: "+X part2" },
+      { verts: [V.D, V.C, V.G], color: [0.38, 0.68, 0.95], label: "+Y part1" },
+      { verts: [V.D, V.G, V.H], color: [0.38, 0.68, 0.95], label: "+Y part2" },
+      { verts: [V.A, V.E, V.F], color: [0.25, 0.55, 0.85], label: "-Y part1" },
+      { verts: [V.A, V.F, V.B], color: [0.25, 0.55, 0.85], label: "-Y part2" },
+    ],
+    corners: ["A","B","C","D","E","F","G","H"]
+  }
+};
+
+// ============================================================================
+// 3D Rendering Engine (pure canvas, no dependencies)
+// ============================================================================
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Camera state
+let camYaw = 0.6, camPitch = 0.45, camDist = 3.2;
+let dragging = false, lastMX = 0, lastMY = 0;
+let currentShape = 'micro_wedge';
+
+canvas.addEventListener('mousedown', e => { dragging = true; lastMX = e.clientX; lastMY = e.clientY; });
+canvas.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  camYaw += (e.clientX - lastMX) * 0.008;
+  camPitch += (e.clientY - lastMY) * 0.008;
+  camPitch = Math.max(-1.2, Math.min(1.2, camPitch));
+  lastMX = e.clientX; lastMY = e.clientY;
+});
+canvas.addEventListener('mouseup', () => dragging = false);
+canvas.addEventListener('mouseleave', () => dragging = false);
+canvas.addEventListener('wheel', e => {
+  camDist *= e.deltaY > 0 ? 1.08 : 0.92;
+  camDist = Math.max(1.5, Math.min(8, camDist));
+});
+
+// Button handlers
+document.querySelectorAll('.shape-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.shape-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentShape = btn.dataset.shape;
+    updateInfo();
+  });
+});
+
+function updateInfo() {
+  const s = SHAPES[currentShape];
+  document.getElementById('shapeName').textContent = s.name;
+  document.getElementById('shapeDesc').textContent = s.desc;
+  document.getElementById('shapeVerts').textContent = 'Corners: ' + s.corners.join(', ') +
+    '\nTriangles: ' + s.faces.length;
+}
+updateInfo();
+
+// Matrix / vector math
+function sub(a, b) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function cross(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function dot(a, b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function normalize(v) { const l = Math.sqrt(dot(v,v)); return l>0?[v[0]/l,v[1]/l,v[2]/l]:[0,1,0]; }
+function add(a, b) { return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
+function scale(v, s) { return [v[0]*s, v[1]*s, v[2]*s]; }
+
+function project(p, eye, right, up, fwd) {
+  const rel = sub(p, eye);
+  const x = dot(rel, right);
+  const y = dot(rel, up);
+  const z = dot(rel, fwd);
+  if (z < 0.01) return null;
+  const fov = 2.0;
+  const sx = W/2 + (x / z) * fov * W/2;
+  const sy = H/2 - (y / z) * fov * W/2;
+  return [sx, sy, z];
+}
+
+// ============================================================================
+// Render loop
+// ============================================================================
+let t0 = performance.now();
+
+function render() {
+  requestAnimationFrame(render);
+  const now = performance.now();
+  const dt = (now - t0) / 1000;
+
+  if (document.getElementById('autoRotate').checked && !dragging) {
+    camYaw += dt * 0.3;
+  }
+  t0 = now;
+
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, W, H);
+
+  // Camera
+  const center = [0.5, 0.5, 0.5];
+  const eyeX = center[0] + camDist * Math.cos(camPitch) * Math.sin(camYaw);
+  const eyeY = center[1] + camDist * Math.sin(camPitch);
+  const eyeZ = center[2] + camDist * Math.cos(camPitch) * Math.cos(camYaw);
+  const eye = [eyeX, eyeY, eyeZ];
+
+  const fwd = normalize(sub(center, eye));
+  const worldUp = [0, 1, 0];
+  const right = normalize(cross(fwd, worldUp));
+  const up = cross(right, fwd);
+
+  const showGhost = document.getElementById('showGhost').checked;
+  const showWire = document.getElementById('showWireframe').checked;
+  const showLabels = document.getElementById('showLabels').checked;
+
+  // Collect all triangles for depth sorting
+  const tris = [];
+  const shape = SHAPES[currentShape];
+
+  // Ghost cube edges
+  if (showGhost) {
+    const edges = [
+      [V.A,V.B],[V.B,V.C],[V.C,V.D],[V.D,V.A], // front
+      [V.E,V.F],[V.F,V.G],[V.G,V.H],[V.H,V.E], // back
+      [V.A,V.E],[V.B,V.F],[V.C,V.G],[V.D,V.H], // connecting
+    ];
+    for (const [a, b] of edges) {
+      const pa = project(a, eye, right, up, fwd);
+      const pb = project(b, eye, right, up, fwd);
+      if (pa && pb) {
+        tris.push({ type: 'edge', p: [pa, pb], z: (pa[2]+pb[2])/2 - 0.001 });
+      }
+    }
+  }
+
+  // Shape faces
+  for (const face of shape.faces) {
+    const projected = face.verts.map(v => project(v, eye, right, up, fwd));
+    if (projected.some(p => !p)) continue;
+
+    // Face normal for lighting
+    const e1 = sub(face.verts[1], face.verts[0]);
+    const e2 = sub(face.verts[2], face.verts[0]);
+    const n = normalize(cross(e1, e2));
+
+    // Backface cull
+    const viewDir = normalize(sub(eye, face.verts[0]));
+    const facing = dot(n, viewDir);
+    if (facing < 0) continue;
+
+    const avgZ = (projected[0][2] + projected[1][2] + projected[2][2]) / 3;
+
+    // Lighting
+    const lightDir = normalize([0.4, 0.8, 0.6]);
+    const diff = Math.max(0, dot(n, lightDir));
+    const ambient = 0.3;
+    const brightness = ambient + diff * 0.7;
+
+    const c = face.color;
+    const r = Math.min(255, Math.floor(c[0] * brightness * 255));
+    const g = Math.min(255, Math.floor(c[1] * brightness * 255));
+    const b = Math.min(255, Math.floor(c[2] * brightness * 255));
+
+    tris.push({
+      type: 'tri',
+      p: projected,
+      z: avgZ,
+      fillColor: `rgb(${r},${g},${b})`,
+      strokeColor: showWire ? `rgba(255,255,255,0.4)` : null,
+      label: face.label,
+      isOrange: c[0] > 0.7 && c[1] < 0.7,
+    });
+  }
+
+  // Depth sort (painter's algorithm, far first)
+  tris.sort((a, b) => b.z - a.z);
+
+  // Draw
+  for (const item of tris) {
+    if (item.type === 'edge') {
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(item.p[0][0], item.p[0][1]);
+      ctx.lineTo(item.p[1][0], item.p[1][1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      ctx.fillStyle = item.fillColor;
+      ctx.beginPath();
+      ctx.moveTo(item.p[0][0], item.p[0][1]);
+      ctx.lineTo(item.p[1][0], item.p[1][1]);
+      ctx.lineTo(item.p[2][0], item.p[2][1]);
+      ctx.closePath();
+      ctx.fill();
+
+      if (item.strokeColor) {
+        ctx.strokeStyle = item.isOrange ? 'rgba(255,200,100,0.6)' : item.strokeColor;
+        ctx.lineWidth = item.isOrange ? 2 : 1;
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Corner labels
+  if (showLabels) {
+    const cornerPositions = {
+      A: [0,0,0], B: [1,0,0], C: [1,1,0], D: [0,1,0],
+      E: [0,0,1], F: [1,0,1], G: [1,1,1], H: [0,1,1]
+    };
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    for (const [name, pos] of Object.entries(cornerPositions)) {
+      const isActive = shape.corners.includes(name);
+      // Offset label slightly outward from center
+      const dir = normalize(sub(pos, center));
+      const labelPos = add(pos, scale(dir, 0.12));
+      const pp = project(labelPos, eye, right, up, fwd);
+      if (!pp) continue;
+
+      if (isActive) {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 3;
+        ctx.strokeText(name, pp[0], pp[1]);
+        ctx.fillText(name, pp[0], pp[1]);
+
+        // Draw corner dot
+        ctx.beginPath();
+        ctx.arc(pp[0], pp[1] + 8, 3, 0, Math.PI * 2);
+        ctx.fillStyle = '#7cb8ff';
+        ctx.fill();
+      } else {
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.fillText(name, pp[0], pp[1]);
+      }
+    }
+
+    // Axis labels
+    const axisEnds = [
+      { pos: [1.4, 0, 0], label: '+X', color: '#ff6666' },
+      { pos: [0, 1.4, 0], label: '+Y', color: '#66ff66' },
+      { pos: [0, 0, 1.4], label: '+Z', color: '#6666ff' },
+    ];
+    ctx.font = 'bold 13px monospace';
+    for (const ax of axisEnds) {
+      const pp = project(ax.pos, eye, right, up, fwd);
+      if (!pp) continue;
+      ctx.fillStyle = ax.color;
+      ctx.fillText(ax.label, pp[0], pp[1]);
+
+      // Axis line
+      const origin = project([0,0,0], eye, right, up, fwd);
+      if (origin) {
+        ctx.strokeStyle = ax.color + '40';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(origin[0], origin[1]);
+        ctx.lineTo(pp[0], pp[1]);
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+render();
+</script>
+</body>
+</html>

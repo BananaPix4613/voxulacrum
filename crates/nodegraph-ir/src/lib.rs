@@ -63,6 +63,8 @@ pub use node::{
     TerrainOutputParams, ThresholdParams, UnionParams, WorldAxisParams, WorldPosParams,
     BuildTerrainParams, JitteredGridParams, PoissonDiskParams, FindFlatParams,
     PlaceTreeParams, PlacePrefabParams, WorldOutputParams, ZoneOutputParams, YBandParams,
+    PoissonDistributionParams, SurfaceFilterParams, BiomeContextMaskParams,
+    SpeciesPickerParams, PaintDensityParams, ScatterPlaceParams,
 };
 pub use pin::PinType;
 pub use prefab::{PrefabTemplate, PrefabVoxel};

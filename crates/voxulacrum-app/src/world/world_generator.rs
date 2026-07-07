@@ -11,15 +11,21 @@
 //! temporary copy. The two containers are kept distinct on purpose so each can
 //! be tuned for its side of the boundary.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::IVec3;
-use nodegraph_eval::{ChunkEvaluation, EvalContext, WorldEvaluator};
+use nodegraph_eval::{ChunkEvaluation, EvalContext, PaintLayer, ScatterBucket, WorldEvaluator};
 use nodegraph_ir::{Graph, NodeKind};
 use serde::Deserialize;
 use smallvec::SmallVec;
+use voxel_core::LocalPos;
 
 use crate::params::TerrainGenParams;
+use super::layers::{
+    DetailLayer, DetailLayerId, DetailLayers, DetailTexel,
+    PrefabId, ScatterFlags, ScatterInstance, ScatterStore, ScatterTypeId, StableInstanceId,
+};
 use super::storage::ChunkStorage;
 use super::storage_boundary::StorageBoundary;
 use super::tags::{BiomeId, ChunkTags, ZoneId};
@@ -127,7 +133,8 @@ impl WorldGenerator {
         let world_eval = WorldEvaluator::new(primary)
             .with_world(hierarchy.world)
             .with_zone(hierarchy.zone)
-            .with_biomes(hierarchy.biomes);
+            .with_biomes(hierarchy.biomes)
+            .with_biome_details(hierarchy.details);
         Self {
             world_eval,
             world_seed,
@@ -153,7 +160,12 @@ impl WorldGenerator {
             Ok(eval) => eval,
             Err(e) => {
                 log::warn!("graph eval failed for chunk {:?}: {}", position, e);
-                return GeneratedChunk { storage: ChunkStorage::new_air(), tags: ChunkTags::default() };
+                return GeneratedChunk {
+                    storage: ChunkStorage::new_air(),
+                    tags: ChunkTags::default(),
+                    detail_layers: DetailLayers::default(),
+                    scatter: ScatterStore::default(),
+                };
             }
         };
         // The harness composited the biome terrain for this chunk.
@@ -168,7 +180,9 @@ impl WorldGenerator {
         super::slab_smoothing::smooth_slabs(&mut storage, self.traversal_smoothing_distance);
         
         let tags = self.derive_tags(&eval);
-        GeneratedChunk { storage, tags }
+        let detail_layers = paint_to_detail_layers(&eval.foliage.paint);
+        let scatter = scatter_to_store(&eval.foliage.scatter);
+        GeneratedChunk { storage, tags, detail_layers, scatter }
     }
 
     /// Aggregate a chunk evaluation's per-column zone/biome assignments into
@@ -209,12 +223,60 @@ fn distinct_sorted(ids: &[u16]) -> Vec<u16> {
     v
 }
 
-/// The product of generating one chunk: its voxel storage and identity tags.
+/// Translate the evaluator's foliage paint (eval domain) into the chunk's
+/// `DetailLayers` (storage domain) - a field-for-field copy per column.
+fn paint_to_detail_layers(paint: &[PaintLayer]) -> DetailLayers {
+    let mut layers: SmallVec<[DetailLayer; 4]> = SmallVec::new();
+    for pl in paint {
+        let mut layer = DetailLayer::new(DetailLayerId(pl.layer_id));
+        for (i, t) in pl.texels.iter().enumerate() {
+            layer.map[i] = DetailTexel {
+                species: t.species,
+                density: t.density,
+                tint: t.tint,
+                flags: t.flags,
+            };
+        }
+        layers.push(layer);
+    }
+    DetailLayers { layers }
+}
+
+/// Translate the evaluator's scatter buckets (eval domain) into the chunk's
+/// `ScatterStore` (storage domain, the generated set) - a field-for-field copy
+/// per instance, carrying the generated `stable_id` so player overrides can
+/// reference instances and identity survives regeneration.
+fn scatter_to_store(scatter: &[ScatterBucket]) -> ScatterStore {
+    let mut by_type: HashMap<ScatterTypeId, Vec<ScatterInstance>> = HashMap::new();
+    for bucket in scatter {
+        let instances = bucket.instances.iter().map(|fi| ScatterInstance {
+            anchor: LocalPos::new_unchecked(fi.anchor[0], fi.anchor[1] ,fi.anchor[2]),
+            sub_offset: fi.sub_offset,
+            rotation_y: fi.rotation_y,
+            scale_variant: fi.scale_variant,
+            prefab_id: PrefabId(fi.prefab_id),
+            flags: ScatterFlags(fi.flags),
+            stable_id: StableInstanceId(fi.stable_id),
+        });
+        by_type
+            .entry(ScatterTypeId(bucket.type_id))
+            .or_default()
+            .extend(instances);
+    }
+    ScatterStore { by_type }
+}
+
+/// The product of generating one chunk: its voxel storage and identity tags, and
+/// Tier-1 foliage paint.
 pub struct GeneratedChunk {
     /// Materialized voxel storage.
     pub storage: ChunkStorage,
     /// Zone/biome identity tags derived from the chunk's column evaluation.
     pub tags: ChunkTags,
+    /// Tier-1 foliage paint layers, translated from the evaluator's output.
+    pub detail_layers: DetailLayers,
+    /// Tier-2/3 scatter instances, translated from the evaluator's output.
+    pub scatter: ScatterStore,
 }
 
 /// Identifies one graph in the world hierarchy, for routing edits and
@@ -248,6 +310,10 @@ pub struct BiomeManifestEntry {
     pub id: u16,
     /// Biome graph file, relative to the manifest directory.
     pub graph: String,
+    /// Optional `DetailGraph` (foliage) file, relative to the manifest directory.
+    /// Absent => this biome produces no foliage.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// The graphs named by a [`WorldManifest`], loaded into memory.
@@ -255,6 +321,8 @@ struct LoadedHierarchy {
     world: Graph,
     zone: Graph,
     biomes: Vec<(u16, Graph)>,
+    /// Per-biome DetailGraphs (by biome id) for biomes that reference one.
+    details: Vec<(u16, Graph)>,
 }
 
 /// Read and parse one `*.graph.json` file.
@@ -273,13 +341,17 @@ fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, St
     let world = read_graph(&dir.join(&manifest.world))?;
     let zone = read_graph(&dir.join(&manifest.zone))?;
     let mut biomes = Vec::with_capacity(manifest.biomes.len());
+    let mut details = Vec::new();
     for entry in &manifest.biomes {
         biomes.push((entry.id, read_graph(&dir.join(&entry.graph))?));
+        if let Some(detail_file) = &entry.detail {
+            details.push((entry.id, read_graph(&dir.join(detail_file))?));
+        }
     }
     if biomes.is_empty() {
         return Err("world manifest lists no biomes".to_string());
     }
-    Ok(LoadedHierarchy { world, zone, biomes })
+    Ok(LoadedHierarchy { world, zone, biomes, details })
 }
 
 /// Load every editable graph in a world manifest, each with its hierarchy
@@ -375,9 +447,67 @@ mod tests {
     }
 
     #[test]
+    fn generate_chunk_is_deterministic() {
+        use crate::world::chunk::CHUNK_VOLUME;
+        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 7, 1)
+            .expect("world manifest must load");
+        let pos = IVec3::new(1, 0, 2);
+        let a = generator.generate_chunk(pos);
+        let b = generator.generate_chunk(pos);
+        // Full voxel compare (material + shape + flags) so slab-smoothing
+        // determinism is covered, not just occupancy.
+        let diffs = (0..CHUNK_VOLUME)
+            .filter(|&i| a.storage.voxel(i) != b.storage.voxel(i))
+            .count();
+        assert_eq!(diffs, 0, "generate_chunk non-deterministic: {diffs} voxels differ");
+    }
+
+    #[test]
     fn distinct_sorted_dedups_and_orders() {
         assert_eq!(distinct_sorted(&[2, 0, 2, 1, 0]), vec![0, 1, 2]);
         assert_eq!(distinct_sorted(&[]), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn paint_translates_to_detail_layers() {
+        use nodegraph_eval::{PaintLayer, PaintTexel};
+        let mut texels = Box::new([PaintTexel::default(); 32 * 32]);
+        texels[5] = PaintTexel { species: 2, density: 200, tint: 1, flags: 0 };
+        let dl = paint_to_detail_layers(&[PaintLayer { layer_id: 3, texels }]);
+        assert_eq!(dl.layers.len(), 1);
+        assert_eq!(dl.layers[0].layer_id, DetailLayerId(3));
+        assert_eq!(dl.layers[0].map[5].density, 200);
+        assert_eq!(dl.layers[0].map[5].species, 2);
+        assert_eq!(dl.layers[0].map[0].density, 0); // untouched column
+    }
+
+    #[test]
+    fn scatter_translates_to_store_carrying_stable_id() {
+        use nodegraph_eval::FoliageInstance;
+        let bucket = ScatterBucket {
+            type_id: 4,
+            instances: vec![FoliageInstance {
+                anchor: [3, 17, 9],
+                sub_offset: [-2, 0, 5],
+                rotation_y: 200,
+                scale_variant: 1,
+                prefab_id: 42,
+                stable_id: 0xDEAD_BEEF,
+                flags: ScatterFlags::HARVESTABLE,
+            }],
+        };
+        let store = scatter_to_store(&[bucket]);
+        let instances = store.by_type.get(&ScatterTypeId(4)).expect("bucket present");
+        assert_eq!(instances.len(), 1);
+        let si = instances[0];
+        assert_eq!(si.anchor, LocalPos::new_unchecked(3, 17, 9));
+        assert_eq!(si.sub_offset, [-2, 0, 5]);
+        assert_eq!(si.rotation_y, 200);
+        assert_eq!(si.scale_variant, 1);
+        assert_eq!(si.prefab_id, PrefabId(42));
+        assert_eq!(si.flags.0, ScatterFlags::HARVESTABLE);
+        assert_eq!(si.stable_id, StableInstanceId(0xDEAD_BEEF)); // now carried
+        assert!(store.by_type.get(&ScatterTypeId(0)).is_none());
     }
 
     #[test]
@@ -404,5 +534,34 @@ mod tests {
             .expect("world.manifest.json and its graphs must load");
         // The hierarchy composites a chunk without panicking.
         let _ = generator.generate_chunk(IVec3::ZERO);
+    }
+
+    #[test]
+    fn manifest_parses_biome_detail() {
+        let json = r#"{
+            "world": "world.graph.json",
+            "zone": "zone.graph.json",
+            "biomes": [
+                { "id": 0, "graph": "biome_meadow.graph.json", "detail": "biome_meadow.detail.json" },
+                { "id": 1, "graph": "biome_rocky.graph.json" }
+            ]
+        }"#;
+        let m: WorldManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.biomes[0].detail.as_deref(), Some("biome_meadow.detail.json"));
+        assert_eq!(m.biomes[1].detail, None);
+    }
+
+    #[test]
+    fn meadow_detail_graph_has_valid_scatter_chain() {
+        // `read_graph` runs `Graph::from_json`, which validates kind-rules (a
+        // Detail graph must have >= 1 paint/scatter terminal). A successful load
+        // plus a present ScatterPlace proves the authored chain is well-formed.
+        let path = graphs_dir().join("biome_meadow.detail.json");
+        let graph = read_graph(&path).expect("biome_meadow.detail.json must load and validate");
+        let has_scatter = graph
+            .nodes
+            .values()
+            .any(|n| matches!(n.kind, NodeKind::ScatterPlace(_)));
+        assert!(has_scatter, "meadow detail graph must contain a ScatterPlace terminal");
     }
 }

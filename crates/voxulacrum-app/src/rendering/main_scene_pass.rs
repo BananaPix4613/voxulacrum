@@ -2,7 +2,8 @@ use crate::rendering::cap_pass::CapPass;
 use crate::rendering::debug_lines::DebugLinePass;
 use crate::rendering::frustum::Frustum;
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::vegetation_pass::VegetationPass;
+use crate::rendering::detail_paint_pass::DetailPaintPass;
+use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::world::chunk::LoadedChunk;
 
@@ -23,8 +24,10 @@ pub struct MainScenePassNode<'a> {
     // Sub-passes
     pub cap_pass: &'a CapPass,
     pub cap_config: CapConfig,
-    pub vegetation_pass: &'a VegetationPass,
-    pub vegetation_pipeline: &'a wgpu::RenderPipeline,
+    pub detail_paint_pass: &'a DetailPaintPass,
+    pub detail_paint_pipeline: &'a wgpu::RenderPipeline,
+    pub scatter_pass: &'a ScatterPass,
+    pub scatter_pipeline: &'a wgpu::RenderPipeline,
     pub water_pass: &'a WaterPass,
     pub water_pipeline: &'a wgpu::RenderPipeline,
     pub debug_line_pass: &'a DebugLinePass,
@@ -109,23 +112,42 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
             pass.draw_indexed(0..self.cap_pass.index_count, 0, 0..1);
         }
 
-        // Vegetation - per-chunk instanced draws with frustum culling
-        if !self.hide_vegetation && !self.vegetation_pass.chunk_vegetation.is_empty() {
-            pass.set_pipeline(self.vegetation_pipeline);
+        // Tier-1 detail paint - GPU-generated blades from per-chunk density buffers
+        if !self.hide_vegetation && !self.detail_paint_pass.chunk_paint.is_empty() {
+            pass.set_pipeline(self.detail_paint_pipeline);
             pass.set_bind_group(0, self.uniform_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vegetation_pass.grass_vertex_buffer.slice(..));
+            pass.set_vertex_buffer(0, self.detail_paint_pass.blade_vertex_buffer.slice(..));
             pass.set_index_buffer(
-                self.vegetation_pass.grass_index_buffer.slice(..),
+                self.detail_paint_pass.blade_index_buffer.slice(..),
                 wgpu::IndexFormat::Uint32,
             );
-            for (&chunk_pos, veg) in &self.vegetation_pass.chunk_vegetation {
+            for (&chunk_pos, chunk) in &self.detail_paint_pass.chunk_paint {
                 if self.frustum.is_chunk_visible(chunk_pos) {
-                    pass.set_vertex_buffer(1, veg.instance_buffer.slice(..));
+                    pass.set_bind_group(1, &chunk.bind_group, &[]);
                     pass.draw_indexed(
-                        0..self.vegetation_pass.grass_index_count,
+                        0..self.detail_paint_pass.blade_index_count,
                         0,
-                        0..veg.instance_count,
+                        0..crate::rendering::detail_paint_pass::INSTANCES_PER_CHUNK,
                     );
+                }
+            }
+        }
+
+        // Tier-2/3 scatter - one instanced draw per prefab mesh, grouped by prefab
+        if !self.hide_vegetation && !self.scatter_pass.chunk_scatter.is_empty() {
+            pass.set_pipeline(self.scatter_pipeline);
+            pass.set_bind_group(0, self.uniform_bind_group, &[]);
+            for (prefab_idx, mesh) in self.scatter_pass.prefab_meshes.iter().enumerate() {
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                for (&chunk_pos, sc) in &self.scatter_pass.chunk_scatter {
+                    if !self.frustum.is_chunk_visible(chunk_pos) {
+                        continue;
+                    }
+                    if let Some(Some(insts)) = sc.by_prefab.get(prefab_idx) {
+                        pass.set_vertex_buffer(1, insts.instance_buffer.slice(..));
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..insts.instance_count);
+                    }
                 }
             }
         }
@@ -154,6 +176,14 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.draw(0..self.debug_line_pass.vertex_count, 0..1);
             }
+        }
+
+        // Pick highlight box - drawn whenever a voxel is picked (8b).
+        if let Some(ref vb) = self.debug_line_pass.highlight_buffer {
+            pass.set_pipeline(&self.debug_line_pass.pipeline);
+            pass.set_bind_group(0, self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.draw(0..self.debug_line_pass.highlight_count, 0..1);
         }
     }
 }

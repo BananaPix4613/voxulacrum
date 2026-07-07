@@ -1,5 +1,10 @@
 /target/
 /cache/
+/saves/
+/.claude/
+/.idea/
+*.log
+nul
 
 # Editor-made stray duplicate graphs (must not reintroduce obsolete nodes).
 * - Copy.json

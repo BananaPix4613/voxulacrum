@@ -246,7 +246,8 @@ impl ChunkStreamingManager {
 
         self.pool.spawn(move || {
             // Generate base terrain + identity tags.
-            let GeneratedChunk { mut storage, tags: generated_tags } = gen.generate_chunk(pos);
+            let GeneratedChunk { mut storage, tags: generated_tags, detail_layers, scatter } =
+                gen.generate_chunk(pos);
 
             // Overlay saved edits from this worker's cached read-only DB handle.
             let mut overrides = None;
@@ -276,7 +277,13 @@ impl ChunkStreamingManager {
                                         if !filtered.voxel_diffs.is_empty() {
                                             storage = crate::world::persistence::apply_overrides_to_storage(&storage, &filtered);
                                         }
-                                        overrides = Some(filtered);
+                                        // Scatter overrides now have a runtime consumer (Phase 5),
+                                        // so carry the player diff forward; without this, placed/
+                                        // removed props are lost on reload. (detail/fluid/decal
+                                        // still round-trip only, no consumer yet.)
+                                        filtered.scatter_removed = delta.scatter_removed;
+                                        filtered.scatter_added = delta.scatter_added;
+                                        overrides = if filtered.is_empty() { None } else { Some(filtered) };
                                     }
                                     ChunkEdits::Full(full) => {
                                         storage = full;
@@ -294,6 +301,8 @@ impl ChunkStreamingManager {
 
             let mut chunk = crate::world::chunk::LoadedChunk::new(pos, std::sync::Arc::new(storage));
             chunk.data.overrides = overrides;
+            chunk.data.detail_layers = detail_layers;
+            chunk.data.scatter_instances = scatter;
             // DB-persisted tags win for loaded chunks; otherwise use the freshly
             // generated tags.
             chunk.data.tags = loaded_tags.unwrap_or(generated_tags);

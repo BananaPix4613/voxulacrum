@@ -44,13 +44,14 @@ impl From<std::io::Error> for PersistError { fn from(e: std::io::Error) -> Self 
 
 // -- Format constants --------------------------------------------------------
 
-const BLOB_VERSION: u8 = 5; // v5 - multi-layer overrides + ChunkTags appended
+const BLOB_VERSION: u8 = 6; // v6 - scatter instances carry stable_id
 
-/// Bumped whenever the on-disk voxel encoding changes. A stored value older than
-/// this forces a one-shot save wipe on open (pre-release; saves are not migrated).
-const VOXEL_FORMAT_VERSION: u64 = 2;
+/// Bumped whenever the on-disk voxel/override encoding changes. A stored value
+/// older than this forces a one-shot save wipe on open (pre-release; saves are
+/// not migrated). v3: scatter instance gained a stable_id field.
+const VOXEL_FORMAT_VERSION: u64 = 3;
 
-// A v5 blob is `[BLOB_VERSION][variant_tag]<variant payload><tags section>`.
+// A v6 blob is `[BLOB_VERSION][variant_tag]<variant payload><tags section>`.
 // The variant payload is one of:
 //   TAG_DELTA          -> every ChunkOverrides field, each a u32-count-prefixed
 //                         section; map-backed sections are key-sorted so an
@@ -157,9 +158,9 @@ fn face_from_u8(v: u8) -> Result<FaceAxis, PersistError> {
     })
 }
 
-// A scatter instance encodes to a fixed 12 bytes:
+// A scatter instance encodes to a fixed 20 bytes:
 //   anchor index u16 | sub_offset 3xi8 | rotation_y u8 | scale_variant u8
-//   | prefab_id u32 | flags u8
+//   | prefab_id u32 | flags u8 | stable_id u64
 fn write_scatter_instance(buf: &mut Vec<u8>, inst: &ScatterInstance) {
     w_u16(buf, inst.anchor.to_index() as u16);
     buf.push(inst.sub_offset[0] as u8);
@@ -169,6 +170,7 @@ fn write_scatter_instance(buf: &mut Vec<u8>, inst: &ScatterInstance) {
     buf.push(inst.scale_variant);
     w_u32(buf, inst.prefab_id.0);
     buf.push(inst.flags.0);
+    w_u64(buf, inst.stable_id.0);
 }
 
 fn read_scatter_instance(r: &mut Reader) -> Result<ScatterInstance, PersistError> {
@@ -178,7 +180,8 @@ fn read_scatter_instance(r: &mut Reader) -> Result<ScatterInstance, PersistError
     let scale_variant = r.u8()?;
     let prefab_id = PrefabId(r.u32()?);
     let flags = ScatterFlags(r.u8()?);
-    Ok(ScatterInstance { anchor, sub_offset, rotation_y, scale_variant, prefab_id, flags })
+    let stable_id = StableInstanceId(r.u64()?);
+    Ok(ScatterInstance { anchor, sub_offset, rotation_y, scale_variant, prefab_id, flags, stable_id })
 }
 
 /// Encode all seven `ChunkOverrides` fields. Each is a `u32` count followed by
@@ -876,6 +879,7 @@ mod tests {
             scale_variant: 4,
             prefab_id: PrefabId(77),
             flags: ScatterFlags(ScatterFlags::PLAYER_PLACED),
+            stable_id: StableInstanceId(0x0123_4567_89AB_CDEF),
         });
         ovr.scatter_added.push(ScatterInstance {
             anchor: LocalPos::from_index(456),
@@ -884,6 +888,7 @@ mod tests {
             scale_variant: 0,
             prefab_id: PrefabId(1),
             flags: ScatterFlags::default(),
+            stable_id: StableInstanceId::default(),
         });
 
         ovr.detail_diffs.insert(

@@ -233,19 +233,23 @@ impl Graph {
     /// beyond the generic checks above (edge integrity, single-input,
     /// required-inputs, acyclicity).
     ///
-    /// This is a scaffold. The functional root-output node kinds for
-    /// World/Zone/Biome graphs (and the Detail scaffold) arrive in later
-    /// substeps, so there is nothing kind-specific to enforce yet and every
-    /// kind currently validates as a generic dataflow graph. The dispatch lives
-    /// here so a later substep adds one match arm rather than re-threading the
-    /// call site. Library graphs are intentionally rule-free (no single root).
-    fn validate_kind_rules(&self, _diags: &mut Vec<Diagnostic>) {
+    /// `DetailGraph`: a non-empty detail graph must terminate in at least one
+    /// `PaintDensity` or `ScatterPlace` writer (an empty detail graph is valid -
+    /// it produces no foliage). World/Zone/Biome root-output rules are still
+    /// scaffolded as generic dataflow; Library graphs are intentionally rule-free.
+    fn validate_kind_rules(&self, diags: &mut Vec<Diagnostic>) {
         match self.kind {
-            GraphKind::World
-            | GraphKind::Zone
-            | GraphKind::Biome
-            | GraphKind::Detail
-            | GraphKind::Library => {}
+            GraphKind::Detail => {
+                let has_terminal = self.nodes.values().any(|n| {
+                    matches!(n.kind, NodeKind::PaintDensity(_) | NodeKind::ScatterPlace(_))
+                });
+                if !self.nodes.is_empty() && !has_terminal {
+                    diags.push(Diagnostic::error(
+                        "DetailGraph has no PaintDensity or ScatterPlace terminal output",
+                    ));
+                }
+            }
+            GraphKind::World | GraphKind::Zone | GraphKind::Biome | GraphKind::Library => {}
         }
     }
 
@@ -342,5 +346,28 @@ mod tests {
         v.as_object_mut().unwrap().remove("kind");
         let g: Graph = serde_json::from_value(v).unwrap();
         assert_eq!(g.kind, GraphKind::Biome);
+    }
+
+
+    #[test]
+    fn empty_detail_graph_is_valid() {
+        let g = Graph::of_kind(GraphKind::Detail);
+        assert!(!g.has_errors());
+    }
+
+    #[test]
+    fn detail_graph_with_terminal_is_valid() {
+        use crate::node::PaintDensityParams;
+        let mut g = Graph::of_kind(GraphKind::Detail);
+        g.add_node(NodeKind::PaintDensity(PaintDensityParams::default()));
+        assert!(!g.has_errors());
+    }
+
+    #[test]
+    fn detail_graph_without_terminal_is_invalid() {
+        use crate::node::PoissonDistributionParams;
+        let mut g = Graph::of_kind(GraphKind::Detail);
+        g.add_node(NodeKind::PoissonDistribution(PoissonDistributionParams::default()));
+        assert!(g.has_errors());
     }
 }

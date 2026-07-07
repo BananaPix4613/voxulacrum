@@ -66,6 +66,12 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Output, "Terrain Output", || NodeKind::TerrainOutput(TerrainOutputParams::default())),
         (NodeCategory::Output, "World Output", || NodeKind::WorldOutput(WorldOutputParams::default())),
         (NodeCategory::Output, "Zone Output",  || NodeKind::ZoneOutput(ZoneOutputParams::default())),
+        (NodeCategory::Foliage, "Poisson Distribution", || NodeKind::PoissonDistribution(PoissonDistributionParams::default())),
+        (NodeCategory::Foliage, "Surface Filter", || NodeKind::SurfaceFilter(SurfaceFilterParams::default())),
+        (NodeCategory::Foliage, "Biome Context Mask", || NodeKind::BiomeContextMask(BiomeContextMaskParams::default())),
+        (NodeCategory::Foliage, "Species Picker", || NodeKind::SpeciesPicker(SpeciesPickerParams::default())),
+        (NodeCategory::Foliage, "Paint Density", || NodeKind::PaintDensity(PaintDensityParams::default())),
+        (NodeCategory::Foliage, "Scatter Place", || NodeKind::ScatterPlace(ScatterPlaceParams::default())),
     ]
 }
 
@@ -271,7 +277,7 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
             NodeCategory::Source, NodeCategory::Math, NodeCategory::Curves,
             NodeCategory::Domain, NodeCategory::Density, NodeCategory::Material,
             NodeCategory::Positions, NodeCategory::Scanners, NodeCategory::Props,
-            NodeCategory::Biome, NodeCategory::Output,
+            NodeCategory::Biome, NodeCategory::Foliage, NodeCategory::Output,
         ] {
             ui.menu_button(format!("{cat:?}"), |ui| {
                 for (entry_cat, label, factory) in catalog() {

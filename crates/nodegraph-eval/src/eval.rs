@@ -490,7 +490,10 @@ impl<'g> Evaluator<'g> {
                 return Err(EvalError::UnresolvedLibraryRef { node: id });
             }
             // --- Per-column nodes belong to the World/Zone graphs ---
-            NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_) => {
+            NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_)
+            | NodeKind::PoissonDistribution(_) | NodeKind::SurfaceFilter(_)
+            | NodeKind::BiomeContextMask(_) | NodeKind::SpeciesPicker(_)
+            | NodeKind::PaintDensity(_) | NodeKind::ScatterPlace(_) => {
                 return Err(EvalError::WrongGraphDomain { node: id });
             }
             // --- Terminal ---
@@ -546,7 +549,10 @@ impl<'g> Evaluator<'g> {
             NodeKind::WorldPos(_) | NodeKind::DomainWarp(_) => {
                 return Err(EvalError::WrongInputType { node: id, expected: "scalar", got: "vec3" });
             }
-            NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_) => {
+            NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_)
+            | NodeKind::PoissonDistribution(_) | NodeKind::SurfaceFilter(_)
+            | NodeKind::BiomeContextMask(_) | NodeKind::SpeciesPicker(_)
+            | NodeKind::PaintDensity(_) | NodeKind::ScatterPlace(_) => {
                 return Err(EvalError::WrongGraphDomain { node: id });
             }
             NodeKind::ConstantMaterial(_)

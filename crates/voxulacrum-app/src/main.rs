@@ -11,8 +11,10 @@ mod ui;
 mod world;
 mod palette;
 mod input;
+mod interaction;
 mod paths;
 mod materials;
+mod prefabs;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,7 +33,8 @@ use rendering::pipelines::{PipelineRegistry, PipelineResources};
 use rendering::uniforms::{self, GlobalUniforms, ShadowUniforms};
 use rendering::debug_lines::DebugLinePass;
 use rendering::upscale_pass::UpscalePass;
-use rendering::vegetation_pass::VegetationPass;
+use rendering::detail_paint_pass::DetailPaintPass;
+use rendering::scatter_pass::ScatterPass;
 use rendering::water_pass::WaterPass;
 use rendering::post_process::PostProcessPass;
 use rendering::outline_pass::OutlinePass;
@@ -52,7 +55,7 @@ use materials::MaterialRegistryRes;
 use ecs::resources::*;
 use ecs::events::*;
 use ecs::schedule::build_frame_schedule;
-use input::{RawInputBuffer, RawInputEvent, InputMap, InputState};
+use input::{InputMap, InputState, PointerButton, PointerState, RawInputBuffer, RawInputEvent};
 
 const SHADOW_MAP_SIZE: u32 = 4096;
 
@@ -291,11 +294,6 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // World
     let gen_start = std::time::Instant::now();
-    let cache_dir = paths::asset_root().join("cache").join("meshes");
-    let world_key =
-        meshing::cache::compute_world_cache_key(&initial_params.terrain_gen);
-    let world_cache_path =
-        meshing::cache::world_cache_path(&cache_dir, world_key);
 
     let min_y = initial_params.streaming.min_chunk_y;
     let max_y = initial_params.streaming.max_chunk_y;
@@ -308,6 +306,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Data-driven material registry (RON primary, built-in fallback). Shared by
     // the vegetation pass and any system needing material metadata.
     let material_registry = materials::load_registry();
+    let prefab_registry = prefabs::load_prefab_registry();
 
     // One bounded rayon pool shared by the startup fill, streaming generation,
     // and background regeneration - the single worker-pool model for all chunk
@@ -319,33 +318,18 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
             .build()
             .expect("failed to build chunk generation thread pool"),
     );
-    
-    let world = if let Some(chunks) =
-        meshing::cache::load_world_cache(&world_cache_path, world_key)
-    {
-        log::info!(
-            "Loaded world from cache in {:.2?} ({} chunks)",
-            gen_start.elapsed(),
-            chunks.len()
-        );
-        world::World::from_cached_chunks(chunks, generator.clone(), min_y, max_y)
-    } else {
-        let w = world::World::generate(generator.clone(), &gen_pool, min_y, max_y);
-        log::info!("World generated in {:.2?}", gen_start.elapsed());
-        if let Err(e) =
-            meshing::cache::save_world_cache(&world_cache_path, world_key, &w)
-        {
-            log::warn!("Failed to save world cache: {}", e);
-        } else {
-            log::info!("World saved to cache");
-        }
-        w
-    };
+
+    // World cache disabled: it stored only voxels (no foliage) and went stale as
+    // the generation pipeline grew (graphs, slabs, foliage), so cached chunks
+    // loaded without grass/scatter. Always regenerate - the generate path
+    // produces slabs + foliage identical to streamed reloads.
+    let world = world::World::generate(generator.clone(), &gen_pool, min_y, max_y);
+    log::info!("World generated in {:.2?}", gen_start.elapsed());
     world.print_debug_stats(&material_registry);
 
-    // Vegetation + water
-    let vegetation_pass =
-        VegetationPass::new(&ctx, &world, &initial_params.vegetation, material_registry.clone());
+    // Tier-1 detail paint + Tier-2/3 scatter + water
+    let detail_paint_pass = DetailPaintPass::new(&ctx, &world);
+    let scatter_pass = ScatterPass::new(&ctx, &world, &prefab_registry);
     let water_pass = WaterPass::new();
 
     // Post-process pass
@@ -421,6 +405,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
+    ecs.insert_resource(prefabs::PrefabRegistryRes(prefab_registry));
 
     // Direct Resource types
     ecs.insert_resource(ctx);
@@ -431,7 +416,8 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(render_targets);
     ecs.insert_resource(debug_line_pass);
     ecs.insert_resource(upscale_pass);
-    ecs.insert_resource(vegetation_pass);
+    ecs.insert_resource(detail_paint_pass);
+    ecs.insert_resource(scatter_pass);
     ecs.insert_resource(water_pass);
     ecs.insert_resource(post_process);
     ecs.insert_resource(outline_pass);
@@ -465,6 +451,8 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(RawInputBuffer::default());
     ecs.insert_resource(InputMap::default());
     ecs.insert_resource(InputState::new());
+    ecs.insert_resource(PointerState::default());
+    ecs.insert_resource(interaction::PickState::default());
 
     // EguiRenderer — NonSend because egui_winit::State may be !Send
     ecs.insert_non_send_resource(egui_renderer);
@@ -573,24 +561,6 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // Save all chunks (including streaming) to world cache before exiting.
-                // This ensures streaming chunks are loaded all-at-once on the next run,
-                // producing deterministic snapshots and mesh cache hits.
-                let world = &ecs.resource::<VoxelWorld>().0;
-                let params = &ecs.resource::<UiState>().params;
-                let cache_dir = paths::asset_root().join("cache").join("meshes");
-                let world_key =
-                    meshing::cache::compute_world_cache_key(&params.terrain_gen);
-                let world_cache_path =
-                    meshing::cache::world_cache_path(&cache_dir, world_key);
-                match meshing::cache::save_world_cache(&world_cache_path, world_key, world) {
-                    Ok(()) => log::info!(
-                        "World cache saved on exit ({} chunks)",
-                        world.chunks.len()
-                    ),
-                    Err(e) => log::warn!("Failed to save world cache on exit: {}", e),
-                }
-
                 event_loop.exit();
             }
 
@@ -664,6 +634,32 @@ impl ApplicationHandler for App {
                     ecs.resource_mut::<RawInputBuffer>()
                         .events
                         .push(RawInputEvent::Scroll(scroll));
+                }
+            }
+
+            ref e @ WindowEvent::CursorMoved { position, .. } => {
+                let window = ecs.resource::<WindowHandle>().0.clone();
+                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                    .handle_event(&window, e);
+                ecs.resource_mut::<RawInputBuffer>()
+                    .events
+                    .push(RawInputEvent::CursorMoved(position.x as f32, position.y as f32));
+            }
+
+            ref e @ WindowEvent::MouseInput { state, button, .. } => {
+                let window = ecs.resource::<WindowHandle>().0.clone();
+                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                    .handle_event(&window, e);
+                let mapped = match button {
+                    winit::event::MouseButton::Left => Some(PointerButton::Left),
+                    winit::event::MouseButton::Right => Some(PointerButton::Right),
+                    _ => None,
+                };
+                if let Some(btn) = mapped {
+                    let pressed = matches!(state, ElementState::Pressed);
+                    ecs.resource_mut::<RawInputBuffer>()
+                        .events
+                        .push(RawInputEvent::MouseButton(btn, pressed));
                 }
             }
 

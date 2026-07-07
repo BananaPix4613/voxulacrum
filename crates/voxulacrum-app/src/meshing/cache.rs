@@ -9,15 +9,22 @@ use std::time::Instant;
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::{ChunkSnapshot, CHUNK_WORLD_SIZE};
 
-/// Cache file format version. Bumped for the cube-mesh rewrite.
-const CACHE_VERSION: u32 = 11;
+/// Cache file format version. Bumped for half-step vertex quantization (v11
+/// stored integer positions, which flattened slab meshes on the round-trip).
+const CACHE_VERSION: u32 = 12;
+
+/// Positions are quantized to this many steps per voxel. Shapes occupy
+/// half-cell vertical intervals (see `shape_y_interval`), so 2 steps/voxel
+/// makes the round-trip exact; doubled coords (0..=64) fit in u8.
+const POS_STEPS_PER_VOXEL: f32 = 2.0;
 
 // ============================================================================
 // Compact disk vertex
 // ============================================================================
 
-/// Cube-mesh vertices live on integer voxel corners. Positions fit in u8 (0..34),
-/// normals are one of six face directions, materials in u8.
+/// Cube-mesh vertices live on half-voxel steps: cubes on integer corners,
+/// slab faces at +0.5. Positions are stored at `POS_STEPS_PER_VOXEL`
+/// resolution in u8, normals are one of six face directions, materials in u8.
 #[derive(Serialize, Deserialize)]
 struct CompactVertex {
     pos_x: u8,
@@ -63,10 +70,13 @@ fn face_normal_index(n: [f32; 3]) -> u8 {
 }
 
 fn to_compact(v: &TerrainVertex, chunk_origin: [f32; 3]) -> CompactVertex {
+    let q = |world: f32, origin: f32| -> u8 {
+        (((world - origin) * POS_STEPS_PER_VOXEL).round() as i32).clamp(0, 255) as u8
+    };
     CompactVertex {
-        pos_x: ((v.position[0] - chunk_origin[0]).round() as i32).clamp(0, 255) as u8,
-        pos_y: ((v.position[1] - chunk_origin[1]).round() as i32).clamp(0, 255) as u8,
-        pos_z: ((v.position[2] - chunk_origin[2]).round() as i32).clamp(0, 255) as u8,
+        pos_x: q(v.position[0], chunk_origin[0]),
+        pos_y: q(v.position[1], chunk_origin[1]),
+        pos_z: q(v.position[2], chunk_origin[2]),
         normal_index: face_normal_index(v.normal),
         material_id: v.material_id as u8,
     }
@@ -81,9 +91,9 @@ fn from_compact(
     let color = if mat_idx < colors.len() { colors[mat_idx] } else { [0.0; 3] };
     TerrainVertex {
         position: [
-            c.pos_x as f32 + chunk_origin[0],
-            c.pos_y as f32 + chunk_origin[1],
-            c.pos_z as f32 + chunk_origin[2],
+            c.pos_x as f32 / POS_STEPS_PER_VOXEL + chunk_origin[0],
+            c.pos_y as f32 / POS_STEPS_PER_VOXEL + chunk_origin[1],
+            c.pos_z as f32 / POS_STEPS_PER_VOXEL + chunk_origin[2],
         ],
         normal: FACE_NORMALS[(c.normal_index as usize).min(5)],
         color,
@@ -402,6 +412,72 @@ impl MeshCacheLru {
     pub fn entry_count(&self) -> usize { self.entries.len() }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meshing::{cube_mesher::generate_chunk_mesh, MaterialConfig};
+    use crate::world::chunk::{SNAP_PAD, SNAP_VOLUME};
+    use voxel_core::{MaterialId, ShapeId, Voxel};
+
+    /// The save/load round-trip must reproduce vertex positions exactly,
+    /// including sub-voxel (half-step) coordinates. Regression test for the
+    /// v11 format, whose integer quantization flattened slab faces (y + 0.5)
+    /// to full cube height on load.
+    #[test]
+    fn roundtrip_preserves_subvoxel_vertex_positions() {
+        // A snapshot with one cube and one slab, at a non-zero chunk position
+        // so the origin add/subtract is exercised too.
+        let materials: Box<[Voxel; SNAP_VOLUME]> =
+            vec![Voxel::EMPTY; SNAP_VOLUME].into_boxed_slice().try_into().unwrap();
+        let mut snap = ChunkSnapshot {
+            position: IVec3::new(3, 1, -2),
+            materials,
+            border_min: [false; 3],
+        };
+        let stone = MaterialId(1);
+        let put = |snap: &mut ChunkSnapshot, x: usize, y: usize, z: usize, v: Voxel| {
+            snap.materials[ChunkSnapshot::snap_index(x + SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD)] = v;
+        };
+        put(&mut snap, 4, 4, 4, Voxel::cube(stone));
+        put(&mut snap, 5, 4, 4, Voxel { material: stone, shape: ShapeId::SlabBottom, flags: 0 });
+
+        let config = MaterialConfig { colors: vec![[0.0; 3], [0.5, 0.5, 0.5]] };
+        let (vertices, indices) = generate_chunk_mesh(&snap, &config);
+
+        // Guard against vacuous round-trip: the mesh must contain half-step Ys.
+        assert!(
+            vertices.iter().any(|v| v.position[1].fract().abs() > 1e-5),
+            "test mesh must contain sub-voxel vertex positions"
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "voxulacrum_mesh_cache_test_{}",
+            std::process::id()
+        ));
+        let key = compute_cache_key(&snap, &config.colors);
+        let path = cache_file_path(&dir, snap.position.x, snap.position.y, snap.position.z, key);
+
+        save_cached_mesh(&dir, snap.position, key, &vertices, &indices).expect("save");
+        let (loaded_verts, loaded_indices) =
+            load_cached_mesh(&path, key, &config.colors).expect("load");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(loaded_indices, indices);
+        assert_eq!(loaded_verts.len(), vertices.len());
+        for (a, b) in vertices.iter().zip(&loaded_verts) {
+            for axis in 0..3 {
+                assert!(
+                    (a.position[axis] - b.position[axis]).abs() < 1e-5,
+                    "vertex position changed across cache round-trip: {:?} -> {:?}",
+                    a.position, b.position
+                );
+            }
+            assert_eq!(a.normal, b.normal);
+            assert_eq!(a.material_id, b.material_id);
+        }
+    }
+}
+
 fn parse_chunk_pos_from_filename(name: &str) -> Option<IVec3> {
     let stem = name.strip_suffix(".bin")?;
     let parts: Vec<&str> = stem.splitn(4, '_').collect();
@@ -416,164 +492,6 @@ fn parse_chunk_pos_from_filename(name: &str) -> Option<IVec3> {
 // ============================================================================
 // World generation cache
 // ============================================================================
-
-/// Hash terrain params to detect when the generated world needs regeneration.
-pub fn compute_world_cache_key(params: &crate::params::TerrainGenParams) -> u64 {
-    use seahash::SeaHasher;
-    use std::hash::Hasher;
-
-    let mut hasher = SeaHasher::new();
-    hasher.write(&params.base_height.to_le_bytes());
-    hasher.write(&params.cliff_threshold.to_le_bytes());
-    hasher.write(&params.hill_amplitude.to_le_bytes());
-    hasher.write(&params.hill_frequency.to_le_bytes());
-    hasher.write(&params.ridge_amplitude.to_le_bytes());
-    hasher.write(&params.ridge_frequency.to_le_bytes());
-    hasher.write(&params.detail_amplitude.to_le_bytes());
-    hasher.write(&params.detail_frequency.to_le_bytes());
-    hasher.write(&(params.cave_enabled as u8).to_le_bytes());
-    hasher.write(&params.cave_spaghetti_freq.to_le_bytes());
-    hasher.write(&params.cave_spaghetti_thickness.to_le_bytes());
-    hasher.write(&params.cave_noodle_freq.to_le_bytes());
-    hasher.write(&params.cave_noodle_thickness.to_le_bytes());
-    hasher.write(&params.cave_cheese_freq.to_le_bytes());
-    hasher.write(&params.cave_cheese_threshold.to_le_bytes());
-    hasher.write(&params.cave_warp_amp.to_le_bytes());
-    hasher.write(&params.cave_surface_margin.to_le_bytes());
-    hasher.write(&params.cave_y_squash.to_le_bytes());
-    hasher.write(&params.water_level.to_le_bytes());
-    hasher.write_i32(params.seed);
-    hasher.finish()
-}
-
-pub fn world_cache_path(cache_dir: &Path, key: u64) -> PathBuf {
-    let parent = cache_dir.parent().unwrap_or(cache_dir);
-    parent.join(format!("world_{:016x}.bin", key))
-}
-
-/// File layout (after lz4 decompress):
-/// `[u64 key][u32 format_ver=4][u32 _pad][u32 _pad][u32 chunk_count]`
-/// then per chunk: `[i32 x][i32 y][i32 z][u8 variant]` followed by either
-/// `[u16 material]` (Uniform) or `[u16 * CHUNK_VOLUME materials]` (Populated).
-const WORLD_CACHE_FORMAT: u32 = 5; // bumped: chunk payloads now store packed u32 Voxels
-
-pub fn save_world_cache(
-    path: &Path,
-    key: u64,
-    world: &crate::world::World,
-) -> io::Result<()> {
-    use std::io::Write;
-    use crate::world::chunk::CHUNK_VOLUME;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let chunk_count = world.chunks.len() as u32;
-    let per_chunk_estimate = 13 + CHUNK_VOLUME * 2;
-    let total_estimate = 24 + per_chunk_estimate * world.chunks.len();
-
-    let mut buf = Vec::with_capacity(total_estimate);
-    buf.write_all(&key.to_le_bytes())?;
-    buf.write_all(&WORLD_CACHE_FORMAT.to_le_bytes())?;
-    buf.write_all(&0u32.to_le_bytes())?;
-    buf.write_all(&0u32.to_le_bytes())?;
-    buf.write_all(&chunk_count.to_le_bytes())?;
-
-    for chunk in world.chunks.values() {
-        buf.write_all(&chunk.data.coord.x.to_le_bytes())?;
-        buf.write_all(&chunk.data.coord.y.to_le_bytes())?;
-        buf.write_all(&chunk.data.coord.z.to_le_bytes())?;
-
-        if chunk.data.voxels.is_uniform() {
-            buf.write_all(&[0u8])?;
-            buf.write_all(&chunk.data.voxels.voxel(0).pack().to_le_bytes())?;
-        } else {
-            buf.write_all(&[1u8])?;
-            for i in 0..CHUNK_VOLUME {
-                buf.write_all(&chunk.data.voxels.voxel(i).pack().to_le_bytes())?;
-            }
-        }
-    }
-
-    let compressed = lz4_flex::compress_prepend_size(&buf);
-    std::fs::write(path, compressed)
-}
-
-pub fn load_world_cache(
-    path: &Path,
-    expected_key: u64,
-) -> Option<std::collections::HashMap<voxel_core::ChunkCoord, crate::world::chunk::LoadedChunk>> {
-    use crate::world::chunk::{LoadedChunk, CHUNK_VOLUME};
-    use crate::world::storage::{self, ChunkStorage};
-    use glam::IVec3;
-    use voxel_core::Voxel;
-
-    let compressed = std::fs::read(path).ok()?;
-    let data = lz4_flex::decompress_size_prepended(&compressed).ok()?;
-
-    if data.len() < 24 {
-        let _ = std::fs::remove_file(path);
-        return None;
-    }
-
-    let key = u64::from_le_bytes(data[0..8].try_into().ok()?);
-    if key != expected_key { return None; }
-
-    let format_version = u32::from_le_bytes(data[8..12].try_into().ok()?);
-    if format_version != WORLD_CACHE_FORMAT {
-        let _ = std::fs::remove_file(path);
-        return None;
-    }
-
-    let chunk_count = u32::from_le_bytes(data[20..24].try_into().ok()?) as usize;
-
-    let mut chunks = std::collections::HashMap::with_capacity(chunk_count);
-    let mut offset = 24;
-
-    for _ in 0..chunk_count {
-        if offset + 13 > data.len() {
-            let _ = std::fs::remove_file(path);
-            return None;
-        }
-
-        let px = i32::from_le_bytes(data[offset..offset + 4].try_into().ok()?);
-        let py = i32::from_le_bytes(data[offset + 4..offset + 8].try_into().ok()?);
-        let pz = i32::from_le_bytes(data[offset + 8..offset + 12].try_into().ok()?);
-        offset += 12;
-
-        let variant_tag = data[offset];
-        offset += 1;
-
-        let pos = IVec3::new(px, py, pz);
-
-        let chunk_storage = if variant_tag == 0 {
-            if offset + 4 > data.len() { return None; }
-            let packed = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?);
-            offset += 4;
-            ChunkStorage::Uniform { voxel: Voxel::unpack(packed).unwrap_or(Voxel::EMPTY) }
-        } else {
-            let material_bytes = CHUNK_VOLUME * 4;
-            if offset + material_bytes > data.len() {
-                let _ = std::fs::remove_file(path);
-                return None;
-            }
-            let mut voxel_arr = Box::new([Voxel::EMPTY; CHUNK_VOLUME]);
-            for i in 0..CHUNK_VOLUME {
-                let base = offset + i * 4;
-                let packed = u32::from_le_bytes(data[base..base + 4].try_into().ok()?);
-                voxel_arr[i] = Voxel::unpack(packed).unwrap_or(Voxel::EMPTY);
-            }
-            offset += material_bytes;
-            storage::storage_from_arrays(&voxel_arr)
-        };
-
-        let chunk = LoadedChunk::new(pos, std::sync::Arc::new(chunk_storage));
-        chunks.insert(pos.into(), chunk);
-    }
-
-    Some(chunks)
-}
 
 pub fn clear_world_cache(cache_dir: &Path) -> io::Result<u64> {
     let parent = cache_dir.parent().unwrap_or(cache_dir);

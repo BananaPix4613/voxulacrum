@@ -133,6 +133,10 @@ pub struct ScatterInstance {
     pub prefab_id: PrefabId,
     /// Instance flags.
     pub flags: ScatterFlags,
+    /// Stable identity (design doc §9): rederived for generated instances,
+    /// persisted for player-placed ones. Lets overrides reference an instance
+    /// and keeps identity across regeneration.
+    pub stable_id: StableInstanceId,
 }
 
 /// Per-chunk collection of scatter instances, indexed by type (Tier 2/3 foliage).

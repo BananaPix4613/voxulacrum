@@ -5,7 +5,8 @@ use crate::world::world_generator::GraphSlot;
 use crate::meshing;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::rendering::render_context::RenderContext;
-use crate::rendering::vegetation_pass::VegetationPass;
+use crate::rendering::detail_paint_pass::DetailPaintPass;
+use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::ui::panels::UiState;
 use crate::world::{World, WorldManager};
@@ -30,7 +31,8 @@ impl WorldRegenCoordinator {
         &mut self,
         world: &mut World,
         meshing: &mut MeshingCoordinator,
-        vegetation_pass: &mut VegetationPass,
+        detail_paint: &mut DetailPaintPass,
+        scatter: &mut ScatterPass,
         water_pass: &mut WaterPass,
         ui_state: &mut UiState,
         ctx: &RenderContext,
@@ -57,9 +59,10 @@ impl WorldRegenCoordinator {
             }
             meshing.pipeline.submit_all_dirty(world);
 
-            let material_registry = vegetation_pass.registry.clone();
-            *vegetation_pass = VegetationPass::new(ctx, world, &ui_state.params.vegetation, material_registry);
-            log::info!("Vegetation pass rebuilt after regeneration");
+            *detail_paint = DetailPaintPass::new(ctx, world);
+            let prefabs = scatter.prefabs().clone();
+            *scatter = ScatterPass::new(ctx, world, &prefabs);
+            log::info!("Detail paint + scatter passes rebuilt after regeneration");
 
             // Water is a Phase 1 no-op; just clear any retained meshes.
             water_pass.clear_all();
@@ -76,15 +79,15 @@ impl WorldRegenCoordinator {
             meshing.pipeline.clear_cache();
             let _ = meshing::cache::clear_world_cache(&cache_dir);
 
-            let world_key = meshing::cache::compute_world_cache_key(&regen_params);
-            let world_cache_path = meshing::cache::world_cache_path(&cache_dir, world_key);
-            if let Err(e) = meshing::cache::save_world_cache(
-                &world_cache_path, world_key, world,
-            ) {
-                log::warn!("Failed to save regenerated world cache: {}", e);
-            } else {
-                log::info!("Regenerated world saved to cache");
-            }
+            // let world_key = meshing::cache::compute_world_cache_key(&regen_params);
+            // let world_cache_path = meshing::cache::world_cache_path(&cache_dir, world_key);
+            // if let Err(e) = meshing::cache::save_world_cache(
+            //     &world_cache_path, world_key, world,
+            // ) {
+            //     log::warn!("Failed to save regenerated world cache: {}", e);
+            // } else {
+            //     log::info!("Regenerated world saved to cache");
+            // }
 
             // Rebuild streaming workers so new chunks use the new generator
             streaming.rebuild_for_new_params(

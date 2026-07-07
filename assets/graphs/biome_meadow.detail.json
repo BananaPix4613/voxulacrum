@@ -1,0 +1,24 @@
+{
+  "kind": "Detail",
+  "nodes": [
+    { "value": null, "version": 0 },
+    { "value": { "kind": { "type": "PaintDensity", "layer_id": 0, "species": 1, "density": 220, "tint": 0 }, "position": [0.0, 0.0] }, "version": 1 },
+    { "value": { "kind": { "type": "PoissonDistribution", "seed": 7, "radius": 8.0, "jitter": 0.6 }, "position": [0.0, 160.0] }, "version": 1 },
+    { "value": { "kind": { "type": "SpeciesPicker", "seed": 8, "weights": [1.0] }, "position": [240.0, 160.0] }, "version": 1 },
+    { "value": { "kind": { "type": "ScatterPlace", "seed": 9, "type_id": 0, "prefab_id": 0 }, "position": [480.0, 160.0] }, "version": 1 },
+    { "value": { "kind": { "type": "PoissonDistribution", "seed": 17, "radius": 15.0, "jitter": 0.6 }, "position": [0.0, 320.0] }, "version": 1 },
+    { "value": { "kind": { "type": "SpeciesPicker", "seed": 18, "weights": [1.0] }, "position": [240.0, 320.0] }, "version": 1 },
+    { "value": { "kind": { "type": "ScatterPlace", "seed": 19, "type_id": 1, "prefab_id": 1 }, "position": [480.0, 320.0] }, "version": 1 },
+    { "value": { "kind": { "type": "PoissonDistribution", "seed": 27, "radius": 24.0, "jitter": 0.6 }, "position": [0.0, 480.0] }, "version": 1 },
+    { "value": { "kind": { "type": "SpeciesPicker", "seed": 28, "weights": [1.0] }, "position": [240.0, 480.0] }, "version": 1 },
+    { "value": { "kind": { "type": "ScatterPlace", "seed": 29, "type_id": 2, "prefab_id": 2 }, "position": [480.0, 480.0] }, "version": 1 }
+  ],
+  "edges": [
+    { "from": { "node": { "idx": 2, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 3, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 3, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 4, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 5, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 6, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 6, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 7, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 8, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 9, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 9, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 10, "version": 1 }, "pin": 0 } }
+  ]
+}

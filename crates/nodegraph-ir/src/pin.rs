@@ -34,6 +34,18 @@ pub enum PinType {
     ZoneId,
     /// `ChunkBuffer<Voxel>` - the final output type. Makes terrain a real flowing pin type.
     Terrain,
+    // --- Foliage (DetailGraph) ---
+    /// Tier-1 paint terminal: writes a detail (foliage paint) layer.
+    PaintOutput,
+    /// Tier-2/3 scatter terminal: writes scatter instances.
+    ScatterOutput,
+    /// Per-column boolean "can place here?" field. Reserved vocabulary (design
+    /// doc §6); not yet wired to a node - the point-filter node chain filters
+    /// `Positions` directly rather than producing masks.
+    PlacementMask,
+    /// Weighted species selection. Reserved vocabulary (design doc §6);
+    /// `SpeciesPicker` carries its weights as a parameter for now.
+    SpeciesWeights,
 }
 
 impl PinType {
@@ -94,5 +106,17 @@ mod tests {
         assert!(!PinType::is_compatible(SurfaceField, Density));
         assert!(!PinType::is_compatible(ZoneId, BiomeId));
         assert!(!PinType::is_compatible(FluidProvider, Material));
+    }
+
+    #[test]
+    fn foliage_types_are_strict() {
+        // Foliage terminals + reserved vocabulary match only themselves.
+        for t in [PaintOutput, ScatterOutput, PlacementMask, SpeciesWeights] {
+            assert!(PinType::is_compatible(t, t));
+        }
+        assert!(!PinType::is_compatible(PaintOutput, ScatterOutput));
+        assert!(!PinType::is_compatible(SurfaceField, PaintOutput));
+        assert!(!PinType::is_compatible(Positions, ScatterOutput));
+        assert!(!PinType::is_compatible(SpeciesWeights, PlacementMask));
     }
 }

@@ -3,7 +3,6 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::path::Path;
 use bevy_ecs::prelude::Resource;
-
 use crate::rendering::render_context::RenderContext;
 
 #[repr(C)]
@@ -253,6 +252,22 @@ pub struct GrassInstance {
     pub _pad1: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ScatterVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ScatterInstanceGpu {
+    pub position: [f32; 3],
+    pub rotation_y: f32,
+    pub color: [f32; 3],
+    pub scale: f32,
+}
+
 pub fn create_vegetation_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
@@ -326,6 +341,95 @@ pub fn create_vegetation_pipeline(
                             offset: 36,
                             shader_location: 9,
                             format: wgpu::VertexFormat::Float32,
+                        },
+                    ],
+                },
+            ],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview: None,
+        cache: None,
+    })
+}
+
+pub fn create_detail_paint_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    global_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
+) -> wgpu::RenderPipeline {
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("detail_paint_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let chunk_layout =
+        crate::rendering::detail_paint_pass::create_detail_chunk_layout(device);
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("detail_paint_pipeline_layout"),
+        bind_group_layouts: &[global_bind_group_layout, &chunk_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("detail_paint_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader_module,
+            entry_point: Some("vs_main"),
+            buffers: &[
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GrassVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 12,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x2,
                         },
                     ],
                 },
@@ -478,6 +582,90 @@ pub fn create_water_pipeline(
     })
 }
 
+pub fn create_scatter_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    global_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
+) -> wgpu::RenderPipeline {
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("scatter_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("scatter_pipeline_layout"),
+        bind_group_layouts: &[global_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("scatter_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader_module,
+            entry_point: Some("vs_main"),
+            buffers: &[
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ScatterVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                    ],
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ScatterInstanceGpu>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute { offset: 0,  shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 12, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                        wgpu::VertexAttribute { offset: 16, shader_location: 4, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: 28, shader_location: 5, format: wgpu::VertexFormat::Float32 },
+                    ],
+                },
+            ],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None, // prefab meshes include double-sided crossed quads
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+        multiview: None,
+        cache: None,
+    })
+}
+
 pub fn create_post_process_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
@@ -544,6 +732,8 @@ pub enum PipelineId {
     Terrain,
     Shadow,
     Vegetation,
+    DetailPaint,
+    Scatter,
     Water,
     PostProcess,
 }
@@ -572,6 +762,8 @@ pub struct PipelineRegistry {
     pub terrain_wireframe_pipeline: wgpu::RenderPipeline,
     pub shadow_pipeline: wgpu::RenderPipeline,
     pub vegetation_pipeline: wgpu::RenderPipeline,
+    pub detail_paint_pipeline: wgpu::RenderPipeline,
+    pub scatter_pipeline: wgpu::RenderPipeline,
     pub water_pipeline: wgpu::RenderPipeline,
 }
 
@@ -592,6 +784,8 @@ impl PipelineRegistry {
         let terrain_source = read_shader(shader_dir, "terrain.wgsl");
         let shadow_source = read_shader(shader_dir, "shadow.wgsl");
         let vegetation_source = read_shader(shader_dir, "vegetation.wgsl");
+        let detail_paint_source = read_shader(shader_dir, "detail_paint.wgsl");
+        let scatter_source = read_shader(shader_dir, "scatter.wgsl");
         let water_source = read_shader(shader_dir, "water.wgsl");
 
         let terrain_pipeline = create_terrain_pipeline(
@@ -609,6 +803,14 @@ impl PipelineRegistry {
         let vegetation_pipeline = create_vegetation_pipeline(
             &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
             &vegetation_source,
+        );
+        let detail_paint_pipeline = create_detail_paint_pipeline(
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
+            &detail_paint_source,
+        );
+        let scatter_pipeline = create_scatter_pipeline(
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
+            &scatter_source,
         );
         let water_pipeline = create_water_pipeline(
             &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
@@ -628,6 +830,14 @@ impl PipelineRegistry {
             pipeline_id: PipelineId::Vegetation,
             last_good_source: vegetation_source,
         });
+        entries.insert("detail_paint.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::DetailPaint,
+            last_good_source: detail_paint_source,
+        });
+        entries.insert("scatter.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::Scatter,
+            last_good_source: scatter_source,
+        });
         entries.insert("water.wgsl".to_string(), PipelineEntry {
             pipeline_id: PipelineId::Water,
             last_good_source: water_source,
@@ -639,6 +849,8 @@ impl PipelineRegistry {
             terrain_wireframe_pipeline,
             shadow_pipeline,
             vegetation_pipeline,
+            detail_paint_pipeline,
+            scatter_pipeline,
             water_pipeline,
         }
     }
@@ -698,6 +910,20 @@ impl PipelineRegistry {
                 );
                 Some(p)
             }
+            PipelineId::DetailPaint => {
+                let p = create_detail_paint_pipeline(
+                    &ctx.device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source,
+                );
+                Some(p)
+            }
+            PipelineId::Scatter => {
+                let p = create_scatter_pipeline(
+                    &ctx.device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source,
+                );
+                Some(p)
+            }
             PipelineId::Water => {
                 let p = create_water_pipeline(
                     &ctx.device, resources.surface_format,
@@ -725,6 +951,8 @@ impl PipelineRegistry {
                 PipelineId::Terrain => self.terrain_pipeline = new_pipeline,
                 PipelineId::Shadow => self.shadow_pipeline = new_pipeline,
                 PipelineId::Vegetation => self.vegetation_pipeline = new_pipeline,
+                PipelineId::DetailPaint => self.detail_paint_pipeline = new_pipeline,
+                PipelineId::Scatter => self.scatter_pipeline = new_pipeline,
                 PipelineId::Water => self.water_pipeline = new_pipeline,
                 PipelineId::PostProcess => {}
             }
