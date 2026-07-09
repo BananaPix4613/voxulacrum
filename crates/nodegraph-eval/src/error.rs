@@ -53,6 +53,15 @@ pub enum EvalError {
         /// The offending node.
         node: NodeId,
     },
+    
+    /// A `GraphRef` node was evaluated directly. Cross-graph references are
+    /// resolved where the hierarchy is assembled, not by the single-graph
+    /// evaluator.
+    #[error("node {node:?} is an unresolved cross-graph reference")]
+    UnresolvedGraphRef {
+        /// The offending node.
+        node: NodeId,
+    },
 
     /// A node was evaluated in the wrong graph domain - a per-column node
     /// (`SurfaceNoise`, `WorldOutput`) in a voxel graph, or a voxel node in a

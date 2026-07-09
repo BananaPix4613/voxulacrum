@@ -19,15 +19,20 @@ use super::storage::ChunkStorage;
 use super::walkability::WalkabilityMask;
 use voxel_core::{ShapeId, Voxel};
 
+/// Number of `(x, z)` columns in a chunk - the length [`smooth_slabs`] expects
+/// for its per-column `distances` slice.
+pub const COLUMN_COUNT: usize = CHUNK_SIZE * CHUNK_SIZE;
+
 /// Smooth single-cube steps in place: demote each walkable surface cube that
 /// borders a walkable neighbor exactly one cell lower into a `SlabBottom`.
 ///
 /// `distance` is the traversal smoothing distance: `0` disables the pass; `>= 1`
 /// applies single-step smoothing. Values above 1 are reserved for future
 /// multi-distance smoothing and currently behave as 1.
-pub fn smooth_slabs(storage: &mut ChunkStorage, distance: u32) {
-    if distance == 0 {
-        return; // Smoothing disabled for this chunk (e.g. a flat plains biome).
+pub fn smooth_slabs(storage: &mut ChunkStorage, distances: &[u32]) {
+    debug_assert_eq!(distances.len(), COLUMN_COUNT, "one smoothing distance per column");
+    if distances.iter().all(|&d| d == 0) {
+        return; // No column is smoothed (e.g. every present biome is flat plains).
     }
     let mask = WalkabilityMask::from_storage(storage);
     if mask.is_empty() {
@@ -40,6 +45,10 @@ pub fn smooth_slabs(storage: &mut ChunkStorage, distance: u32) {
     for z in 0..CHUNK_SIZE {
         for y in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
+                // Each column's biome sets its own smoothing distance; 0 disables.
+                if distances[x + z * CHUNK_SIZE] == 0 {
+                    continue;
+                }
                 if !mask.is_walkable(x, y, z) {
                     continue;
                 }
@@ -116,13 +125,18 @@ mod tests {
         s.voxel(Chunk::voxel_index(x, y, z)).shape
     }
 
+    /// A per-column distances slice with the same distance everywhere.
+    fn uniform(distance: u32) -> [u32; COLUMN_COUNT] {
+        [distance; COLUMN_COUNT]
+    }
+
     #[test]
     fn single_step_high_side_becomes_slab() {
         let mut s = storage_with(|a| {
             set(a, 4, 4, 4, cube()); // high surface at y=4
             set(a, 5, 3, 4, cube()); // neighbor surface one lower
         });
-        smooth_slabs(&mut s, 1);
+        smooth_slabs(&mut s, &uniform(1));
         assert_eq!(shape_at(&s, 4, 4, 4), ShapeId::SlabBottom, "high cube should demote");
         assert_eq!(shape_at(&s, 5, 3, 4), ShapeId::Cube, "low cube unchanged");
         // Material and flags are preserved through the demotion.
@@ -136,7 +150,7 @@ mod tests {
             set(a, 5, 4, 4, cube());
             set(a, 6, 4, 4, cube());
         });
-        smooth_slabs(&mut s, 1);
+        smooth_slabs(&mut s, &uniform(1));
         for x in [4usize, 5, 6] {
             assert_eq!(shape_at(&s, x, 4, 4), ShapeId::Cube, "flat row must stay cubes");
         }
@@ -148,7 +162,7 @@ mod tests {
             set(a, 4, 5, 4, cube()); // surface at y=5
             set(a, 5, 3, 4, cube()); // surface two lower (a cliff, not a step)
         });
-        smooth_slabs(&mut s, 1);
+        smooth_slabs(&mut s, &uniform(1));
         assert_eq!(shape_at(&s, 4, 5, 4), ShapeId::Cube, "2-cube cliff must stay sharp");
     }
 
@@ -158,7 +172,7 @@ mod tests {
             set(a, 4, 4, 4, slab_bottom()); // already a slab on the high side
             set(a, 5, 3, 4, cube());
         });
-        smooth_slabs(&mut s, 1);
+        smooth_slabs(&mut s, &uniform(1));
         assert_eq!(shape_at(&s, 4, 4, 4), ShapeId::SlabBottom, "authored slab left intact");
     }
 
@@ -175,8 +189,8 @@ mod tests {
         };
         let mut a = make();
         let mut b = make();
-        smooth_slabs(&mut a, 1);
-        smooth_slabs(&mut b, 1);
+        smooth_slabs(&mut a, &uniform(1));
+        smooth_slabs(&mut b, &uniform(1));
         for i in 0..CHUNK_VOLUME {
             assert_eq!(a.voxel(i), b.voxel(i), "nondeterministic at index {i}");
         }
@@ -192,7 +206,24 @@ mod tests {
             set(a, 4, 4, 4, cube()); // a 1-cube step distance 1 would smooth
             set(a, 5, 3, 4, cube());
         });
-        smooth_slabs(&mut s, 0);
+        smooth_slabs(&mut s, &uniform(0));
         assert_eq!(shape_at(&s, 4, 4, 4), ShapeId::Cube, "distance 0 leaves cubes untouched");
+    }
+
+    #[test]
+    fn per_column_distance_gates_smoothing() {
+        // Two identical 1-cube steps in different columns; only the column whose
+        // distance is >= 1 gets smoothed.
+        let mut s = storage_with(|a| {
+            set(a, 4, 4, 4, cube()); // column (4, 4)
+            set(a, 5, 3, 4, cube());
+            set(a, 10, 4, 10, cube()); // column (10, 10)
+            set(a, 11, 3, 10, cube());
+        });
+        let mut d = uniform(0);
+        d[4 + 4 * CHUNK_SIZE] = 1; // enable smoothing only for column (4, 4)
+        smooth_slabs(&mut s, &d);
+        assert_eq!(shape_at(&s, 4, 4, 4), ShapeId::SlabBottom, "enabled column smooths");
+        assert_eq!(shape_at(&s, 10, 4, 10), ShapeId::Cube, "disabled column stays a cube");
     }
 }

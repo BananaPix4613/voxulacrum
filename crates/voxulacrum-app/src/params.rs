@@ -21,6 +21,7 @@ pub struct MaterialParams {
 }
 
 impl MaterialParams {
+    #[allow(dead_code)] // material-change detector; used when remesh-on-edit lands
     pub fn sharpness_changed(&self, other: &MaterialParams) -> bool {
         if self.entries.len() != other.entries.len() {
             return true;
@@ -170,27 +171,6 @@ pub struct WaterVisualParams {
 impl Default for WaterVisualParams {
     fn default() -> Self {
         Self { water_level: 30.0 }
-    }
-}
-
-// ============================================================================
-// Vegetation parameters
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct VegetationParams {
-    pub blade_half_width: f32,
-    pub blade_height: f32,
-    pub blades_per_voxel: u32,
-}
-
-impl Default for VegetationParams {
-    fn default() -> Self {
-        Self {
-            blade_half_width: 0.08,
-            blade_height: 0.6,
-            blades_per_voxel: 3,
-        }
     }
 }
 
@@ -398,10 +378,6 @@ pub struct TerrainGenParams {
     pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
     pub water_level: f32,
     pub seed: i32,
-    /// Worldgen slab-smoothing distance (design doc §"Traversal smoothing
-    /// distance"). `0` disables smoothing; `>= 1` enables single-step smoothing.
-    /// Intended to vary per biome; a single global value for now.
-    pub traversal_smoothing_distance: u32,
 }
 
 impl Default for TerrainGenParams {
@@ -427,7 +403,6 @@ impl Default for TerrainGenParams {
             cave_y_squash: 0.5,
             water_level: 30.0,
             seed: 54321,
-            traversal_smoothing_distance: 1,
         }
     }
 }
@@ -448,7 +423,7 @@ pub struct DebugParams {
     pub show_performance: bool,
     pub freeze_culling: bool,
     pub hide_water: bool,
-    pub hide_vegetation: bool,
+    pub hide_foliage: bool,
 }
 
 impl Default for DebugParams {
@@ -464,7 +439,7 @@ impl Default for DebugParams {
             show_performance: true,
             freeze_culling: false,
             hide_water: false,
-            hide_vegetation: false,
+            hide_foliage: false,
         }
     }
 }
@@ -569,7 +544,6 @@ pub struct EngineParams {
     pub wind: WindParams,
     pub cloud: CloudParams,
     pub water: WaterVisualParams,
-    pub vegetation: VegetationParams,
     pub post_process: PostProcessParams,
     pub palette: PaletteParams,
     pub time_control: TimeControlParams,
@@ -592,7 +566,6 @@ impl Default for EngineParams {
             wind: WindParams::default(),
             cloud: CloudParams::default(),
             water: WaterVisualParams::default(),
-            vegetation: VegetationParams::default(),
             post_process: PostProcessParams::default(),
             palette: PaletteParams::default(),
             time_control: TimeControlParams::default(),

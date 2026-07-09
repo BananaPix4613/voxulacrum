@@ -10,10 +10,11 @@
 //! chunk-independent evaluation at any absolute world column - the basis for
 //! cross-chunk biome-boundary access (a chunk querying a neighbor's columns).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use fastnoise_lite::NoiseType;
-use nodegraph_ir::{Graph, NodeId, NodeKind, Severity};
+use nodegraph_ir::{Graph, GraphRefTarget, NodeId, NodeKind, Severity};
 
 use crate::column::{ColumnCache, ColumnField, ColumnOutput, IdColumn};
 use crate::context::EvalContext;
@@ -26,12 +27,22 @@ pub struct ColumnEvaluator<'g> {
     graph: &'g Graph,
     ctx: EvalContext,
     cache: ColumnCache,
+    /// Cross-graph resolution context for `GraphRef` reads (`None` for World and
+    /// for graphs with no cross-graph references).
+    upstream: Option<&'g UpstreamGraphs<'g>>,
 }
 
 impl<'g> ColumnEvaluator<'g> {
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, ctx, cache: ColumnCache::new() }
+        Self { graph, ctx, cache: ColumnCache::new(), upstream: None }
+    }
+    
+    /// Attach a cross-graph resolution context so `GraphRef` reads resolve to
+    /// upstream graphs' named outputs.
+    pub fn with_upstream(mut self, upstream: &'g UpstreamGraphs<'g>) -> Self {
+        self.upstream = Some(upstream);
+        self
     }
 
     /// Borrow the per-column cache (populated by [`ColumnEvaluator::evaluate`]).
@@ -58,6 +69,11 @@ impl<'g> ColumnEvaluator<'g> {
         let order = self.graph.topological_order().map_err(|_| EvalError::Cyclic)?;
         for id in order {
             if self.cache.contains(id) {
+                continue;
+            }
+            // GraphRef reads upstream graphs on demand at input resolution; it
+            // has no single cached output, so it is not filled here.
+            if matches!(self.graph.nodes[id].kind, NodeKind::GraphRef(_)) {
                 continue;
             }
             let out = self.fill_node(id)?;
@@ -93,23 +109,38 @@ impl<'g> ColumnEvaluator<'g> {
                 let field = self.input_surface(id, 0)?;
                 ColumnOutput::Id(Arc::new(quantize_bands(&field, &p.biome_bands)))
             }
+            // GraphOutput marks its input value as a named boundary output; the
+            // value passes through so a cross-graph reader can sample it by node.
+            NodeKind::GraphOutput(_) => ColumnOutput::Surface(self.input_surface(id, 0)?),
             // Every other kind is a voxel-domain node with no per-column fill.
             _ => return Err(EvalError::WrongGraphDomain { node: id }),
         })
     }
 
-    /// Resolve the surface field feeding `(node, pin)`.
+    /// Resolve the surface field feeding `(node, pin)`. If the source is a
+    /// `GraphRef`, read the referenced upstream graph's named output (bulk, from
+    /// the upstream's computed cache); otherwise read this graph's own cache.
     fn input_surface(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ColumnField>> {
-        let edge = self
+        let from = self
             .graph
             .edges
             .iter()
             .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
+            .ok_or(EvalError::MissingInput { node, pin })?
+            .from;
+        if let Some(src) = self.graph.nodes.get(from.node) {
+            if let NodeKind::GraphRef(gr) = &src.kind {
+                let name = self.graph_ref_output_name(from.node, from.pin)?;
+                let up = self
+                    .upstream
+                    .ok_or(EvalError::UnresolvedGraphRef { node: from.node })?;
+                return up.surface_field(gr.target, &name, from.node);
+            }
+        }
         let src = self
             .cache
-            .get(edge.from.node)
-            .ok_or(EvalError::MissingOutput(edge.from.node))?;
+            .get(from.node)
+            .ok_or(EvalError::MissingOutput(from.node))?;
         match src.as_surface() {
             Some(f) => Ok(f.clone()),
             None => Err(EvalError::WrongInputType {
@@ -118,6 +149,18 @@ impl<'g> ColumnEvaluator<'g> {
                 got: src.kind_name(),
             }),
         }
+    }
+    
+    /// The boundary-output name a `GraphRef` node exposes an output `pin` (from
+    /// its resolved pins). Errors if the node is unresolved or the pin is out of
+    /// range.
+    fn graph_ref_output_name(&self, graphref: NodeId, pin: u16) -> EvalResult<String> {
+        let node = self.graph.nodes.get(graphref).ok_or(EvalError::MissingOutput(graphref))?;
+        node.kind
+            .effective_outputs()
+            .get(pin as usize)
+            .map(|p| p.name.to_string())
+            .ok_or(EvalError::UnresolvedGraphRef { node: graphref })
     }
 
     /// Pointwise per-column evaluation at an absolute world column `(world_x,
@@ -148,6 +191,9 @@ impl<'g> ColumnEvaluator<'g> {
                 let v = self.sample_input_surface(id, 0, world_x, world_z)?;
                 ColumnSample::Id(quantize_one(v, &p.biome_bands))
             }
+            NodeKind::GraphOutput(_) => {
+                ColumnSample::Surface(self.sample_input_surface(id, 0, world_x, world_z)?)
+            }
             _ => return Err(EvalError::WrongGraphDomain { node: id }),
         })
     }
@@ -161,13 +207,23 @@ impl<'g> ColumnEvaluator<'g> {
         world_x: i32,
         world_z: i32,
     ) -> EvalResult<f32> {
-        let edge = self
+        let from = self
             .graph
             .edges
             .iter()
             .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        match self.sample_column(edge.from.node, world_x, world_z)? {
+            .ok_or(EvalError::MissingInput { node, pin })?
+            .from;
+        if let Some(src) = self.graph.nodes.get(from.node) {
+            if let NodeKind::GraphRef(gr) = &src.kind {
+                let name = self.graph_ref_output_name(from.node, pin)?;
+                let up = self
+                    .upstream
+                    .ok_or(EvalError::UnresolvedGraphRef { node: from.node })?;
+                return up.surface_sample(gr.target, &name, world_x, world_z, from.node);
+            }
+        }
+        match self.sample_column(from.node, world_x, world_z)? {
             ColumnSample::Surface(v) => Ok(v),
             ColumnSample::Id(_) => Err(EvalError::WrongInputType {
                 node,
@@ -186,6 +242,94 @@ pub enum ColumnSample {
     Surface(f32),
     /// A discrete per-column id (zone or biome).
     Id(u16),
+}
+
+/// Cross-graph resolution context: for each referable hierarchy graph, its
+/// graph + chunk context, its already-computed per-column cache, and the map
+/// from boundary-output name to the `GraphOutput` node producing it. A
+/// `GraphRef` read resolves against this - the bulk path clones the cached
+/// column field; the pointwise path resamples the upstream graph
+/// (chunk-independently, so seam-correct).
+#[derive(Default)]
+pub struct UpstreamGraphs<'g> {
+    graphs: HashMap<GraphRefTarget, UpstreamGraph<'g>>,
+}
+
+/// One registered upstream graph within [`UpstreamGraphs`].
+struct UpstreamGraph<'g> {
+    graph: &'g Graph,
+    ctx: EvalContext,
+    cache: &'g ColumnCache,
+    outputs: HashMap<String, NodeId>,
+}
+
+impl<'g> UpstreamGraphs<'g> {
+    /// Empty context.
+    pub fn new() -> Self {
+        Self { graphs: HashMap::new() }
+    }
+    
+    /// Register `graph` - already evaluated into `cache` for `ctx` - as the
+    /// upstream for `target`. Its boundary outputs are indexed by name from its
+    /// `GraphOutput` nodes.
+    pub fn insert(
+        &mut self,
+        target: GraphRefTarget,
+        graph: &'g Graph,
+        ctx: EvalContext,
+        cache: &'g ColumnCache,
+    ) {
+        let outputs = graph
+            .nodes
+            .iter()
+            .filter_map(|(id, n)| match &n.kind {
+                NodeKind::GraphOutput(p) => Some((p.name.clone(), id)),
+                _ => None,
+            })
+            .collect();
+        self.graphs.insert(target, UpstreamGraph { graph, ctx, cache, outputs });
+    }
+    
+    /// The bulk cached surface field of `target`'s named output. `graphref` is
+    /// the referencing node, for error context.
+    fn surface_field(
+        &self,
+        target: GraphRefTarget,
+        name: &str,
+        graphref: NodeId,
+    ) -> EvalResult<Arc<ColumnField>> {
+        let ug = self.graphs.get(&target).ok_or(EvalError::UnresolvedGraphRef { node: graphref })?;
+        let node = *ug.outputs.get(name).ok_or(EvalError::UnresolvedGraphRef { node: graphref })?;
+        match ug.cache.get(node) {
+            Some(out) => out.as_surface().cloned().ok_or(EvalError::WrongInputType {
+                node,
+                expected: "surface",
+                got: out.kind_name(),
+            }),
+            None => Err(EvalError::MissingOutput(node)),
+        }
+    }
+    
+    /// The pointwise surface value of `target`'s named output at a world column.
+    fn surface_sample(
+        &self,
+        target: GraphRefTarget,
+        name: &str,
+        world_x: i32,
+        world_z: i32,
+        graphref: NodeId,
+    ) -> EvalResult<f32> {
+        let ug = self.graphs.get(&target).ok_or(EvalError::UnresolvedGraphRef { node: graphref })?;
+        let node = *ug.outputs.get(name).ok_or(EvalError::UnresolvedGraphRef { node: graphref })?;
+        match ColumnEvaluator::new(ug.graph, ug.ctx).sample_column(node, world_x, world_z)? {
+            ColumnSample::Surface(v) => Ok(v),
+            ColumnSample::Id(_) => Err(EvalError::WrongInputType {
+                node,
+                expected: "surface",
+                got: "id",
+            }),
+        }
+    }
 }
 
 /// The id a band-quantizing terminal assigns to one column: the number of
@@ -359,5 +503,72 @@ mod tests {
         let ib = b.get(out_id).unwrap().as_id().unwrap();
         assert_eq!(ia.data(), ib.data(), "biome column not deterministic");
         assert!(ia.data().iter().all(|&b| b <= 1), "one band => ids in {{0, 1}}");
+    }
+
+    #[test]
+    fn graph_output_passes_its_input_through() {
+        use nodegraph_ir::{GraphKind, GraphOutputParams};
+        // SurfaceNoise -> GraphOutput("climate"): the marker's cached value must
+        // equal the noise it wraps, both in bulk fill and pointwise.
+        let mut g = Graph::of_kind(GraphKind::World);
+        let noise = g.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let out = g.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "climate".into() }));
+        g.connect(PinRef::new(noise, 0), PinRef::new(out, 0)).unwrap();
+
+        let ctx = EvalContext::new(4, IVec3::new(1, 0, -2));
+        let mut e = ColumnEvaluator::new(&g, ctx);
+        e.evaluate().unwrap();
+        let noise_f = e.cache().get(noise).unwrap().as_surface().unwrap().clone();
+        let out_f = e.cache().get(out).unwrap().as_surface().unwrap().clone();
+        assert_eq!(noise_f.data(), out_f.data(), "GraphOutput must pass its input through");
+
+        let wx = ctx.chunk.x * CHUNK_DIM as i32 + 5;
+        let wz = ctx.chunk.z * CHUNK_DIM as i32 + 6;
+        match e.sample_column(out, wx, wz).unwrap() {
+            ColumnSample::Surface(v) => assert_eq!(v, out_f.get(5, 6)),
+            other => panic!("expected surface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_ref_reads_upstream_climate() {
+        use nodegraph_ir::{GraphKind, GraphOutputParams, GraphRefParams, ZoneOutputParams};
+        // Upstream (World): SurfaceNoise -> GraphOutput("climate").
+        let mut world = Graph::of_kind(GraphKind::World);
+        let wn = world.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let wo = world.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "climate".into() }));
+        world.connect(PinRef::new(wn, 0), PinRef::new(wo, 0)).unwrap();
+        world.derive_output_boundary();
+
+        // Downstream (Zone): GraphRef(World).climate -> ZoneOutput(one band).
+        let mut zone = Graph::of_kind(GraphKind::Zone);
+        let gr = zone.add_node(NodeKind::GraphRef(GraphRefParams {
+            target: GraphRefTarget::World,
+            ..Default::default()
+        }));
+        let zo = zone.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0] }));
+        let world_boundary = world.boundary.clone();
+        zone.resolve_graph_refs(|t| (t == GraphRefTarget::World).then(|| world_boundary.clone()));
+        zone.connect(PinRef::new(gr, 0), PinRef::new(zo, 0)).unwrap();
+
+        let ctx = EvalContext::new(9, IVec3::new(2, 0, -1));
+        let mut we = ColumnEvaluator::new(&world, ctx);
+        we.evaluate().unwrap();
+        let world_cache = we.into_cache();
+        let mut upstream = UpstreamGraphs::new();
+        upstream.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+
+        let mut ze = ColumnEvaluator::new(&zone, ctx).with_upstream(&upstream);
+        ze.evaluate().unwrap();
+        let biome = ze.cache().get(zo).unwrap().as_id().unwrap();
+
+        // Zone's biome ids must equal quantizing World's climate directly.
+        let climate = world_cache.get(wo).unwrap().as_surface().unwrap();
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let expect = if climate.get(x, z) >= 0.0 { 1u16 } else { 0 };
+                assert_eq!(biome.get(x, z), expect, "biome must follow World's climate");
+            }
+        }
     }
 }

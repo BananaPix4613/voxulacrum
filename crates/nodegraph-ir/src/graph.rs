@@ -5,10 +5,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
+use crate::boundary::{BoundaryPort, GraphBoundary, ResolvedBoundary, ResolvedPin};
+use crate::crossgraph::GraphRefTarget;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::edge::{Edge, PinRef};
 use crate::error::{GraphError, GraphResult};
-use crate::library::LibraryGraphId;
+use crate::library::{LibraryGraphId, LibraryGraphRegistry};
 use crate::node::{Node, NodeId, NodeKind};
 use crate::pin::PinType;
 
@@ -45,6 +47,11 @@ pub struct Graph {
     /// legacy flat terrain graph loads unchanged.
     #[serde(default)]
     pub kind: GraphKind,
+    /// The named typed inputs/outputs this graph exposes to consumers (a
+    /// `LibraryRef` or `GraphRef`). Empty by default, so graphs that predate
+    /// this field - and graphs that expose no boundary - round-trip unchanged.
+    #[serde(default)]
+    pub boundary: GraphBoundary,
     /// Nodes keyed by stable [`NodeId`].
     pub nodes: SlotMap<NodeId, Node>,
     /// Directed edges (output pin -> input pin).
@@ -82,25 +89,26 @@ impl Graph {
     /// both nodes exist, both pin indices are in range, the types are
     /// compatible, and the input is not already connected.
     pub fn connect(&mut self, from: PinRef, to: PinRef) -> GraphResult<()> {
-        let from_node = self.nodes.get(from.node).ok_or(GraphError::NodeNotFound(from.node))?;
-        let to_node = self.nodes.get(to.node).ok_or(GraphError::NodeNotFound(to.node))?;
+        // Resolve the effective pin types up front; the borrowed pin lists are
+        // scoped so they release the node borrows before `self.edges` is mutated.
+        let (out_ty, in_ty) = {
+            let from_node = self.nodes.get(from.node).ok_or(GraphError::NodeNotFound(from.node))?;
+            let to_node = self.nodes.get(to.node).ok_or(GraphError::NodeNotFound(to.node))?;
+            let outputs = from_node.kind.effective_outputs();
+            let inputs = to_node.kind.effective_inputs();
+            let out_ty = outputs
+                .get(from.pin as usize)
+                .ok_or(GraphError::PinOutOfRange { node: from.node, pin: from.pin, count: outputs.len() })?
+                .ty;
+            let in_ty = inputs
+                .get(to.pin as usize)
+                .ok_or(GraphError::PinOutOfRange { node: to.node, pin: to.pin, count: inputs.len() })?
+                .ty;
+            (out_ty, in_ty)
+        };
 
-        let outputs = from_node.kind.descriptor().outputs;
-        let inputs = to_node.kind.descriptor().inputs;
-
-        let out_spec = outputs.get(from.pin as usize).ok_or(GraphError::PinOutOfRange {
-            node: from.node,
-            pin: from.pin,
-            count: outputs.len(),
-        })?;
-        let in_spec = inputs.get(to.pin as usize).ok_or(GraphError::PinOutOfRange {
-            node: to.node,
-            pin: to.pin,
-            count: inputs.len(),
-        })?;
-
-        if !PinType::is_compatible(out_spec.ty, in_spec.ty) {
-            return Err(GraphError::TypeMismatch { from: out_spec.ty, to: in_spec.ty });
+        if !PinType::is_compatible(out_ty, in_ty) {
+            return Err(GraphError::TypeMismatch { from: out_ty, to: in_ty });
         }
 
         if self.edges.iter().any(|e| e.to == to) {
@@ -128,6 +136,76 @@ impl Graph {
         })
     }
 
+    /// Resolve every `LibraryRef` node's pins from `libraries`, caching the
+    /// projected boundary on each node. A reference to an unregistered library
+    /// resolves to no pins. Idempotent; re-run on load and after edits so the
+    /// cached pins track the referenced library's current boundary.
+    pub fn resolve_library_refs(&mut self, libraries: &LibraryGraphRegistry) {
+        for node in self.nodes.values_mut() {
+            if let NodeKind::LibraryRef(params) = &mut node.kind {
+                params.resolved =
+                    libraries.get(params.library).map(|lib| lib.boundary.to_resolved());
+            }
+        }
+    }
+
+    /// The hierarchy targets referenced by `GraphRef` nodes in this graph.
+    /// Iteration order follows the slotmap and is unspecified; callers that need
+    /// determinism should sort (see
+    /// [`detect_graph_ref_cycle`](crate::detect_graph_ref_cycle)).
+    pub fn graph_refs(&self) -> impl Iterator<Item = GraphRefTarget> + '_ {
+        self.nodes.values().filter_map(|n| match &n.kind {
+            NodeKind::GraphRef(p) => Some(p.target),
+            _ => None,
+        })
+    }
+
+    /// Resolve every `GraphRef` node's output pins from the referenced graph's
+    /// boundary outputs, via `boundary_of`. A `GraphRef` exposes only the
+    /// target's outputs (it reads, never feeds), so its inputs stay empty. A
+    /// target with no boundary resolves to no pins. Idempotent; re-run on load
+    /// or after edits.
+    pub fn resolve_graph_refs<F>(&mut self, boundary_of: F)
+    where
+        F: Fn(GraphRefTarget) -> Option<GraphBoundary>,
+    {
+        for node in self.nodes.values_mut() {
+            if let NodeKind::GraphRef(params) = &mut node.kind {
+                params.resolved = boundary_of(params.target).map(|b| ResolvedBoundary {
+                    inputs: Vec::new(),
+                    outputs: b
+                        .outputs
+                        .iter()
+                        .map(|p| ResolvedPin { name: p.name.clone(), ty: p.ty, required: false })
+                        .collect(),
+                });
+            }
+        }
+    }
+
+    /// Populate `boundary.outputs` from this graph's `GraphOutput` nodes - each
+    /// marks its input value as a named boundary output (currently a
+    /// [`SurfaceField`](crate::PinType::SurfaceField) climate channel). Outputs
+    /// are ordered by name for determinism. Idempotent; call after load or edit.
+    /// Declared inputs are left untouched (graphs declare none; libraries author
+    /// both sides).
+    pub fn derive_output_boundary(&mut self) {
+        let mut outputs: Vec<BoundaryPort> = self
+            .nodes
+            .values()
+            .filter_map(|n| match &n.kind {
+                NodeKind::GraphOutput(p) => Some(BoundaryPort {
+                    name: p.name.clone(),
+                    ty: PinType::SurfaceField,
+                    description: String::new(),
+                }),
+                _ => None,
+            })
+            .collect();
+        outputs.sort_by(|a, b| a.name.cmp(&b.name));
+        self.boundary.outputs = outputs;
+    }
+
     /// Validate the whole graph. Returns all findings; an empty result (or
     /// one with no [`Severity::Error`]) means the graph is evaluable.
     ///
@@ -147,8 +225,8 @@ impl Graph {
                 diags.push(Diagnostic::error("edge references missing target target node").with_edge(i));
                 continue;
             };
-            let outputs = from_node.kind.descriptor().outputs;
-            let inputs = to_node.kind.descriptor().inputs;
+            let outputs = from_node.kind.effective_outputs();
+            let inputs = to_node.kind.effective_inputs();
             let Some(out_spec) = outputs.get(edge.from.pin as usize) else {
                 diags.push(
                     Diagnostic::error(format!("output pin {} out of range", edge.from.pin))
@@ -192,7 +270,7 @@ impl Graph {
 
         // 3. All required inputs connected.
         for (id, node) in &self.nodes {
-            for (pin_idx, spec) in node.kind.descriptor().inputs.iter().enumerate() {
+            for (pin_idx, spec) in node.kind.effective_inputs().iter().enumerate() {
                 if spec.required {
                     let connected = self
                         .edges
@@ -226,6 +304,9 @@ impl Graph {
         // 5. Per-kind structural rules (root outputs, etc.).
         self.validate_kind_rules(&mut diags);
 
+        // 6. Boundary declaration integrity: port names unique within a side.
+        self.validate_boundary(&mut diags);
+
         diags
     }
 
@@ -250,6 +331,26 @@ impl Graph {
                 }
             }
             GraphKind::World | GraphKind::Zone | GraphKind::Biome | GraphKind::Library => {}
+        }
+    }
+
+    /// Append diagnostics for boundary declaration integrity: port names must be
+    /// unique within `inputs` and within `outputs` (a name may legitimately
+    /// appear once on each side). Consumers resolve ports by name, so a
+    /// duplicate would be ambiguous.
+    fn validate_boundary(&self, diags: &mut Vec<Diagnostic>) {
+        for (side, ports) in [
+            ("input", &self.boundary.inputs),
+            ("output", &self.boundary.outputs),
+        ] {
+            for (i, port) in ports.iter().enumerate() {
+                if ports[..i].iter().any(|p| p.name == port.name) {
+                    diags.push(Diagnostic::error(format!(
+                        "duplicate boundary {side} port name '{}'",
+                        port.name
+                    )));
+                }
+            }
         }
     }
 
@@ -348,6 +449,48 @@ mod tests {
         assert_eq!(g.kind, GraphKind::Biome);
     }
 
+    #[test]
+    fn boundary_defaults_empty_and_round_trips() {
+        use crate::boundary::{BoundaryPort, GraphBoundary};
+        use crate::pin::PinType;
+        let mut g = Graph::of_kind(GraphKind::Library);
+        assert!(g.boundary.is_empty());
+        g.boundary = GraphBoundary {
+            inputs: vec![BoundaryPort::new("distance", PinType::SurfaceField)],
+            outputs: vec![
+                BoundaryPort::new("weight", PinType::SurfaceField)
+                    .with_description("own-biome fade weight"),
+            ],
+        };
+        let back = Graph::from_json(&g.to_json().unwrap()).unwrap();
+        assert_eq!(back.boundary, g.boundary);
+        assert_eq!(back.boundary.output("weight").unwrap().ty, PinType::SurfaceField);
+    }
+
+    #[test]
+    fn legacy_json_without_boundary_defaults_empty() {
+        // Drop the `boundary` field to mimic a document authored before it existed.
+        let mut v: serde_json::Value =
+            serde_json::from_str(&Graph::new().to_json().unwrap()).unwrap();
+        v.as_object_mut().unwrap().remove("boundary");
+        let g: Graph = serde_json::from_value(v).unwrap();
+        assert!(g.boundary.is_empty());
+    }
+
+    #[test]
+    fn duplicate_boundary_port_name_is_an_error() {
+        use crate::boundary::{BoundaryPort, GraphBoundary};
+        use crate::pin::PinType;
+        let mut g = Graph::of_kind(GraphKind::Library);
+        g.boundary = GraphBoundary {
+            inputs: Vec::new(),
+            outputs: vec![
+                BoundaryPort::new("x", PinType::Density),
+                BoundaryPort::new("x", PinType::Scalar),
+            ],
+        };
+        assert!(g.has_errors());
+    }
 
     #[test]
     fn empty_detail_graph_is_valid() {
@@ -369,5 +512,99 @@ mod tests {
         let mut g = Graph::of_kind(GraphKind::Detail);
         g.add_node(NodeKind::PoissonDistribution(PoissonDistributionParams::default()));
         assert!(g.has_errors());
+    }
+
+    #[test]
+    fn library_ref_resolves_pins_from_boundary() {
+        use crate::boundary::{BoundaryPort, GraphBoundary};
+        use crate::library::{LibraryGraphId, LibraryGraphRegistry};
+        use crate::node::LibraryRefParams;
+        use crate::pin::PinType;
+        
+        let mut lib = Graph::of_kind(GraphKind::Library);
+        lib.boundary = GraphBoundary {
+            inputs: vec![BoundaryPort::new("distance", PinType::SurfaceField)],
+            outputs: vec![BoundaryPort::new("weight", PinType::SurfaceField)],
+        };
+        let mut registry = LibraryGraphRegistry::new();
+        registry.insert(LibraryGraphId(3), lib);
+        
+        let mut g = Graph::new();
+        let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+            library: LibraryGraphId(3),
+            ..Default::default()
+        }));
+        // Before resolution: no pins.
+        assert!(g.nodes[n].kind.effective_inputs().is_empty());
+        assert!(g.nodes[n].kind.effective_outputs().is_empty());
+        
+        // After resolution: pins mirror the library boundary.
+        g.resolve_library_refs(&registry);
+        let inputs = g.nodes[n].kind.effective_inputs();
+        let outputs = g.nodes[n].kind.effective_outputs();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].name, "distance");
+        assert_eq!(inputs[0].ty, PinType::SurfaceField);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].name, "weight");
+    }
+    
+    #[test]
+    fn library_ref_to_unregistered_library_resolves_to_no_pins() {
+        use crate::library::{LibraryGraphId, LibraryGraphRegistry};
+        use crate::node::LibraryRefParams;
+        let mut g = Graph::new();
+        let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+            library: LibraryGraphId(99),
+            ..Default::default()
+        }));
+        g.resolve_library_refs(&LibraryGraphRegistry::new());
+        assert!(g.nodes[n].kind.effective_inputs().is_empty());
+        assert!(g.nodes[n].kind.effective_outputs().is_empty());
+    }
+    
+    #[test]
+    fn connect_uses_resolved_library_pins() {
+        use crate::boundary::{BoundaryPort, GraphBoundary};
+        use crate::library::{LibraryGraphId, LibraryGraphRegistry};
+        use crate::node::{LibraryRefParams, ZoneOutputParams};
+        use crate::pin::PinType;
+        
+        // A library exposing one SurfaceField output "weight".
+        let mut lib = Graph::of_kind(GraphKind::Library);
+        lib.boundary = GraphBoundary {
+            inputs: Vec::new(),
+            outputs: vec![BoundaryPort::new("weight", PinType::SurfaceField)],
+        };
+        let mut registry = LibraryGraphRegistry::new();
+        registry.insert(LibraryGraphId(1), lib);
+        
+        let mut g = Graph::of_kind(GraphKind::Zone);
+        let lref = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+            library: LibraryGraphId(1),
+            ..Default::default()
+        }));
+        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams::default()));
+        
+        // Before resolution the LibraryRef has no output pin 0 -> connect fails.
+        assert!(g.connect(PinRef::new(lref, 0), PinRef::new(out, 0)).is_err());
+        
+        // After resolution its SurfaceField output feeds ZoneOutput's SurfaceField input.
+        g.resolve_library_refs(&registry);
+        assert!(g.connect(PinRef::new(lref, 0), PinRef::new(out, 0)).is_ok());
+    }
+
+    #[test]
+    fn derive_output_boundary_from_graph_output_nodes() {
+        use crate::node::GraphOutputParams;
+        use crate::pin::PinType;
+        let mut g = Graph::of_kind(GraphKind::World);
+        g.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "climate".into() }));
+        g.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "aridity".into() }));
+        g.derive_output_boundary();
+        assert_eq!(g.boundary.outputs.len(), 2);
+        assert_eq!(g.boundary.outputs[0].name, "aridity"); // sorted by name
+        assert_eq!(g.boundary.outputs[1].name, "climate");
+        assert!(g.boundary.outputs.iter().all(|p| p.ty == PinType::SurfaceField));
     }
 }

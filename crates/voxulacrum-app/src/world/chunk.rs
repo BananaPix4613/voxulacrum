@@ -35,8 +35,13 @@ pub struct Chunk {
     pub voxels: Arc<ChunkStorage>,
     pub detail_layers: DetailLayers,
     pub scatter_instances: ScatterStore,
+    // Design §3 layers; retained for the fluid/decal/lighting systems that will
+    // consume them (not yet wired).
+    #[allow(dead_code)]
     pub fluids: FluidLayer,
+    #[allow(dead_code)]
     pub decals: DecalLayer,
+    #[allow(dead_code)]
     pub lighting: LightData,
     /// Zone / biome / library identity for targeted invalidation. Phase 3 tags
     /// every chunk `ZoneId(0)` + `[BiomeId(0)]`; see [`super::tags::ChunkTags`].
@@ -81,7 +86,6 @@ pub struct LoadedChunk {
     /// mesh_seq at snapshot time and only clears mesh_dirty on upload if it matches.
     pub mesh_seq: u64,
     pub mesh: Option<ChunkMesh>,
-    pub generation: u64,
     pub persist_dirty: bool,
     /// When the last edit occurred. None = generation-triggered dirty (no debounce).
     pub mesh_debounce: Option<Instant>,
@@ -94,13 +98,13 @@ impl LoadedChunk {
             mesh_dirty: true,
             mesh_seq: 0,
             mesh: None,
-            generation: 0,
             persist_dirty: false,
             mesh_debounce: None,
         }
     }
 
     /// Create a chunk with default air storage.
+    #[allow(dead_code)] // chunk-construction API; used by tests / future callers
     pub fn new_air(position: IVec3) -> Self {
         Self::new(position, Arc::new(ChunkStorage::new_air()))
     }
@@ -112,6 +116,7 @@ impl LoadedChunk {
     }
 
     /// Mark dirty due to a voxel edit (applies debounce timer).
+    #[allow(dead_code)] // voxel-edit toolkit; wired when editing lands
     pub fn mark_mesh_dirty_from_edit(&mut self) {
         self.mesh_dirty = true;
         self.mesh_seq = self.mesh_seq.wrapping_add(1);
@@ -164,6 +169,7 @@ pub struct ChunkSnapshot {
     pub position: IVec3,
     pub materials: Box<[Voxel; SNAP_VOLUME]>, // 34*34*34 = 39_304
     /// True per axis if this chunk is at the negative world border.
+    #[allow(dead_code)] // border-state for boundary-aware meshing; not yet consumed
     pub border_min: [bool; 3],
 }
 
@@ -217,6 +223,7 @@ impl ChunkSnapshot {
     }
 
     /// Read the voxel at chunk-local coordinates (x in -PAD..CHUNK_SIZE+PAD).
+    #[allow(dead_code)] // snapshot read API; used by tests / mesher paths
     #[inline]
     pub fn get_voxel(&self, x: i32, y: i32, z: i32) -> Voxel {
         let pad = SNAP_PAD as i32;
@@ -257,6 +264,7 @@ fn resolve_voxel(neighbors: &ChunkNeighbors, x: i32, y: i32, z: i32) -> Voxel {
 
 /// Given a flat voxel index, return chunk-relative offsets of neighbors
 /// whose mesh is also stale due to border proximity (within 1 voxel of face).
+#[allow(dead_code)] // used by World::apply_edit (voxel-edit toolkit, not yet reachable)
 pub fn border_dirty_neighbors(index: u16) -> SmallVec<[IVec3; 3]> {
     let x = (index as usize % CHUNK_SIZE) as i32;
     let y = ((index as usize / CHUNK_SIZE) % CHUNK_SIZE) as i32;

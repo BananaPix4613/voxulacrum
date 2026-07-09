@@ -1,0 +1,13 @@
+{
+  "id": 2,
+  "id_name": "surface_layering",
+  "boundary": {
+    "inputs": [
+      { "name": "density", "ty": "Density" }
+    ],
+    "outputs": [
+      { "name": "material", "ty": "Material" }
+    ]
+  },
+  "kernel": "surface_layering"
+}

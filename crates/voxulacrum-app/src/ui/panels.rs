@@ -24,6 +24,7 @@ pub struct UiState {
     pub selected_keyframe: usize,
     pub fps: f32,
     pub frame_time_ms: f32,
+    #[allow(dead_code)] // HUD stat; retained for the vertex-count readout
     pub total_vertices: u64,
     pub total_triangles: u64,
     pub chunks_visible: u32,
@@ -153,8 +154,6 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 draw_cross_section(ui, &mut state.params.cross_section);
                 ui.separator();
                 draw_water(ui, &mut state.params.water);
-                ui.separator();
-                draw_vegetation(ui, &mut state.params.vegetation, state.mesh_params_pending);
                 ui.separator();
                 draw_meshing_params(ui, &mut state.params.meshing, state.remeshing, state.mesh_params_pending);
                 ui.separator();
@@ -511,17 +510,6 @@ fn draw_water(ui: &mut egui::Ui, p: &mut WaterVisualParams) {
     });
 }
 
-fn draw_vegetation(ui: &mut egui::Ui, p: &mut VegetationParams, mesh_params_pending: bool) {
-    ui.collapsing("Vegetation", |ui| {
-        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blade half-width:"); ui.add(egui::Slider::new(&mut p.blade_half_width, 0.01..=0.3)); });
-        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blade height:"); ui.add(egui::Slider::new(&mut p.blade_height, 0.1..=2.0)); });
-        ui.horizontal(|ui| { dot_yellow(ui); ui.label("Blades/voxel:"); ui.add(egui::DragValue::new(&mut p.blades_per_voxel).range(1..=10)); });
-        if mesh_params_pending {
-            ui.colored_label(egui::Color32::from_rgb(220, 200, 60), "Remesh required.");
-        }
-    });
-}
-
 fn draw_meshing_params(ui: &mut egui::Ui, _p: &mut MeshingParams, remeshing: bool, mesh_params_pending: bool) {
     ui.collapsing("Meshing", |ui| {
         ui.add_enabled_ui(!remeshing, |ui| {
@@ -606,7 +594,7 @@ fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
         ui.checkbox(&mut p.show_wireframe, "Wireframe");
         ui.checkbox(&mut p.show_chunk_boundaries, "Chunk boundaries");
         ui.checkbox(&mut p.hide_water, "Hide water");
-        ui.checkbox(&mut p.hide_vegetation, "Hide vegetation");
+        ui.checkbox(&mut p.hide_foliage, "Hide foliage");
 
         ui.separator();
         ui.label("Shader debug (mutually exclusive):");

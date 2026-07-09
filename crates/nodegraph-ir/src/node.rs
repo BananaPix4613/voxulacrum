@@ -4,6 +4,8 @@ use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 
+use crate::boundary::{EffectivePin, ResolvedBoundary, ResolvedPin};
+use crate::crossgraph::GraphRefTarget;
 use crate::library::LibraryGraphId;
 use crate::pin::PinType;
 use crate::prefab::PrefabTemplate;
@@ -298,6 +300,8 @@ impl Default for LayerParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct TerrainOutputParams {}
 /// Parameters for [`NodeKind::BuildTerrain`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct BuildTerrainParams {}
+/// Parameters for [`NodeKind::DensityOutput`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct DensityOutputParams {}
 
 /// Parameters for [`NodeKind::JitteredGrid`]: points on a regular XZ grid,
 /// each cell offset by a per-cell random jitter, kept with probability
@@ -391,12 +395,59 @@ impl Default for PlacePrefabParams {
 }
 
 /// Parameters for [`NodeKind::LibraryRef`]: a reference to a reusable library
-/// graph by id. Boundary pins are a static placeholder (none) this phase; the
-/// dynamic pins mirroring the library's declared inputs/outputs arrive later.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+/// graph by id. The referenced library's boundary is resolved into this node's
+/// pins by [`Graph::resolve_library_refs`](crate::Graph::resolve_library_refs)
+/// and cached in `resolved` (recomputed on load; not serialized).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct LibraryRefParams {
     /// The library graph this node instantiates.
     pub library: LibraryGraphId,
+    /// Pins resolved from the referenced library's boundary. `None` until a
+    /// resolve pass runs, in which case the node presents no pins.
+    #[serde(skip)]
+    pub resolved: Option<ResolvedBoundary>,
+}
+
+/// Equality ignores the cached `resolved` pins (derived state): two references
+/// are equal when they target the same library.
+impl PartialEq for LibraryRefParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.library == other.library
+    }
+}
+
+/// Parameters for [`NodeKind::GraphRef`]: a reference to another graph in the
+/// hierarchy (the World graph, the Zone graph, or a Biome graph). The referenced
+/// graph's declared boundary outputs are resolved into this node's output pins
+/// where the hierarchy is assembled (a later substep) and cached in `resolved`
+/// (recomputed on load; not serialized).
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct GraphRefParams {
+    /// Which hierarchy graph this node reads from.
+    pub target: GraphRefTarget,
+    /// Pins resolved from the referenced graph's boundary. `None` until a
+    /// resolve pass runs, in which case the node presents no pins.
+    #[serde(skip)]
+    pub resolved: Option<ResolvedBoundary>,
+}
+
+/// Equality ignores the cached `resolved` pins (derived state); two references
+/// are equal when they name the same target.
+impl PartialEq for GraphRefParams {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+    }
+}
+
+/// Parameters for [`NodeKind::GraphOutput`]: marks this node's input value as a
+/// named boundary output of its graph, importable cross-graph by a `GraphRef`.
+/// A graph's [`GraphBoundary`](crate::GraphBoundary) outputs are derived from
+/// its `GraphOutput` nodes (see
+/// [`Graph::derive_output_boundary`](crate::Graph::derive_output_boundary)).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct GraphOutputParams {
+    /// The boundary output name this node exposes.
+    pub name: String,
 }
 
 /// Parameters for [`NodeKind::WorldOutput`]: the WorldGraph's terminal. Maps a
@@ -520,6 +571,17 @@ pub struct ScatterPlaceParams {
     pub prefab_id: u32,
 }
 
+/// Parameters for [`NodeKind::BiomeParam`]: read a named per-biome scalar from
+/// the biome-param sidecar, or `default` when the active biome has no such entry
+/// (or no sidecar is threaded).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct BiomeParamParams {
+    /// The parameter name to read.
+    pub name: String,
+    /// Fallback value when the parameter is absent.
+    pub default: f32,
+}
+
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -592,6 +654,9 @@ pub enum NodeKind {
     TerrainOutput(TerrainOutputParams),
     /// Builds a terrain (`ChunkBuffer<Voxel>`) from density + material fields.
     BuildTerrain(BuildTerrainParams),
+    /// Biome terminal: exposes a continuous density + material as this biome's
+    /// contribution, composited and fused to voxels post-composition.
+    DensityOutput(DensityOutputParams),
     // --- Positions ---
     /// Jittered-grid point scatter.
     JitteredGrid(JitteredGridParams),
@@ -613,10 +678,16 @@ pub enum NodeKind {
     WorldOutput(WorldOutputParams),
     /// ZoneGraph terminal: assigns a per-column biome id from a climate field
     ZoneOutput(ZoneOutputParams),
-    // --- Library ---
-    /// References a reusable library graph by id. Boundary pins are a static
-    /// placeholder (none) this phase.
+    // --- References ---
+    /// References a reusable library graph by id, exposing the library's
+    /// declared boundary as this node's pins (resolved at load time).
     LibraryRef(LibraryRefParams),
+    /// References another graph in the hierarchy (World/Zone/Biome), exposing
+    /// its declared boundary outputs as this node's pins.
+    GraphRef(GraphRefParams),
+    /// Marks its input value as a named boundary output of this graph (imported
+    /// cross-graph by a `GraphRef`).
+    GraphOutput(GraphOutputParams),
     /// Terminal node; consumes one density input.
     Output(OutputParams),
     // --- Foliage (DetailGraph) ---
@@ -632,6 +703,9 @@ pub enum NodeKind {
     PaintDensity(PaintDensityParams),
     /// Tier-2/3 terminal: write scatter instances.
     ScatterPlace(ScatterPlaceParams),
+    /// Reads a named per-biome scalar parameter (the biome-param sidecar) as a
+    /// uniform scalar field, falling back to a node default when unset.
+    BiomeParam(BiomeParamParams),
 }
 
 // Static pin layouts, shared by all instances of a kind.
@@ -699,6 +773,8 @@ const SURFACE_IN_REQUIRED: &[PinSpec] =
     &[PinSpec { name: "zone field", ty: PinType::SurfaceField, required: true }];
 const SURFACE_IN_BIOME: &[PinSpec] =
     &[PinSpec { name: "biome field", ty: PinType::SurfaceField, required: true }];
+const GRAPH_OUTPUT_IN: &[PinSpec] =
+    &[PinSpec { name: "value", ty: PinType::SurfaceField, required: true }];
 const POSITIONS_IN: &[PinSpec] =
     &[PinSpec { name: "points", ty: PinType::Positions, required: true }];
 const ASSIGNMENTS_OUT: &[PinSpec] =
@@ -925,6 +1001,13 @@ impl NodeKind {
                 inputs: BUILD_TERRAIN_IN,
                 outputs: TERRAIN_OUT,
             },
+            NodeKind::DensityOutput(_) => NodeDescriptor {
+                display_name: "Density Output",
+                category: NodeCategory::Output,
+                color: OUT,
+                inputs: BUILD_TERRAIN_IN,
+                outputs: NO_PINS,
+            },
             NodeKind::JitteredGrid(_) => NodeDescriptor {
                 display_name: "Jittered Grid",
                 category: NodeCategory::Positions,
@@ -971,7 +1054,21 @@ impl NodeKind {
                 display_name: "Library Ref",
                 category: NodeCategory::Library,
                 color: [0xb0, 0x80, 0xff],
-                inputs: NO_PINS,  // scaffold: dynamic boundary pins deferred
+                inputs: NO_PINS,  // fallback; real pins come from effective_inputs()
+                outputs: NO_PINS,
+            },
+            NodeKind::GraphRef(_) => NodeDescriptor {
+                display_name: "Graph Ref",
+                category: NodeCategory::Library,
+                color: [0x80, 0xa0, 0xff],
+                inputs: NO_PINS,  // GraphRef has no inputs; outputs via effective_outputs()
+                outputs: NO_PINS,
+            },
+            NodeKind::GraphOutput(_) => NodeDescriptor {
+                display_name: "Graph Output",
+                category: NodeCategory::Output,
+                color: OUT,
+                inputs: GRAPH_OUTPUT_IN,
                 outputs: NO_PINS,
             },
             NodeKind::SurfaceNoise(_) => NodeDescriptor {
@@ -1044,6 +1141,44 @@ impl NodeKind {
                 inputs: ASSIGNMENTS_IN,
                 outputs: SCATTER_OUT,
             },
+            NodeKind::BiomeParam(_) => NodeDescriptor {
+                display_name: "Biome Param",
+                category: NodeCategory::Biome,
+                color: SRC,
+                inputs: NO_PINS,
+                outputs: SCALAR_OUT,
+            },
+        }
+    }
+    
+    /// This node's effective input pins: the resolved dynamic pins of a
+    /// reference node whose boundary has been resolved (see
+    /// [`Graph::resolve_library_refs`](crate::Graph::resolve_library_refs)),
+    /// otherwise the static [`descriptor`](NodeKind::descriptor) inputs. This is
+    /// the pin set `connect`, `validate`, and the editor operate on.
+    pub fn effective_inputs(&self) -> Vec<EffectivePin<'_>> {
+        match self.resolved_boundary() {
+            Some(rb) => rb.inputs.iter().map(resolved_pin_to_effective).collect(),
+            None => self.descriptor().inputs.iter().map(spec_to_effective).collect(),
+        }
+    }
+    
+    /// This node's effective output pins - the output analogue of
+    /// [`effective_inputs`](NodeKind::effective_inputs).
+    pub fn effective_outputs(&self) -> Vec<EffectivePin<'_>> {
+        match self.resolved_boundary() {
+            Some(rb) => rb.outputs.iter().map(resolved_pin_to_effective).collect(),
+            None => self.descriptor().outputs.iter().map(spec_to_effective).collect(),
+        }
+    }
+    
+    /// The resolved boundary cached on this node, if it is a reference node
+    /// (`LibraryRef`) whose pins have been resolved.
+    fn resolved_boundary(&self) -> Option<&ResolvedBoundary> {
+        match self {
+            NodeKind::LibraryRef(p) => p.resolved.as_ref(),
+            NodeKind::GraphRef(p) => p.resolved.as_ref(),
+            _ => None,
         }
     }
 
@@ -1079,12 +1214,15 @@ impl NodeKind {
             NodeKind::Queue(_)               => "Queue",
             NodeKind::TerrainOutput(_)       => "TerrainOutput",
             NodeKind::BuildTerrain(_)        => "BuildTerrain",
+            NodeKind::DensityOutput(_)       => "DensityOutput",
             NodeKind::JitteredGrid(_)        => "JitteredGrid",
             NodeKind::PoissonDisk(_)         => "PoissonDisk",
             NodeKind::FindFlat(_)            => "FindFlat",
             NodeKind::PlaceTree(_)           => "PlaceTree",
             NodeKind::PlacePrefab(_)         => "PlacePrefab",
             NodeKind::LibraryRef(_)          => "LibraryRef",
+            NodeKind::GraphRef(_)            => "GraphRef",
+            NodeKind::GraphOutput(_)         => "GraphOutput",
             NodeKind::SurfaceNoise(_)        => "SurfaceNoise",
             NodeKind::WorldOutput(_)         => "WorldOutput",
             NodeKind::ZoneOutput(_)          => "ZoneOutput",
@@ -1095,8 +1233,20 @@ impl NodeKind {
             NodeKind::SpeciesPicker(_)       => "SpeciesPicker",
             NodeKind::PaintDensity(_)        => "PaintDensity",
             NodeKind::ScatterPlace(_)        => "ScatterPlace",
+            NodeKind::BiomeParam(_)          => "BiomeParam",
         }
     }
+}
+
+/// Project a static [`PinSpec`] onto an [`EffectivePin`] (borrowing its
+/// `'static` name).
+fn spec_to_effective(spec: &PinSpec) -> EffectivePin<'_> {
+    EffectivePin { name: spec.name, ty: spec.ty, required: spec.required }
+}
+
+/// Project a [`ResolvedPin`] onto an [`EffectivePin`] (borrowing its name).
+fn resolved_pin_to_effective(pin: &ResolvedPin) -> EffectivePin<'_> {
+    EffectivePin { name: &pin.name, ty: pin.ty, required: pin.required }
 }
 
 /// A node instance in the graph: its kind/params plus editor position.

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::IVec3;
-use nodegraph_eval::{ChunkEvaluation, EvalContext, PaintLayer, ScatterBucket, WorldEvaluator};
+use nodegraph_eval::{BiomeParams, ChunkEvaluation, EvalContext, PaintLayer, ScatterBucket, WorldEvaluator};
 use nodegraph_ir::{Graph, NodeKind};
 use serde::Deserialize;
 use smallvec::SmallVec;
@@ -26,9 +26,15 @@ use super::layers::{
     DetailLayer, DetailLayerId, DetailLayers, DetailTexel,
     PrefabId, ScatterFlags, ScatterInstance, ScatterStore, ScatterTypeId, StableInstanceId,
 };
+use super::chunk::CHUNK_SIZE;
 use super::storage::ChunkStorage;
 use super::storage_boundary::StorageBoundary;
 use super::tags::{BiomeId, ChunkTags, ZoneId};
+
+/// Biome parameter name for the per-biome slab-smoothing distance.
+const TRAVERSAL_SMOOTHING_DISTANCE: &str = "traversal_smoothing_distance";
+/// Smoothing distance for biomes that do not declare `traversal_smoothing_distance`.
+const DEFAULT_TRAVERSAL_SMOOTHING_DISTANCE: u32 = 1;
 
 /// The single world generator. Evaluates one fixed graph per chunk.
 pub struct WorldGenerator {
@@ -39,29 +45,23 @@ pub struct WorldGenerator {
     /// The evaluation -> storage domain boundary used to materialize each
     /// evaluated chunk buffer into engine storage form.
     storage_boundary: StorageBoundary,
-    /// Slab-smoothing distance applied in [`WorldGenerator::generate_chunk`].
-    /// `0` disables smoothing; `>= 1` enables single-step smoothing.
-    traversal_smoothing_distance: u32,
 }
 
 impl WorldGenerator {
     /// Build a generator from an owned graph. Fails if the graph has no
-    /// `TerrainOutput` terminal (a config error worth catching at startup
+    /// `DensityOutput` terminal (a config error worth catching at startup
     /// rather than per-chunk).
-    pub fn new(
-        graph: Graph,
-        world_seed: u64,
-        traversal_smoothing_distance: u32,
-    ) -> Result<Self, String> {
-        // Validate the biome graph has a terrain terminal (a startup config
+    #[allow(dead_code)] // single-graph ctor; app runs the manifest path, tests use this
+    pub fn new(graph: Graph, world_seed: u64) -> Result<Self, String> {
+        // Validate the biome graph has a density terminal (a startup config
         // error worth catching here). The harness re-locates it internally and
         // additionally logs any validation findings on the full graph set.
         if !graph
             .nodes
             .iter()
-            .any(|(_, n)| matches!(n.kind, NodeKind::TerrainOutput(_)))
+            .any(|(_, n)| matches!(n.kind, NodeKind::DensityOutput(_)))
         {
-            return Err("graph has no TerrainOutput node".to_string());
+            return Err("graph has no DensityOutput node".to_string());
         }
 
         let world_eval = WorldEvaluator::new(graph);
@@ -70,19 +70,15 @@ impl WorldGenerator {
             world_eval,
             world_seed,
             storage_boundary: StorageBoundary::new(),
-            traversal_smoothing_distance,
         })
     }
     
     /// Load a generator from a `*.graph.json` file on disk.
-    pub fn from_path(
-        path: &std::path::Path,
-        world_seed: u64,
-        traversal_smoothing_distance: u32,
-    ) -> Result<Self, String> {
+    #[allow(dead_code)] // single-graph loader; app runs the manifest path, tests use this
+    pub fn from_path(path: &std::path::Path, world_seed: u64) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let graph = Graph::from_json(&text).map_err(|e| e.to_string())?;
-        Self::new(graph, world_seed, traversal_smoothing_distance)
+        Self::new(graph, world_seed)
     }
 
     /// Build a generator from a world manifest: a World graph, a Zone graph, and
@@ -90,10 +86,9 @@ impl WorldGenerator {
     pub fn from_manifest(
         manifest_path: &std::path::Path,
         world_seed: u64,
-        traversal_smoothing_distance: u32,
     ) -> Result<Self, String> {
         let hierarchy = load_hierarchy(manifest_path)?;
-        Ok(Self::from_hierarchy(hierarchy, world_seed, traversal_smoothing_distance))
+        Ok(Self::from_hierarchy(hierarchy, world_seed))
     }
 
     /// Like [`WorldGenerator::from_manifest`], but substitutes `graph` for the
@@ -103,7 +98,6 @@ impl WorldGenerator {
     pub fn from_manifest_with_override(
         manifest_path: &std::path::Path,
         world_seed: u64,
-        traversal_smoothing_distance: u32,
         slot: GraphSlot,
         graph: Graph,
     ) -> Result<Self, String> {
@@ -118,15 +112,11 @@ impl WorldGenerator {
                 }
             }
         }
-        Ok(Self::from_hierarchy(hierarchy, world_seed, traversal_smoothing_distance))
+        Ok(Self::from_hierarchy(hierarchy, world_seed))
     }
 
     /// Assemble a generator from an already-loaded hierarchy.
-    fn from_hierarchy(
-        hierarchy: LoadedHierarchy,
-        world_seed: u64,
-        traversal_smoothing_distance: u32,
-    ) -> Self {
+    fn from_hierarchy(hierarchy: LoadedHierarchy, world_seed: u64) -> Self {
         // The primary biome anchors `WorldEvaluator::new`; `with_biomes` then
         // installs the full set, replacing that placeholder entry.
         let primary = hierarchy.biomes[0].1.clone();
@@ -134,16 +124,18 @@ impl WorldGenerator {
             .with_world(hierarchy.world)
             .with_zone(hierarchy.zone)
             .with_biomes(hierarchy.biomes)
-            .with_biome_details(hierarchy.details);
+            .with_biome_details(hierarchy.details)
+            .with_biome_params(hierarchy.biome_params)
+            .with_cross_graph_resolved();
         Self {
             world_eval,
             world_seed,
             storage_boundary: StorageBoundary::new(),
-            traversal_smoothing_distance,
         }
     }
     
     /// The Biome graph this generator evaluates (the terminal terrain producer).
+    #[allow(dead_code)] // graph accessor; used by tests / tooling
     pub fn graph(&self) -> &Graph {
         &self.world_eval.biome_graph()
     }
@@ -177,7 +169,24 @@ impl WorldGenerator {
         let mut storage = self.storage_boundary.materialize(terrain);
         
         // Worldgen stage 7: halve single-cube walkable steps into slab transitions.
-        super::slab_smoothing::smooth_slabs(&mut storage, self.traversal_smoothing_distance);
+        // Each column's smoothing distance comes from its biome's params (default
+        // when unset), so biomes can smooth differently.
+        let biome_col = self
+            .world_eval
+            .zone_output_node()
+            .and_then(|n| eval.zone_columns.get(n))
+            .and_then(|c| c.as_id())
+            .cloned();
+        let mut distances = [DEFAULT_TRAVERSAL_SMOOTHING_DISTANCE; super::slab_smoothing::COLUMN_COUNT];
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let biome = biome_col.as_ref().map_or(0, |c| c.get(x, z));
+                if let Some(d) = self.world_eval.biome_param(biome, TRAVERSAL_SMOOTHING_DISTANCE) {
+                    distances[x + z * CHUNK_SIZE] = d.max(0.0) as u32;
+                }
+            }
+        }
+        super::slab_smoothing::smooth_slabs(&mut storage, &distances);
         
         let tags = self.derive_tags(&eval);
         let detail_layers = paint_to_detail_layers(&eval.foliage.paint);
@@ -314,6 +323,10 @@ pub struct BiomeManifestEntry {
     /// Absent => this biome produces no foliage.
     #[serde(default)]
     pub detail: Option<String>,
+    /// Per-biome scalar parameters (the biome-param sidecar). Free-form; absent
+    /// => no parameters (every `BiomeParam` falls back to its node default).
+    #[serde(default)]
+    pub params: HashMap<String, f32>,
 }
 
 /// The graphs named by a [`WorldManifest`], loaded into memory.
@@ -323,6 +336,8 @@ struct LoadedHierarchy {
     biomes: Vec<(u16, Graph)>,
     /// Per-biome DetailGraphs (by biome id) for biomes that reference one.
     details: Vec<(u16, Graph)>,
+    /// Per-biome scalar parameter sidecars (by biome id).
+    biome_params: Vec<(u16, BiomeParams)>,
 }
 
 /// Read and parse one `*.graph.json` file.
@@ -342,16 +357,20 @@ fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, St
     let zone = read_graph(&dir.join(&manifest.zone))?;
     let mut biomes = Vec::with_capacity(manifest.biomes.len());
     let mut details = Vec::new();
+    let mut biome_params = Vec::new();
     for entry in &manifest.biomes {
         biomes.push((entry.id, read_graph(&dir.join(&entry.graph))?));
         if let Some(detail_file) = &entry.detail {
             details.push((entry.id, read_graph(&dir.join(detail_file))?));
         }
+        if !entry.params.is_empty() {
+            biome_params.push((entry.id, BiomeParams::from_entries(entry.params.clone())));
+        }
     }
     if biomes.is_empty() {
         return Err("world manifest lists no biomes".to_string());
     }
-    Ok(LoadedHierarchy { world, zone, biomes, details })
+    Ok(LoadedHierarchy { world, zone, biomes, details, biome_params })
 }
 
 /// Load every editable graph in a world manifest, each with its hierarchy
@@ -377,6 +396,15 @@ pub fn load_world_graphs(
             read_graph(&dir.join(&entry.graph))?,
         ));
     }
+    // Resolve cross-graph pins so the editor renders GraphRef pins correctly:
+    // derive World's boundary (out[0]) and resolve the Zone graph's GraphRefs
+    // (out[1]) against it. Runtime regeneration re-resolves via from_hierarchy.
+    out[0].2.derive_output_boundary();
+    let world_boundary = out[0].2.boundary.clone();
+    out[1].2.resolve_graph_refs(|t| match t {
+        nodegraph_ir::GraphRefTarget::World => Some(world_boundary.clone()),
+        _ => None,
+    });
     Ok(out)
 }
 
@@ -416,12 +444,7 @@ fn graphs_dir() -> std::path::PathBuf {
 /// `Arc`. Re-reading the file here (rather than caching one immutable graph)
 /// means a regeneration picks up an edited `biome_meadow.graph.json`.
 pub fn load_default(params: &TerrainGenParams) -> Result<Arc<WorldGenerator>, String> {
-    WorldGenerator::from_manifest(
-        &world_manifest_path(),
-        params.seed as u64,
-        params.traversal_smoothing_distance,
-    )
-    .map(Arc::new)
+    WorldGenerator::from_manifest(&world_manifest_path(), params.seed as u64).map(Arc::new)
 }
 
 #[cfg(test)]
@@ -429,19 +452,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_biome_graph_loads_with_terrain_output() {
-        // `new` rejects a biome graph without a TerrainOutput, so a successful
+    fn default_biome_graph_loads_with_density_output() {
+        // `new` rejects a biome graph without a DensityOutput, so a successful
         // load proves the default graph has one.
-        WorldGenerator::from_path(&default_graph_path(), 0, 1)
-            .expect("biome_meadow.graph.json must load (and have a TerrainOutput)");
+        WorldGenerator::from_path(&default_graph_path(), 0)
+            .expect("biome_meadow.graph.json must load (and have a DensityOutput)");
     }
 
     #[test]
     fn generated_chunk_tags_default_to_single_biome() {
-        let generator = WorldGenerator::from_path(&default_graph_path(), 0, 1)
+        let generator = WorldGenerator::from_path(&default_graph_path(), 0)
             .expect("biome_meadow.graph.json must load");
         let generated = generator.generate_chunk(IVec3::ZERO);
-        // Empty World/Zone graphs ⇒ legacy single-biome tags.
+        // Empty World/Zone graphs -> legacy single-biome tags.
         assert_eq!(generated.tags.zone, ZoneId(0));
         assert_eq!(generated.tags.biomes.as_slice(), &[BiomeId(0)]);
     }
@@ -449,7 +472,7 @@ mod tests {
     #[test]
     fn generate_chunk_is_deterministic() {
         use crate::world::chunk::CHUNK_VOLUME;
-        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 7, 1)
+        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 7)
             .expect("world manifest must load");
         let pos = IVec3::new(1, 0, 2);
         let a = generator.generate_chunk(pos);
@@ -530,7 +553,7 @@ mod tests {
 
     #[test]
     fn default_world_manifest_loads() {
-        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 0, 1)
+        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 0)
             .expect("world.manifest.json and its graphs must load");
         // The hierarchy composites a chunk without panicking.
         let _ = generator.generate_chunk(IVec3::ZERO);
@@ -563,5 +586,52 @@ mod tests {
             .values()
             .any(|n| matches!(n.kind, NodeKind::ScatterPlace(_)));
         assert!(has_scatter, "meadow detail graph must contain a ScatterPlace terminal");
+    }
+
+    #[test]
+    fn migrated_zone_imports_world_climate() {
+        use nodegraph_ir::GraphRefTarget;
+        let dir = graphs_dir();
+        let mut world = read_graph(&dir.join("world.graph.json")).expect("world.graph.json");
+        let mut zone = read_graph(&dir.join("zone.graph.json")).expect("zone.graph.json");
+
+        // World exposes a "climate" boundary output.
+        world.derive_output_boundary();
+        assert!(world.boundary.outputs.iter().any(|p| p.name == "climate"));
+
+        // Zone's GraphRef(World) resolves to a "climate" pin.
+        let wb = world.boundary.clone();
+        zone.resolve_graph_refs(|t| (t == GraphRefTarget::World).then(|| wb.clone()));
+        let gr = zone
+            .nodes
+            .values()
+            .find(|n| matches!(n.kind, NodeKind::GraphRef(_)))
+            .expect("zone has a GraphRef");
+        assert!(
+            gr.kind.effective_outputs().iter().any(|p| p.name == "climate"),
+            "GraphRef must expose World's climate pin"
+        );
+
+        // Zone no longer derives its own climate, and the resolved graph is valid.
+        assert!(
+            !zone.nodes.values().any(|n| matches!(n.kind, NodeKind::SurfaceNoise(_))),
+            "zone should import climate, not derive it"
+        );
+        assert!(!zone.has_errors(), "resolved zone graph must validate");
+    }
+
+    #[test]
+    fn manifest_parses_biome_params() {
+        let json = r#"{
+            "world": "world.graph.json",
+            "zone": "zone.graph.json",
+            "biomes": [
+                { "id": 0, "graph": "biome_meadow.graph.json", "params": { "traversal_smoothing_distance": 4.0 } },
+                { "id": 1, "graph": "biome_rocky.graph.json" }
+            ]
+        }"#;
+        let m: WorldManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.biomes[0].params.get("traversal_smoothing_distance"), Some(&4.0));
+        assert!(m.biomes[1].params.is_empty());
     }
 }

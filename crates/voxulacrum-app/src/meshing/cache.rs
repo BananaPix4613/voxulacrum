@@ -136,16 +136,6 @@ impl AtomicCacheStats {
     }
 }
 
-/// Snapshot of cache stats for display in the UI.
-#[derive(Clone, Default, Debug)]
-pub struct CacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub errors: u64,
-    pub files_on_disk: u64,
-    pub bytes_on_disk: u64,
-}
-
 // ============================================================================
 // Cache key
 // ============================================================================
@@ -313,20 +303,6 @@ pub fn clear_cache(cache_dir: &Path) -> io::Result<u64> {
         }
     }
     Ok(count)
-}
-
-pub fn disk_usage(cache_dir: &Path) -> (u64, u64) {
-    let mut files = 0u64;
-    let mut bytes = 0u64;
-    if let Ok(entries) = std::fs::read_dir(cache_dir) {
-        for entry in entries.flatten() {
-            if entry.path().extension().map_or(false, |e| e == "bin") {
-                files += 1;
-                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-            }
-        }
-    }
-    (files, bytes)
 }
 
 // ============================================================================

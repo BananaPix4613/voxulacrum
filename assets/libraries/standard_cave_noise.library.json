@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "id_name": "standard_cave_noise",
+  "boundary": {
+    "inputs": [
+      { "name": "position", "ty": "Vec3" }
+    ],
+    "outputs": [
+      { "name": "density", "ty": "Density" }
+    ]
+  },
+  "kernel": "standard_cave_noise"
+}

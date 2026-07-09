@@ -21,12 +21,18 @@ pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 #[derive(Resource)]
 pub struct RenderTargets {
+    // RAII: these textures own the storage the matching *_view handles borrow;
+    // held for resize/recreate, not read directly.
+    #[allow(dead_code)]
     pub scene: wgpu::Texture,
     pub scene_view: wgpu::TextureView,
+    #[allow(dead_code)]
     pub processed: wgpu::Texture,
     pub processed_view: wgpu::TextureView,
+    #[allow(dead_code)]
     pub depth: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
+    #[allow(dead_code)]
     pub normal: wgpu::Texture,
     pub normal_view: wgpu::TextureView,
     pub render_width: u32,

@@ -6,6 +6,7 @@ use crate::rendering::render_context::RenderContext;
 pub struct CloudShadowState {
     pub offset: Vec2,
     pub coverage: f32,
+    #[allow(dead_code)] // RAII: owns the storage texture_view borrows
     pub texture: wgpu::Texture,
     pub texture_view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,

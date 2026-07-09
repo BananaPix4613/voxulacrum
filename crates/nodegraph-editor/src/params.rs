@@ -1,7 +1,7 @@
 //! Per-`NodeKind` parameter editor widgets.
 
 use egui::Ui;
-use nodegraph_ir::{Axis, FractalType, NodeKind};
+use nodegraph_ir::{Axis, FractalType, GraphRefTarget, NodeKind};
 use voxel_core::MaterialId;
 
 /// One parameter row: a left-aligned label followed by its editor widget.
@@ -127,6 +127,10 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
         NodeKind::LibraryRef(p) => row(ui, "library id", |ui| {
             ui.add(egui::DragValue::new(&mut p.library.0))
         }),
+        NodeKind::GraphRef(p) => graph_ref_target_ui(ui, &mut p.target),
+        NodeKind::GraphOutput(p) => {
+            row(ui, "output name", |ui| ui.text_edit_singleline(&mut p.name))
+        }
         NodeKind::SurfaceNoise(p) => noise_params_ui(ui, p),
         NodeKind::WorldOutput(p) => band_list_ui(ui, "zone bands (ascending)", &mut p.zone_bands),
         NodeKind::ZoneOutput(p) => band_list_ui(ui, "biome bands (ascending)", &mut p.biome_bands),
@@ -167,16 +171,62 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
             changed |= row(ui, "prefab id", |ui| ui.add(egui::DragValue::new(&mut p.prefab_id)));
             changed
         }
+        NodeKind::BiomeParam(p) => {
+            let mut changed = row(ui, "param name", |ui| ui.text_edit_singleline(&mut p.name));
+            changed |= row(ui, "default", |ui| ui.add(egui::DragValue::new(&mut p.default).speed(0.05)));
+            changed
+        }
         // Parameterless variants:
         NodeKind::WorldPos(_) | NodeKind::Add(_) | NodeKind::Multiply(_)
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)
         | NodeKind::Lerp(_) | NodeKind::Union(_) | NodeKind::Intersect(_)
         | NodeKind::DensitySubtract(_) | NodeKind::Mix(_) | NodeKind::Mask(_)
-        | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) | NodeKind::BuildTerrain(_) => {
+        | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) | NodeKind::BuildTerrain(_)
+        | NodeKind::DensityOutput(_) => {
             ui.weak("(no parameters)");
             false
         }
     }
+}
+
+/// Editor for a [`GraphRefTarget`]: pick World / Zone / Biome, plus a biome id
+/// when Biome. Returns `true` if edited this frame.
+fn graph_ref_target_ui(ui: &mut Ui, target: &mut GraphRefTarget) -> bool {
+    let mut changed = false;
+    let selected = match target {
+        GraphRefTarget::World => "World".to_string(),
+        GraphRefTarget::Zone => "Zone".to_string(),
+        GraphRefTarget::Biome(id) => format!("Biome {id}"),
+    };
+    ui.horizontal(|ui| {
+        ui.label("target");
+        egui::ComboBox::from_id_salt("graph_ref_target")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(matches!(target, GraphRefTarget::World), "World").clicked()
+                    && !matches!(target, GraphRefTarget::World)
+                {
+                    *target = GraphRefTarget::World;
+                    changed = true;
+                }
+                if ui.selectable_label(matches!(target, GraphRefTarget::Zone), "Zone").clicked()
+                    && !matches!(target, GraphRefTarget::Zone)
+                {
+                    *target = GraphRefTarget::Zone;
+                    changed = true;
+                }
+                if ui.selectable_label(matches!(target, GraphRefTarget::Biome(_)), "Biome").clicked()
+                    && !matches!(target, GraphRefTarget::Biome(_))
+                {
+                    *target = GraphRefTarget::Biome(0);
+                    changed = true;
+                }
+            });
+    });
+    if let GraphRefTarget::Biome(id) = target {
+        changed |= row(ui, "biome id", |ui| ui.add(egui::DragValue::new(id)));
+    }
+    changed
 }
 
 /// Editor for an ascending list of band thresholds (zone or biome selection),

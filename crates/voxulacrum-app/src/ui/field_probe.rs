@@ -144,7 +144,7 @@ impl FieldProbe {
 /// so the panel trails live edits by one frame (imperceptible).
 pub fn field_probe_system(
     mut probe: ResMut<FieldProbe>,
-    mut egui: NonSendMut<EguiRenderer>,
+    egui: NonSendMut<EguiRenderer>,
     ui_state: Res<UiState>,
 ) {
     // 1. Drain a completed evaluation, if one finished.

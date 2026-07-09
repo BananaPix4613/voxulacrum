@@ -2,7 +2,7 @@
   "world": "world.graph.json",
   "zone": "zone.graph.json",
   "biomes": [
-    { "id": 0, "graph": "biome_meadow.graph.json", "detail": "biome_meadow.detail.json" },
-    { "id": 1, "graph": "biome_rocky.graph.json" }
+    { "id": 0, "graph": "biome_meadow.graph.json", "detail": "biome_meadow.detail.json", "params": { "traversal_smoothing_distance": 1.0 } },
+    { "id": 1, "graph": "biome_rocky.graph.json", "params": { "traversal_smoothing_distance": 0.0 } }
   ]
 }

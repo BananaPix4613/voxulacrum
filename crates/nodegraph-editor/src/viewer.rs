@@ -193,7 +193,7 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         }
     }
 
-    fn inputs(&mut self, node: &NodeKind) -> usize { node.descriptor().inputs.len() }
+    fn inputs(&mut self, node: &NodeKind) -> usize { node.effective_inputs().len() }
 
     fn show_input(
         &mut self,
@@ -201,14 +201,15 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         ui: &mut Ui,
         snarl: &mut Snarl<NodeKind>,
     ) -> impl SnarlPin + 'static {
-        let spec = snarl[pin.id.node].descriptor().inputs[pin.id.input];
+        let pins = snarl[pin.id.node].effective_inputs();
+        let spec = &pins[pin.id.input];
         ui.label(spec.name);
         PinInfo::default()
             .with_shape(pin_shape(spec.ty))
             .with_fill(pin_color(spec.ty))
     }
 
-    fn outputs(&mut self, node: &NodeKind) -> usize { node.descriptor().outputs.len() }
+    fn outputs(&mut self, node: &NodeKind) -> usize { node.effective_outputs().len() }
 
     fn show_output(
         &mut self,
@@ -216,7 +217,8 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         ui: &mut Ui,
         snarl: &mut Snarl<NodeKind>,
     ) -> impl SnarlPin + 'static {
-        let spec = snarl[pin.id.node].descriptor().outputs[pin.id.output];
+        let pins = snarl[pin.id.node].effective_outputs();
+        let spec = &pins[pin.id.output];
         // Output rows are right-to-left: this space lands to the *right* of
         // the label, opening clearance before the pin marker so it stops
         // crowding the last glyph.
@@ -310,18 +312,22 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
     }
 
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<NodeKind>) {
-        let from_desc = snarl[from.id.node].descriptor();
-        let to_desc = snarl[to.id.node].descriptor();
-        let from_spec = from_desc.outputs[from.id.output];
-        let to_spec = to_desc.inputs[to.id.input];
-        if !PinType::is_compatible(from_spec.ty, to_spec.ty) {
-            return;
-        }
-        let label = format!(
-            "Connect {}.{} → {}.{}",
-            from_desc.display_name, from_spec.name,
-            to_desc.display_name, to_spec.name,
-        );
+        let label = {
+            let from_node = &snarl[from.id.node];
+            let to_node = &snarl[to.id.node];
+            let from_pins = from_node.effective_outputs();
+            let to_pins = to_node.effective_inputs();
+            let from_spec = &from_pins[from.id.output];
+            let to_spec = &to_pins[to.id.input];
+            if !PinType::is_compatible(from_spec.ty, to_spec.ty) {
+                return;
+            }
+            format!(
+                "Connect {}.{} → {}.{}",
+                from_node.descriptor().display_name, from_spec.name,
+                to_node.descriptor().display_name, to_spec.name,
+            )
+        };
         // Single-input rule: drop any existing wire feeding this input first.
         for existing in to.remotes.clone() {
             snarl.disconnect(existing, to.id);

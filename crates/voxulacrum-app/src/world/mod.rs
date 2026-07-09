@@ -21,7 +21,6 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
 use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_VOLUME, DELTA_THRESHOLD};
-use storage::ChunkStorage;
 use overrides::ChunkOverrides;
 use world_generator::WorldGenerator;
 
@@ -141,7 +140,7 @@ impl World {
         }
     }
 
-    pub fn build_neighbors(&self, pos: IVec3) -> ChunkNeighbors {
+    pub fn build_neighbors(&self, pos: IVec3) -> ChunkNeighbors<'_> {
         let mut neighbors = ChunkNeighbors::empty();
         for dz in -1i32..=1 {
             for dy in -1i32..=1 {
@@ -157,6 +156,7 @@ impl World {
 
     /// Apply a voxel edit to a chunk, propagating mesh-dirty to border neighbors.
     /// Sets persist_dirty on the edited chunk only.
+    #[allow(dead_code)] // voxel-edit toolkit entry point; not yet reachable
     pub fn apply_edit(&mut self, chunk_pos: IVec3, index: u16, voxel: Voxel) {
         if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
             // Apply the edit to storage
@@ -297,7 +297,10 @@ pub struct WorldManager {
     /// Generator the in-flight regen is using; adopted by `World` + streaming
     /// on completion so all three share one `Arc`.
     regen_generator: Option<Arc<WorldGenerator>>,
+    // Y-bounds of the in-flight regen; retained for bounded-regen wiring.
+    #[allow(dead_code)]
     regen_min_y: i32,
+    #[allow(dead_code)]
     regen_max_y: i32,
 }
 

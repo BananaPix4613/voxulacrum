@@ -22,6 +22,14 @@ pub enum CachedOutput {
     Terrain(Arc<ChunkBuffer<Voxel, 32>>),
     /// A scattered point set (for prop placement).
     Positions(Arc<Vec<ScatterPoint>>),
+    /// A biome layer: continuous density + material, produced by `DensityOutput`
+    /// and composited (density blended, material selected) before fusing to voxels.
+    BiomeLayer {
+        /// Continuous density field (solid where `> 0`).
+        density: Arc<ScalarField>,
+        /// Material field.
+        material: Arc<ChunkBuffer<MaterialId, 32>>,
+    },
 }
 
 impl CachedOutput {
@@ -50,6 +58,17 @@ impl CachedOutput {
         if let Self::Positions(p) = self { Some(p) } else { None }
     }
 
+    /// Borrow as a biome layer (density + material), if it is one.
+    pub fn as_biome_layer(
+        &self,
+    ) -> Option<(&Arc<ScalarField>, &Arc<ChunkBuffer<MaterialId, 32>>)> {
+        if let Self::BiomeLayer { density, material } = self {
+            Some((density, material))
+        } else {
+            None
+        }
+    }
+
     /// Static name for diagnostics.
     pub fn kind_name(&self) -> &'static str {
         match self {
@@ -58,6 +77,7 @@ impl CachedOutput {
             Self::Material(_) => "material",
             Self::Terrain(_)  => "terrain",
             Self::Positions(_) => "positions",
+            Self::BiomeLayer { .. } => "biome layer",
         }
     }
 }

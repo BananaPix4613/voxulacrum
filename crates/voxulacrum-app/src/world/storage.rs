@@ -102,6 +102,7 @@ impl PalettedBitArray {
     }
 
     /// Number of entries (always CHUNK_VOLUME).
+    #[allow(dead_code)] // natural collection API
     pub fn len(&self) -> usize {
         CHUNK_VOLUME
     }
@@ -114,6 +115,7 @@ impl PalettedBitArray {
     }
 
     /// Number of distinct values in the palette.
+    #[allow(dead_code)] // natural collection API
     pub fn palette_len(&self) -> usize {
         self.palette.len()
     }

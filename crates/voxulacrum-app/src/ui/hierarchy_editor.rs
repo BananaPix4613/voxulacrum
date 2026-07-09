@@ -94,6 +94,7 @@ impl HierarchyEditor {
     }
     
     /// The slot currently shown.
+    #[allow(dead_code)] // selection accessor
     pub fn selected(&self) -> GraphSlot {
         self.selected
     }

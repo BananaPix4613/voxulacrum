@@ -43,6 +43,7 @@ impl TimeOfDay {
         Self::interpolate_keyframes(&keyframes, self.time)
     }
 
+    #[allow(dead_code)] // lighting accessor
     pub fn sun_intensity(&self) -> f32 {
         self.sun_direction().y.max(0.0)
     }

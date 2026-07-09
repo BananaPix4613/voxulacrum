@@ -88,10 +88,13 @@ pub(crate) fn jittered_grid(ctx: &EvalContext, p: &JitteredGridParams) -> Vec<Sc
     out
 }
 
-/// Per-chunk Bridson Poisson-disk scatter over the margin band.
-pub(crate) fn poisson_disk(ctx: &EvalContext, p: &PoissonDiskParams) -> Vec<ScatterPoint> {
-    let radius = p.radius.max(0.5);
-    let k = p.k.max(1);
+/// Bridson Poisson-disk sampling over this chunk's margin band `[-M, N+M)²`,
+/// seeded by `base`. Returns sample positions in chunk-local continuous XZ.
+/// Shared by the `PoissonDisk` node (which attaches per-point seeds) and the
+/// `PoissonPlacement` library kernel, so the two never drift.
+pub fn poisson_placement(base: u64, radius: f32, k: u32) -> Vec<(f32, f32)> {
+    let radius = radius.max(0.5);
+    let k = k.max(1);
     let lo = -PROP_MARGIN;
     let span = N + 2.0 * PROP_MARGIN;
     let cell = radius / std::f32::consts::SQRT_2;
@@ -99,7 +102,6 @@ pub(crate) fn poisson_disk(ctx: &EvalContext, p: &PoissonDiskParams) -> Vec<Scat
     let mut grid = vec![usize::MAX; grid_dim * grid_dim];
     let mut samples: Vec<(f32, f32)> = Vec::new();
     let mut active: Vec<usize> = Vec::new();
-    let base = ctx.scatter_seed(p.seed);
     let mut rng = SplitMix64::new(base);
 
     let grid_idx = |x: f32, z: f32| -> usize {
@@ -153,6 +155,13 @@ pub(crate) fn poisson_disk(ctx: &EvalContext, p: &PoissonDiskParams) -> Vec<Scat
     }
 
     samples
+}
+
+/// Per-chunk Bridson Poisson-disk scatter over the margin band, with per-point
+/// seeds attached. Delegates the point layout to [`poisson_placement`].
+pub(crate) fn poisson_disk(ctx: &EvalContext, p: &PoissonDiskParams) -> Vec<ScatterPoint> {
+    let base = ctx.scatter_seed(p.seed);
+    poisson_placement(base, p.radius, p.k)
         .into_iter()
         .enumerate()
         .map(|(i, (lx, lz))| {
@@ -215,5 +224,13 @@ mod tests {
                         "two points closer than radius");
             }
         }
+    }
+
+    #[test]
+    fn poisson_placement_is_deterministic() {
+        let a = poisson_placement(12345, 4.0, 30);
+        let b = poisson_placement(12345, 4.0, 30);
+        assert_eq!(a, b);
+        assert!(a.len() > 4);
     }
 }

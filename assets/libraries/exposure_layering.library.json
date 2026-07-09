@@ -1,0 +1,16 @@
+{
+  "id": 3,
+  "id_name": "exposure_layering",
+  "boundary": {
+    "inputs": [
+      { "name": "base_material", "ty": "Material" },
+      { "name": "cap_material", "ty": "Material" },
+      { "name": "exposure", "ty": "Scalar" },
+      { "name": "threshold", "ty": "Scalar" }
+    ],
+    "outputs": [
+      { "name": "material", "ty": "Material" }
+    ]
+  },
+  "kernel": "exposure_layering"
+}

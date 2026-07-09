@@ -15,6 +15,7 @@ mod interaction;
 mod paths;
 mod materials;
 mod prefabs;
+mod libraries;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -304,10 +305,11 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         .expect("Failed to load default_biome graph generator");
     
     // Data-driven material registry (RON primary, built-in fallback). Shared by
-    // the vegetation pass and any system needing material metadata.
+    // the foliage passes and any system needing material metadata.
     let material_registry = materials::load_registry();
     let prefab_registry = prefabs::load_prefab_registry();
-
+    let libraries = libraries::load_libraries();
+    
     // One bounded rayon pool shared by the startup fill, streaming generation,
     // and background regeneration - the single worker-pool model for all chunk
     // generation (engine-design.md §12).
@@ -406,6 +408,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(VoxelWorld(world));
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
     ecs.insert_resource(prefabs::PrefabRegistryRes(prefab_registry));
+    ecs.insert_resource(libraries::LibrariesRes(libraries));
 
     // Direct Resource types
     ecs.insert_resource(ctx);

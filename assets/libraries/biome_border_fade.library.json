@@ -1,0 +1,14 @@
+{
+  "id": 0,
+  "id_name": "biome_border_fade",
+  "boundary": {
+    "inputs": [
+      { "name": "distance", "ty": "SurfaceField" },
+      { "name": "radius", "ty": "Scalar" }
+    ],
+    "outputs": [
+      { "name": "weight", "ty": "SurfaceField" }
+    ]
+  },
+  "kernel": "biome_border_fade"
+}

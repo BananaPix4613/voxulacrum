@@ -322,8 +322,8 @@ pub fn streaming_tick_system(
         water_pass.remove_chunk_water(*pos);
     }
 
-    // NOTE: We do NOT add vegetation/water here for inserted chunks.
-    // Inserted chunks don't have meshes yet. Vegetation/water are added
+    // NOTE: We do NOT add foliage/water here for inserted chunks.
+    // Inserted chunks don't have meshes yet. Foliage/water are added
     // in meshing_tick_system when the mesh upload completes, so they
     // appear on the same frame as the terrain.
 
@@ -348,7 +348,7 @@ pub fn meshing_tick_system(
     // Phase 1: tick meshing with &mut world - collects meshed positions.
     let meshed = meshing.tick(&mut world.0, &ctx, &mut ui);
 
-    // Phase 2: for each newly meshed chunk, build per-chunk vegetation
+    // Phase 2: for each newly meshed chunk, build per-chunk foliage
     // and water GPU buffers. world.0 is now borrowed immutably.
     if !meshed.is_empty() {
         for pos in &meshed {
@@ -629,7 +629,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
             hide_water: ui.params.debug.hide_water,
-            hide_vegetation: ui.params.debug.hide_vegetation,
+            hide_foliage: ui.params.debug.hide_foliage,
         };
 
         let mut graph = RenderGraph::new();

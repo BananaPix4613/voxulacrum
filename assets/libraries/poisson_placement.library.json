@@ -1,0 +1,11 @@
+{
+  "id": 4,
+  "id_name": "poisson_placement",
+  "boundary": {
+    "inputs": [],
+    "outputs": [
+      { "name": "points", "ty": "Positions" }
+    ]
+  },
+  "kernel": "poisson_placement"
+}

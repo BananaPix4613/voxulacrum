@@ -144,7 +144,6 @@ impl WorldRegenCoordinator {
                 match crate::world::world_generator::WorldGenerator::from_manifest_with_override(
                     &crate::world::world_generator::world_manifest_path(),
                     seed,
-                    ui_state.params.terrain_gen.traversal_smoothing_distance,
                     slot,
                     graph,
                 ) {

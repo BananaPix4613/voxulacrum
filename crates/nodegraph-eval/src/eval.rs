@@ -6,6 +6,7 @@ use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
 use nodegraph_ir::{Axis, Graph, FractalType, NoiseParams, NodeId, NodeKind, Severity};
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
+use crate::biome_params::BiomeParams;
 use crate::cache::{CachedOutput, EvalCache};
 use crate::context::EvalContext;
 use crate::error::{EvalError, EvalResult};
@@ -39,12 +40,21 @@ pub struct Evaluator<'g> {
     graph: &'g Graph,
     ctx: EvalContext,
     cache: EvalCache,
+    /// The active biome's scalar parameters, read by `BiomeParam` nodes. `None`
+    /// falls every `BiomeParam` back to its node default.
+    biome_params: Option<&'g BiomeParams>,
 }
 
 impl<'g> Evaluator<'g> {
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, ctx, cache: EvalCache::new() }
+        Self { graph, ctx, cache: EvalCache::new(), biome_params: None }
+    }
+    
+    /// Attach the active biome's parameter sidecar, read by `BiomeParam` nodes.
+    pub fn with_biome_params(mut self, params: &'g BiomeParams) -> Self {
+        self.biome_params = Some(params);
+        self
     }
 
     /// Borrow the CSE cache (populated by [`Evaluator::evaluate`]).
@@ -267,6 +277,13 @@ impl<'g> Evaluator<'g> {
                 }
                 CachedOutput::Scalar(Arc::new(field))
             }
+            NodeKind::BiomeParam(p) => {
+                let value = self
+                    .biome_params
+                    .and_then(|bp| bp.get(&p.name))
+                    .unwrap_or(p.default);
+                CachedOutput::Scalar(Arc::new(ScalarField::filled(value)))
+            }
             // --- Math (all elementwise on density fields) ---
             NodeKind::Add(_) => {
                 let (a, b) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?);
@@ -399,17 +416,9 @@ impl<'g> Evaluator<'g> {
                                 None => MaterialId::AIR, // empty column
                                 Some(sy) if y > sy => MaterialId::AIR, // above surface
                                 Some(sy) => {
-                                    let depth = sy - y;
-                                    let mut accum: u32 = 0;
-                                    let mut chosen = fill;
-                                    for &(material, thickness) in &bands {
-                                        if (depth as u32) < accum + thickness {
-                                            chosen = material;
-                                            break;
-                                        }
-                                        accum += thickness;
-                                    }
-                                    chosen
+                                    crate::library_kernel::surface_layering(
+                                        (sy - y) as u32, &bands, fill,
+                                    )
                                 }
                             };
                             out.set(x, y, z, mat);
@@ -485,12 +494,20 @@ impl<'g> Evaluator<'g> {
             NodeKind::TerrainOutput(_) => {
                 CachedOutput::Terrain(self.input_terrain(id, 0)?)
             }
-            // --- Library (scaffold: not yet expandable) ---
+            NodeKind::DensityOutput(_) => CachedOutput::BiomeLayer {
+                density: self.input_scalar(id, 0)?,
+                material: self.input_material(id, 1)?,
+            },
+            // --- References (resolved outside the single-graph evaluator) ---
             NodeKind::LibraryRef(_) => {
                 return Err(EvalError::UnresolvedLibraryRef { node: id });
             }
+            NodeKind::GraphRef(_) => {
+                return Err(EvalError::UnresolvedGraphRef { node: id });
+            }
             // --- Per-column nodes belong to the World/Zone graphs ---
             NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_)
+            | NodeKind::GraphOutput(_)
             | NodeKind::PoissonDistribution(_) | NodeKind::SurfaceFilter(_)
             | NodeKind::BiomeContextMask(_) | NodeKind::SpeciesPicker(_)
             | NodeKind::PaintDensity(_) | NodeKind::ScatterPlace(_) => {
@@ -508,6 +525,9 @@ impl<'g> Evaluator<'g> {
         let node = self.graph.nodes.get(id).ok_or(EvalError::MissingOutput(id))?;
         Ok(match &node.kind {
             NodeKind::Constant(p) => p.value,
+            NodeKind::BiomeParam(p) => {
+                self.biome_params.and_then(|bp| bp.get(&p.name)).unwrap_or(p.default)
+            }
             NodeKind::Perlin2D(p)  => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::Perlin).get_noise_2d(w.x, w.z) }
             NodeKind::Perlin3D(p)  => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::Perlin).get_noise_3d(w.x, w.y, w.z) }
             NodeKind::Simplex2D(p) => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::OpenSimplex2).get_noise_2d(w.x, w.z) }
@@ -550,6 +570,7 @@ impl<'g> Evaluator<'g> {
                 return Err(EvalError::WrongInputType { node: id, expected: "scalar", got: "vec3" });
             }
             NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_)
+            | NodeKind::GraphOutput(_)
             | NodeKind::PoissonDistribution(_) | NodeKind::SurfaceFilter(_)
             | NodeKind::BiomeContextMask(_) | NodeKind::SpeciesPicker(_)
             | NodeKind::PaintDensity(_) | NodeKind::ScatterPlace(_) => {
@@ -560,6 +581,7 @@ impl<'g> Evaluator<'g> {
             | NodeKind::Queue(_)
             | NodeKind::BuildTerrain(_)
             | NodeKind::TerrainOutput(_)
+            | NodeKind::DensityOutput(_)
             | NodeKind::JitteredGrid(_)
             | NodeKind::PoissonDisk(_)
             | NodeKind::FindFlat(_)
@@ -571,6 +593,9 @@ impl<'g> Evaluator<'g> {
             }
             NodeKind::LibraryRef(_) => {
                 return Err(EvalError::UnresolvedLibraryRef { node: id });
+            }
+            NodeKind::GraphRef(_) => {
+                return Err(EvalError::UnresolvedGraphRef { node: id });
             }
         })
     }
@@ -608,4 +633,64 @@ fn sample_curve(stops: &[(f32, f32)], v: f32) -> f32 {
         }
     }
     stops.last().unwrap().1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::IVec3;
+    use nodegraph_ir::BiomeParamParams;
+    
+    fn scalar0(out: Option<&CachedOutput>) -> f32 {
+        match out {
+            Some(CachedOutput::Scalar(f)) => f.get(0, 0, 0),
+            _ => panic!("expected scalar output"),
+        }
+    }
+    
+    #[test]
+    fn biome_param_reads_sidecar_with_default_fallback() {
+        let mut g = Graph::new();
+        let bp = g.add_node(NodeKind::BiomeParam(BiomeParamParams {
+            name: "scale".into(),
+            default: 2.0,
+        }));
+        let ctx = EvalContext::new(0, IVec3::ZERO);
+        
+        // No sidecar -> node default.
+        let mut e = Evaluator::new(&g, ctx);
+        e.evaluate().unwrap();
+        assert_eq!(scalar0(e.cache().get(bp)), 2.0, "no sidecar -> node default");
+        
+        // Sidecar with the param -> that value.
+        let mut params = BiomeParams::new();
+        params.set("scale", 5.5);
+        let mut e2 = Evaluator::new(&g, ctx).with_biome_params(&params);
+        e2.evaluate().unwrap();
+        assert_eq!(scalar0(e2.cache().get(bp)), 5.5, "sidecar value");
+        
+        // Sidecar missing the param -> node default.
+        let mut other = BiomeParams::new();
+        other.set("other", 9.0);
+        let mut e3 = Evaluator::new(&g, ctx).with_biome_params(&other);
+        e3.evaluate().unwrap();
+        assert_eq!(scalar0(e3.cache().get(bp)), 2.0, "missing param -> node default");
+    }
+
+    #[test]
+    fn density_output_caches_biome_layer() {
+        use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, PinRef};
+        let mut g = Graph::new();
+        let d = g.add_node(NodeKind::Constant(ConstantParams { value: 0.75 }));
+        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
+        g.connect(PinRef::new(d, 0), PinRef::new(out, 0)).unwrap(); // Scalar -> Density coercion
+        g.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
+
+        let mut e = Evaluator::new(&g, EvalContext::new(0, IVec3::ZERO));
+        e.evaluate().unwrap();
+        let (density, material) = e.cache().get(out).unwrap().as_biome_layer().expect("biome layer");
+        assert_eq!(density.get(0, 0, 0), 0.75);
+        assert_eq!(material.get(0, 0, 0), ConstantMaterialParams::default().material);
+    }
 }

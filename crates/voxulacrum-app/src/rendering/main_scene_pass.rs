@@ -10,7 +10,10 @@ use crate::world::chunk::LoadedChunk;
 /// Configuration for cross-section cap rendering within the main scene pass.
 pub struct CapConfig {
     pub enabled: bool,
+    // Cross-section clip plane; retained for the cap-rendering path.
+    #[allow(dead_code)]
     pub clip_dirs: [f32; 3],
+    #[allow(dead_code)]
     pub clip_pos: [f32; 3],
 }
 
@@ -33,7 +36,7 @@ pub struct MainScenePassNode<'a> {
     pub debug_line_pass: &'a DebugLinePass,
     pub show_debug_lines: bool,
     pub hide_water: bool,
-    pub hide_vegetation: bool,
+    pub hide_foliage: bool,
 }
 
 impl<'a> RenderPassNode for MainScenePassNode<'a> {
@@ -113,7 +116,7 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         }
 
         // Tier-1 detail paint - GPU-generated blades from per-chunk density buffers
-        if !self.hide_vegetation && !self.detail_paint_pass.chunk_paint.is_empty() {
+        if !self.hide_foliage && !self.detail_paint_pass.chunk_paint.is_empty() {
             pass.set_pipeline(self.detail_paint_pipeline);
             pass.set_bind_group(0, self.uniform_bind_group, &[]);
             pass.set_vertex_buffer(0, self.detail_paint_pass.blade_vertex_buffer.slice(..));
@@ -134,7 +137,7 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         }
 
         // Tier-2/3 scatter - one instanced draw per prefab mesh, grouped by prefab
-        if !self.hide_vegetation && !self.scatter_pass.chunk_scatter.is_empty() {
+        if !self.hide_foliage && !self.scatter_pass.chunk_scatter.is_empty() {
             pass.set_pipeline(self.scatter_pipeline);
             pass.set_bind_group(0, self.uniform_bind_group, &[]);
             for (prefab_idx, mesh) in self.scatter_pass.prefab_meshes.iter().enumerate() {

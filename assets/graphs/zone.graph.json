@@ -2,7 +2,7 @@
   "kind": "Zone",
   "nodes": [
     { "value": null, "version": 0 },
-    { "value": { "kind": { "type": "SurfaceNoise", "seed": 20, "frequency": 0.004, "octaves": 3, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [0.0, 0.0] }, "version": 1 },
+    { "value": { "kind": { "type": "GraphRef", "target": "World" }, "position": [0.0, 0.0] }, "version": 1 },
     { "value": { "kind": { "type": "ZoneOutput", "biome_bands": [0.0] }, "position": [240.0, 0.0] }, "version": 1 }
   ],
   "edges": [

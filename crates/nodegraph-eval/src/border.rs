@@ -48,26 +48,42 @@ pub fn analyze_biome_borders(
     chunk: IVec3,
     radius: i32,
 ) -> EvalResult<BorderAnalysis> {
-    let mut distance = ColumnField::filled(radius.max(0) as f32);
-    let mut neighbor = IdColumn::zeroed();
+    let r = radius.max(0);
+    let dim = CHUNK_DIM as i32;
+    let side = (dim + 2 * r) as usize;
+    let base_x = chunk.x * dim - r;
+    let base_z = chunk.z * dim - r;
+    
+    // Sample the biome id for every column of the radius-extended footprint once,
+    // so the neighborhood scan below is just grid reads (instead of re-sampling,
+    // and re-noising, per neighbor pair).
+    let mut grid = vec![0u16; side * side];
+    for ez in 0..side {
+        for ex in 0..side {
+            let wx = base_x + ex as i32;
+            let wz = base_z + ez as i32;
+            grid[ez * side + ex] = sample_id(eval, biome_node, wx, wz)?;
+        }
+    }
+    let at = |ex: i32, ez: i32| grid[ez as usize * side + ex as usize];
 
+    let mut distance = ColumnField::filled(r as f32);
+    let mut neighbor = IdColumn::zeroed();
     for z in 0..CHUNK_DIM {
         for x in 0..CHUNK_DIM {
-            let wx = chunk.x * CHUNK_DIM as i32 + x as i32;
-            let wz = chunk.z * CHUNK_DIM as i32 + z as i32;
-            let own = sample_id(eval, biome_node, wx, wz)?;
+            let (gx, gz) = (x as i32 + r, z as i32 + r);
+            let own = at(gx, gz);
             neighbor.set(x, z, own);
 
             // Nearest differing biome within the radius (squared Euclidean).
-            let mut best_d2 = (radius * radius) as f32;
-            for dz in -radius..=radius {
-                for dx in -radius..=radius {
+            let mut best_d2 = (r * r) as f32;
+            for dz in -r..=r {
+                for dx in -r..=r {
                     let d2 = (dx * dx + dz * dz) as f32;
-                    // Skip the center and anything that can't beat the best.
                     if d2 == 0.0 || d2 >= best_d2 {
                         continue;
                     }
-                    let other = sample_id(eval, biome_node, wx + dx, wz + dz)?;
+                    let other = at(gx + dx, gz + dz);
                     if other != own {
                         best_d2 = d2;
                         neighbor.set(x, z, other);

@@ -74,6 +74,7 @@ pub struct CameraView {
     pub aspect: f32,
     pub rotation: f32,
     pub camera_chunk: IVec3,
+    #[allow(dead_code)] // camera world-space position; retained for view math
     pub camera_world_pos: Vec3,
 }
 
@@ -117,7 +118,7 @@ impl CameraView {
     /// the horizontal direction, preventing pop-in when the camera moves forward.
     fn half_extents(&self, margin_fraction: f32) -> (f32, f32) {
         const MIN_MARGIN: f32 = 2.0; // minimum buffer in chunks, prevents pop-in at low zoom
-        let sin_theta = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
+        let _sin_theta = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
         let half_right_vis = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
         let half_up_vis    = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
 
@@ -130,6 +131,7 @@ impl CameraView {
     /// Simple Euclidean distance in chunk space from camera_chunk center.
     /// The diamond test already filters out irrelevant chunks, so
     /// center-first loading is the main priority need.
+    #[allow(dead_code)] // load-priority helper; center-first loading API
     pub fn priority_score(&self, pos: IVec3) -> f32 {
         let dx = (pos.x - self.camera_chunk.x) as f32;
         let dz = (pos.z - self.camera_chunk.z) as f32;
@@ -316,7 +318,7 @@ impl ChunkStreamingManager {
     /// Main tick: load/unload chunks based on camera position and frustum.
     ///
     /// Returns the list of newly inserted and unloaded chunk positions so the
-    /// caller can do incremental work (e.g. vegetation per-chunk).
+    /// caller can do incremental work (e.g. foliage per-chunk).
     pub fn tick(
         &mut self,
         world: &mut World,

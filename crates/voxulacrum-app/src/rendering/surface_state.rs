@@ -16,5 +16,4 @@ impl SurfaceState {
         self.surface.configure(&device, &self.surface_config);
     }
 
-    pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 }

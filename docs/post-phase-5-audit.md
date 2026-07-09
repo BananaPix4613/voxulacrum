@@ -4,6 +4,11 @@ Close-of-phase snapshot for **Phase 5 (Foliage Content)**. Companion to
 `post-phase-4-audit.md`. Records what shipped, the state of the foliage stack,
 test/verification coverage, and the deferred/known-limitation backlog.
 
+**Status: complete.** Every substep landed and was runtime-verified; the
+Substep-11 cleanup sweep is applied; the phase is committed as a single Phase-5
+commit on branch `mc-revision`. Substep 7 (LOD billboards) was deferred by
+choice — see Deferred below.
+
 ## What Phase 5 delivered
 
 Three foliage tiers now generate from DetailGraphs and render end-to-end, plus
@@ -78,8 +83,10 @@ anchor-based player interaction and a data-driven prefab system:
   tree); `create_vegetation_pipeline` + `vegetation.wgsl` + `VegetationParams` + the
   registry's `vegetation_pipeline` are still built but undrawn. Safe to delete wholesale in
   a future tidy.
-- **Prefab size at pixel density:** `grass_tuft` in particular is hard to see; sizes are a
-  one-line tune in `prefabs.ron` (mirror in `load_initial()` to keep the lock test green).
+- **Prefab size at pixel density:** props were tuned up (`grass_tuft`/`bush`/`rock` scale
+  0.65/0.85/0.75) for visibility, but at ~16 px/voxel `grass_tuft` still reads as a speck.
+  Further sizing is a one-line tune in `prefabs.ron` (mirror in `load_initial()` to keep the
+  lock test green — the sync is enforced, so a drift here fails `fallback_matches_shipped_ron`).
 - Only the meadow biome (0) has a DetailGraph; the rocky biome (1) has no foliage by design.
 
 ## Known tech-debt backlog (pre-existing, out of Phase-5 scope)
@@ -91,7 +98,10 @@ accumulated unused items (`CacheStats`, `disk_usage`, `PostProcess` variant,
 dead-code pass. Phase 5 introduced zero net-new warnings after the sweep in Substep 11.
 
 ## Verification results
-- `cargo check` / `cargo build` clean (warnings down to the pre-existing backlog above).
-- `cargo test` green.
+- `cargo check` / `cargo build` clean — warnings down to the pre-existing backlog above;
+  Phase 5 added zero net-new after the Substep-11 sweep.
+- `cargo test` green, including `fallback_matches_shipped_ron` after syncing `load_initial()`
+  to the tuned `prefabs.ron` scales.
 - Runtime: three tiers render on the meadow; place/remove interaction works and persists
   across unload→reload and regen; slabs persist on reload (the cache bug is fixed).
+- Committed as a single Phase-5 commit on branch `mc-revision`.

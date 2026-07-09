@@ -40,6 +40,8 @@
 
 #![warn(missing_docs)]
 
+mod boundary;
+mod crossgraph;
 mod diagnostic;
 mod edge;
 mod error;
@@ -49,19 +51,21 @@ mod node;
 mod pin;
 mod prefab;
 
+pub use boundary::{BoundaryPort, EffectivePin, GraphBoundary, ResolvedBoundary, ResolvedPin};
+pub use crossgraph::{detect_graph_ref_cycle, GraphRefTarget};
 pub use diagnostic::{Diagnostic, Severity};
 pub use edge::{Edge, PinRef};
 pub use error::{GraphError, GraphResult};
 pub use graph::{Graph, GraphKind};
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
 pub use node::{
-    AddParams, Axis, ClampParams, ConstantMaterialParams, ConstantParams, CurveMapperParams,
-    DensitySubtractParams, DomainWarpParams, FractalType, IntersectParams, LayerParams,
-    LerpParams, LibraryRefParams, MaskParams, MaxParams, MinParams, MixParams, MultiplyParams,
-    Node, NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams,
-    Perlin2DParams, PinSpec, QueueParams, RemapParams, SubtractParams,
-    TerrainOutputParams, ThresholdParams, UnionParams, WorldAxisParams, WorldPosParams,
-    BuildTerrainParams, JitteredGridParams, PoissonDiskParams, FindFlatParams,
+    AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams, ConstantParams,
+    CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams, FractalType,
+    GraphOutputParams, GraphRefParams, IntersectParams, LayerParams, LerpParams, LibraryRefParams,
+    MaskParams, MaxParams, MinParams, MixParams, MultiplyParams, Node, NodeCategory, NodeDescriptor,
+    NodeId, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinSpec, QueueParams, RemapParams,
+    SubtractParams, TerrainOutputParams, ThresholdParams, UnionParams, WorldAxisParams,
+    WorldPosParams, BuildTerrainParams, JitteredGridParams, PoissonDiskParams, FindFlatParams,
     PlaceTreeParams, PlacePrefabParams, WorldOutputParams, ZoneOutputParams, YBandParams,
     PoissonDistributionParams, SurfaceFilterParams, BiomeContextMaskParams,
     SpeciesPickerParams, PaintDensityParams, ScatterPlaceParams,

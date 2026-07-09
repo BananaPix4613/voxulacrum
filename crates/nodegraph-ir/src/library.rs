@@ -141,6 +141,7 @@ mod tests {
         for &t in targets {
             g.add_node(NodeKind::LibraryRef(LibraryRefParams {
                 library: LibraryGraphId(t),
+                ..Default::default()
             }));
         }
         g

@@ -15,5 +15,6 @@ pub struct ClearMeshCache;
 /// Request a palette load by name.
 #[derive(Event)]
 pub struct LoadPaletteRequest {
+    #[allow(dead_code)] // event payload; consumed once the handler is wired
     pub name: String,
 }

@@ -30,6 +30,7 @@ pub struct FrameState {
     pub clip_max: [f32; 3],
     pub clip_enabled: u32,
     pub debug_mode: u32,
+    #[allow(dead_code)] // sky tint uniform; retained for shader wiring
     pub sky_color: [f32; 3],
     pub warm_tint_color: [f32; 3],
     pub warm_tint_strength: f32,

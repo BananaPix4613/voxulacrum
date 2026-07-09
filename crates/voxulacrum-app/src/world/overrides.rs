@@ -60,6 +60,7 @@ impl ChunkOverrides {
     
     /// Record a voxel change at flat chunk index `index` (air clears the cell).
     /// Repeated edits to the same cell are last-write-wins for free.
+    #[allow(dead_code)] // voxel-edit toolkit; wired when editing lands
     pub fn set_voxel(&mut self, index: usize, voxel: Voxel) {
         self.voxel_diffs.insert(LocalPos::from_index(index), voxel);
     }

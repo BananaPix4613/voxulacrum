@@ -1,28 +1,64 @@
 //! Multi-graph evaluation harness for the five-graph hierarchy.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use nodegraph_ir::{Graph, GraphKind, LibraryGraphRegistry, NodeId, NodeKind, Severity};
-use voxel_core::{ChunkBuffer, Voxel};
+use nodegraph_ir::{Graph, GraphKind, GraphRefTarget, LibraryGraphRegistry, NodeId, NodeKind, Severity};
+use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
-use crate::cache::CachedOutput;
+use crate::biome_params::BiomeParams;
+use crate::border::{analyze_biome_borders, biome_border_fade, blend_density, BorderAnalysis};
+use crate::library_kernel::surface_layering;
 use crate::column::{ColumnCache, IdColumn};
-use crate::column_eval::ColumnEvaluator;
+use crate::column_eval::{ColumnEvaluator, UpstreamGraphs};
 use crate::context::EvalContext;
 use crate::detail_eval::DetailEvaluator;
 use crate::error::EvalResult;
 use crate::eval::Evaluator;
-use crate::field::CHUNK_DIM;
+use crate::field::{ScalarField, CHUNK_DIM};
 use crate::foliage::ChunkFoliage;
 
-/// One biome's terrain graph, the biome id it renders, and its located
-/// `TerrainOutput` (absent if the graph has none - such a biome produces air),
-/// and an optional `DetailGraph` producing the biome's foliage.
+/// Biome-border fade radius, in world columns: how far the density blend reaches
+/// from a biome boundary. Larger widens the transition (and the cross-column
+/// border scan). Could later become a per-biome parameter.
+const FADE_RADIUS: i32 = 10;
+
+/// How a biome assigns material to its (composed) density: a depth-layered cake
+/// (`Layer`), a single material (`ConstantMaterial`), or - for any other material
+/// chain - fall back to the biome's precomputed material field.
+enum BiomeMaterialRule {
+    /// Top-down `(material, thickness)` bands + fill below (see `surface_layering`).
+    Layer { bands: Vec<(MaterialId, u32)>, fill: MaterialId },
+    /// A single uniform material.
+    Uniform(MaterialId),
+    /// Fall back to the biome's precomputed material field (shifted).
+    Field,
+}
+
+/// Derive a biome's [`BiomeMaterialRule`] from the node feeding its
+/// `DensityOutput` material input (pin 1), so material can be reapplied to the
+/// blended surface instead of read from a surface-relative precomputed field.
+fn extract_material_rule(graph: &Graph, density_node: NodeId) -> BiomeMaterialRule {
+    let Some(edge) = graph.edges.iter().find(|e| e.to.node == density_node && e.to.pin == 1) else {
+        return BiomeMaterialRule::Field;
+    };
+    match graph.nodes.get(edge.from.node).map(|n| &n.kind) {
+        Some(NodeKind::Layer(p)) => BiomeMaterialRule::Layer { bands: p.bands.clone(), fill: p.fill },
+        Some(NodeKind::ConstantMaterial(p)) => BiomeMaterialRule::Uniform(p.material),
+        _ => BiomeMaterialRule::Field,
+    }
+}
+
+/// One biome's terrain graph, the biome id it renders, its located
+/// `DensityOutput` (absent if the graph has none - such a biome produces air),
+/// its material rule, and an optional `DetailGraph` producing the biome's foliage.
 struct BiomeGraph {
     id: u16,
     graph: Graph,
-    terrain_node: Option<NodeId>,
+    density_node: Option<NodeId>,
+    material_rule: BiomeMaterialRule,
     detail: Option<Graph>,
+    params: BiomeParams,
 }
 
 /// Owns the graph set for one world - the World and Zone graphs, the biome
@@ -46,11 +82,20 @@ impl WorldEvaluator {
     /// graphs and no libraries. Validates every graph and the library references
     /// set, logging findings.
     pub fn new(biome: Graph) -> Self {
-        let terrain_node = find_terrain_node(&biome);
+        let density_node = find_density_node(&biome);
+        let material_rule =
+            density_node.map_or(BiomeMaterialRule::Field, |n| extract_material_rule(&biome, n));
         let this = Self {
             world: Graph::of_kind(GraphKind::World),
             zone: Graph::of_kind(GraphKind::Zone),
-            biomes: vec![BiomeGraph { id: 0, graph: biome, terrain_node, detail: None }],
+            biomes: vec![BiomeGraph {
+                id: 0,
+                graph: biome,
+                density_node,
+                material_rule,
+                detail: None,
+                params: BiomeParams::new(),
+            }],
             libraries: LibraryGraphRegistry::new(),
         };
         this.log_validation();
@@ -70,14 +115,23 @@ impl WorldEvaluator {
     }
 
     /// Replace the biome set (builder-style). Each entry is a `(biome id, graph)`
-    /// pair; the graph's `TerrainOutput` is located now (a biome without one
+    /// pair; the graph's `DensityOutput` is located now (a biome without one
     /// produces air for its columns).
     pub fn with_biomes(mut self, biomes: Vec<(u16, Graph)>) -> Self {
         self.biomes = biomes
             .into_iter()
             .map(|(id, graph)| {
-                let terrain_node = find_terrain_node(&graph);
-                BiomeGraph { id, graph, terrain_node, detail: None }
+                let density_node = find_density_node(&graph);
+                let material_rule = density_node
+                    .map_or(BiomeMaterialRule::Field, |n| extract_material_rule(&graph, n));
+                BiomeGraph {
+                    id,
+                    graph,
+                    density_node,
+                    material_rule,
+                    detail: None,
+                    params: BiomeParams::new(),
+                }
             })
             .collect();
         self
@@ -95,9 +149,40 @@ impl WorldEvaluator {
         self
     }
 
+    /// Attach per-biome scalar parameters by id (builder-style). Entries whose id
+    /// has no matching biome are ignored; a biome without an entry keeps an empty
+    /// sidecar (every `BiomeParam` falls back to its node default).
+    pub fn with_biome_params(mut self, params: Vec<(u16, BiomeParams)>) -> Self {
+        for (id, p) in params {
+            if let Some(bg) = self.biomes.iter_mut().find(|b| b.id == id) {
+                bg.params = p;
+            }
+        }
+        self
+    }
+
     /// Replace the library registry (builder-style).
     pub fn with_libraries(mut self, libraries: LibraryGraphRegistry) -> Self {
         self.libraries = libraries;
+        self
+    }
+
+    /// Finalize cross-graph dataflow: derive the World and Zone boundaries from
+    /// their `GraphOutput` nodes, then resolve the Zone graph's `GraphRef` pins
+    /// against those boundaries. Call once after the graphs are installed (it is
+    /// a no-op when nothing references anything). Biome-graph cross-graph imports
+    /// arrive with the biome density rework (Substep 7).
+    pub fn with_cross_graph_resolved(mut self) -> Self {
+        self.world.derive_output_boundary();
+        self.zone.derive_output_boundary();
+        let world_boundary = self.world.boundary.clone();
+        let zone_boundary = self.zone.boundary.clone();
+        let boundary_of = |t: GraphRefTarget| match t {
+            GraphRefTarget::World => Some(world_boundary.clone()),
+            GraphRefTarget::Zone => Some(zone_boundary.clone()),
+            GraphRefTarget::Biome(_) => None,
+        };
+        self.zone.resolve_graph_refs(boundary_of);
         self
     }
 
@@ -140,15 +225,44 @@ impl WorldEvaluator {
             .map(|(id, _)| id)
     }
 
+    /// A biome's scalar parameter by name, if that biome exists and declares it.
+    pub fn biome_param(&self, biome_id: u16, name: &str) -> Option<f32> {
+        self.biomes
+            .iter()
+            .find(|b| b.id == biome_id)
+            .and_then(|b| b.params.get(name))
+    }
+
     /// Evaluate the graph set for one chunk: World -> per-column zone ids, Zone
     /// -> per-column biome ids, then composite the biome graphs' terrain by that
     /// biome assignment.
     pub fn evaluate_chunk(&self, ctx: EvalContext) -> EvalResult<ChunkEvaluation> {
-        let world_columns = Self::eval_columns(&self.world, ctx)?;
-        let zone_columns = Self::eval_columns(&self.zone, ctx)?;
+        let world_columns = Self::eval_columns(&self.world, ctx, None)?;
+
+        // Evaluate Zone with World as its cross-graph upstream, and analyze biome
+        // borders (a cross-chunk scan) so the composite can blend densities at
+        // boundaries. Scoped so the upstream's borrow of `world_columns` ends
+        // before it is moved out.
+        let (zone_columns, border) = {
+            let mut upstream = UpstreamGraphs::new();
+            if !self.world.nodes.is_empty() {
+                upstream.insert(GraphRefTarget::World, &self.world, ctx, &world_columns);
+            }
+            if self.zone.nodes.is_empty() {
+                (ColumnCache::new(), None)
+            } else {
+                let mut zone_eval = ColumnEvaluator::new(&self.zone, ctx).with_upstream(&upstream);
+                zone_eval.evaluate()?;
+                let border = match self.zone_output_node() {
+                    Some(zn) => Some(analyze_biome_borders(&zone_eval, zn, ctx.chunk, FADE_RADIUS)?),
+                    None => None,
+                };
+                (zone_eval.into_cache(), border)
+            }
+        };
 
         let biome_col = self.biome_id_column(&zone_columns);
-        let terrain = self.composite_terrain(ctx, biome_col.as_deref())?;
+        let terrain = self.composite_terrain(ctx, biome_col.as_deref(), border.as_ref())?;
         let foliage = self.evaluate_foliage(ctx, &terrain, biome_col.as_deref())?;
 
         Ok(ChunkEvaluation { terrain, world_columns, zone_columns, foliage })
@@ -187,65 +301,128 @@ impl WorldEvaluator {
         &self,
         ctx: EvalContext,
         biome_col: Option<&IdColumn>,
+        border: Option<&BorderAnalysis>,
     ) -> EvalResult<Arc<ChunkBuffer<Voxel, 32>>> {
         let biome_at = |x: usize, z: usize| biome_col.map_or(0u16, |c| c.get(x, z));
-        let present = present_biomes(biome_col);
 
-        // Fast path: the whole chunk is one biome - return its terrain directly,
-        // no per-voxel copy (the single-biome world's path).
-        if present.len() == 1 {
-            return Ok(self
-                .eval_biome_terrain(ctx, present[0])?
-                .unwrap_or_else(empty_terrain));
+        // Evaluate a layer for every biome we need: those present in this chunk
+        // plus any that appear as a fade neighbor in the border analysis.
+        let mut needed = present_biomes(biome_col);
+        if let Some(b) = border {
+            for &n in b.neighbor.data() {
+                if !needed.contains(&n) {
+                    needed.push(n);
+                }
+            }
+        }
+        let mut layers: HashMap<u16, (Arc<ScalarField>, Arc<ChunkBuffer<MaterialId, 32>>)> =
+            HashMap::new();
+        for bid in needed {
+            if let Some(layer) = self.eval_biome_layer(ctx, bid)? {
+                layers.insert(bid, layer);
+            }
         }
 
-        // Composite path: per biome, evaluate its terrain and copy its columns.
+        // Per column: blend the own biome's density toward its nearest differing
+        // neighbor by the fade weight (density interpolates). The own material is
+        // surface-relative, so shift it to the *blended* surface - otherwise the
+        // cells the blend raises above the biome's own surface would read as air
+        // (material 0). Material stays the winning biome's (a sharp material cut).
         let mut out = ChunkBuffer::<Voxel, 32>::uniform(Voxel::EMPTY);
-        for &bid in &present {
-            let Some(terr) = self.eval_biome_terrain(ctx, bid)? else {
-                continue; // unknown / terrain-less biome -> its columns stay air
-            };
-            for z in 0..CHUNK_DIM {
-                for x in 0..CHUNK_DIM {
-                    if biome_at(x, z) == bid {
-                        for y in 0..CHUNK_DIM {
-                            out.set(x, y, z, terr.get(x, y, z));
-                        }
+        let mut col = [0.0f32; CHUNK_DIM];
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let own = biome_at(x, z);
+                let Some((own_density, own_material)) = layers.get(&own) else {
+                    continue; // own biome has no layer -> air column
+                };
+                let (weight, neighbor) = match border {
+                    Some(b) if b.neighbor.get(x, z) != own => (
+                        biome_border_fade(b.distance.get(x, z), FADE_RADIUS as f32),
+                        layers.get(&b.neighbor.get(x, z)),
+                    ),
+                    _ => (1.0, None),
+                };
+                // Blended density column + its surface (topmost solid cell).
+                let mut composed_surface = None;
+                for y in 0..CHUNK_DIM {
+                    let od = own_density.get(x, y, z);
+                    col[y] = match neighbor {
+                        Some((nd, _)) => blend_density(od, nd.get(x, y, z), weight),
+                        None => od,
+                    };
+                    if col[y] > 0.0 {
+                        composed_surface = Some(y);
+                    }
+                }
+                let Some(cs) = composed_surface else { continue };
+                // Material comes from the WINNING biome's rule, reapplied at the
+                // depth below the blended surface `cs` - so it stays consistent
+                // with the biome the column belongs to, never the fade neighbor's.
+                let own_rule = self.biomes.iter().find(|b| b.id == own).map(|b| &b.material_rule);
+                let own_surface = (0..CHUNK_DIM).rev().find(|&y| own_density.get(x, y, z) > 0.0);
+                for y in 0..CHUNK_DIM {
+                    if col[y] > 0.0 {
+                        let depth = (cs - y) as u32;
+                        let material = match own_rule {
+                            Some(BiomeMaterialRule::Layer { bands, fill }) => {
+                                surface_layering(depth, bands, *fill)
+                            }
+                            Some(BiomeMaterialRule::Uniform(m)) => *m,
+                            _ => {
+                                // Fallback for other material chains: shift the
+                                // precomputed surface-relative field.
+                                let shift = own_surface.map_or(0, |os| os as i32 - cs as i32);
+                                let src = (y as i32 + shift).clamp(0, CHUNK_DIM as i32 - 1) as usize;
+                                own_material.get(x, src, z)
+                            }
+                        };
+                        out.set(x, y, z, Voxel { shape: ShapeId::Cube, material, flags: 0 });
                     }
                 }
             }
         }
+        out.try_collapse();
         Ok(Arc::new(out))
     }
 
-    /// Evaluate one biome graph's whole-chunk terrain, or `None` if the biome id
-    /// has no graph or the graph has no `TerrainOutput`.
-    fn eval_biome_terrain(
+    /// Evaluate one biome graph's (density, material) layer, or `None` if the
+    /// biome id has no graph or the graph has no `DensityOutput`.
+    fn eval_biome_layer(
         &self,
         ctx: EvalContext,
         bid: u16,
-    ) -> EvalResult<Option<Arc<ChunkBuffer<Voxel, 32>>>> {
+    ) -> EvalResult<Option<(Arc<ScalarField>, Arc<ChunkBuffer<MaterialId, 32>>)>> {
         let Some(bg) = self.biomes.iter().find(|b| b.id == bid) else {
             return Ok(None);
         };
-        let Some(terrain_node) = bg.terrain_node else {
+        let Some(density_node) = bg.density_node else {
             return Ok(None);
         };
-        let mut eval = Evaluator::new(&bg.graph, ctx);
+        let mut eval = Evaluator::new(&bg.graph, ctx).with_biome_params(&bg.params);
         eval.evaluate()?;
-        Ok(match eval.cache().get(terrain_node) {
-            Some(CachedOutput::Terrain(t)) => Some(t.clone()),
-            _ => None,
-        })
+        Ok(eval
+            .cache()
+            .get(density_node)
+            .and_then(|out| out.as_biome_layer())
+            .map(|(d, m)| (d.clone(), m.clone())))
     }
 
     /// Evaluate a per-column (World/Zone) graph into a cache, or return an empty
-    /// cache when the graph has no nodes (consumers default ids to 0).
-    fn eval_columns(graph: &Graph, ctx: EvalContext) -> EvalResult<ColumnCache> {
+    /// cache when the graph has no nodes (consumers default ids to 0). An
+    /// `upstream` context resolves any `GraphRef` reads to other graphs' outputs.
+    fn eval_columns<'a>(
+        graph: &Graph,
+        ctx: EvalContext,
+        upstream: Option<&'a UpstreamGraphs<'a>>,
+    ) -> EvalResult<ColumnCache> {
         if graph.nodes.is_empty() {
             return Ok(ColumnCache::new());
         }
         let mut col = ColumnEvaluator::new(graph, ctx);
+        if let Some(up) = upstream {
+            col = col.with_upstream(up);
+        }
         col.evaluate()?;
         Ok(col.into_cache())
     }
@@ -274,18 +451,13 @@ impl WorldEvaluator {
     }
 }
 
-/// Locate a graph's `TerrainOutput` terminal, if any.
-fn find_terrain_node(graph: &Graph) -> Option<NodeId> {
+/// Locate a graph's `DensityOutput` terminal, if any.
+fn find_density_node(graph: &Graph) -> Option<NodeId> {
     graph
         .nodes
         .iter()
-        .find(|(_, n)| matches!(n.kind, NodeKind::TerrainOutput(_)))
+        .find(|(_, n)| matches!(n.kind, NodeKind::DensityOutput(_)))
         .map(|(id, _)| id)
-}
-
-/// An all-air chunk buffer (a biome with no terrain).
-fn empty_terrain() -> Arc<ChunkBuffer<Voxel, 32>> {
-    Arc::new(ChunkBuffer::uniform(Voxel::EMPTY))
 }
 
 /// Distinct biome ids present across a chunk's columns (`None` => `[0]`).
@@ -323,7 +495,7 @@ pub struct ChunkEvaluation {
 mod tests {
     use super::*;
     use glam::IVec3;
-    use nodegraph_ir::{BuildTerrainParams, ConstantMaterialParams, ConstantParams, NoiseParams, PinRef, PoissonDistributionParams, TerrainOutputParams, ZoneOutputParams};
+    use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, NoiseParams, PinRef, ZoneOutputParams};
 
     /// A biome graph filling the chunk with uniform `density` + a constant
     /// material: Constant -> BuildTerrain <- ConstantMaterial -> TerrainOutput.
@@ -331,11 +503,19 @@ mod tests {
         let mut g = Graph::new();
         let d = g.add_node(NodeKind::Constant(ConstantParams { value: density }));
         let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
-        let bt = g.add_node(NodeKind::BuildTerrain(BuildTerrainParams::default()));
-        let to = g.add_node(NodeKind::TerrainOutput(TerrainOutputParams::default()));
-        g.connect(PinRef::new(d, 0), PinRef::new(bt, 0)).unwrap();
-        g.connect(PinRef::new(m, 0), PinRef::new(bt, 1)).unwrap();
-        g.connect(PinRef::new(bt, 0), PinRef::new(to, 0)).unwrap();
+        let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
+        g.connect(PinRef::new(d, 0), PinRef::new(out, 0)).unwrap(); // Scalar -> Density coercion
+        g.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
+        g
+    }
+
+    fn terrain_graph_mat(density: f32, material: MaterialId) -> Graph {
+        let mut g = Graph::new();
+        let d = g.add_node(NodeKind::Constant(ConstantParams { value: density }));
+        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams { material }));
+        let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
+        g.connect(PinRef::new(d, 0), PinRef::new(out, 0)).unwrap();
+        g.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
         g
     }
 
@@ -348,14 +528,19 @@ mod tests {
         g
     }
 
-    fn eval_terrain(graph: &Graph, ctx: EvalContext) -> Arc<ChunkBuffer<Voxel, 32>> {
-        let tn = find_terrain_node(graph).unwrap();
-        let mut e = Evaluator::new(graph, ctx);
-        e.evaluate().unwrap();
-        match e.cache().get(tn) {
-            Some(CachedOutput::Terrain(t)) => t.clone(),
-            _ => panic!("graph produced no terrain"),
-        }
+    /// The expected fused terrain of a constant-density `terrain_graph`: solid
+    /// cubes of the constant material where density > 0, else air.
+    fn expected_terrain(density: f32) -> Arc<ChunkBuffer<Voxel, 32>> {
+        let voxel = if density > 0.0 {
+            Voxel {
+                shape: ShapeId::Cube,
+                material: ConstantMaterialParams::default().material,
+                flags: 0,
+            }
+        } else {
+            Voxel::EMPTY
+        };
+        Arc::new(ChunkBuffer::uniform(voxel))
     }
 
     #[test]
@@ -370,10 +555,9 @@ mod tests {
 
     #[test]
     fn single_biome_composites_to_that_biome() {
-        let biome = terrain_graph(1.0);
         let ctx = EvalContext::new(0, IVec3::ZERO);
-        let eval = WorldEvaluator::new(biome.clone()).evaluate_chunk(ctx).unwrap();
-        let expected = eval_terrain(&biome, ctx);
+        let eval = WorldEvaluator::new(terrain_graph(1.0)).evaluate_chunk(ctx).unwrap();
+        let expected = expected_terrain(1.0);
         for i in 0..ChunkBuffer::<Voxel, 32>::VOLUME {
             assert_eq!(eval.terrain.get_index(i), expected.get_index(i));
         }
@@ -382,32 +566,29 @@ mod tests {
     }
 
     #[test]
-    fn composite_matches_per_column_biome_terrain() {
+    fn composite_selects_winning_biome_material() {
+        // Two solid biomes with different materials: the density blend keeps every
+        // column solid, and the material is a sharp per-column winner.
         let zone = zone_split();
-        let b0 = terrain_graph(1.0);  // solid
-        let b1 = terrain_graph(-1.0); // air
+        let b0 = terrain_graph_mat(5.0, MaterialId(1));
+        let b1 = terrain_graph_mat(5.0, MaterialId(2));
         let ctx = EvalContext::new(7, IVec3::new(1, 0, 1));
-
         let we = WorldEvaluator::new(b0.clone())
             .with_zone(zone.clone())
             .with_biomes(vec![(0, b0.clone()), (1, b1.clone())]);
         let eval = we.evaluate_chunk(ctx).unwrap();
 
-        // Re-derive the per-column biome assignment and each biome's terrain.
         let zone_node = we.zone_output_node().unwrap();
         let mut ze = ColumnEvaluator::new(&zone, ctx);
         ze.evaluate().unwrap();
-        let zone_cache = ze.into_cache();
-        let biome_ids = zone_cache.get(zone_node).unwrap().as_id().unwrap();
-        let t0 = eval_terrain(&b0, ctx);
-        let t1 = eval_terrain(&b1, ctx);
+        let biome_ids = ze.into_cache().get(zone_node).unwrap().as_id().unwrap().clone();
 
         for z in 0..CHUNK_DIM {
             for x in 0..CHUNK_DIM {
-                let expected = if biome_ids.get(x, z) == 0 { &t0 } else { &t1 };
-                for y in 0..CHUNK_DIM {
-                    assert_eq!(eval.terrain.get(x, y, z), expected.get(x, y, z));
-                }
+                let expected = if biome_ids.get(x, z) == 0 { MaterialId(1) } else { MaterialId(2) };
+                let v = eval.terrain.get(x, 0, z);
+                assert_ne!(v, Voxel::EMPTY, "both biomes solid -> every column solid");
+                assert_eq!(v.material, expected, "material follows the winning biome");
             }
         }
     }
@@ -473,5 +654,100 @@ mod tests {
         let eval = we.evaluate_chunk(EvalContext::new(7, IVec3::ZERO)).unwrap();
         assert!(!eval.foliage.scatter.is_empty());
         assert!(!eval.foliage.scatter[0].instances.is_empty());
+    }
+
+    #[test]
+    fn world_climate_drives_zone_biome_assignment() {
+        use nodegraph_ir::{GraphOutputParams, GraphRefParams, GraphRefTarget};
+
+        // World: SurfaceNoise -> GraphOutput("climate").
+        let mut world = Graph::of_kind(GraphKind::World);
+        let wn = world.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let wo = world.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "climate".into() }));
+        world.connect(PinRef::new(wn, 0), PinRef::new(wo, 0)).unwrap();
+        world.derive_output_boundary();
+
+        // Zone: GraphRef(World).climate -> ZoneOutput(one band). No own SurfaceNoise.
+        let mut zone = Graph::of_kind(GraphKind::Zone);
+        let gr = zone.add_node(NodeKind::GraphRef(GraphRefParams {
+            target: GraphRefTarget::World,
+            ..Default::default()
+        }));
+        let zo = zone.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0] }));
+        let wb = world.boundary.clone();
+        zone.resolve_graph_refs(|t| (t == GraphRefTarget::World).then(|| wb.clone()));
+        zone.connect(PinRef::new(gr, 0), PinRef::new(zo, 0)).unwrap();
+
+        let b0 = terrain_graph(1.0); // solid
+        let b1 = terrain_graph(-1.0); // air
+        let ctx = EvalContext::new(9, IVec3::new(2, 0, -1));
+
+        let we = WorldEvaluator::new(b0.clone())
+            .with_world(world.clone())
+            .with_zone(zone)
+            .with_biomes(vec![(0, b0.clone()), (1, b1.clone())])
+            .with_cross_graph_resolved();
+        let eval = we.evaluate_chunk(ctx).unwrap();
+
+        // Zone's biome column must equal quantizing World's climate directly.
+        let zone_node = we.zone_output_node().unwrap();
+        let biome_ids = eval.zone_columns.get(zone_node).unwrap().as_id().unwrap();
+        let mut wc = ColumnEvaluator::new(&world, ctx);
+        wc.evaluate().unwrap();
+        let climate = wc.cache().get(wo).unwrap().as_surface().unwrap();
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let expect = if climate.get(x, z) >= 0.0 { 1u16 } else { 0 };
+                assert_eq!(biome_ids.get(x, z), expect, "biome must follow World's climate");
+            }
+        }
+    }
+
+    #[test]
+    fn biome_param_threads_into_biome_terrain() {
+        use nodegraph_ir::BiomeParamParams;
+        // Biome graph: BiomeParam("solid") drives density into BuildTerrain.
+        let mut biome = Graph::new();
+        let bp = biome.add_node(NodeKind::BiomeParam(BiomeParamParams { name: "solid".into(), default: -1.0 }));
+        let m = biome.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let out = biome.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
+        biome.connect(PinRef::new(bp, 0), PinRef::new(out, 0)).unwrap(); // Scalar -> Density coercion
+        biome.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
+
+        let ctx = EvalContext::new(0, IVec3::ZERO);
+
+        // Default (-1) -> all air.
+        let air = WorldEvaluator::new(biome.clone()).evaluate_chunk(ctx).unwrap();
+        assert!(
+            (0..ChunkBuffer::<Voxel, 32>::VOLUME).all(|i| air.terrain.get_index(i) == Voxel::EMPTY),
+            "default biome param should leave the chunk air"
+        );
+
+        // Sidecar solid=1 -> solid terrain.
+        let mut params = BiomeParams::new();
+        params.set("solid", 1.0);
+        let solid = WorldEvaluator::new(biome.clone())
+            .with_biome_params(vec![(0, params)])
+            .evaluate_chunk(ctx)
+            .unwrap();
+        assert!(
+            (0..ChunkBuffer::<Voxel, 32>::VOLUME).any(|i| solid.terrain.get_index(i) != Voxel::EMPTY),
+            "biome param should thread through to solid terrain"
+        );
+    }
+
+    #[test]
+    fn biome_param_reads_the_right_biome() {
+        let mut p0 = BiomeParams::new();
+        p0.set("d", 3.0);
+        let mut p1 = BiomeParams::new();
+        p1.set("d", 0.0);
+        let we = WorldEvaluator::new(terrain_graph(1.0))
+            .with_biomes(vec![(0, terrain_graph(1.0)), (1, terrain_graph(1.0))])
+            .with_biome_params(vec![(0, p0), (1, p1)]);
+        assert_eq!(we.biome_param(0, "d"), Some(3.0));
+        assert_eq!(we.biome_param(1, "d"), Some(0.0));
+        assert_eq!(we.biome_param(0, "missing"), None);
+        assert_eq!(we.biome_param(9, "d"), None);
     }
 }

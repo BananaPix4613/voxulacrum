@@ -281,6 +281,7 @@ impl InputState {
         self.actions.get(&action).map_or(false, |s| s.just_pressed)
     }
 
+    #[allow(dead_code)] // input accessor; pairs with just_pressed
     pub fn just_released(&self, action: GameAction) -> bool {
         self.actions.get(&action).map_or(false, |s| s.just_released)
     }
