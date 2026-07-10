@@ -1,39 +1,70 @@
 use std::collections::HashMap;
+
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
+use wgpu::util::DeviceExt;
 
-/// Per-chunk water mesh on GPU. Retained for Phase 3/5; unconstructed in Phase 1.
-#[allow(dead_code)]
+use crate::rendering::pipelines::WaterVertex;
+use crate::world::chunk::{LoadedChunk, CHUNK_SIZE, VOXEL_SCALE};
+use crate::world::fluid_gen::FULL_MASS;
+use crate::world::layers::FluidFillMode;
+use crate::world::World;
+use voxel_core::LocalPos;
+
+/// Per-chunk water surface mesh on GPU.
 pub struct ChunkWaterMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
 }
 
-/// Water surface pass.
+/// Water surface pass: holds one surface mesh per chunk that has visible water.
 ///
-/// Phase 1: no-op. Terrain now comes from the node graph (`WorldGenerator`),
-/// which exposes no analytic `terrain_height` for the old column-scan water
-/// mesher, so that mesher is removed. The struct, the GPU water pipeline
-/// (in `PipelineRegistry`), and the per-frame meshing-stage scheduling are
-/// retained so water can return as a graph-driven pass in Phase 3 (water
-/// table) and Phase 5 (flow), per design §7. `chunk_meshes` stays empty, so
-/// the scene pass draws no water.
+/// Geometry is (re)built from a chunk's `FluidLayer` when the chunk meshes; the
+/// pipeline + shader (`water.wgsl`) handle transparency, depth shading, and
+/// waves. Deep (fully `Submerged`) chunks produce no mesh - their surface is
+/// rendered by the chunk that straddles `sea_level`.
 #[derive(Resource)]
 pub struct WaterPass {
-    /// Per-chunk water meshes, keyed by chunk position. Empty in Phase 1.
+    /// Per-chunk water meshes, keyed by chunk position. Chunks with no visible
+    /// water surface have no entry.
     pub chunk_meshes: HashMap<IVec3, ChunkWaterMesh>,
 }
 
 impl WaterPass {
-    /// Create an empty water pass. See the type-level Phase 1 no-op note.
+    /// Create an empty water pass. Meshes are added as chunks mesh.
     pub fn new() -> Self {
         Self { chunk_meshes: HashMap::new() }
     }
 
-    /// No-op in Phase 1. Retained so meshing-stage scheduling is unchanged;
-    /// re-enters graph-driven water generation in Phase 3/5 (design §7).
-    pub fn add_chunk_water(&mut self, _pos: IVec3) {}
+    /// Build (or refresh) the water surface mesh for a single chunk. Removes the
+    /// entry when the chunk has no visible water surface.
+    pub fn add_chunk_water(&mut self, pos: IVec3, world: &World, device: &wgpu::Device) {
+        let chunk = match world.get_chunk(pos) {
+            Some(c) => c,
+            None => return,
+        };
+        let (verts, indices) = build_water_mesh(pos, chunk);
+        if indices.is_empty() {
+            self.chunk_meshes.remove(&pos);
+            return;
+        }
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("water_vertex_buffer"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("water_index_buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.chunk_meshes.insert(pos, ChunkWaterMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+        });
+    }
 
     /// Remove water mesh for an unloaded chunk. GPU buffers dropped.
     pub fn remove_chunk_water(&mut self, pos: IVec3) {
@@ -44,4 +75,94 @@ impl WaterPass {
     pub fn clear_all(&mut self) {
         self.chunk_meshes.clear();
     }
+}
+
+/// Build the water surface mesh for one chunk from its `FluidLayer`.
+///
+/// Emits an upward top-face quad for each water cell whose cell directly above
+/// is open air, so a filled column yields exactly one quad at its top. Per-
+/// vertex `depth` is the contiguous water depth below the surface in voxels,
+/// which the shader maps to color + alpha. Returns empty vecs when the chunk has
+/// no visible water surface.
+fn build_water_mesh(pos: IVec3, chunk: &LoadedChunk) -> (Vec<WaterVertex>, Vec<u32>) {
+    let fluids = &chunk.data.fluids;
+    let storage = &chunk.data.voxels;
+    let submerged = matches!(fluids.fill_mode, FluidFillMode::Submerged(_));
+
+    // Fully dry chunk: nothing to build.
+    if !submerged && fluids.cells.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let dim = CHUNK_SIZE;
+    // Mass at a local cell: an explicit cell wins; otherwise the Submerged
+    // default fills empty voxels; otherwise the cell is dry.
+    let mass_at = |x: usize, y: usize, z: usize| -> u16 {
+        let lp = LocalPos::new_unchecked(x as u8, y as u8, z as u8);
+        if let Some(cell) = fluids.cells.get(&lp) {
+            cell.mass
+        } else if submerged && !storage.voxel(lp.to_index()).is_solid() {
+            FULL_MASS
+        } else {
+            0
+        }
+    };
+
+    let origin = [
+        pos.x as f32 * dim as f32 * VOXEL_SCALE,
+        pos.y as f32 * dim as f32 * VOXEL_SCALE,
+        pos.z as f32 * dim as f32 * VOXEL_SCALE,
+    ];
+
+    let mut verts: Vec<WaterVertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for z in 0..dim {
+        for y in 0..dim {
+            for x in 0..dim {
+                let m = mass_at(x, y, z);
+                if m == 0 {
+                    continue;
+                }
+                // A surface exists only where the cell directly above is open air.
+                let above_open = if y + 1 >= dim {
+                    // Top row: deep water continues into the chunk above, so a
+                    // Submerged chunk emits no surface there; a cells-mode chunk
+                    // (pond) treats the ceiling as open.
+                    !submerged
+                } else {
+                    let above = LocalPos::new_unchecked(x as u8, (y + 1) as u8, z as u8);
+                    mass_at(x, y + 1, z) == 0 && !storage.voxel(above.to_index()).is_solid()
+                };
+                if !above_open {
+                    continue;
+                }
+
+                // Surface height: top of this (possibly partial) cell.
+                let surf_y = origin[1] + (y as f32 + m as f32 / FULL_MASS as f32) * VOXEL_SCALE;
+                // Depth: contiguous water cells downward from here, in voxels.
+                let mut depth = 0u32;
+                let mut yy = y as i32;
+                while yy >= 0 && mass_at(x, yy as usize, z) > 0 {
+                    depth += 1;
+                    yy -= 1;
+                }
+                let d = depth as f32;
+
+                let x0 = origin[0] + x as f32 * VOXEL_SCALE;
+                let x1 = x0 + VOXEL_SCALE;
+                let z0 = origin[2] + z as f32 * VOXEL_SCALE;
+                let z1 = z0 + VOXEL_SCALE;
+                let base = verts.len() as u32;
+                // Top-face corners (CCW from above; culling is disabled).
+                verts.push(WaterVertex { position: [x0, surf_y, z0], flow: [0.0, 0.0], depth: d });
+                verts.push(WaterVertex { position: [x1, surf_y, z0], flow: [0.0, 0.0], depth: d });
+                verts.push(WaterVertex { position: [x1, surf_y, z1], flow: [0.0, 0.0], depth: d });
+                verts.push(WaterVertex { position: [x0, surf_y, z1], flow: [0.0, 0.0], depth: d });
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+    }
+
+    (verts, indices)
 }

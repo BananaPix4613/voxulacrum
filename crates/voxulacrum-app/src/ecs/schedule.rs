@@ -46,6 +46,10 @@ pub fn build_frame_schedule() -> Schedule {
         systems::simulation_tick_system.in_set(FrameStage::Simulation),
         systems::param_change_detection_system.in_set(FrameStage::Simulation),
         systems::palette_load_system.in_set(FrameStage::Simulation),
+        systems::fluid_tick_system
+            .in_set(FrameStage::Simulation)
+            .after(systems::simulation_tick_system) // needs FrameState
+            .after(crate::interaction::picking_system), // needs the current pick
         crate::interaction::picking_system
             .in_set(FrameStage::Simulation)
             .after(systems::simulation_tick_system),

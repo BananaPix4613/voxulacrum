@@ -24,6 +24,7 @@ use crate::rendering::frustum::Frustum;
 use crate::shader_reload::ShaderWatcher;
 use crate::graph_reload::GraphWatcherRes;
 use crate::input::InputState;
+use crate::interaction::PickState;
 use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui;
 use crate::ui::panels::UiState;
@@ -273,6 +274,193 @@ pub fn palette_load_system(
     }
 }
 
+pub fn fluid_tick_system(
+    mut clock: ResMut<FluidClock>,
+    frame: Res<FrameState>,
+    input: Res<InputState>,
+    pick: Res<PickState>,
+    mut world: ResMut<VoxelWorld>,
+    mut water_pass: ResMut<WaterPass>,
+    ctx: Res<RenderContext>,
+) {
+    let mut changed: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
+
+    // Debug disturbance (press G with the cursor over terrain): pour a short
+    // water column at the picked cell.
+    if input.just_pressed(crate::input::GameAction::PourWater) {
+        if let Some(anchor) = pick.anchor {
+            pour_water_column(&mut world.0, anchor, &mut changed);
+        }
+    }
+
+    let active_total: usize =
+        world.0.chunks.values().map(|c| c.data.fluids.active.len()).sum();
+    if active_total > 100_000 {
+        log::warn!("fluid: {active_total} active cells - possible mass-conservation runaway");
+    }
+    let mut ticks = clock.ticks_for(frame.dt);
+    // Throttle: during a very large disturbance, run fewer ticks per frame so a
+    // big flow slows down instead of stalling the framerate. Each tick is still a
+    // full, deterministic global two-phase; we just do fewer per frame.
+    if active_total > 20_000 {
+        ticks = ticks.min(1);
+    }
+    for _ in 0..ticks {
+        // Phase 1: plan every active chunk from the shared pre-tick snapshot,
+        // reading neighbor chunks read-only (nothing mutates yet).
+        let active: Vec<voxel_core::ChunkCoord> = world
+            .0
+            .chunks
+            .iter()
+            .filter(|(_, c)| !c.data.fluids.active.is_empty())
+            .map(|(coord, _)| *coord)
+            .collect();
+        if active.is_empty() {
+            break;
+        }
+        let mut plans: Vec<(voxel_core::ChunkCoord, crate::world::fluid_sim::ChunkPlan)> =
+            Vec::new();
+        {
+            let w = &world.0;
+            for &coord in &active {
+                let Some(this) = w.chunks.get(&coord) else { continue };
+                let faces = fluid_neighbor_faces(w, coord);
+                let sample = crate::world::fluid_sim::NeighborSample::new(
+                    &this.data.fluids,
+                    this.data.voxels.as_ref(),
+                    faces,
+                );
+                let plan = crate::world::fluid_sim::plan_chunk(&this.data.fluids, &sample);
+                plans.push((coord, plan));
+            }
+        }
+        // Phase 2: commit each plan, recording which *changed* edge cells should
+        // wake their neighbor's mirror so flow keeps crossing the seam (waking
+        // only changed cells avoids perpetual boundary churn once level).
+        let mut wakes: Vec<(voxel_core::ChunkCoord, voxel_core::LocalPos)> = Vec::new();
+        for (coord, plan) in plans {
+            for &(pos, _) in plan.changed_cells() {
+                fluid_edge_mirrors(coord, pos, &mut wakes);
+            }
+            if let Some(chunk) = world.0.chunks.get_mut(&coord) {
+                if crate::world::fluid_sim::commit_chunk(&mut chunk.data.fluids, plan) {
+                    changed.insert(glam::IVec3::from(coord));
+                }
+            }
+        }
+        // Phase 3: wake neighbor edge cells so they participate next tick.
+        for (ncoord, mirror) in wakes {
+            if let Some(chunk) = world.0.chunks.get_mut(&ncoord) {
+                chunk.data.fluids.activate(mirror);
+            }
+        }
+    }
+
+    // Any chunk whose fluid changed must persist its field. Give it an overrides
+    // bucket so build_chunk_edits snapshots the fluid even without a voxel edit.
+    for &pos in &changed {
+        if let Some(c) = world.0.chunks.get_mut(&voxel_core::ChunkCoord::from(pos)) {
+            c.persist_dirty = true;
+            c.data
+                .overrides
+                .get_or_insert_with(crate::world::overrides::ChunkOverrides::default);
+        }
+    }
+    for pos in changed {
+        water_pass.add_chunk_water(pos, &world.0, &ctx.device);
+    }
+}
+
+/// Insert a short column of full water cells above `anchor` and wake them, so the
+/// next tick flows it. Skips solid cells. Records touched chunks for mesh rebuild.
+fn pour_water_column(
+    world: &mut crate::world::World,
+    anchor: glam::IVec3,
+    changed: &mut std::collections::HashSet<glam::IVec3>,
+) {
+    let dim = crate::world::chunk::CHUNK_SIZE as i32;
+    for dy in 1..=8 {
+        let p = anchor + glam::IVec3::new(0, dy, 0);
+        let chunk_pos =
+            glam::IVec3::new(p.x.div_euclid(dim), p.y.div_euclid(dim), p.z.div_euclid(dim));
+        let Some(chunk) = world.get_chunk_mut(chunk_pos) else { continue };
+        let lp = voxel_core::LocalPos::new_unchecked(
+            p.x.rem_euclid(dim) as u8,
+            p.y.rem_euclid(dim) as u8,
+            p.z.rem_euclid(dim) as u8,
+        );
+        if chunk.data.voxels.voxel(lp.to_index()).is_solid() {
+            continue;
+        }
+        let cell = crate::world::layers::FluidCell {
+            fluid_id: crate::world::layers::FluidId::WATER,
+            mass: crate::world::fluid_gen::FULL_MASS,
+            flags: 0,
+        };
+        chunk.data.fluids.cells.insert(lp, cell);
+        chunk.data.fluids.activate(lp);
+        // Persist the pour (a player edit) so it survives save/reload; it
+        // re-applies as settled and re-flows on load.
+        chunk
+            .data
+            .overrides
+            .get_or_insert_with(crate::world::overrides::ChunkOverrides::default)
+            .fluid_diffs
+            .insert(lp, cell);
+        chunk.persist_dirty = true;
+        changed.insert(chunk_pos);
+    }
+}
+
+/// Read-only `(fluids, storage)` of the six face-neighbors of `coord`, in the
+/// order `NeighborSample` expects: `[-x, +x, -y, +y, -z, +z]`.
+fn fluid_neighbor_faces<'a>(
+    world: &'a crate::world::World,
+    coord: voxel_core::ChunkCoord,
+) -> [Option<(&'a crate::world::layers::FluidLayer, &'a crate::world::storage::ChunkStorage)>; 6] {
+    let offs = [(-1i32, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)];
+    let mut faces: [Option<(
+        &crate::world::layers::FluidLayer,
+        &crate::world::storage::ChunkStorage,
+    )>; 6] = [None; 6];
+    for (i, &(dx, dy, dz)) in offs.iter().enumerate() {
+        let nc = voxel_core::ChunkCoord::new(coord.x + dx, coord.y + dy, coord.z + dz);
+        if let Some(chunk) = world.chunks.get(&nc) {
+            faces[i] = Some((&chunk.data.fluids, chunk.data.voxels.as_ref()));
+        }
+    }
+    faces
+}
+
+/// For each chunk face `pos` lies on, push the neighbor chunk + the mirror cell
+/// on the far side of that face (a corner cell yields up to three).
+fn fluid_edge_mirrors(
+    coord: voxel_core::ChunkCoord,
+    pos: voxel_core::LocalPos,
+    out: &mut Vec<(voxel_core::ChunkCoord, voxel_core::LocalPos)>,
+) {
+    use voxel_core::{ChunkCoord, LocalPos};
+    let d = crate::world::chunk::CHUNK_SIZE as u8;
+    if pos.x == 0 {
+        out.push((ChunkCoord::new(coord.x - 1, coord.y, coord.z), LocalPos::new_unchecked(d - 1, pos.y, pos.z)));
+    }
+    if pos.x == d - 1 {
+        out.push((ChunkCoord::new(coord.x + 1, coord.y, coord.z), LocalPos::new_unchecked(0, pos.y, pos.z)));
+    }
+    if pos.y == 0 {
+        out.push((ChunkCoord::new(coord.x, coord.y - 1, coord.z), LocalPos::new_unchecked(pos.x, d - 1, pos.z)));
+    }
+    if pos.y == d - 1 {
+        out.push((ChunkCoord::new(coord.x, coord.y + 1, coord.z), LocalPos::new_unchecked(pos.x, 0, pos.z)));
+    }
+    if pos.z == 0 {
+        out.push((ChunkCoord::new(coord.x, coord.y, coord.z - 1), LocalPos::new_unchecked(pos.x, pos.y, d - 1)));
+    }
+    if pos.z == d - 1 {
+        out.push((ChunkCoord::new(coord.x, coord.y, coord.z + 1), LocalPos::new_unchecked(pos.x, pos.y, 0)));
+    }
+}
+
 // ==========================================================================
 // Streaming stage
 // ==========================================================================
@@ -354,8 +542,7 @@ pub fn meshing_tick_system(
         for pos in &meshed {
             detail_paint.add_chunk(*pos, &world.0, &ctx.device);
             scatter.add_chunk(*pos, &world.0, &ctx.device);
-            // Water is a Phase 1 no-op; call retained to keep scheduling intact.
-            water_pass.add_chunk_water(*pos);
+            water_pass.add_chunk_water(*pos, &world.0, &ctx.device);
         }
     }
 }

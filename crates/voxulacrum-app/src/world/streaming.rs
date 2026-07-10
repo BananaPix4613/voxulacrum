@@ -68,6 +68,24 @@ fn with_worker_db<R>(
     })
 }
 
+/// Overlay a chunk's persisted `fluid_diffs` onto its generated fluid layer as
+/// settled cells (design doc §7 / §9: player edits persist; the active set
+/// re-derives at runtime).
+fn apply_persisted_fluid(
+    fluids: &mut crate::world::layers::FluidLayer,
+    overrides: &Option<ChunkOverrides>,
+) {
+    let Some(ovr) = overrides else { return };
+    for (&pos, &cell) in &ovr.fluid_diffs {
+        fluids.cells.insert(pos, cell);
+        // Cells that were mid-flow at save time resume flowing; settled cells stay
+        // put (the settled flag mirrors the active set - see FluidLayer::settle).
+        if cell.flags & crate::world::layers::FluidCell::FLAG_SETTLED == 0 {
+            fluids.activate(pos);
+        }
+    }
+}
+
 /// Camera state needed for frustum-based chunk loading.
 pub struct CameraView {
     pub zoom: f32,
@@ -248,7 +266,7 @@ impl ChunkStreamingManager {
 
         self.pool.spawn(move || {
             // Generate base terrain + identity tags.
-            let GeneratedChunk { mut storage, tags: generated_tags, detail_layers, scatter } =
+            let GeneratedChunk { mut storage, tags: generated_tags, detail_layers, scatter, fluids } =
                 gen.generate_chunk(pos);
 
             // Overlay saved edits from this worker's cached read-only DB handle.
@@ -285,6 +303,9 @@ impl ChunkStreamingManager {
                                         // still round-trip only, no consumer yet.)
                                         filtered.scatter_removed = delta.scatter_removed;
                                         filtered.scatter_added = delta.scatter_added;
+                                        // Fluid now has a runtime consumer (Phase 7): carry
+                                        // persisted player-poured water forward too.
+                                        filtered.fluid_diffs = delta.fluid_diffs;
                                         overrides = if filtered.is_empty() { None } else { Some(filtered) };
                                     }
                                     ChunkEdits::Full(full) => {
@@ -305,6 +326,10 @@ impl ChunkStreamingManager {
             chunk.data.overrides = overrides;
             chunk.data.detail_layers = detail_layers;
             chunk.data.scatter_instances = scatter;
+            chunk.data.fluids = fluids;
+            // Overlay persisted player-poured water on top of the generated
+            // fluid, as settled (the active set is runtime-only and re-derives).
+            apply_persisted_fluid(&mut chunk.data.fluids, &chunk.data.overrides);
             // DB-persisted tags win for loaded chunks; otherwise use the freshly
             // generated tags.
             chunk.data.tags = loaded_tags.unwrap_or(generated_tags);

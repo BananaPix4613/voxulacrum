@@ -23,7 +23,7 @@ use voxel_core::LocalPos;
 
 use crate::params::TerrainGenParams;
 use super::layers::{
-    DetailLayer, DetailLayerId, DetailLayers, DetailTexel,
+    DetailLayer, DetailLayerId, DetailLayers, DetailTexel, FluidLayer,
     PrefabId, ScatterFlags, ScatterInstance, ScatterStore, ScatterTypeId, StableInstanceId,
 };
 use super::chunk::CHUNK_SIZE;
@@ -42,6 +42,9 @@ pub struct WorldGenerator {
     /// World/Zone graphs are empty and the Biome graph produces the terrain.
     world_eval: WorldEvaluator,
     world_seed: u64,
+    /// Global ocean surface (world-Y): empty voxels at or below this fill with
+    /// water at generation time (design doc §7). Sourced from the manifest.
+    sea_level: i32,
     /// The evaluation -> storage domain boundary used to materialize each
     /// evaluated chunk buffer into engine storage form.
     storage_boundary: StorageBoundary,
@@ -69,6 +72,7 @@ impl WorldGenerator {
         Ok(Self {
             world_eval,
             world_seed,
+            sea_level: 0,
             storage_boundary: StorageBoundary::new(),
         })
     }
@@ -130,6 +134,7 @@ impl WorldGenerator {
         Self {
             world_eval,
             world_seed,
+            sea_level: hierarchy.sea_level,
             storage_boundary: StorageBoundary::new(),
         }
     }
@@ -157,6 +162,7 @@ impl WorldGenerator {
                     tags: ChunkTags::default(),
                     detail_layers: DetailLayers::default(),
                     scatter: ScatterStore::default(),
+                    fluids: FluidLayer::default(),
                 };
             }
         };
@@ -191,7 +197,15 @@ impl WorldGenerator {
         let tags = self.derive_tags(&eval);
         let detail_layers = paint_to_detail_layers(&eval.foliage.paint);
         let scatter = scatter_to_store(&eval.foliage.scatter);
-        GeneratedChunk { storage, tags, detail_layers, scatter }
+        // Worldgen stage 9: ocean fill from the global sea level, then layer any
+        // biome-authored ponds on top (design doc §7).
+        let mut fluids = super::fluid_gen::ocean_fill(&storage, position.y, self.sea_level);
+        if let Some(levels) = &eval.fluid_levels {
+            super::fluid_gen::apply_biome_ponds(
+                &mut fluids, &storage, position.y, self.sea_level, levels,
+            )
+        }
+        GeneratedChunk { storage, tags, detail_layers, scatter, fluids }
     }
 
     /// Aggregate a chunk evaluation's per-column zone/biome assignments into
@@ -286,6 +300,8 @@ pub struct GeneratedChunk {
     pub detail_layers: DetailLayers,
     /// Tier-2/3 scatter instances, translated from the evaluator's output.
     pub scatter: ScatterStore,
+    /// Ocean/biome fluid layer for this chunk (design doc §7).
+    pub fluids: FluidLayer,
 }
 
 /// Identifies one graph in the world hierarchy, for routing edits and
@@ -306,6 +322,10 @@ pub enum GraphSlot {
 pub struct WorldManifest {
     /// World graph file (climate + zone assignment).
     pub world: String,
+    /// Global ocean surface (world-Y); empty voxels at or below fill with water.
+    /// Absent => 0 (effectively no ocean for a world sitting above Y 0).
+    #[serde(default)]
+    pub sea_level: i32,
     /// Zone graph file (biome assignment).
     pub zone: String,
     /// Biome graphs, keyed by the biome id each renders.
@@ -338,6 +358,8 @@ struct LoadedHierarchy {
     details: Vec<(u16, Graph)>,
     /// Per-biome scalar parameter sidecars (by biome id).
     biome_params: Vec<(u16, BiomeParams)>,
+    /// Global ocean surface (world-Y), from the manifest.
+    sea_level: i32,
 }
 
 /// Read and parse one `*.graph.json` file.
@@ -370,7 +392,7 @@ fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, St
     if biomes.is_empty() {
         return Err("world manifest lists no biomes".to_string());
     }
-    Ok(LoadedHierarchy { world, zone, biomes, details, biome_params })
+    Ok(LoadedHierarchy { world, zone, biomes, details, biome_params, sea_level: manifest.sea_level })
 }
 
 /// Load every editable graph in a world manifest, each with its hierarchy

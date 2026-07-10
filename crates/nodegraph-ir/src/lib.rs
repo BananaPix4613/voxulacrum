@@ -60,15 +60,15 @@ pub use graph::{Graph, GraphKind};
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
 pub use node::{
     AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams, ConstantParams,
-    CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams, FractalType,
-    GraphOutputParams, GraphRefParams, IntersectParams, LayerParams, LerpParams, LibraryRefParams,
-    MaskParams, MaxParams, MinParams, MixParams, MultiplyParams, Node, NodeCategory, NodeDescriptor,
-    NodeId, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinSpec, QueueParams, RemapParams,
-    SubtractParams, TerrainOutputParams, ThresholdParams, UnionParams, WorldAxisParams,
-    WorldPosParams, BuildTerrainParams, JitteredGridParams, PoissonDiskParams, FindFlatParams,
-    PlaceTreeParams, PlacePrefabParams, WorldOutputParams, ZoneOutputParams, YBandParams,
-    PoissonDistributionParams, SurfaceFilterParams, BiomeContextMaskParams,
-    SpeciesPickerParams, PaintDensityParams, ScatterPlaceParams,
+    CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,
+    FluidOutputParams, FractalType, GraphOutputParams, GraphRefParams, IntersectParams, LayerParams,
+    LerpParams, LibraryRefParams, MaskParams, MaxParams, MinParams, MixParams, MultiplyParams, Node,
+    NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams, Perlin2DParams,
+    PinSpec, QueueParams, RemapParams, SubtractParams, TerrainOutputParams, ThresholdParams,
+    UnionParams, WorldAxisParams, WorldPosParams, BuildTerrainParams, JitteredGridParams,
+    PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlacePrefabParams, WorldOutputParams,
+    ZoneOutputParams, YBandParams, PoissonDistributionParams, SurfaceFilterParams,
+    BiomeContextMaskParams, SpeciesPickerParams, PaintDensityParams, ScatterPlaceParams,
 };
 pub use pin::PinType;
 pub use prefab::{PrefabTemplate, PrefabVoxel};

@@ -688,19 +688,23 @@ pub fn apply_overrides_to_storage(base: &ChunkStorage, overrides: &ChunkOverride
 /// Build ChunkEdits from a Chunk's overrides. Returns None if unmodified.
 pub fn build_chunk_edits(chunk: &LoadedChunk) -> Option<ChunkEdits> {
     if !chunk.persist_dirty { return None; }
+    // Snapshot the chunk's current fluid field so flowing + settled water resumes
+    // exactly on reload, rather than rewinding to the pour source
+    let fluids = &chunk.data.fluids.cells;
     match &chunk.data.overrides {
         None => {
-            // Promoted or full replacement - save entire storage
-            // (persist_dirty already checked above).
+            // Voxel-promoted / full replacement saves entire storage. (Fluid on a
+            // heavily voxel-edited chunk is a rare edge, not carried here.)
             Some(ChunkEdits::Full((*chunk.data.voxels).clone()))
         }
         Some(ovr) if ovr.is_empty() => None,
+        Some(ovr) if ovr.voxel_override_count() > DELTA_THRESHOLD => {
+            Some(ChunkEdits::Full((*chunk.data.voxels).clone()))
+        }
         Some(ovr) => {
-            if ovr.voxel_override_count() > DELTA_THRESHOLD {
-                Some(ChunkEdits::Full((*chunk.data.voxels).clone()))
-            } else {
-                Some(ChunkEdits::Delta(ovr.clone()))
-            }
+            let mut ovr = ovr.clone();
+            ovr.fluid_diffs = fluids.clone();
+            Some(ChunkEdits::Delta(ovr))
         }
     }
 }

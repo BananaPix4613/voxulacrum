@@ -32,4 +32,4 @@ pub use guard::{enter_schedule_thread, on_schedule_thread, ScheduleThreadGuard};
 pub use library_kernel::{exposure_layering, standard_cave_noise, surface_layering, LibraryKernel};
 pub use png::{ascii_heightmap, render_graph_to_png, write_heightmap_png};
 pub use scatter::{poisson_placement, ScatterPoint, PROP_MARGIN};
-pub use world_eval::{ChunkEvaluation, WorldEvaluator};
+pub use world_eval::{ChunkEvaluation, NO_POND, WorldEvaluator};

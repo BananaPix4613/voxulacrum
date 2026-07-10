@@ -302,6 +302,8 @@ impl Default for LayerParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct BuildTerrainParams {}
 /// Parameters for [`NodeKind::DensityOutput`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct DensityOutputParams {}
+/// Parameters for [`NodeKind::FluidOutput`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct FluidOutputParams {}
 
 /// Parameters for [`NodeKind::JitteredGrid`]: points on a regular XZ grid,
 /// each cell offset by a per-cell random jitter, kept with probability
@@ -657,6 +659,10 @@ pub enum NodeKind {
     /// Biome terminal: exposes a continuous density + material as this biome's
     /// contribution, composited and fused to voxels post-composition.
     DensityOutput(DensityOutputParams),
+    /// Biome fluid terminal: `level` (Scalar water-surface world-Y) + `mask`
+    /// (Density; pond present where the per-column value > 0). Harvested per
+    /// column by the world evaluator, not the single-graph density evaluator.
+    FluidOutput(FluidOutputParams),
     // --- Positions ---
     /// Jittered-grid point scatter.
     JitteredGrid(JitteredGridParams),
@@ -754,6 +760,10 @@ const TERRAIN_OUT: &[PinSpec] =
 const BUILD_TERRAIN_IN: &[PinSpec] = &[
     PinSpec { name: "density",  ty: PinType::Density,  required: true },
     PinSpec { name: "material", ty: PinType::Material, required: true },
+];
+const FLUID_OUTPUT_IN: &[PinSpec] = &[
+    PinSpec { name: "level", ty: PinType::Scalar,  required: true },
+    PinSpec { name: "mask",  ty: PinType::Density, required: true },
 ];
 const TERRAIN_TERMINAL_IN: &[PinSpec] =
     &[PinSpec { name: "terrain", ty: PinType::Terrain, required: true }];
@@ -1008,6 +1018,13 @@ impl NodeKind {
                 inputs: BUILD_TERRAIN_IN,
                 outputs: NO_PINS,
             },
+            NodeKind::FluidOutput(_) => NodeDescriptor {
+                display_name: "Fluid Output",
+                category: NodeCategory::Output,
+                color: OUT,
+                inputs: FLUID_OUTPUT_IN,
+                outputs: NO_PINS,
+            },
             NodeKind::JitteredGrid(_) => NodeDescriptor {
                 display_name: "Jittered Grid",
                 category: NodeCategory::Positions,
@@ -1215,6 +1232,7 @@ impl NodeKind {
             NodeKind::TerrainOutput(_)       => "TerrainOutput",
             NodeKind::BuildTerrain(_)        => "BuildTerrain",
             NodeKind::DensityOutput(_)       => "DensityOutput",
+            NodeKind::FluidOutput(_)         => "FluidOutput",
             NodeKind::JitteredGrid(_)        => "JitteredGrid",
             NodeKind::PoissonDisk(_)         => "PoissonDisk",
             NodeKind::FindFlat(_)            => "FindFlat",

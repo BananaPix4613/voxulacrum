@@ -505,6 +505,10 @@ impl<'g> Evaluator<'g> {
             NodeKind::GraphRef(_) => {
                 return Err(EvalError::UnresolvedGraphRef { node: id });
             }
+            // FluidOutput terminal: cache its `mask` input as its value so the
+            // graph-wide evaluate() succeeds; the world evaluator harvests the
+            // pond per column from the mask field + the level input.
+            NodeKind::FluidOutput(_) => CachedOutput::Scalar(self.input_scalar(id, 1)?),
             // --- Per-column nodes belong to the World/Zone graphs ---
             NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_)
             | NodeKind::GraphOutput(_)
@@ -569,7 +573,8 @@ impl<'g> Evaluator<'g> {
             NodeKind::WorldPos(_) | NodeKind::DomainWarp(_) => {
                 return Err(EvalError::WrongInputType { node: id, expected: "scalar", got: "vec3" });
             }
-            NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_)
+            NodeKind::FluidOutput(_)
+            | NodeKind::SurfaceNoise(_) | NodeKind::WorldOutput(_) | NodeKind::ZoneOutput(_)
             | NodeKind::GraphOutput(_)
             | NodeKind::PoissonDistribution(_) | NodeKind::SurfaceFilter(_)
             | NodeKind::BiomeContextMask(_) | NodeKind::SpeciesPicker(_)

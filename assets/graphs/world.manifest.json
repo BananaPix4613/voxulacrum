@@ -1,5 +1,6 @@
 {
   "world": "world.graph.json",
+  "sea_level": 24,
   "zone": "zone.graph.json",
   "biomes": [
     { "id": 0, "graph": "biome_meadow.graph.json", "detail": "biome_meadow.detail.json", "params": { "traversal_smoothing_distance": 1.0 } },

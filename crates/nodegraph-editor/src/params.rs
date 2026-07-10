@@ -182,7 +182,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
         | NodeKind::Lerp(_) | NodeKind::Union(_) | NodeKind::Intersect(_)
         | NodeKind::DensitySubtract(_) | NodeKind::Mix(_) | NodeKind::Mask(_)
         | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) | NodeKind::BuildTerrain(_)
-        | NodeKind::DensityOutput(_) => {
+        | NodeKind::DensityOutput(_) | NodeKind::FluidOutput(_) => {
             ui.weak("(no parameters)");
             false
         }

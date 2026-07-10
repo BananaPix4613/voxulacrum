@@ -1,5 +1,7 @@
 pub mod chunk;
 pub mod generation;
+pub mod fluid_gen;
+pub mod fluid_sim;
 pub mod layers;
 pub mod overrides;
 pub mod tags;
@@ -67,6 +69,7 @@ impl World {
                     chunk.data.tags = generated.tags;
                     chunk.data.detail_layers = generated.detail_layers;
                     chunk.data.scatter_instances = generated.scatter;
+                    chunk.data.fluids = generated.fluids;
                     (ChunkCoord::from(pos), chunk)
                 })
                 .collect()
@@ -430,6 +433,7 @@ fn generate_world_background(
             chunk.data.tags = generated.tags;
             chunk.data.detail_layers = generated.detail_layers;
             chunk.data.scatter_instances = generated.scatter;
+            chunk.data.fluids = generated.fluids;
             progress.fetch_add(1, Ordering::Relaxed);
             chunk
         })

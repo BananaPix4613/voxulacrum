@@ -9,7 +9,7 @@ use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 use crate::biome_params::BiomeParams;
 use crate::border::{analyze_biome_borders, biome_border_fade, blend_density, BorderAnalysis};
 use crate::library_kernel::surface_layering;
-use crate::column::{ColumnCache, IdColumn};
+use crate::column::{ColumnCache, ColumnField, IdColumn};
 use crate::column_eval::{ColumnEvaluator, UpstreamGraphs};
 use crate::context::EvalContext;
 use crate::detail_eval::DetailEvaluator;
@@ -57,6 +57,8 @@ struct BiomeGraph {
     graph: Graph,
     density_node: Option<NodeId>,
     material_rule: BiomeMaterialRule,
+    /// Located `FluidOutput` terminal, if the biome authors water.
+    fluid_node: Option<NodeId>,
     detail: Option<Graph>,
     params: BiomeParams,
 }
@@ -85,6 +87,7 @@ impl WorldEvaluator {
         let density_node = find_density_node(&biome);
         let material_rule =
             density_node.map_or(BiomeMaterialRule::Field, |n| extract_material_rule(&biome, n));
+        let fluid_node = find_fluid_node(&biome);
         let this = Self {
             world: Graph::of_kind(GraphKind::World),
             zone: Graph::of_kind(GraphKind::Zone),
@@ -93,6 +96,7 @@ impl WorldEvaluator {
                 graph: biome,
                 density_node,
                 material_rule,
+                fluid_node,
                 detail: None,
                 params: BiomeParams::new(),
             }],
@@ -124,11 +128,13 @@ impl WorldEvaluator {
                 let density_node = find_density_node(&graph);
                 let material_rule = density_node
                     .map_or(BiomeMaterialRule::Field, |n| extract_material_rule(&graph, n));
+                let fluid_node = find_fluid_node(&graph);
                 BiomeGraph {
                     id,
                     graph,
                     density_node,
                     material_rule,
+                    fluid_node,
                     detail: None,
                     params: BiomeParams::new(),
                 }
@@ -264,8 +270,9 @@ impl WorldEvaluator {
         let biome_col = self.biome_id_column(&zone_columns);
         let terrain = self.composite_terrain(ctx, biome_col.as_deref(), border.as_ref())?;
         let foliage = self.evaluate_foliage(ctx, &terrain, biome_col.as_deref())?;
+        let fluid_levels = self.composite_fluid(ctx, biome_col.as_deref())?;
 
-        Ok(ChunkEvaluation { terrain, world_columns, zone_columns, foliage })
+        Ok(ChunkEvaluation { terrain, world_columns, zone_columns, foliage, fluid_levels })
     }
 
     /// Run each present biome's `DetailGraph` (if any) against the composited
@@ -292,6 +299,56 @@ impl WorldEvaluator {
             .and_then(|n| zone_columns.get(n))
             .and_then(|c| c.as_id())
             .cloned()
+    }
+
+    /// Per-column pond water-surface level (world-Y) authored by present biomes'
+    /// `FluidOutput` terminals. `None` when no present biome authors fluid;
+    /// otherwise a column reads [`NO_POND`] where its biome places no pond.
+    ///
+    /// Each fluid biome is re-evaluated (a full biome eval) and its `FluidOutput`
+    /// mask (cached as the node's value) + `level` input are read: where the mask
+    /// is positive in that biome's columns, the pond level is that biome's `level`.
+    fn composite_fluid(
+        &self,
+        ctx: EvalContext,
+        biome_col: Option<&IdColumn>,
+    ) -> EvalResult<Option<Arc<ColumnField>>> {
+        let biome_at = |x: usize, z: usize| biome_col.map_or(0u16, |c| c.get(x, z));
+        let present = present_biomes(biome_col);
+        if !present
+            .iter()
+            .any(|&b| self.biomes.iter().any(|bg| bg.id == b && bg.fluid_node.is_some()))
+        {
+            return Ok(None);
+        }
+
+        let mut levels = ColumnField::filled(NO_POND);
+        for &bid in &present {
+            let Some(bg) = self.biomes.iter().find(|b| b.id == bid) else { continue };
+            let Some(fluid_node) = bg.fluid_node else { continue };
+            let Some(level_src) = input_source(&bg.graph, fluid_node, 0) else { continue };
+
+            let mut eval = Evaluator::new(&bg.graph, ctx).with_biome_params(&bg.params);
+            eval.evaluate()?;
+            let cache = eval.cache();
+            // The FluidOutput node caches its `mask` field; read it at y=0 (the
+            // mask chain is 2D). `level` is the scalar feeding pin 0.
+            let Some(mask) = cache.get(fluid_node).and_then(|o| o.as_scalar()) else { continue };
+            let Some(level) =
+                cache.get(level_src).and_then(|o| o.as_scalar()).map(|f| f.get(0, 0, 0))
+            else {
+                continue;
+            };
+
+            for z in 0..CHUNK_DIM {
+                for x in 0..CHUNK_DIM {
+                    if biome_at(x, z) == bid && mask.get(x, 0, z) > 0.0 {
+                        levels.set(x, z, level);
+                    }
+                }
+            }
+        }
+        Ok(Some(Arc::new(levels)))
     }
 
     /// Composite each column's biome terrain into one chunk buffer. `biome_col`
@@ -460,6 +517,23 @@ fn find_density_node(graph: &Graph) -> Option<NodeId> {
         .map(|(id, _)| id)
 }
 
+/// Sentinel for "no pond in this column" in a fluid-level field.
+pub const NO_POND: f32 = f32::MIN;
+
+/// Locate a graph's `FluidOutput` terminal, if any.
+fn find_fluid_node(graph: &Graph) -> Option<NodeId> {
+    graph
+        .nodes
+        .iter()
+        .find(|(_, n)| matches!(n.kind, NodeKind::FluidOutput(_)))
+        .map(|(id, _)| id)
+}
+
+/// The node feeding `(node, pin)`, if any.
+fn input_source(graph: &Graph, node: NodeId, pin: u16) -> Option<NodeId> {
+    graph.edges.iter().find(|e| e.to.node == node && e.to.pin == pin).map(|e| e.from.node)
+}
+
 /// Distinct biome ids present across a chunk's columns (`None` => `[0]`).
 fn present_biomes(biome_col: Option<&IdColumn>) -> Vec<u16> {
     let biome_at = |x: usize, z: usize| biome_col.map_or(0u16, |c| c.get(x, z));
@@ -489,6 +563,9 @@ pub struct ChunkEvaluation {
     /// Per-biome foliage (paint + scatter), unioned across the chunk's biomes.
     /// Empty when no biome has a `DetailGraph`.
     pub foliage: ChunkFoliage,
+    /// Per-column pond water-surface level (world-Y), or `None` when no biome
+    /// authors fluid. Columns without a pond read [`NO_POND`].
+    pub fluid_levels: Option<Arc<ColumnField>>,
 }
 
 #[cfg(test)]
@@ -749,5 +826,25 @@ mod tests {
         assert_eq!(we.biome_param(1, "d"), Some(0.0));
         assert_eq!(we.biome_param(0, "missing"), None);
         assert_eq!(we.biome_param(9, "d"), None);
+    }
+
+    #[test]
+    fn fluid_output_produces_pond_levels() {
+        use nodegraph_ir::{ConstantParams, FluidOutputParams, PinRef};
+        let mut biome = Graph::new();
+        let level = biome.add_node(NodeKind::Constant(ConstantParams { value: 30.0 }));
+        let mask = biome.add_node(NodeKind::Constant(ConstantParams { value: 1.0 }));
+        let fout = biome.add_node(NodeKind::FluidOutput(FluidOutputParams::default()));
+        biome.connect(PinRef::new(level, 0), PinRef::new(fout, 0)).unwrap();
+        biome.connect(PinRef::new(mask, 0), PinRef::new(fout, 1)).unwrap();
+
+        let we = WorldEvaluator::new(biome);
+        let a = we.evaluate_chunk(EvalContext::new(0, IVec3::ZERO)).unwrap();
+        let levels = a.fluid_levels.expect("pond field present");
+        assert_eq!(levels.get(0, 0), 30.0);
+        assert_eq!(levels.get(31, 31), 30.0);
+        // Deterministic.
+        let b = we.evaluate_chunk(EvalContext::new(0, IVec3::ZERO)).unwrap();
+        assert_eq!(b.fluid_levels.unwrap().get(5, 5), 30.0);
     }
 }

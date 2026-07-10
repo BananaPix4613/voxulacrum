@@ -24,6 +24,8 @@ pub enum GameAction {
     ToggleUI,
     ToggleGraphEditor,
     ToggleFieldProbe,
+    /// Debug: pour water at the picked cell.
+    PourWater,
 }
 
 // ============================================================================
@@ -220,6 +222,8 @@ impl Default for InputMap {
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F2.into()), action: ToggleGraphEditor, mode: EdgeTriggered },
                 // F3 field-probe toggle - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F3.into()), action: ToggleFieldProbe, mode: EdgeTriggered },
+                // G debug: pour watch at the cursor - edge triggered
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyG.into()), action: PourWater, mode: EdgeTriggered },
             ],
         }
     }
