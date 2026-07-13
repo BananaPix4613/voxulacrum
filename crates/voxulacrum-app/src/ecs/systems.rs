@@ -33,6 +33,7 @@ use crate::{compute_render_dimensions, palette, FrameCounter};
 use crate::world::chunk::{LoadedChunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
 use crate::world::persistence::WorldPersistence;
+use crate::world::mutation::{MutationCommand, WorldMutation};
 use crate::materials::MaterialRegistryRes;
 
 // ==========================================================================
@@ -289,7 +290,11 @@ pub fn fluid_tick_system(
     // water column at the picked cell.
     if input.just_pressed(crate::input::GameAction::PourWater) {
         if let Some(anchor) = pick.anchor {
-            pour_water_column(&mut world.0, anchor, &mut changed);
+            let out = world
+                .0
+                .execute(MutationCommand::authoring(WorldMutation::PourFluidColumn { anchor }))
+                .expect("authoring pour in authoring mode");
+            changed.extend(out.water_rebuild);
         }
     }
 
@@ -356,59 +361,18 @@ pub fn fluid_tick_system(
         }
     }
 
-    // Any chunk whose fluid changed must persist its field. Give it an overrides
-    // bucket so build_chunk_edits snapshots the fluid even without a voxel edit.
-    for &pos in &changed {
-        if let Some(c) = world.0.chunks.get_mut(&voxel_core::ChunkCoord::from(pos)) {
-            c.persist_dirty = true;
-            c.data
-                .overrides
-                .get_or_insert_with(crate::world::overrides::ChunkOverrides::default);
-        }
+    // Any chunk whose fluid changed must persist its field. Route the marking
+    // through the mutation API so all persistence bookkeeping lives in one place.
+    if !changed.is_empty() {
+        world
+            .0
+            .execute(MutationCommand::authoring(WorldMutation::MarkFluidDirty {
+                chunks: changed.iter().copied().collect(),
+            }))
+            .expect("authoring fluid mark in authoring mode");
     }
     for pos in changed {
         water_pass.add_chunk_water(pos, &world.0, &ctx.device);
-    }
-}
-
-/// Insert a short column of full water cells above `anchor` and wake them, so the
-/// next tick flows it. Skips solid cells. Records touched chunks for mesh rebuild.
-fn pour_water_column(
-    world: &mut crate::world::World,
-    anchor: glam::IVec3,
-    changed: &mut std::collections::HashSet<glam::IVec3>,
-) {
-    let dim = crate::world::chunk::CHUNK_SIZE as i32;
-    for dy in 1..=8 {
-        let p = anchor + glam::IVec3::new(0, dy, 0);
-        let chunk_pos =
-            glam::IVec3::new(p.x.div_euclid(dim), p.y.div_euclid(dim), p.z.div_euclid(dim));
-        let Some(chunk) = world.get_chunk_mut(chunk_pos) else { continue };
-        let lp = voxel_core::LocalPos::new_unchecked(
-            p.x.rem_euclid(dim) as u8,
-            p.y.rem_euclid(dim) as u8,
-            p.z.rem_euclid(dim) as u8,
-        );
-        if chunk.data.voxels.voxel(lp.to_index()).is_solid() {
-            continue;
-        }
-        let cell = crate::world::layers::FluidCell {
-            fluid_id: crate::world::layers::FluidId::WATER,
-            mass: crate::world::fluid_gen::FULL_MASS,
-            flags: 0,
-        };
-        chunk.data.fluids.cells.insert(lp, cell);
-        chunk.data.fluids.activate(lp);
-        // Persist the pour (a player edit) so it survives save/reload; it
-        // re-applies as settled and re-flows on load.
-        chunk
-            .data
-            .overrides
-            .get_or_insert_with(crate::world::overrides::ChunkOverrides::default)
-            .fluid_diffs
-            .insert(lp, cell);
-        chunk.persist_dirty = true;
-        changed.insert(chunk_pos);
     }
 }
 

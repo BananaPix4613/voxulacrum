@@ -685,25 +685,38 @@ pub fn apply_overrides_to_storage(base: &ChunkStorage, overrides: &ChunkOverride
     storage
 }
 
-/// Build ChunkEdits from a Chunk's overrides. Returns None if unmodified.
+/// Build ChunkEdits from a Chunk's overrides. Returns None when there is nothing
+/// to persist.
+///
+/// Fluid is snapshotted as a full field (Phase-7 interim shape; the diff-with-
+/// tombstones target is drift-review 1.3, deferred). A chunk holds fluid worth
+/// persisting whenever it has explicit cells - independent of whether the override
+/// bucket carries voxel/scatter edits. Decoupling those two is the drift-review
+/// 1.2 fix: a chunk water merely *flowed into* has an empty bucket but real fluid
+/// cells, and must still save.
 pub fn build_chunk_edits(chunk: &LoadedChunk) -> Option<ChunkEdits> {
     if !chunk.persist_dirty { return None; }
-    // Snapshot the chunk's current fluid field so flowing + settled water resumes
-    // exactly on reload, rather than rewinding to the pour source
-    let fluids = &chunk.data.fluids.cells;
+
+    let has_fluid = !chunk.data.fluids.cells.is_empty();
+
     match &chunk.data.overrides {
-        None => {
-            // Voxel-promoted / full replacement saves entire storage. (Fluid on a
-            // heavily voxel-edited chunk is a rare edge, not carried here.)
-            Some(ChunkEdits::Full((*chunk.data.voxels).clone()))
-        }
-        Some(ovr) if ovr.is_empty() => None,
+        // Voxel-promoted / full replacement saves the entire storage. Fluid on a
+        // Full-promoted chunk is NOT carried: `ChunkEdits::Full` has no fluid slot,
+        // and adding one is a blob-format change that rides with the 1.3 diff
+        // migration. Reachable only past DELTA_THRESHOLD voxel edits - no live
+        // Phase-8 path produces that (any real fluid change creates a bucket, which
+        // routes to the Delta arm below), so the loss is documented, not hit.
+        None => Some(ChunkEdits::Full((*chunk.data.voxels).clone())),
         Some(ovr) if ovr.voxel_override_count() > DELTA_THRESHOLD => {
             Some(ChunkEdits::Full((*chunk.data.voxels).clone()))
         }
+        // Empty bucket AND no fluid: genuinely nothing to persist.
+        Some(ovr) if ovr.is_empty() && !has_fluid => None,
+        // Otherwise a delta: clone the bucket (possibly empty) and attach the full
+        // fluid snapshot. This is the arm that saves flowed-into chunks (1.2 fix).
         Some(ovr) => {
             let mut ovr = ovr.clone();
-            ovr.fluid_diffs = fluids.clone();
+            ovr.fluid_diffs = chunk.data.fluids.cells.clone();
             Some(ChunkEdits::Delta(ovr))
         }
     }
@@ -1059,5 +1072,50 @@ mod tests {
             ChunkEdits::Full(ChunkStorage::Uniform { .. }) => "Full Uniform",
             ChunkEdits::Full(ChunkStorage::Populated(_)) => "Full Populated",
         }
+    }
+
+    /// A chunk with only fluid changes — an empty override bucket plus real fluid
+    /// cells, exactly what `handle_mark_fluid_dirty` produces for a flowed-into
+    /// chunk — must save its fluid and reload it. Regression guard for drift-
+    /// review 1.2.
+    #[test]
+    fn fluid_only_chunk_saves_and_reloads() {
+        let mut chunk = LoadedChunk::new_air(IVec3::ZERO);
+        chunk.data.fluids.cells.insert(
+            LocalPos::from_index(64),
+            FluidCell { fluid_id: FluidId::WATER, mass: 40000, flags: 0 },
+        );
+        chunk.data.overrides = Some(ChunkOverrides::default()); // empty bucket + dirty
+        chunk.persist_dirty = true;
+
+        let record = build_chunk_record(&chunk).expect("fluid-only chunk must save");
+        match &record.edits {
+            ChunkEdits::Delta(ovr) => {
+                assert_eq!(ovr.fluid_diffs.len(), 1);
+                assert_eq!(ovr.fluid_diffs[&LocalPos::from_index(64)].mass, 40000);
+            }
+            _ => panic!("fluid-only chunk should persist as a Delta"),
+        }
+
+        // Round-trips through the blob.
+        let raw = serialize_chunk_record_raw(&record).unwrap();
+        let back = deserialize_chunk_record_raw(&raw).unwrap();
+        match back.edits {
+            ChunkEdits::Delta(ovr) => {
+                let cell = ovr.fluid_diffs[&LocalPos::from_index(64)];
+                assert_eq!(cell.mass, 40000);
+                assert_eq!(cell.fluid_id, FluidId::WATER);
+            }
+            _ => panic!("expected Delta after reload"),
+        }
+    }
+
+    /// A dirty chunk with an empty bucket and no fluid has nothing to persist.
+    #[test]
+    fn empty_bucket_without_fluid_saves_nothing() {
+        let mut chunk = LoadedChunk::new_air(IVec3::ZERO);
+        chunk.data.overrides = Some(ChunkOverrides::default());
+        chunk.persist_dirty = true;
+        assert!(build_chunk_edits(&chunk).is_none());
     }
 }

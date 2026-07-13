@@ -13,6 +13,7 @@ use crate::world::{World, WorldManager};
 use crate::world::persistence::WorldPersistence;
 use crate::world::streaming::ChunkStreamingManager;
 use crate::world::tags::{BiomeId, ChunkTags, ZoneId};
+use crate::world::mutation::{MutationCommand, WorldMutation};
 
 #[derive(Resource)]
 pub struct WorldRegenCoordinator {
@@ -45,18 +46,19 @@ impl WorldRegenCoordinator {
         
         // Poll for completed background regeneration
         if let Some((new_chunks, regen_params, regen_generator)) = self.manager.poll_regeneration() {
-            // Merge regenerated voxel data into the world and adopt the shared
-            // generator. Targeted invalidation regenerates a subset, so we merge
-            // (not replace) to retain chunks the edit didn't touch; a full regen
-            // produces every loaded position and overwrites all of them.
-            world.chunks.extend(new_chunks);
-            world.generator = regen_generator.clone();
-            
-            // Reset meshing pipeline
+            // Swap the completed regeneration into the world through the mutation
+            // API: merge regenerated chunks (retaining untouched ones; a full regen
+            // overwrites all), adopt the shared generator, and mark every chunk
+            // mesh-dirty. Authoring-mode authoritative regen (§9).
+            world
+                .execute(MutationCommand::authoring(WorldMutation::SwapRegeneratedChunks {
+                    chunks: new_chunks,
+                    generator: regen_generator.clone(),
+                }))
+                .expect("authoring regen swap in authoring mode");
+
+            // Reset the meshing pipeline, then resubmit every (now-dirty) chunk.
             meshing.pipeline.reset_for_new_world();
-            for chunk in world.chunks.values_mut() {
-                chunk.mesh_dirty = true;
-            }
             meshing.pipeline.submit_all_dirty(world);
 
             *detail_paint = DetailPaintPass::new(ctx, world);

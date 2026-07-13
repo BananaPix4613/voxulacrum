@@ -1,13 +1,15 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.2
+**Status:** Baseline reference, v1.4
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
-**Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled.
+**Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
 **Revision history:**
 - v1.0 — Initial baseline.
 - v1.1 — Replaced 45° slope geometry with half-height slabs. Slopes are removed from the engine entirely. Added walkability mask and traversal smoothing distance as foundational concepts.
 - v1.2 — Documented previously-implicit foundational systems: ECS runtime (bevy_ecs + FrameStage schedule), chunk persistence (rusqlite + zstd), mesh disk cache (graph-hash-keyed), and chunk streaming. Added material registry pattern. Clarified that `ChunkOverrides` is the canonical in-memory representation of player edits that the persistence layer serializes.
+- v1.3 — Documented settled architectural additions from Phases 2 through 7: cross-graph dataflow (`GraphRef` + `GraphOutput`), named boundary pins for libraries, per-biome parameter sidecar, standard libraries as authored assets with `LibraryKernel` backing, and the manifest-driven world structure. Reframed traversal smoothing distance in §5 to reflect the coupled tensions Phase 6 surfaced (multi-distance smoothing requires terrain modification, foliage reordering, and cross-chunk generation infrastructure). Revised LOD strategy in §11 for the orthographic isometric camera model. Renamed the pin type `ScatterPoints` → `Positions` to match the general-mechanism naming pattern used throughout. Renamed `FluidProvider` → `FluidOutput` to match code. Added explicit interim-vs-target notes for three items where current implementation is scheduled to migrate: the mesh vertex format (current `TerrainVertex` → target `FaceVertex`), save format versioning (current wipe-on-bump → target per-layer versioning), and fluid persistence (current full-snapshot → target diff-with-tombstones).
+- v1.4 — Clarified §9 to document the content-authoring-vs-play mode model the engine implements. Added an explicit "Modes: content authoring vs. play" subsection to §9 stating that authoring and play do not coexist: authoring-mode regeneration is authoritative and wipes overrides by design; play-mode graphs are read-only. Removed the "worldgen edits don't destroy player work" property from §9's rationale, which described a coexistence case that is not a design goal. Updated the Stable Instance IDs paragraph to distinguish play-mode chunk reload (applies tombstones and additions) from authoring-mode regeneration (wipes). Removed property #3 from the fluid persistence interim justification since it described the same coexistence case. Introduced the mutation command API as the enforcement mechanism for the mode separation; the API becomes real in Phase 8.
 
 ---
 
@@ -161,6 +163,12 @@ ChunkFile {
 
 **`ChunkOverrides` is the canonical representation of player edits**, in-memory and on-disk. The persistence layer serializes `ChunkOverrides` directly; there is no separate "edit log" format. When a chunk loads, the generator runs from the graph + seed and the deserialized `ChunkOverrides` is applied on top. When a chunk evicts from memory, only its `ChunkOverrides` plus any tag changes are written back — generated content is reproducible and not persisted.
 
+### Interim shape: monolithic version + wipe-on-bump
+
+The current implementation ships a single monolithic `BLOB_VERSION` byte per chunk blob plus a global `VOXEL_FORMAT_VERSION` marker whose bump wipes all saves and the mesh cache on next launch. This is a **pre-release interim policy**, not the target. The doc's per-layer versioning target above is intentionally preserved so that the following release-blocking property holds: at first release, saves survive engine upgrades via layer-scoped migrations that read older layer versions and write the current one.
+
+The wipe policy is defensible while the engine is pre-release because save invalidation is cheap (no user commitment yet) and per-layer version machinery adds implementation overhead that provides no user-facing benefit before players accumulate save state. The migration to per-layer versioning becomes mandatory before any release that promises save-file compatibility across engine upgrades. Retrofitting per-layer versioning onto a monolithic blob is a format redesign; do it deliberately at the last planned `BLOB_VERSION` bump before that release, not discovered mid-release.
+
 ### Generated vs. authored split
 
 Within each layer, content divides into **generated** (reproducible from seed + graph; not serialized in detail) and **overrides** (player edits; serialized fully). See §9 for the diff model.
@@ -184,19 +192,21 @@ The world generator is composed of **five graph types** in a strict hierarchy. E
 ### Hierarchy
 
 ```
-World
-├── WorldGraph (climate, zone selector, sea_level)
-├── Zones (registered)
+World (manifest: sea_level, seed, zone/biome/library registrations)
+├── WorldGraph (climate channels, zone selector)
+├── Zones (registered via manifest)
 │   ├── ZoneGraph[Z1]
 │   │   ├── BiomeGraph[B1]
 │   │   ├── BiomeGraph[B2]
 │   │   └── DetailGraph[B1], DetailGraph[B2]
 │   └── ZoneGraph[Z2] ...
-└── Libraries (reusable subgraphs)
+└── Libraries (reusable subgraphs, registered via manifest)
     ├── LibraryGraph["StandardCaveNoise"]
     ├── LibraryGraph["SurfaceLayering"]
     └── ...
 ```
+
+The world's structure is materialized on disk as a manifest file (`world.manifest.json`) plus the individual graph and library files it references. See "Manifest-driven world structure" below.
 
 ### Pin types
 
@@ -209,13 +219,14 @@ pub enum PinType {
     Density,                // 3D scalar field; solid where > 0
     SurfaceField,           // 2D scalar over chunk XZ footprint
     Material,               // material provider; "what block at this position?"
-    FluidProvider,          // fluid initialization; "what fluid at this position?"
+    FluidOutput,            // fluid initialization terminal; "what fluid at this position?"
     // Selection types
     BiomeId,
     ZoneId,
     Curve,                  // editable spline f32 → f32
     // Placement types
-    ScatterPoints,          // set of candidate positions
+    Positions,              // set of candidate positions (formerly named ScatterPoints;
+                            //   renamed to describe the general mechanism, not the scenario)
     PlacementMask,          // boolean field for "can place here?"
     SpeciesWeights,         // weighted variant selection
     // Output types
@@ -233,16 +244,64 @@ pub enum PinType {
 
 No other implicit coercions. Strictness is a feature.
 
-### LibraryGraph mechanics
+### Cross-graph dataflow
 
-A `LibraryGraph` declares typed inputs and outputs at its boundary. A `LibraryRef` node inside any other graph references a library by ID, exposes its inputs as pin inputs, and exposes its outputs as pin outputs. Cycles are forbidden (validation catches them).
+Graphs in the hierarchy reference each other's outputs via a `GraphRef` node and a `GraphOutput` marker. This mechanism is what makes the hierarchy actually compose: a `ZoneGraph` reads its parent `WorldGraph`'s climate channels rather than re-deriving climate internally; a `BiomeGraph` reads whatever inputs it declares by name from its containing `ZoneGraph` and grandparent `WorldGraph`.
 
-Standard libraries to ship:
+- **`GraphOutput { name, pin_type }`** — a terminal node placed inside the producing graph. Every named output a graph exposes to consumers is marked by a `GraphOutput`. A `WorldGraph` typically has one `GraphOutput` per climate channel plus one for `zone_id`. A `BiomeGraph` has one `GraphOutput` for terrain density and one for material.
+- **`GraphRef { target, output_name }`** — a source node placed inside the consuming graph. It resolves `target` (a typed identifier like `GraphRefTarget::World` or `GraphRefTarget::Zone(id)`) against the manifest, then reads the named `GraphOutput` from that target graph at evaluation time.
+
+Cycles in the graph-reference DAG are forbidden and caught at validation time. The manifest declares which graph is `WorldGraph`, which `ZoneGraph`s exist, and which `BiomeGraph`s each zone contains, so target resolution is a manifest lookup rather than a search.
+
+Evaluation memoizes upstream outputs per chunk column (see §5 `ColumnCache`), so a `GraphRef` resolves once per column per graph reference regardless of how many nodes downstream read from it.
+
+### Named boundary pins for libraries
+
+A `LibraryGraph` declares its boundary — typed named inputs and typed named outputs — at authoring time. Every `LibraryRef` node that references the library exposes those declarations as its own pin descriptors dynamically, so the visual graph shape adapts to the library's boundary rather than being hardcoded on the referring node.
+
+- **Library boundary declaration** — the library file's header specifies `{ inputs: [{ name, pin_type }, ...], outputs: [{ name, pin_type }, ...] }`. Boundary changes to a library are breaking changes to every graph that references it (a validation error surfaces at the referring `LibraryRef` node).
+- **`LibraryRef` dynamic pins** — at graph load time, the referred library's boundary is resolved and the node's pin descriptor is computed. The resolved boundary is cached on the referring node's serialized params so that subsequent loads don't re-walk libraries; edits to the library re-cache during the library's own reload flow.
+
+Cycles among library references are forbidden and caught at validation time. Cross-graph references (see above) and library references share cycle-detection infrastructure.
+
+### Per-biome parameter sidecar
+
+Biomes are graphs, but some biome-scoped values are not natural graph outputs — traversal smoothing distance is a single scalar that governs the slab-smoothing pass; fade radius is a boundary-blending constant; future parameters (fluid density, fog color, wind strength) will follow the same shape. These values are stored in a **typed scalar-metadata sidecar** per biome, addressable by name.
+
+```rust
+BiomeParams { entries: HashMap<String, Scalar> }
+```
+
+The biome manifest entry declares parameter values; the evaluator threads the biome's `BiomeParams` into any pass that consumes them (slab smoothing reads `traversal_smoothing_distance`; the material composition pass reads any material-domain params; etc.). A `BiomeParam(name)` node kind exposes parameters to `BiomeGraph` internal nodes, so authors can drive graph behavior from the sidecar without hardcoding constants.
+
+Parameters are free-form (any biome can declare any parameter name) with documented defaults. Structured schemas are future work; they are not a blocker for adding new parameters.
+
+### Standard libraries
+
+The engine ships a set of standard libraries as authored assets under `assets/libraries/`:
+
 - `StandardCaveNoise` — 3D Worley + ridged noise composite
 - `SurfaceLayering` — depth-conditional material cake (grass/dirt/stone)
 - `ExposureLayering` — surface layering varied by face exposure (top-facing vs side-facing surfaces get different materials/tints; useful for snow caps, exposed rock on cliff faces, moss on shaded sides)
-- `BiomeBorderFade` — standard fade kernel
+- `BiomeBorderFade` — standard fade kernel used by biomes at their edges
 - `PoissonPlacement` — point distribution for scatter
+
+Standard libraries follow the same authoring format as any other library. They are **backed by `LibraryKernel`** — an enum matching each standard library's name to a native implementation. The authored asset captures the library's boundary declaration and identity; the actual computation runs in native code. This is the pragmatic starting shape: libraries participate in the graph editor, the reference/cycle-detection system, and the invalidation table, without paying the cost of full graph-body library implementation for functions that biomes don't currently customize.
+
+When authors want to write a library body from scratch (rather than customize a native kernel's parameters), the same file format extends to hold a graph body instead of a kernel reference. That extension is a compatible addition, not a rewrite.
+
+### Manifest-driven world structure
+
+A world is defined on disk by a **manifest file** (`world.manifest.json`) that names:
+
+- `sea_level` — the global scalar Y at which oceans fill (see §7). This lives on the manifest rather than as a `WorldGraph` output because a single scalar constant across the world is not natural graph data, and threading it through as a graph output would introduce a `GraphRef` in every biome without providing any biome variation.
+- `seed` — the world seed.
+- `world` — the path to the `WorldGraph` asset (`.graph.json`).
+- `zones` — a list of `ZoneGraph` asset references, each with an identity (`ZoneId`) and a path.
+- `biomes` — a list of `BiomeGraph` asset references, each with an identity (`BiomeId`), a path, an optional `detail` path pointing to its `DetailGraph`, and an optional `params` block (the per-biome parameter sidecar).
+- `libraries` — a list of `LibraryGraph` asset references, each with an identity (`LibraryGraphId`) and a path.
+
+The manifest is the resolution root: `GraphRef` targets and `LibraryRef` targets resolve against it. Editing the manifest invalidates the entire loaded world (structural change); editing individual graphs invalidates per the table below.
 
 ### Edit invalidation table
 
@@ -250,11 +309,13 @@ Edits to different graph types invalidate different chunk sets. This is the prim
 
 | Edit target | Invalidates |
 |-------------|-------------|
-| `WorldGraph` (climate, zone selector, sea_level) | All loaded chunks |
+| `Manifest` (structural change: `sea_level`, seed, graph registrations) | All loaded chunks |
+| `WorldGraph` (climate, zone selector) | All loaded chunks |
 | `ZoneGraph[Z]` | All chunks tagged with Zone Z or within Z's fade range |
 | `BiomeGraph[B].density` | All chunks tagged with Biome B + fade buffer |
 | `BiomeGraph[B].material` | Material-only re-pass; density cache kept |
-| `BiomeGraph[B].fluid_provider` | Fluid initialization re-pass |
+| `BiomeGraph[B].fluid_output` | Fluid initialization re-pass |
+| `BiomeGraph[B].params` (sidecar values) | Depends on the parameter; `traversal_smoothing_distance` triggers a slab-smoothing re-pass on B's chunks |
 | `DetailGraph[D]` | Detail-only re-pass; voxel data untouched |
 | `LibraryGraph[L]` | Every graph importing L applies its own rules |
 
@@ -272,7 +333,7 @@ Chunk generation runs in **strict pipeline order**. Each stage reads from previo
 1. WorldGraph evaluation
    - Per-column: climate vector (temp, humidity, continentalness, erosion, weirdness)
    - Per-column: zone_id + zone_border_distance
-   - Global: sea_level
+   - (`sea_level` is read from the manifest and made available as a `Scalar` input to any graph that needs it via `GraphRef`; it is not a graph output.)
 
 2. ZoneGraph evaluation
    - Per-column: biome_id + biome_border_distance
@@ -306,7 +367,7 @@ Chunk generation runs in **strict pipeline order**. Each stage reads from previo
 
 9. Fluid initialization
    - All empty voxels ≤ sea_level → ocean fill mode
-   - BiomeGraph.fluid_provider outputs → settled fluid cells
+   - BiomeGraph.fluid_output outputs → settled fluid cells
    - ZoneGraph.rivers → settled fluid cells along channels
 
 10. DetailGraph paint + scatter
@@ -386,18 +447,25 @@ Computing it once, in worldgen, before meshing, is what makes pathfinding and mo
 
 ### Traversal smoothing distance
 
-A per-biome worldgen parameter controlling how aggressively the slab smoothing pass converts cube-step transitions into slab staircases.
+A per-biome worldgen parameter controlling whether the slab smoothing pass converts cube-step transitions into slab half-steps.
 
 | Value | Behavior | Visual result |
 |-------|----------|---------------|
 | 0 | No smoothing | Sharp cube steps; terraced terrain |
-| 1 | Smooth single-voxel transitions only | Half-step inserted at 1-cube height changes |
-| 2–4 | Smooth across short distances | Gentle short staircases |
-| 5+ | Smooth across long distances | Long landings between half-steps; reads as gradual slope |
+| ≥ 1 | Smooth single-voxel transitions | Half-step inserted at 1-cube height changes |
 
-The parameter influences how the smoother distributes slab steps across walkable surfaces. A meadow biome might use 6 (gentle, gradual). A canyon biome might use 1 (sharp, terraced). A flat plains biome uses 0 (no smoothing needed; terrain is already level).
+The parameter influences whether the smoother demotes cube voxels adjacent to walkable-height transitions into `SlabBottom` voxels. A meadow biome might use `1` (softened). A canyon biome might use `0` (sharp, terraced). A flat plains biome uses `0` (no smoothing needed; terrain is already level).
 
-This is the mechanism that produces the "feeling of gradual slopes" without any diagonal geometry. The slope is emergent from step distribution, not from per-voxel angles.
+**Multi-distance smoothing — target reserved for a future revision.** Earlier revisions of this section anticipated that values above 1 would distribute half-steps across multi-cube height differences ("long landings between half-steps; reads as gradual slope"). Implementation surfaced four coupled tensions that make the naive distributive approach unworkable:
+
+1. **Correct multi-distance smoothing is terrain morphology, not step insertion.** Producing gradual slopes over distances greater than one cube requires lowering surfaces (min-cone erosion or similar), which contradicts the engine's "cliff faces stay sharp" principle from §1 unless erosion is scoped precisely enough to skip cliffs — a per-region decision the smoothing pass alone can't make.
+2. **Bounded radius produces mid-slope artifacts.** A distance-N pass applied to a height difference of N+K cubes produces an unsmoothed segment somewhere on the slope. There is no non-arbitrary place to put it.
+3. **Scatter placement runs before smoothing.** Foliage instances (§6) anchor to pre-smoothing surface positions. Multi-distance smoothing that actually lowers the surface would leave props floating above the new surface. Fixing this requires reordering scatter after smoothing, which couples the two systems tightly.
+4. **Cross-chunk seam smoothing.** Multi-cube staircases that straddle chunk boundaries need cross-chunk generation infrastructure (see §12 Cross-Cutting Concerns) which is deferred with rivers and structures.
+
+Multi-distance smoothing is a design decision that couples across four subsystems and depends on infrastructure the engine doesn't yet have. It is reserved as future work; the parameter type and per-biome sourcing infrastructure are in place so that when the four tensions are resolved, the behavior can activate without renaming or re-plumbing.
+
+The **half-step-only behavior at value ≥ 1** produces the current stable "softened terraces" visual style. The "feeling of gradual slopes" over multi-cube distances is the aspiration; it does not currently ship.
 
 ---
 
@@ -529,9 +597,9 @@ pub struct FluidCell {
 
 ### Generation sources
 
-- `WorldGraph.sea_level` (global Y) — defines ocean fill.
-- `BiomeGraph.fluid_provider` — defines lakes, ponds, biome-specific water bodies.
-- `ZoneGraph.rivers` — defines cross-biome water channels.
+- **`sea_level`** (manifest constant) — defines ocean fill. Every empty voxel at or below this global Y receives water at generation time; chunks entirely at or below sea level use the O(1) `FluidFillMode::Submerged(WATER)` fast path. Lives on the manifest (see §4) rather than as a `WorldGraph` output because it is a single scalar constant across the world with no biome variation, and threading it through as a graph output would introduce a `GraphRef` in every biome for no gain.
+- **`BiomeGraph.fluid_output`** — a biome's terminal for water bodies. Produces the biome's contribution to `FluidLayer` at generation time; used for authored lakes, ponds, and biome-specific water sources. `fluid_output` is a **terminal name** ("this is the biome's fluid output"), not a **role name** ("this thing provides fluids") — the same reconciliation pattern as `Positions` in §4.
+- **`ZoneGraph.rivers`** — defines cross-biome water channels. Rivers are structurally coupled to terrain modification (carved riverbed) and cross-chunk generation infrastructure; both are future work.
 
 After generation, all cells are flagged `settled`. They unsettle only when disturbed.
 
@@ -569,9 +637,20 @@ Every chunk layer (voxels, detail, scatter, fluids, decals) splits into **genera
 
 ### Why
 
-- **Worldgen edits don't destroy player work**: regenerating a chunk subtracts removed-overrides from new-generated, adds added-overrides.
-- **Save files stay small**: untouched chunks store no overrides.
-- **The graph remains the source of truth** for the default world, even after extensive player modification.
+- **Save files stay small**: untouched chunks store no overrides. Persistent state is the delta from graph output, not a snapshot of the world.
+- **The graph remains the source of truth** for the default world. A fresh world starts from graph output alone; every player edit persists as a delta from that source.
+- **Player edits are represented uniformly** across voxels, scatter, detail, fluid, and decals via `ChunkOverrides`.
+
+### Modes: content authoring vs. play
+
+The engine operates in one of two modes at any given time. The two do not coexist:
+
+- **Content authoring mode.** The developer edits graphs in the integrated editor. Each graph edit invalidates affected chunks per the invalidation table in §4; regeneration is authoritative and produces a fresh world from the current graph. Any player-shaped state present in memory or on disk (voxel overrides, scatter tombstones, fluid diffs) is a stale artifact of a previous run and is intentionally cleared by regeneration. There are no players to protect from graph iteration.
+- **Play mode.** The graph is fixed. Players make edits (place/remove voxels, scatter, water); each edit lands in the appropriate `ChunkOverrides` layer and persists. Regeneration does not run; graphs are read-only at runtime. A chunk unloading and reloading re-runs generation from the (fixed) graph and re-applies persisted overrides on top.
+
+The `ChunkOverrides` diff model exists to serve play mode's persistence needs and to keep save files small, not to reconcile graph edits against player state at runtime. **A general-purpose "editing graphs during play preserves player edits" property is not a design goal** — the engine does not implement the reconciliation (subtracting removed-generated from newly-generated, remapping stable IDs across seed changes, resolving material-change conflicts on player-edited voxels, etc.) that such coexistence would require.
+
+The mode separation is enforced by the **mutation command API**: every world-mutation call site (editor graph edit, player voxel edit, player fluid disturbance, streaming override apply) declares its origin — dev-authoring or play-time — and the runtime rejects the combination that would produce coexistence rather than silently entering it.
 
 ### Structure
 
@@ -589,13 +668,24 @@ pub struct ChunkOverrides {
 
 ### Stable instance IDs
 
-Generated scatter instances need IDs that survive regeneration:
+Generated scatter instances need IDs that survive chunk reload in play mode:
 
 ```
 StableInstanceId = hash(world_seed, world_pos, prefab_id, sequence_in_anchor)
 ```
 
-After regeneration, the engine subtracts `scatter_removed` from the freshly-generated set and unions `scatter_added`.
+**In play mode**, when a chunk unloads and reloads, the engine regenerates from the (fixed) graph, subtracts `scatter_removed` from the freshly-generated set, and unions `scatter_added`. Because IDs are deterministic from world position + seed, tombstones stay valid across the unload/reload cycle.
+
+**In authoring mode**, graph-edit regeneration is authoritative and any `scatter_removed`/`scatter_added` state is cleared alongside the rest of the chunk overrides.
+
+### Interim shape: fluid persistence full-snapshot
+
+The current implementation serializes `fluid_diffs` as a full snapshot of the chunk's live fluid field at save time (including generated ocean cells on sea-level-straddling chunks), and the loader overlays that snapshot on top of freshly-generated fluid at load time. This is an **interim shape**, not the target. The doc's diff-against-generated model above is intentionally preserved so that the following properties hold at the target:
+
+1. **Save files stay small** — the full-field snapshot serializes hundreds of untouched generated cells per straddle chunk; the target diff serializes only genuine deviations.
+2. **Player-drained water stays drained** across chunk unload/reload in play mode — the target diff includes tombstones for removed generated cells; the interim overlay has no tombstone concept and cannot represent removal, so drained water re-derives on load.
+
+The migration to a diff-with-tombstones shape lands when player-water interaction becomes a real concern, or when save-file size on ocean-heavy worlds becomes a problem — whichever comes first. The wire format extension is compatible: adding a tombstone list to the existing `fluid_diffs` structure doesn't require a `BLOB_VERSION` bump (once per-layer versioning lands per §3).
 
 ---
 
@@ -625,6 +715,21 @@ pub struct FaceVertex {
 }
 // ~32 bytes per vertex
 ```
+
+### Interim shape: `TerrainVertex` with baked color
+
+The current implementation ships a **64-byte `TerrainVertex`** with baked color per vertex rather than the 32-byte `FaceVertex` above. Registry color is resolved and written into the vertex at mesh time; the shader reads color directly. This is an interim shape, not the target. The `FaceVertex` target above is intentionally preserved so that the following capabilities can land as a single format migration rather than being paid for incrementally:
+
+- **Palette / time-of-day shifts** without re-meshing the world (target: shader composes color from `material_id` + `occlusion_class` + `biome_tint_index` at draw time).
+- **Biome tint** carried per-vertex (target: `biome_tint_index` byte).
+- **Enclosure factor** for cave fog (§11) and audio occlusion (§12) that the doc-stated "no additional data required" premise depends on.
+- **Edge-flag outlines** at material boundaries.
+- **Quantized light levels** as a per-vertex byte.
+- **Debug attribute views** that swap which vertex byte drives color.
+- **Sway weight** for foliage (already relevant for §6 Tier 3 rendering).
+- Roughly 2× smaller mesh data on disk and in GPU memory.
+
+The migration to `FaceVertex` is scheduled as its own substep before any of the above features are built. Doing it incrementally would break the mesh disk cache multiple times; doing it once means one migration and all subsequent §11 features land against a stable format. The `CACHE_VERSION` machinery in the mesh cache already handles the invalidation.
 
 ### Mesher requirements
 
@@ -748,8 +853,16 @@ Depth cueing in isometric uses world-space Z, not perspective:
 
 ### LOD
 
-- Near-field chunks render with full vertex data.
-- Distant background chunks render as simplified meshes derived from heightmap + biome color, no per-voxel data.
+The engine uses an **orthographic isometric camera at pixel-art resolution** (roughly 16 px per world voxel). This flattens the near/far distinction that perspective LOD strategies depend on: a voxel at the back of the visible region occupies the same pixel footprint as a voxel at the front, and a mesh simplification pass that reduces vertex count without changing on-screen pixels is not obviously a win.
+
+The consequence: **distance-based LOD as described in perspective rendering contexts does not straightforwardly apply.** LOD in this engine takes different shapes:
+
+- **View-radius culling** is real and load-bearing. Chunks outside the streaming radius do not render at all; the streaming system loads and unloads based on camera position. The unload boundary provides hysteresis against churn (see §12).
+- **Zoom-level LOD** (if zoom-out capability is added) becomes a real LOD axis: at a distant zoom, individual voxels compress into fewer pixels and simplification becomes visually justified. This is the axis on which "simplified distant meshes from heightmap + biome color" would apply — the assumption is *rendering scale*, not *view distance*.
+- **Per-chunk mesh detail** stays uniform within the streaming radius at a given zoom level. A distant chunk at the edge of the streaming radius renders with the same vertex data as a nearby chunk.
+- **Foliage LOD** follows the same shape: Tier 3 billboards deferred at the current zoom level; if zoom-out is added, billboards activate below a threshold pixel size.
+
+**What this replaces:** the earlier revision of this section described billboarding of distant tree instances and simplified heightmap meshes for far chunks as if they were driven by distance from a perspective viewer. The engine's camera does not produce that distance gradient. When zoom levels or additional camera modes land, this section revises to describe LOD as a scale-driven strategy across zoom bands.
 
 ### Player z-sorting
 
@@ -856,7 +969,8 @@ These are toggleable in the engine's debug UI.
 ## 13. Glossary
 
 - **Anchor voxel**: the integer cell that owns a foliage instance for purposes of player interaction.
-- **BiomeGraph**: graph type defining terrain density, material, fluid sources, and fade behavior for one biome.
+- **BiomeGraph**: graph type defining terrain density, material, fluid output, and fade behavior for one biome.
+- **BiomeParams**: per-biome typed scalar-metadata sidecar. Addressable by name from the biome manifest entry and by `BiomeParam(name)` nodes inside a `BiomeGraph`. Home for `traversal_smoothing_distance` and future biome-scoped scalars.
 - **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation.
 - **CSE cache**: chunk-scoped cache that ensures each node's output is computed at most once per chunk evaluation.
 - **DetailGraph**: graph type defining foliage paint and scatter placement, distinct from terrain generation.
@@ -867,16 +981,23 @@ These are toggleable in the engine's debug UI.
 - **Fade factor**: 0–1 weight for blending between neighbor biomes at boundaries.
 - **FluidCell**: a single cell's fluid state: type, mass, flags.
 - **FluidFillMode**: chunk-level default for fluid presence. Enables ocean fast path.
+- **FluidOutput**: `BiomeGraph` terminal for water bodies. Renamed from `FluidProvider` to describe the terminal position, not the role.
 - **FrameStage**: ordered schedule of per-frame work in the bevy_ecs runtime. Stages run in fixed order: Input, Simulation, Meshing, UniformWrite, Render, PostFrame.
 - **Generated content**: chunk data reproducible from seed + graph. Not serialized in detail.
-- **LibraryGraph**: reusable subgraph referenced by any other graph type.
+- **GraphOutput**: terminal node placed inside a producing graph, marking a named typed output that other graphs (via `GraphRef`) can consume.
+- **GraphRef**: source node placed inside a consuming graph, referencing a target graph and one of its `GraphOutput` names. Resolved via the manifest at evaluation time.
+- **LibraryGraph**: reusable subgraph referenced by any other graph type. Declares typed named inputs and outputs at its boundary.
+- **LibraryKernel**: enum matching each standard library's identity to a native implementation. Backs standard libraries whose authored file captures identity and boundary but delegates computation to native code.
+- **LibraryRef**: node referencing a `LibraryGraph` by ID. Exposes the referenced library's boundary as dynamic pin descriptors on the referring node.
+- **Manifest**: `world.manifest.json`. Names `sea_level`, seed, and the paths + identities of the WorldGraph, ZoneGraphs, BiomeGraphs (with optional DetailGraph paths and `BiomeParams`), and LibraryGraphs. Resolution root for `GraphRef` and `LibraryRef`.
 - **MaterialRegistry**: data-driven registry mapping stable `MaterialId` values and human-readable names to material definitions. Loaded at startup; extensible by mods.
 - **Mesh disk cache**: persistent cache of meshed chunks keyed by chunk coordinate, graph hash, mesher version, registry hash, and world seed.
 - **Overrides**: player-authored edits serialized separately from generated content. Canonical in-memory shape is `ChunkOverrides`; persisted directly.
 - **Pin type**: typed connection between graph nodes. Enforces compatibility at edit time.
+- **Positions**: pin type representing a set of candidate positions (used by scatter placement and any other consumer of a candidate-position set). Formerly named `ScatterPoints`; renamed to describe the general mechanism rather than the scenario.
 - **ScatterInstance**: a single placed foliage/prop instance with anchor, sub-offset, rotation, prefab reference.
 - **ScatterStore**: per-chunk collection of ScatterInstances indexed by type.
-- **Sea level**: global Y from WorldGraph determining ocean fill.
+- **Sea level**: global Y read from the manifest, determining ocean fill.
 - **Slab**: a half-height voxel shape. Either `SlabBottom` (lower half solid) or `SlabTop` (upper half solid). All slab faces are cardinal-axis-aligned.
 - **Slab smoothing**: engine pass during worldgen that inserts slab steps at walkable cube-step transitions, controlled by traversal smoothing distance.
 - **Streaming**: load/evict policy keeping only chunks within observer radius resident. Background workers handle generation and meshing.

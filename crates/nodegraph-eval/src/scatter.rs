@@ -2,9 +2,11 @@
 //!
 //! Points live in chunk-local continuous XZ space. To support props that
 //! straddle a chunk border, scatter covers a margin band `[-M, N+M)²`
-//! ([`PROP_MARGIN`]); placement later clips to `[0, N)`. `JitteredGrid`
-//! seeds from world-absolute cells (seam-correct); `PoissonDisk` seeds
-//! per-chunk (not seam-continuous - acceptable for Phase 10).
+//! ([`PROP_MARGIN`]); placement later clips to `[0, N)`. `JitteredGrid` seeds per
+//! world-absolute cell (seam-continuous). `PoissonDisk` seeds its per-chunk
+//! Bridson walk from a world-absolute chunk seed (§12) that includes `chunk.y`, so
+//! its layout is stable and vertically distinct - but the walk is per-chunk, so
+//! margin-band points are not identical across a seam.
 
 use nodegraph_ir::{JitteredGridParams, PoissonDiskParams};
 
@@ -160,7 +162,7 @@ pub fn poisson_placement(base: u64, radius: f32, k: u32) -> Vec<(f32, f32)> {
 /// Per-chunk Bridson Poisson-disk scatter over the margin band, with per-point
 /// seeds attached. Delegates the point layout to [`poisson_placement`].
 pub(crate) fn poisson_disk(ctx: &EvalContext, p: &PoissonDiskParams) -> Vec<ScatterPoint> {
-    let base = ctx.scatter_seed(p.seed);
+    let base = ctx.chunk_world_seed(p.seed);
     poisson_placement(base, p.radius, p.k)
         .into_iter()
         .enumerate()
@@ -232,5 +234,29 @@ mod tests {
         let b = poisson_placement(12345, 4.0, 30);
         assert_eq!(a, b);
         assert!(a.len() > 4);
+    }
+
+    #[test]
+    fn poisson_disk_is_deterministic() {
+        // Same world seed + chunk -> identical points, regardless of when the chunk
+        // is generated (poisson_disk is a pure function of ctx + params; no chunk
+        // shares mutable state, so generation order can't affect it).
+        let p = PoissonDiskParams { seed: 5, radius: 4.0, k: 30 };
+        let a = poisson_disk(&ctx(IVec3::new(2, 0, -3)), &p);
+        let b = poisson_disk(&ctx(IVec3::new(2, 0, -3)), &p);
+        assert_eq!(a, b);
+        assert!(a.len() > 4);
+    }
+
+    #[test]
+    fn poisson_disk_varies_with_chunk_y() {
+        // Observation 5.3: vertically stacked chunks must not share an XZ layout
+        // now that chunk.y folds into the seed.
+        let p = PoissonDiskParams { seed: 5, radius: 4.0, k: 30 };
+        let lo: Vec<(f32, f32)> =
+            poisson_disk(&ctx(IVec3::new(0, 0, 0)), &p).iter().map(|s| (s.lx, s.lz)).collect();
+        let hi: Vec<(f32, f32)> =
+            poisson_disk(&ctx(IVec3::new(0, 1, 0)), &p).iter().map(|s| (s.lx, s.lz)).collect();
+        assert_ne!(lo, hi, "stacked chunks must scatter differently");
     }
 }

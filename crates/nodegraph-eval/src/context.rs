@@ -44,13 +44,26 @@ impl EvalContext {
         h as i32
     }
 
-    /// Per-chunk stochastic seed: folds chunk coords into the seed so each
-    /// chunk scatters independently. Used by `PoissonDisk` (per-chunk set).
-    pub fn scatter_seed(&self, node_local_seed: u32) -> u64 {
+    /// World-absolute seed for a per-chunk stochastic process (e.g. `PoissonDisk`'s
+    /// Bridson walk over this chunk's margin band). Derived from the chunk's
+    /// world-space base voxel (`chunk * CHUNK_DIM`) rather than chunk coordinates.
+    /// so it matches the world-position derivation the rest of the stack uses (§12:
+    /// no RNG from chunk coordinates alone) and folds the Y base - vertically
+    /// stacked chunks no longer share an XZ layout (observation 5.3).
+    ///
+    /// This makes the *seed* world-absolute; it does not make the Poisson point set
+    /// seam-continuous. Bridson is a single global sequential walk seeded once per
+    /// chunk, so points in the margin overlap still differ across a chunk border.
+    /// True seam continuity would need a world-tiled Bridson (out of scope); the
+    /// margin-band ownership model (`scatter.rs`) already handles props whose
+    /// footprint straddles a border.
+    pub fn chunk_world_seed(&self, node_local_seed: u32) -> u64 {
+        let base = self.chunk * CHUNK_DIM as i32; // world-space base voxel of the chunk
         let mut h = self.world_seed;
         h = mix64(h ^ (node_local_seed as u64).wrapping_mul(0x9E3779B97F4A7C15));
-        h = mix64(h ^ (self.chunk.x as i64 as u64).wrapping_mul(0xD1B54A32D192ED03));
-        h = mix64(h ^ (self.chunk.z as i64 as u64).wrapping_mul(0xABC98388FB8FAC03));
+        h = mix64(h ^ (base.x as i64 as u64).wrapping_mul(0xD1B54A32D192ED03));
+        h = mix64(h ^ (base.y as i64 as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        h = mix64(h ^ (base.z as i64 as u64).wrapping_mul(0xABC98388FB8FAC03));
         h
     }
 

@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
-use std::thread::{self, JoinHandle};
 use std::time::Instant;
 use bevy_ecs::prelude::Resource;
 
+use crate::core_budget::CoreBudget;
 use crate::params::MaterialParams;
 use crate::rendering::pipelines::TerrainVertex;
 use crate::world::chunk::ChunkSnapshot;
@@ -21,12 +21,6 @@ use cube_mesher::generate_chunk_mesh;
 // ============================================================================
 // Messages
 // ============================================================================
-
-struct MeshRequest {
-    chunk_key: IVec3,
-    snapshot: ChunkSnapshot,
-    mesh_seq: u64,
-}
 
 pub struct MeshResult {
     pub chunk_key: IVec3,
@@ -93,9 +87,18 @@ impl MaterialConfig {
 
 #[derive(Resource)]
 pub struct MeshingPipeline {
-    request_tx: mpsc::SyncSender<MeshRequest>,
+    /// Shared generation+meshing pool (Phase-2 unified worker model). Mesh work is
+    /// fire-and-forget `spawn`ed here, not run on dedicated threads.
+    pool: Arc<rayon::ThreadPool>,
+    /// Cloned into each spawned mesh task to return its result. Behind a `Mutex`
+    /// so the pipeline stays `Sync` (`mpsc::Sender` is not).
+    result_tx: Mutex<Sender<MeshResult>>,
     result_rx: Mutex<Receiver<MeshResult>>,
-    _workers: Mutex<Vec<JoinHandle<()>>>,
+    /// Shared cache config handed to each spawned task.
+    cache_config: Arc<CacheConfig>,
+    /// Max concurrent in-flight mesh tasks (meshing's share of the pool budget),
+    /// so meshing can't starve generation on the shared pool.
+    max_in_flight: usize,
 
     chunk_states: HashMap<IVec3, ChunkMeshState>,
     material_config: Arc<RwLock<MaterialConfig>>,
@@ -113,13 +116,12 @@ pub struct MeshingPipeline {
 
 impl MeshingPipeline {
     pub fn new(
+        pool: Arc<rayon::ThreadPool>,
         materials: &MaterialParams,
         _meshing: &crate::params::MeshingParams,
         mesh_cache: &crate::params::MeshCacheParams,
     ) -> Self {
-        let usable = num_cpus::get().saturating_sub(2).max(2);
-        let gen_workers = (usable / 3).max(2);
-        let num_workers = (usable - gen_workers).max(2);
+        let budget = CoreBudget::detect();
 
         let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
@@ -142,32 +144,23 @@ impl MeshingPipeline {
             eviction_batch_size: mesh_cache.eviction_batch_size,
         });
 
-        let (req_tx, req_rx) = mpsc::sync_channel::<MeshRequest>(256);
         let (res_tx, res_rx) = mpsc::channel::<MeshResult>();
-        let req_rx = Arc::new(Mutex::new(req_rx));
 
-        let mut workers = Vec::with_capacity(num_workers);
-        for i in 0..num_workers {
-            let req_rx = req_rx.clone();
-            let res_tx = res_tx.clone();
-            let cache_config = cache_config.clone();
-            let mat_config = material_config.clone();
-            let handle = thread::Builder::new()
-                .name(format!("mesh-worker-{}", i))
-                .spawn(move || worker_loop(req_rx, res_tx, cache_config, mat_config))
-                .expect("Failed to spawn mesh worker thread");
-            workers.push(handle);
-        }
-
-        log::info!("MeshingPipeline: {} worker threads, cache at {:?}", num_workers, cache_dir);
+        let worker_count = pool.current_num_threads();
+        log::info!(
+            "MeshingPipeline: meshing on shared gen_pool ({} threads, {} in-flight cap), cache at {:?}",
+            worker_count, budget.mesh_in_flight, cache_dir
+        );
 
         Self {
-            request_tx: req_tx,
+            pool,
+            result_tx: Mutex::new(res_tx),
             result_rx: Mutex::new(res_rx),
-            _workers: Mutex::new(workers),
+            cache_config,
+            max_in_flight: budget.mesh_in_flight,
             chunk_states: HashMap::new(),
             material_config,
-            stats: MeshingStats { worker_count: num_workers, ..Default::default() },
+            stats: MeshingStats { worker_count, ..Default::default() },
             batch_start: None,
             pending_submissions: Vec::new(),
             pending_set: HashSet::new(),
@@ -203,7 +196,19 @@ impl MeshingPipeline {
         let mut submitted = 0;
         let mut i = 0;
 
-        while i < self.pending_submissions.len() && submitted < MAX_SNAPSHOTS_PER_FRAME {
+        // Cap concurrent mesh tasks so meshing doesn't starve generation on the
+        // shared pool: count what's already in flight, then stop draining when the
+        // budget is full (remaining pending chunks wait for the next frame).
+        let mut in_flight = self
+            .chunk_states
+            .values()
+            .filter(|s| **s == ChunkMeshState::InProgress)
+            .count();
+
+        while i < self.pending_submissions.len()
+            && submitted < MAX_SNAPSHOTS_PER_FRAME
+            && in_flight < self.max_in_flight
+        {
             let pos = self.pending_submissions[i];
 
             let state = self.chunk_states.get(&pos).copied().unwrap_or(ChunkMeshState::Idle);
@@ -236,23 +241,17 @@ impl MeshingPipeline {
             );
             let mesh_seq = chunk.mesh_seq;
 
-            match self.request_tx.try_send(MeshRequest {
-                chunk_key: pos,
-                snapshot,
-                mesh_seq,
-            }) {
-                Ok(()) => {
-                    self.chunk_states.insert(pos, ChunkMeshState::InProgress);
-                    submitted += 1;
-                }
-                Err(mpsc::TrySendError::Full(_)) => {
-                    self.pending_submissions.push(pos);
-                    self.pending_set.insert(pos);
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    log::error!("Mesh request channel disconnected");
-                }
-            }
+            // Fire-and-forget onto the shared pool; the task returns over the result
+            // channel, which `poll` drains.
+            let res_tx = self.result_tx.lock().unwrap().clone();
+            let cache_config = self.cache_config.clone();
+            let material_config = self.material_config.clone();
+            self.pool.spawn(move || {
+                mesh_chunk_task(pos, snapshot, mesh_seq, res_tx, cache_config, material_config);
+            });
+            self.chunk_states.insert(pos, ChunkMeshState::InProgress);
+            submitted += 1;
+            in_flight += 1;
         }
     }
 
@@ -352,89 +351,73 @@ impl MeshingPipeline {
 }
 
 // ============================================================================
-// Worker thread
+// Mesh task (runs on the shared generation pool)
 // ============================================================================
 
-fn worker_loop(
-    req_rx: Arc<Mutex<Receiver<MeshRequest>>>,
+/// Load-or-mesh one chunk snapshot and return the result over `res_tx`. Runs as a
+/// fire-and-forget task on the shared `gen_pool` (Phase-2 unified worker model),
+/// replacing the former dedicated mesh-worker threads.
+fn mesh_chunk_task(
+    chunk_key: IVec3,
+    snapshot: ChunkSnapshot,
+    mesh_seq: u64,
     res_tx: Sender<MeshResult>,
     cache_config: Arc<CacheConfig>,
     material_config: Arc<RwLock<MaterialConfig>>,
 ) {
-    loop {
-        let req = {
-            let rx = match req_rx.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            match rx.recv() {
-                Ok(r) => r,
-                Err(_) => return,
-            }
-        };
+    let mat_config = material_config.read().unwrap();
+    let cache_key = cache::compute_cache_key(&snapshot, &mat_config.colors);
 
-        let mat_config = material_config.read().unwrap();
-        let cache_key = cache::compute_cache_key(&req.snapshot, &mat_config.colors);
+    let cache_path = cache::cache_file_path(
+        &cache_config.cache_dir,
+        snapshot.position.x,
+        snapshot.position.y,
+        snapshot.position.z,
+        cache_key,
+    );
 
-        let cache_path = cache::cache_file_path(
-            &cache_config.cache_dir,
-            req.snapshot.position.x,
-            req.snapshot.position.y,
-            req.snapshot.position.z,
-            cache_key,
-        );
-        
-        if let Some((vertices, indices)) = cache::load_cached_mesh(&cache_path, cache_key, &mat_config.colors) {
-            cache_config.stats.hits.fetch_add(1, Ordering::Relaxed);
-            if let Ok(mut lru) = cache_config.lru.lock() {
-                lru.touch(req.snapshot.position);
-            }
-            let _ = res_tx.send(MeshResult {
-                chunk_key: req.chunk_key,
-                vertices,
-                indices,
-                mesh_seq: req.mesh_seq,
-            });
-            continue;
+    if let Some((vertices, indices)) =
+        cache::load_cached_mesh(&cache_path, cache_key, &mat_config.colors)
+    {
+        cache_config.stats.hits.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut lru) = cache_config.lru.lock() {
+            lru.touch(snapshot.position);
         }
-
-        cache_config.stats.misses.fetch_add(1, Ordering::Relaxed);
-        let (vertices, indices) = generate_chunk_mesh(&req.snapshot, &mat_config);
-        drop(mat_config);
-
-        match cache::save_cached_mesh(
-            &cache_config.cache_dir,
-            req.snapshot.position,
-            cache_key,
-            &vertices,
-            &indices,
-        ) {
-            Ok(bytes_written) => {
-                if let Ok(mut lru) = cache_config.lru.lock() {
-                    lru.insert(req.snapshot.position, cache_path, bytes_written);
-                    if lru.total_bytes() > cache_config.max_cache_bytes {
-                        let freed = lru.evict(
-                            cache_config.max_cache_bytes,
-                            cache_config.eviction_batch_size,
-                        );
-                        if freed > 0 {
-                            cache_config.stats.evictions.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                    cache_config.stats.total_bytes.store(lru.total_bytes(), Ordering::Relaxed);
-                }
-            }
-            Err(e) => {
-                log::warn!("Cache save failed for chunk {}: {}", req.chunk_key, e);
-                cache_config.stats.errors.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        let _ = res_tx.send(MeshResult {
-            chunk_key: req.chunk_key,
-            vertices,
-            indices,
-            mesh_seq: req.mesh_seq,
-        });
+        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+        return;
     }
+
+    cache_config.stats.misses.fetch_add(1, Ordering::Relaxed);
+    let (vertices, indices) = generate_chunk_mesh(&snapshot, &mat_config);
+    drop(mat_config);
+
+    match cache::save_cached_mesh(
+        &cache_config.cache_dir,
+        snapshot.position,
+        cache_key,
+        &vertices,
+        &indices,
+    ) {
+        Ok(bytes_written) => {
+            if let Ok(mut lru) = cache_config.lru.lock() {
+                lru.insert(snapshot.position, cache_path, bytes_written);
+                if lru.total_bytes() > cache_config.max_cache_bytes {
+                    let freed = lru.evict(
+                        cache_config.max_cache_bytes,
+                        cache_config.eviction_batch_size,
+                    );
+                    if freed > 0 {
+                        cache_config.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                cache_config.stats.total_bytes.store(lru.total_bytes(), Ordering::Relaxed);
+            }
+        }
+        Err(e) => {
+            log::warn!("Cache save failed for chunk {}: {}", chunk_key, e);
+            cache_config.stats.errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
 }

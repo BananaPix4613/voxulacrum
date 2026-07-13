@@ -16,6 +16,7 @@ use crate::world::overrides::ChunkOverrides;
 use crate::world::persistence::{ChunkEdits, ChunkRecord, WorldDatabase};
 use crate::world::world_generator::{GeneratedChunk, WorldGenerator};
 use crate::world::World;
+use crate::world::mutation::{MutationCommand, WorldMutation};
 
 /// Monotonic, process-global token identifying the current DB configuration.
 /// Each `ChunkStreamingManager` (including every rebuild after a regen) claims a
@@ -210,8 +211,7 @@ impl ChunkStreamingManager {
         db_path: Option<PathBuf>,
         dict_bytes: Option<Arc<Vec<u8>>>,
     ) -> Self {
-        let usable = num_cpus::get().saturating_sub(2).max(2);
-        let max_in_flight = (usable / 3).max(2);
+        let max_in_flight = crate::core_budget::CoreBudget::detect().gen_in_flight;
         let db_generation = NEXT_DB_GENERATION.fetch_add(1, Ordering::Relaxed);
         let (result_tx, result_rx) = mpsc::channel::<GenResult>();
 
@@ -395,7 +395,12 @@ impl ChunkStreamingManager {
                     continue;
                 }
 
-                world.insert_chunk(gen_result.chunk);
+                // Insert + face-neighbor mesh-dirty flow through the mutation API.
+                world
+                    .execute(MutationCommand::authoring(WorldMutation::InsertLoadedChunk {
+                        chunk: gen_result.chunk,
+                    }))
+                    .expect("authoring chunk insert in authoring mode");
                 result.inserted.push(pos);
                 inserted_count += 1;
 

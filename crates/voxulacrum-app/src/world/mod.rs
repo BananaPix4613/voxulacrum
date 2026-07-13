@@ -13,6 +13,7 @@ pub mod storage;
 pub mod storage_boundary;
 pub mod persistence;
 pub mod world_generator;
+pub mod mutation;
 
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -22,19 +23,27 @@ use std::sync::mpsc;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
-use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_VOLUME, DELTA_THRESHOLD};
+use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_SIZE, CHUNK_VOLUME, DELTA_THRESHOLD};
 use overrides::ChunkOverrides;
+use layers::{PrefabId, ScatterFlags, ScatterInstance, StableInstanceId};
 use world_generator::WorldGenerator;
+use mutation::{
+    EngineMode, MutationCommand, MutationError, MutationOutcome, WorldMutation,
+};
 
 pub struct World {
     pub chunks: HashMap<ChunkCoord, LoadedChunk>,
     pub generator: Arc<WorldGenerator>,
     pub min_chunk_y: i32,
     pub max_chunk_y: i32, // exclusive upper bound
+    /// The engine's current world-mutation mode (design doc §9). Phase 8 is
+    /// always `Authoring`; every mutation flows through [`World::execute`] and is
+    /// origin-checked against this. `Play` lands in Phase 9.
+    pub mode: EngineMode,
 }
 
 use crate::params::TerrainGenParams;
-use voxel_core::{ChunkCoord, MaterialId, MaterialRegistry, Voxel};
+use voxel_core::{ChunkCoord, LocalPos, MaterialId, MaterialRegistry, Voxel};
 
 impl World {
     /// Build the initial world synchronously (blocks boot), fanning the per-chunk
@@ -80,6 +89,7 @@ impl World {
             generator,
             min_chunk_y: min_y,
             max_chunk_y: max_y,
+            mode: EngineMode::Authoring,
         }
     }
 
@@ -157,39 +167,260 @@ impl World {
         neighbors
     }
 
-    /// Apply a voxel edit to a chunk, propagating mesh-dirty to border neighbors.
-    /// Sets persist_dirty on the edited chunk only.
-    #[allow(dead_code)] // voxel-edit toolkit entry point; not yet reachable
-    pub fn apply_edit(&mut self, chunk_pos: IVec3, index: u16, voxel: Voxel) {
+    /// The single entry point for every world-state mutation (design doc §9).
+    /// Validates the command's origin against the current [`EngineMode`], then
+    /// dispatches its intent to the matching handler. Handlers own persistence
+    /// marking, mesh-dirty flagging, override-bucket creation, and invalidation;
+    /// the caller constructs a [`MutationCommand`] and services the returned
+    /// [`MutationOutcome`]'s GPU-side rebuilds. A command whose origin does not
+    /// match the current mode is rejected without touching the world.
+    #[allow(dead_code)] // reachable once live call sites migrate (Substeps 1b/1c)
+    pub fn execute(
+        &mut self,
+        command: MutationCommand,
+    ) -> Result<MutationOutcome, MutationError> {
+        if self.mode.required_origin() != command.origin {
+            return Err(MutationError::WrongMode {
+                mode: self.mode,
+                origin: command.origin,
+            });
+        }
+        let outcome = match command.mutation {
+            WorldMutation::EditVoxel { chunk, index, voxel } => {
+                self.handle_edit_voxel(chunk, index, voxel)
+            }
+            WorldMutation::EditVoxelBatch { chunk, edits } => {
+                self.handle_edit_voxel_batch(chunk, edits)
+            }
+            WorldMutation::RemoveScatter { chunk, anchor } => {
+                self.handle_remove_scatter(chunk, anchor)
+            }
+            WorldMutation::PlaceScatter { chunk, anchor, world_voxel } => {
+                self.handle_place_scatter(chunk, anchor, world_voxel)
+            }
+            WorldMutation::PourFluidColumn { anchor } => self.handle_pour_fluid_column(anchor),
+            WorldMutation::MarkFluidDirty { chunks } => self.handle_mark_fluid_dirty(chunks),
+            WorldMutation::InsertLoadedChunk { chunk } => self.handle_insert_loaded_chunk(chunk),
+            WorldMutation::SwapRegeneratedChunks { chunks, generator } => {
+                self.handle_swap_regenerated_chunks(chunks, generator)
+            }
+        };
+        Ok(outcome)
+    }
+
+    /// Handler for [`WorldMutation::EditVoxel`]. A convenience over the batched
+    /// path: constructs a batch of one and delegates, so the single- and batched-
+    /// edit forms share one implementation (and one storage clone).
+    fn handle_edit_voxel(&mut self, chunk_pos: IVec3, index: u16, voxel: Voxel) -> MutationOutcome {
+        self.handle_edit_voxel_batch(chunk_pos, vec![(LocalPos::from_index(index as usize), voxel)])
+    }
+
+    /// Handler for [`WorldMutation::EditVoxelBatch`]. Clones the chunk's storage
+    /// exactly once for the whole batch (drift-review 3.1), applies every edit,
+    /// records them in the override bucket with a single delta->full promotion
+    /// check, and marks persist + mesh dirty once — plus each border neighbor whose
+    /// face a batch edit touches, deduplicated. A missing target chunk skips the
+    /// storage work but still marks resident border neighbors (matching the prior
+    /// single-edit path).
+    fn handle_edit_voxel_batch(
+        &mut self,
+        chunk_pos: IVec3,
+        edits: Vec<(LocalPos, Voxel)>,
+    ) -> MutationOutcome {
+        let mut outcome = MutationOutcome::default();
+        if edits.is_empty() {
+            return outcome;
+        }
+
         if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
-            // Apply the edit to storage
+            // One storage clone for the whole batch.
             let mut storage = (*chunk.data.voxels).clone();
-            storage.set_voxel(index as usize, voxel);
+            let ovr = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
+            for &(pos, voxel) in &edits {
+                let index = pos.to_index();
+                storage.set_voxel(index, voxel);
+                ovr.set_voxel(index, voxel);
+            }
             chunk.data.voxels = Arc::new(storage);
 
-            // Track for persistence. voxel_diffs is a map, so repeated edits to
-            // the same cell are last-write-wins for free.
-            let ovr = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
-            ovr.set_voxel(index as usize, voxel);
-
-            // Auto-promote: past the threshold, drop the per-voxel overrides and
-            // let build_chunk_edits persist the whole storage as a Full snapshot
-            // (overrides == None + persist_dirty == true -> Full).
+            // Promotion decided once, after every edit has landed.
             if ovr.voxel_override_count() >= DELTA_THRESHOLD {
                 chunk.data.overrides = None;
             }
 
             chunk.persist_dirty = true;
             chunk.mark_mesh_dirty_from_edit();
+            outcome.mesh_invalidated.push(chunk_pos);
         }
 
-        // Propagate mesh-dirty to border neighbors
-        for offset in chunk::border_dirty_neighbors(index) {
+        // Border neighbors whose mesh must re-cull, unioned across the batch (each
+        // marked at most once), regardless of whether the target chunk is resident.
+        let mut border_neighbors: Vec<IVec3> = Vec::new();
+        for &(pos, _) in &edits {
+            for offset in chunk::border_dirty_neighbors(pos.to_index() as u16) {
+                if !border_neighbors.contains(&offset) {
+                    border_neighbors.push(offset);
+                }
+            }
+        }
+        for offset in border_neighbors {
             let neighbor_pos = chunk_pos + offset;
             if let Some(neighbor) = self.chunks.get_mut(&ChunkCoord::from(neighbor_pos)) {
                 neighbor.mark_mesh_dirty_from_edit();
+                outcome.mesh_invalidated.push(neighbor_pos);
             }
         }
+
+        outcome
+    }
+
+    /// Handler for [`WorldMutation::RemoveScatter`]. Tombstones the generated
+    /// instances at `anchor` and drops player-added ones; marks persist-dirty and
+    /// reports the chunk for a scatter-buffer rebuild when anything changed.
+    fn handle_remove_scatter(&mut self, chunk_pos: IVec3, anchor: LocalPos) -> MutationOutcome {
+        let mut outcome = MutationOutcome::default();
+        if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
+            if remove_scatter_at(chunk, anchor) {
+                chunk.persist_dirty = true;
+                outcome.scatter_rebuild.push(chunk_pos);
+            }
+        }
+        outcome
+    }
+
+    /// Handler for [`WorldMutation::PlaceScatter`]. Appends one player instance at
+    /// `anchor` (id derived from `world_voxel`), marks persist_dirty, and reports
+    /// the chunk for a scatter-buffer rebuild.
+    fn handle_place_scatter(
+        &mut self,
+        chunk_pos: IVec3,
+        anchor: LocalPos,
+        world_voxel: IVec3,
+    ) -> MutationOutcome {
+        let mut outcome = MutationOutcome::default();
+        if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
+            if place_scatter_at(chunk, anchor, world_voxel) {
+                chunk.persist_dirty = true;
+                outcome.scatter_rebuild.push(chunk_pos);
+            }
+        }
+        outcome
+    }
+
+    /// Handler for [`WorldMutation::PourFluidColumn`]. Inserts a short settled
+    /// water column above `anchor` (skipping solid cells), writes each cell as a
+    /// player fluid override, activates it for the next tick, marks persist-dirty,
+    /// and reports each touched chunk for a water-mesh rebuild.
+    fn handle_pour_fluid_column(&mut self, anchor: IVec3) -> MutationOutcome {
+        use crate::world::layers::{FluidCell, FluidId};
+        let mut outcome = MutationOutcome::default();
+        let dim = CHUNK_SIZE as i32;
+        for dy in 1..=8 {
+            let p = anchor + IVec3::new(0, dy, 0);
+            let chunk_pos =
+                IVec3::new(p.x.div_euclid(dim), p.y.div_euclid(dim), p.z.div_euclid(dim));
+            let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) else { continue };
+            let lp = LocalPos::new_unchecked(
+                p.x.rem_euclid(dim) as u8,
+                p.y.rem_euclid(dim) as u8,
+                p.z.rem_euclid(dim) as u8,
+            );
+            if chunk.data.voxels.voxel(lp.to_index()).is_solid() {
+                continue;
+            }
+            let cell = FluidCell {
+                fluid_id: FluidId::WATER,
+                mass: crate::world::fluid_gen::FULL_MASS,
+                flags: 0,
+            };
+            chunk.data.fluids.cells.insert(lp, cell);
+            chunk.data.fluids.activate(lp);
+            // Persist the pour (a player edit) so it survives save/reload; it
+            // re-applies as settled and re-flows on load.
+            chunk
+                .data
+                .overrides
+                .get_or_insert_with(ChunkOverrides::default)
+                .fluid_diffs
+                .insert(lp, cell);
+            chunk.persist_dirty = true;
+            if !outcome.water_rebuild.contains(&chunk_pos) {
+                outcome.water_rebuild.push(chunk_pos);
+            }
+        }
+        outcome
+    }
+
+    /// Handler for [`WorldMutation::MarkFluidDirty`]. Marks each fluid-changed
+    /// chunk persist-dirty and ensures it carries an override bucket, which routes
+    /// it through the delta (not full-storage) save path so `build_chunk_edits`
+    /// snapshots the fluid field. The sim mutates cells directly (physics, outside
+    /// the command path); this centralizes the resulting persistence bookkeeping.
+    fn handle_mark_fluid_dirty(&mut self, chunks: Vec<IVec3>) -> MutationOutcome {
+        for pos in chunks {
+            if let Some(c) = self.chunks.get_mut(&ChunkCoord::from(pos)) {
+                c.persist_dirty = true;
+                c.data
+                    .overrides
+                    .get_or_insert_with(ChunkOverrides::default);
+            }
+        }
+        MutationOutcome::default()
+    }
+
+    /// Handler for [`WorldMutation::InsertLoadedChunk`]. Inserts the chunk and
+    /// marks its six face-adjacent neighbors mesh-dirty so their boundary faces
+    /// re-cull against the newly resident chunk. The inserted chunk is already
+    /// mesh-dirty from construction, so it is not re-marked here.
+    fn handle_insert_loaded_chunk(&mut self, chunk: LoadedChunk) -> MutationOutcome {
+        let mut outcome = MutationOutcome::default();
+        let pos: IVec3 = chunk.data.coord.into();
+        self.insert_chunk(chunk);
+        for offset in [
+            IVec3::new(1, 0, 0),
+            IVec3::new(-1, 0, 0),
+            IVec3::new(0, 1, 0),
+            IVec3::new(0, -1, 0),
+            IVec3::new(0, 0, 1),
+            IVec3::new(0, 0, -1),
+        ] {
+            let npos = pos + offset;
+            if let Some(neighbor) = self.get_chunk_mut(npos) {
+                neighbor.mark_mesh_dirty();
+                outcome.mesh_invalidated.push(npos);
+            }
+        }
+        outcome
+    }
+
+    /// Handler for [`WorldMutation::SwapRegeneratedChunks`]. Merges the
+    /// regenerated chunk set over the resident set (retaining chunks the edit did
+    /// not touch; a full regen overwrites all of them), adopts the new generator,
+    /// and marks every resident chunk mesh-dirty. The caller resets the mesh
+    /// pipeline and resubmits (`submit_all_dirty`) afterward.
+    fn handle_swap_regenerated_chunks(
+        &mut self,
+        chunks: HashMap<ChunkCoord, LoadedChunk>,
+        generator: Arc<WorldGenerator>,
+    ) -> MutationOutcome {
+        self.chunks.extend(chunks);
+        self.generator = generator;
+        for chunk in self.chunks.values_mut() {
+            chunk.mesh_dirty = true;
+        }
+        MutationOutcome::default()
+    }
+
+    /// Apply a single voxel edit. Thin wrapper over the mutation API's
+    /// [`WorldMutation::EditVoxel`] intent, retained for existing/test callers;
+    /// new code constructs a [`MutationCommand`] and calls [`World::execute`].
+    #[allow(dead_code)] // voxel-edit toolkit entry point; not yet reachable
+    pub fn apply_edit(&mut self, chunk_pos: IVec3, index: u16, voxel: Voxel) {
+        let _ = self.execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+            chunk: chunk_pos,
+            index,
+            voxel,
+        }));
     }
 
     /// Get a chunk by its chunk-space IVec3 position.
@@ -440,4 +671,340 @@ fn generate_world_background(
         .collect();
     
     chunks.into_iter().map(|c| (c.data.coord, c)).collect()
+}
+
+/// Remove every effective scatter instance anchored at `anchor`: generated ones
+/// are recorded in `scatter_removed`, player-added ones are dropped.
+fn remove_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos) -> bool {
+    let generated_ids: Vec<StableInstanceId> = chunk
+        .data
+        .scatter_instances
+        .by_type
+        .values()
+        .flatten()
+        .filter(|si| si.anchor == anchor)
+        .map(|si| si.stable_id)
+        .collect();
+
+    let overrides = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
+    let mut changed = false;
+    for id in generated_ids {
+        if overrides.scatter_removed.insert(id) {
+            changed = true;
+        }
+    }
+    let before = overrides.scatter_added.len();
+    overrides.scatter_added.retain(|si| si.anchor != anchor);
+    if overrides.scatter_added.len() != before {
+        changed = true;
+    }
+    changed
+}
+
+/// Place one player scatter instance at `anchor`, jittered within the cell.
+fn place_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos, world_voxel: IVec3) -> bool {
+    let seq = effective_count_at(chunk, anchor);
+    let h = player_stable_id(world_voxel, seq);
+    let overrides = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
+    overrides.scatter_added.push(ScatterInstance {
+        anchor,
+        sub_offset: [(h & 0xFF) as u8 as i8, 0, ((h >> 8) & 0xFF) as u8 as i8],
+        rotation_y: ((h >> 16) & 0xFF) as u8,
+        scale_variant: 0,
+        prefab_id: PrefabId(0),
+        flags: ScatterFlags(ScatterFlags::PLAYER_PLACED),
+        stable_id: StableInstanceId(h),
+    });
+    true
+}
+
+/// Count affective instances at `anchor` (generated-minus-removed + added).
+fn effective_count_at(chunk: &LoadedChunk, anchor: LocalPos) -> u32 {
+    let ovr = chunk.data.overrides.as_ref();
+    let gen = chunk
+        .data
+        .scatter_instances
+        .by_type
+        .values()
+        .flatten()
+        .filter(|si| {
+            si.anchor == anchor
+                && !ovr.map_or(false, |o| o.scatter_removed.contains(&si.stable_id))
+        })
+        .count();
+    let added = ovr.map_or(0, |o| {
+        o.scatter_added.iter().filter(|si| si.anchor == anchor).count()
+    });
+    (gen + added) as u32
+}
+
+/// Stable id for a player-placed instance. Salted so it can't collide with a
+/// generated id (which derives from the world seed), and varied by `seq` so
+/// repeated placements on one anchor get distinct ids.
+fn player_stable_id(v: IVec3, seq: u32) -> u64 {
+    let mut h: u64 = 0xA11C_E1A5_0FF1_CE11; // player-placed salt
+    h = mix64(h ^ (v.x as i64 as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+    h = mix64(h ^ (v.y as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    h = mix64(h ^ (v.z as i64 as u64).wrapping_mul(0xABC9_8388_FB8F_AC03));
+    h = mix64(h ^ (seq as u64).wrapping_mul(0xC4CE_B9FE_1A85_EC53));
+    h
+}
+
+fn mix64(mut x: u64) -> u64 {
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
+    x ^= x >> 33;
+    x
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    use crate::world::mutation::{EngineMode, MutationCommand, MutationError, MutationOrigin, WorldMutation};
+    use glam::IVec3;
+    use voxel_core::{ChunkCoord, MaterialId, Voxel};
+
+    /// A minimal world holding a single air chunk at the origin, in `mode`.
+    fn world_with_air_chunk(mode: EngineMode) -> World {
+        let generator = crate::world::world_generator::load_default(
+            &crate::params::TerrainGenParams::default(),
+        )
+        .expect("default generator loads");
+        let mut chunks = HashMap::new();
+        chunks.insert(ChunkCoord::from(IVec3::ZERO), LoadedChunk::new_air(IVec3::ZERO));
+        World { chunks, generator, min_chunk_y: 0, max_chunk_y: 4, mode }
+    }
+
+    #[test]
+    fn authoring_command_applies_voxel_edit() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let voxel = Voxel::cube(MaterialId(3));
+        let outcome = world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                chunk: IVec3::ZERO,
+                index: 5,
+                voxel,
+            }))
+            .expect("authoring edit accepted in authoring mode");
+
+        let chunk = world.get_chunk(IVec3::ZERO).unwrap();
+        assert_eq!(chunk.data.voxels.voxel(5), voxel, "voxel written");
+        assert!(chunk.persist_dirty, "edit marks persist dirty");
+        assert!(chunk.mesh_dirty, "edit marks mesh dirty");
+        assert!(
+            outcome.mesh_invalidated.contains(&IVec3::ZERO),
+            "outcome reports the edited chunk mesh-invalidated"
+        );
+    }
+
+    #[test]
+    fn play_time_command_rejected_in_authoring_mode() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let before = world.get_chunk(IVec3::ZERO).unwrap().data.voxels.voxel(5);
+
+        let err = world
+            .execute(MutationCommand::play(WorldMutation::EditVoxel {
+                chunk: IVec3::ZERO,
+                index: 5,
+                voxel: Voxel::cube(MaterialId(3)),
+            }))
+            .expect_err("play-time command rejected in authoring mode");
+        assert_eq!(
+            err,
+            MutationError::WrongMode {
+                mode: EngineMode::Authoring,
+                origin: MutationOrigin::PlayTime,
+            }
+        );
+
+        // Rejection must leave the world untouched.
+        let chunk = world.get_chunk(IVec3::ZERO).unwrap();
+        assert_eq!(chunk.data.voxels.voxel(5), before, "rejected edit did not apply");
+        assert!(!chunk.persist_dirty, "rejected edit did not mark persist dirty");
+    }
+
+    #[test]
+    fn authoring_command_rejected_in_play_mode() {
+        // Symmetric enforcement: an authoring command in Play mode is also rejected
+        // (this is the machinery Phase 9 will lean on; no live Play mode yet).
+        let mut world = world_with_air_chunk(EngineMode::Play);
+        let err = world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                chunk: IVec3::ZERO,
+                index: 5,
+                voxel: Voxel::cube(MaterialId(3)),
+            }))
+            .expect_err("authoring command rejected in play mode");
+        assert_eq!(
+            err,
+            MutationError::WrongMode {
+                mode: EngineMode::Play,
+                origin: MutationOrigin::Authoring,
+            }
+        );
+    }
+
+    #[test]
+    fn place_scatter_marks_persist_and_rebuild() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let anchor = LocalPos::new_unchecked(5, 0, 5);
+        let outcome = world
+            .execute(MutationCommand::authoring(WorldMutation::PlaceScatter {
+                chunk: IVec3::ZERO,
+                anchor,
+                world_voxel: IVec3::new(5, 0, 5),
+            }))
+            .expect("authoring place accepted");
+        assert!(outcome.scatter_rebuild.contains(&IVec3::ZERO));
+        let chunk = world.get_chunk(IVec3::ZERO).unwrap();
+        assert!(chunk.persist_dirty);
+        let ovr = chunk.data.overrides.as_ref().expect("bucket created");
+        assert_eq!(ovr.scatter_added.len(), 1);
+        assert_eq!(ovr.scatter_added[0].anchor, anchor);
+    }
+
+    #[test]
+    fn pour_fluid_column_writes_overrides_and_activates() {
+        use crate::world::layers::FluidId;
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let outcome = world
+            .execute(MutationCommand::authoring(WorldMutation::PourFluidColumn {
+                anchor: IVec3::new(5, 0, 5),
+            }))
+            .expect("authoring pour accepted");
+        assert!(outcome.water_rebuild.contains(&IVec3::ZERO));
+        let chunk = world.get_chunk(IVec3::ZERO).unwrap();
+        assert!(chunk.persist_dirty);
+        // 8 cells poured above the anchor (all air), each an override + active.
+        assert_eq!(chunk.data.fluids.cells.len(), 8);
+        assert_eq!(chunk.data.fluids.active.len(), 8);
+        let ovr = chunk.data.overrides.as_ref().expect("bucket created");
+        assert_eq!(ovr.fluid_diffs.len(), 8);
+        let top = LocalPos::new_unchecked(5, 1, 5);
+        assert_eq!(ovr.fluid_diffs[&top].fluid_id, FluidId::WATER);
+
+        // Deterministic: a fresh world poured identically matches.
+        let mut world2 = world_with_air_chunk(EngineMode::Authoring);
+        world2
+            .execute(MutationCommand::authoring(WorldMutation::PourFluidColumn {
+                anchor: IVec3::new(5, 0, 5),
+            }))
+            .unwrap();
+        let c2 = world2.get_chunk(IVec3::ZERO).unwrap();
+        assert_eq!(chunk.data.fluids.cells, c2.data.fluids.cells);
+    }
+
+    #[test]
+    fn mark_fluid_dirty_sets_persist_and_bucket() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        world
+            .execute(MutationCommand::authoring(WorldMutation::MarkFluidDirty {
+                chunks: vec![IVec3::ZERO],
+            }))
+            .expect("authoring mark accepted");
+        let chunk = world.get_chunk(IVec3::ZERO).unwrap();
+        assert!(chunk.persist_dirty);
+        assert!(chunk.data.overrides.is_some(), "bucket ensured for snapshot");
+    }
+
+    #[test]
+    fn insert_loaded_chunk_marks_face_neighbors() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        // Clear the origin chunk's generation-dirty flag so the mark is observable.
+        world.get_chunk_mut(IVec3::ZERO).unwrap().mesh_dirty = false;
+        let seq_before = world.get_chunk(IVec3::ZERO).unwrap().mesh_seq;
+
+        let new_chunk = LoadedChunk::new_air(IVec3::new(1, 0, 0));
+        let outcome = world
+            .execute(MutationCommand::authoring(WorldMutation::InsertLoadedChunk {
+                chunk: new_chunk,
+            }))
+            .expect("authoring insert accepted");
+
+        assert!(world.get_chunk(IVec3::new(1, 0, 0)).is_some(), "chunk inserted");
+        let origin = world.get_chunk(IVec3::ZERO).unwrap();
+        assert!(origin.mesh_dirty, "face neighbor marked mesh-dirty");
+        assert_eq!(origin.mesh_seq, seq_before + 1, "neighbor mesh_seq bumped");
+        assert!(outcome.mesh_invalidated.contains(&IVec3::ZERO));
+    }
+
+    #[test]
+    fn swap_regenerated_chunks_extends_and_marks_all_dirty() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        world.get_chunk_mut(IVec3::ZERO).unwrap().mesh_dirty = false;
+        let gen = world.generator.clone();
+
+        let mut new_chunks = HashMap::new();
+        new_chunks.insert(
+            ChunkCoord::from(IVec3::new(2, 0, 0)),
+            LoadedChunk::new_air(IVec3::new(2, 0, 0)),
+        );
+
+        world
+            .execute(MutationCommand::authoring(WorldMutation::SwapRegeneratedChunks {
+                chunks: new_chunks,
+                generator: gen,
+            }))
+            .expect("authoring swap accepted");
+
+        assert!(world.get_chunk(IVec3::new(2, 0, 0)).is_some(), "regenerated chunk merged");
+        assert!(world.chunks.values().all(|c| c.mesh_dirty), "every resident chunk mesh-dirty");
+    }
+
+    #[test]
+    fn batch_equals_sequential_singles() {
+        use voxel_core::LocalPos;
+        let edits: Vec<(LocalPos, Voxel)> = vec![
+            (LocalPos::from_index(0), Voxel::cube(MaterialId(1))),
+            (LocalPos::from_index(500), Voxel::cube(MaterialId(2))),
+            (LocalPos::from_index(9000), Voxel::EMPTY),
+            (LocalPos::from_index(500), Voxel::cube(MaterialId(3))), // last-write-wins on 500
+        ];
+
+        // Batched application (one storage clone).
+        let mut batched = world_with_air_chunk(EngineMode::Authoring);
+        batched
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxelBatch {
+                chunk: IVec3::ZERO,
+                edits: edits.clone(),
+            }))
+            .unwrap();
+
+        // Sequential single edits (one clone each).
+        let mut singles = world_with_air_chunk(EngineMode::Authoring);
+        for (pos, voxel) in &edits {
+            singles
+                .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                    chunk: IVec3::ZERO,
+                    index: pos.to_index() as u16,
+                    voxel: *voxel,
+                }))
+                .unwrap();
+        }
+
+        let a = batched.get_chunk(IVec3::ZERO).unwrap();
+        let b = singles.get_chunk(IVec3::ZERO).unwrap();
+        let diffs = (0..CHUNK_VOLUME)
+            .filter(|&i| a.data.voxels.voxel(i) != b.data.voxels.voxel(i))
+            .count();
+        assert_eq!(diffs, 0, "batch and sequential singles produce identical storage");
+        assert_eq!(a.data.overrides, b.data.overrides, "and identical override buckets");
+        assert!(a.persist_dirty && b.persist_dirty);
+        assert!(a.mesh_dirty && b.mesh_dirty);
+    }
+
+    #[test]
+    fn empty_batch_is_noop() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let outcome = world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxelBatch {
+                chunk: IVec3::ZERO,
+                edits: vec![],
+            }))
+            .unwrap();
+        assert!(outcome.mesh_invalidated.is_empty());
+        assert!(!world.get_chunk(IVec3::ZERO).unwrap().persist_dirty, "empty batch marks nothing");
+    }
 }

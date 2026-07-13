@@ -16,6 +16,7 @@ mod paths;
 mod materials;
 mod prefabs;
 mod libraries;
+mod core_budget;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -315,7 +316,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // generation (engine-design.md §12).
     let gen_pool: Arc<rayon::ThreadPool> = Arc::new(
         rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get().saturating_sub(2).max(2))
+            .num_threads(core_budget::CoreBudget::detect().pool_threads)
             .thread_name(|i| format!("chunk-gen-{i}"))
             .build()
             .expect("failed to build chunk generation thread pool"),
@@ -385,6 +386,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // Meshing
     let mut meshing_pipeline = MeshingPipeline::new(
+        gen_pool.clone(),
         &ui_state.params.materials,
         &ui_state.params.meshing,
         &ui_state.params.mesh_cache,

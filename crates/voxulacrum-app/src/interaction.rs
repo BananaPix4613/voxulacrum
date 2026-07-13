@@ -16,9 +16,8 @@ use crate::rendering::render_context::RenderContext;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::surface_state::SurfaceState;
 use crate::simulation::manager::SimulationManager;
-use crate::world::chunk::{LoadedChunk, CHUNK_SIZE, VOXEL_SCALE};
-use crate::world::layers::{PrefabId, ScatterFlags, ScatterInstance, StableInstanceId};
-use crate::world::overrides::ChunkOverrides;
+use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
+use crate::world::mutation::{MutationCommand, WorldMutation};
 use crate::world::World;
 
 /// The voxel anchor currently under the cursor, if the ray hit terrain.
@@ -177,110 +176,30 @@ pub fn scatter_edit_system(
         anchor_voxel.z.rem_euclid(dim) as u8,
     );
 
-    let changed = {
-        let Some(chunk) = world.0.get_chunk_mut(chunk_pos) else {
-            return;
-        };
-        let mut c = false;
-        if left {
-            c |= remove_scatter_at(chunk, anchor);
-        }
-        if right {
-            c |= place_scatter_at(chunk, anchor, anchor_voxel);
-        }
-        if c {
-            chunk.persist_dirty = true; // override changed -> needs save
-        }
-        c
-    };
+    let mut rebuilt = false;
+    if left {
+        let out = world
+            .0
+            .execute(MutationCommand::authoring(WorldMutation::RemoveScatter {
+                chunk: chunk_pos,
+                anchor,
+            }))
+            .expect("authoring scatter edit in authoring mode");
+        rebuilt |= !out.scatter_rebuild.is_empty();
+    }
+    if right {
+        let out = world
+            .0
+            .execute(MutationCommand::authoring(WorldMutation::PlaceScatter {
+                chunk: chunk_pos,
+                anchor,
+                world_voxel: anchor_voxel,
+            }))
+            .expect("authoring scatter edit in authoring mode");
+        rebuilt |= !out.scatter_rebuild.is_empty();
+    }
 
-    if changed {
+    if rebuilt {
         scatter_pass.add_chunk(chunk_pos, &world.0, &ctx.device);
     }
-}
-
-/// Remove every effective scatter instance anchored at `anchor`: generated ones
-/// are recorded in `scatter_removed`, player-added ones are dropped.
-fn remove_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos) -> bool {
-    let generated_ids: Vec<StableInstanceId> = chunk
-        .data
-        .scatter_instances
-        .by_type
-        .values()
-        .flatten()
-        .filter(|si| si.anchor == anchor)
-        .map(|si| si.stable_id)
-        .collect();
-
-    let overrides = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
-    let mut changed = false;
-    for id in generated_ids {
-        if overrides.scatter_removed.insert(id) {
-            changed = true;
-        }
-    }
-    let before = overrides.scatter_added.len();
-    overrides.scatter_added.retain(|si| si.anchor != anchor);
-    if overrides.scatter_added.len() != before {
-        changed = true;
-    }
-    changed
-}
-
-/// Place one player scatter instance at `anchor`, jittered within the cell.
-fn place_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos, world_voxel: IVec3) -> bool {
-    let seq = effective_count_at(chunk, anchor);
-    let h = player_stable_id(world_voxel, seq);
-    let overrides = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
-    overrides.scatter_added.push(ScatterInstance {
-        anchor,
-        sub_offset: [(h & 0xFF) as u8 as i8, 0, ((h >> 8) & 0xFF) as u8 as i8],
-        rotation_y: ((h >> 16) & 0xFF) as u8,
-        scale_variant: 0,
-        prefab_id: PrefabId(0),
-        flags: ScatterFlags(ScatterFlags::PLAYER_PLACED),
-        stable_id: StableInstanceId(h),
-    });
-    true
-}
-
-/// Count effective instances at `anchor` (generated-minus-removed + added).
-fn effective_count_at(chunk: &LoadedChunk, anchor: LocalPos) -> u32 {
-    let ovr = chunk.data.overrides.as_ref();
-    let gen = chunk
-        .data
-        .scatter_instances
-        .by_type
-        .values()
-        .flatten()
-        .filter(|si| {
-            si.anchor == anchor
-                && !ovr.map_or(false, |o| o.scatter_removed.contains(&si.stable_id))
-        })
-        .count();
-    let added = ovr.map_or(0, |o| {
-        o.scatter_added.iter().filter(|si| si.anchor == anchor).count()
-    });
-    (gen + added) as u32
-}
-
-/// Stable id for a player-placed instance. Salted so it can't collide with a
-/// generated id (which derives from the world seed), and varied by `seq` so
-/// repeated placements on one anchor get distinct ids.
-fn player_stable_id(v: IVec3, seq: u32) -> u64 {
-    let mut h: u64 = 0xA11C_E1A5_0FF1_CE11; // player-placed salt
-    h = mix64(h ^ (v.x as i64 as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
-    h = mix64(h ^ (v.y as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    h = mix64(h ^ (v.z as i64 as u64).wrapping_mul(0xABC9_8388_FB8F_AC03));
-    h = mix64(h ^ (seq as u64).wrapping_mul(0xC4CE_B9FE_1A85_EC53));
-    h
-}
-
-fn mix64(mut x: u64) -> u64 {
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    x ^= x >> 33;
-    x
 }

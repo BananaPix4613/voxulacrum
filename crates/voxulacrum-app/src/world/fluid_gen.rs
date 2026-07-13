@@ -131,6 +131,27 @@ pub fn apply_biome_ponds(
     }
 }
 
+/// True when the air cell directly above surface voxel `(x, sy, z)` holds water,
+/// so foliage anchored so that surface would render submerged (design doc §5:
+/// fluid initialization, stage 9, precedes foliage, stage 10). In a `Submerged`
+/// chunk every empty voxel is water, so any surface foliage is submerged. When the
+/// surface sits at the chunk's ceiling (`sy + 1` out of range), the neighbor
+/// chunk's water is unknown at single-chunk generation time, so the column is
+/// treated as dry - a rare edge; surfaces sit well below the ceiling in practice.
+pub fn foliage_submerged(fluids: &FluidLayer, x: usize, sy: usize, z: usize) -> bool {
+    match fluids.fill_mode {
+        FluidFillMode::Submerged(_) => true,
+        FluidFillMode::Empty => {
+            let above = sy + 1;
+            if above >= CHUNK_SIZE {
+                return false;
+            }
+            let lp = LocalPos::new_unchecked(x as u8, above as u8, z as u8);
+            fluids.cells.get(&lp).map_or(false, |c| c.mass > 0)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +228,20 @@ mod tests {
         let mut fluids2 = ocean_fill(&s, 0, 24);
         apply_biome_ponds(&mut fluids2, &s, 0, 24, &levels);
         assert_eq!(fluids, fluids2);
+    }
+
+    #[test]
+    fn foliage_submerged_detects_water_above_surface() {
+        // Empty fill, water at (2,6,2): a surface at y=5 is submerged; y=7 is dry.
+        let mut f = FluidLayer::default();
+        f.cells.insert(
+            LocalPos::new_unchecked(2, 6, 2),
+            FluidCell { fluid_id: FluidId::WATER, mass: FULL_MASS, flags: FluidCell::FLAG_SETTLED },
+        );
+        assert!(foliage_submerged(&f, 2, 5, 2), "water directly above the surface");
+        assert!(!foliage_submerged(&f, 2, 7, 2), "surface above the water line");
+        // Submerged fast path: everything is submerged.
+        let s = FluidLayer { fill_mode: FluidFillMode::Submerged(FluidId::WATER), ..Default::default() };
+        assert!(foliage_submerged(&s, 10, 10, 10));
     }
 }

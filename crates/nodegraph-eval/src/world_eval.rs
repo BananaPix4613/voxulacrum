@@ -269,8 +269,12 @@ impl WorldEvaluator {
 
         let biome_col = self.biome_id_column(&zone_columns);
         let terrain = self.composite_terrain(ctx, biome_col.as_deref(), border.as_ref())?;
-        let foliage = self.evaluate_foliage(ctx, &terrain, biome_col.as_deref())?;
+        // Stage 9 (fluid) precedes stage 10 (foliage) per design doc §5. Foliage
+        // submersion is applied at the storage boundary (world_generator), where
+        // the fully-composited fluid field is available; the order here matches
+        // the documented stage sequence.
         let fluid_levels = self.composite_fluid(ctx, biome_col.as_deref())?;
+        let foliage = self.evaluate_foliage(ctx, &terrain, biome_col.as_deref())?;
 
         Ok(ChunkEvaluation { terrain, world_columns, zone_columns, foliage, fluid_levels })
     }

@@ -23,7 +23,7 @@ use voxel_core::LocalPos;
 
 use crate::params::TerrainGenParams;
 use super::layers::{
-    DetailLayer, DetailLayerId, DetailLayers, DetailTexel, FluidLayer,
+    DetailLayer, DetailLayerId, DetailLayers, DetailTexel, FluidFillMode, FluidLayer,
     PrefabId, ScatterFlags, ScatterInstance, ScatterStore, ScatterTypeId, StableInstanceId,
 };
 use super::chunk::CHUNK_SIZE;
@@ -195,16 +195,23 @@ impl WorldGenerator {
         super::slab_smoothing::smooth_slabs(&mut storage, &distances);
         
         let tags = self.derive_tags(&eval);
-        let detail_layers = paint_to_detail_layers(&eval.foliage.paint);
-        let scatter = scatter_to_store(&eval.foliage.scatter);
+
         // Worldgen stage 9: ocean fill from the global sea level, then layer any
-        // biome-authored ponds on top (design doc §7).
+        // biome-authored ponds on top (design doc §7). Fluids initializes before
+        // foliage so stage 10 can respect submersion.
         let mut fluids = super::fluid_gen::ocean_fill(&storage, position.y, self.sea_level);
         if let Some(levels) = &eval.fluid_levels {
             super::fluid_gen::apply_biome_ponds(
                 &mut fluids, &storage, position.y, self.sea_level, levels,
             )
         }
+
+        // Worldgen stage 10: translate foliage into storage form, dropping any
+        // paint/scatter whose surface the fluid field submerges (design doc §5
+        // stage 9 -> 10; drift-review 1.4).
+        let detail_layers = paint_to_detail_layers(&eval.foliage.paint, &storage, &fluids);
+        let scatter = scatter_to_store(&eval.foliage.scatter, &fluids);
+
         GeneratedChunk { storage, tags, detail_layers, scatter, fluids }
     }
 
@@ -247,12 +254,31 @@ fn distinct_sorted(ids: &[u16]) -> Vec<u16> {
 }
 
 /// Translate the evaluator's foliage paint (eval domain) into the chunk's
-/// `DetailLayers` (storage domain) - a field-for-field copy per column.
-fn paint_to_detail_layers(paint: &[PaintLayer]) -> DetailLayers {
+/// `DetailLayers` (storage domain). A painted column whose surface the fluid field
+/// submerges is dropped (left default), so grass never paints underwater (design
+/// §5 stage 9 before stage 10; drift-review 1.4).
+fn paint_to_detail_layers(
+    paint: &[PaintLayer],
+    storage: &ChunkStorage,
+    fluids: &FluidLayer,
+) -> DetailLayers {
+    // A chunk with no water can't submerge anything - skip the per-column surface
+    // scan entirely so above-sea biomes pay nothing.
+    let dry = matches!(fluids.fill_mode, FluidFillMode::Empty) && fluids.cells.is_empty();
+
     let mut layers: SmallVec<[DetailLayer; 4]> = SmallVec::new();
     for pl in paint {
         let mut layer = DetailLayer::new(DetailLayerId(pl.layer_id));
         for (i, t) in pl.texels.iter().enumerate() {
+            if !dry {
+                let x = i % CHUNK_SIZE;
+                let z = i / CHUNK_SIZE;
+                if let Some(sy) = column_surface(storage, x, z) {
+                    if super::fluid_gen::foliage_submerged(fluids, x, sy, z) {
+                        continue; // submerged column: leave the texel default (no foliage)
+                    }
+                }
+            }
             layer.map[i] = DetailTexel {
                 species: t.species,
                 density: t.density,
@@ -265,26 +291,55 @@ fn paint_to_detail_layers(paint: &[PaintLayer]) -> DetailLayers {
     DetailLayers { layers }
 }
 
+/// Topmost solid voxel Y in a column of `storage` (the surface), or `None` if the
+/// column is all air.
+fn column_surface(storage: &ChunkStorage, x: usize, z: usize) -> Option<usize> {
+    for y in (0..CHUNK_SIZE).rev() {
+        let idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE;
+        if storage.voxel(idx).is_solid() {
+            return Some(y);
+        }
+    }
+    None
+}
+
 /// Translate the evaluator's scatter buckets (eval domain) into the chunk's
-/// `ScatterStore` (storage domain, the generated set) - a field-for-field copy
-/// per instance, carrying the generated `stable_id` so player overrides can
-/// reference instances and identity survives regeneration.
-fn scatter_to_store(scatter: &[ScatterBucket]) -> ScatterStore {
+/// `ScatterStore` (storage domain, the generated set), carrying the generated
+/// `stable_id`. Instances whose anchor surface the fluid field submerges are
+/// dropped, so props never scatter underwater (design §5 stage 9 before stage 10;
+/// drift-review 1.4).
+fn scatter_to_store(scatter: &[ScatterBucket], fluids: &FluidLayer) -> ScatterStore {
+    let dry = matches!(fluids.fill_mode, FluidFillMode::Empty) && fluids.cells.is_empty();
+
     let mut by_type: HashMap<ScatterTypeId, Vec<ScatterInstance>> = HashMap::new();
     for bucket in scatter {
-        let instances = bucket.instances.iter().map(|fi| ScatterInstance {
-            anchor: LocalPos::new_unchecked(fi.anchor[0], fi.anchor[1] ,fi.anchor[2]),
-            sub_offset: fi.sub_offset,
-            rotation_y: fi.rotation_y,
-            scale_variant: fi.scale_variant,
-            prefab_id: PrefabId(fi.prefab_id),
-            flags: ScatterFlags(fi.flags),
-            stable_id: StableInstanceId(fi.stable_id),
-        });
-        by_type
-            .entry(ScatterTypeId(bucket.type_id))
-            .or_default()
-            .extend(instances);
+        let instances: Vec<ScatterInstance> = bucket
+            .instances
+            .iter()
+            .filter(|fi| {
+                dry || !super::fluid_gen::foliage_submerged(
+                    fluids,
+                    fi.anchor[0] as usize,
+                    fi.anchor[1] as usize,
+                    fi.anchor[2] as usize,
+                )
+            })
+            .map(|fi| ScatterInstance {
+                anchor: LocalPos::new_unchecked(fi.anchor[0], fi.anchor[1] ,fi.anchor[2]),
+                sub_offset: fi.sub_offset,
+                rotation_y: fi.rotation_y,
+                scale_variant: fi.scale_variant,
+                prefab_id: PrefabId(fi.prefab_id),
+                flags: ScatterFlags(fi.flags),
+                stable_id: StableInstanceId(fi.stable_id),
+            })
+            .collect();
+        if !instances.is_empty() {
+            by_type
+                .entry(ScatterTypeId(bucket.type_id))
+                .or_default()
+                .extend(instances);
+        }
     }
     ScatterStore { by_type }
 }
@@ -518,7 +573,10 @@ mod tests {
         use nodegraph_eval::{PaintLayer, PaintTexel};
         let mut texels = Box::new([PaintTexel::default(); 32 * 32]);
         texels[5] = PaintTexel { species: 2, density: 200, tint: 1, flags: 0 };
-        let dl = paint_to_detail_layers(&[PaintLayer { layer_id: 3, texels }]);
+        // Air storage -> no surface -> submersion filter inert; empty fluids anyway.
+        let storage = ChunkStorage::new_air();
+        let fluids = FluidLayer::default();
+        let dl = paint_to_detail_layers(&[PaintLayer { layer_id: 3, texels }], &storage, &fluids);
         assert_eq!(dl.layers.len(), 1);
         assert_eq!(dl.layers[0].layer_id, DetailLayerId(3));
         assert_eq!(dl.layers[0].map[5].density, 200);
@@ -541,7 +599,7 @@ mod tests {
                 flags: ScatterFlags::HARVESTABLE,
             }],
         };
-        let store = scatter_to_store(&[bucket]);
+        let store = scatter_to_store(&[bucket], &FluidLayer::default());
         let instances = store.by_type.get(&ScatterTypeId(4)).expect("bucket present");
         assert_eq!(instances.len(), 1);
         let si = instances[0];
@@ -655,5 +713,55 @@ mod tests {
         let m: WorldManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.biomes[0].params.get("traversal_smoothing_distance"), Some(&4.0));
         assert!(m.biomes[1].params.is_empty());
+    }
+
+    #[test]
+    fn submerged_scatter_is_dropped() {
+        use nodegraph_eval::FoliageInstance;
+        use super::super::layers::{FluidCell, FluidId};
+        // Water at (5,11,5): the instance anchored at (5,10,5) has water directly
+        // above and is dropped; the one at (8,10,8) survives.
+        let mut fluids = FluidLayer::default();
+        fluids.cells.insert(
+            LocalPos::new_unchecked(5, 11, 5),
+            FluidCell { fluid_id: FluidId::WATER, mass: 65535, flags: 0 },
+        );
+        let bucket = ScatterBucket {
+            type_id: 0,
+            instances: vec![
+                FoliageInstance { anchor: [5, 10, 5], sub_offset: [0, 0, 0], rotation_y: 0,
+                    scale_variant: 0, prefab_id: 1, stable_id: 1, flags: 0 },
+                FoliageInstance { anchor: [8, 10, 8], sub_offset: [0, 0, 0], rotation_y: 0,
+                    scale_variant: 0, prefab_id: 1, stable_id: 2, flags: 0 },
+            ],
+        };
+        let store = scatter_to_store(&[bucket], &fluids);
+        let insts = store.by_type.get(&ScatterTypeId(0)).expect("dry instance kept");
+        assert_eq!(insts.len(), 1);
+        assert_eq!(insts[0].stable_id, StableInstanceId(2));
+    }
+
+    #[test]
+    fn submerged_fill_mode_drops_all_foliage() {
+        use nodegraph_eval::{FoliageInstance, PaintLayer, PaintTexel};
+        use super::super::layers::FluidId;
+        let mut fluids = FluidLayer::default();
+        fluids.fill_mode = FluidFillMode::Submerged(FluidId::WATER);
+
+        // Scatter: all dropped (submerged chunk).
+        let bucket = ScatterBucket {
+            type_id: 0,
+            instances: vec![FoliageInstance { anchor: [1, 5, 1], sub_offset: [0, 0, 0],
+                rotation_y: 0, scale_variant: 0, prefab_id: 1, stable_id: 1, flags: 0 }],
+        };
+        assert!(scatter_to_store(&[bucket], &fluids).by_type.is_empty());
+
+        // Paint: a solid column's painted texel is dropped.
+        let mut storage = ChunkStorage::new_air();
+        storage.set_voxel(1 + 5 * 32 + 1 * 32 * 32, voxel_core::Voxel::cube(voxel_core::MaterialId(1)));
+        let mut texels = Box::new([PaintTexel::default(); 32 * 32]);
+        texels[1 + 1 * 32] = PaintTexel { species: 1, density: 200, tint: 0, flags: 0 };
+        let dl = paint_to_detail_layers(&[PaintLayer { layer_id: 0, texels }], &storage, &fluids);
+        assert_eq!(dl.layers[0].map[1 + 1 * 32].density, 0, "submerged column paints nothing");
     }
 }
