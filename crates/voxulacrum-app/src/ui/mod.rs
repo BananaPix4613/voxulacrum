@@ -139,6 +139,9 @@ impl EguiRenderer {
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
         window: &winit::window::Window,
+        mode: crate::world::mutation::EngineMode,
+        material_name: &str,
+        material_color: [f32; 3],
     ) {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -166,6 +169,9 @@ impl EguiRenderer {
             if probe.enabled {
                 let tex = self.probe_texture.as_ref().map(|t| &t.handle);
                 field_probe::draw_field_probe_window(ctx, probe, registry, tex);
+            }
+            if mode == crate::world::mutation::EngineMode::Play {
+                panels::draw_play_hud(ctx, material_name, material_color);
             }
         });
         

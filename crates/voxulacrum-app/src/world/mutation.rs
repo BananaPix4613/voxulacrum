@@ -30,6 +30,7 @@ use super::world_generator::WorldGenerator;
 pub enum MutationOrigin {
     Authoring,
     PlayTime,
+    System,
 }
 
 /// The engine's current world-mutation mode (design §9). Phase 8 ships only
@@ -37,10 +38,6 @@ pub enum MutationOrigin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineMode {
     Authoring,
-    /// Play mode lands in Phase 9 (player edits persist; graphs are read-only). No
-    /// Phase-8 path constructs it; it is matched by `required_origin` and exercised
-    /// by the mode-rejection tests.
-    #[allow(dead_code)]
     Play,
 }
 
@@ -164,5 +161,12 @@ impl MutationCommand {
     #[allow(dead_code)] // no Play-mode site yet; used by mode-rejection tests
     pub fn play(mutation: WorldMutation) -> Self {
         Self { origin: MutationOrigin::PlayTime, mutation }
+    }
+
+    /// A command issued by engine infrastructure (streaming, sim bookkeeping),
+    /// accepted in any mode. It is not an actor edit and does not participate in
+    /// the authoring/play coexistence gate.
+    pub fn system(mutation: WorldMutation) -> Self {
+        Self { origin: MutationOrigin::System, mutation }
     }
 }

@@ -4,8 +4,7 @@
 //! face-adjacent neighbor (looked up in the snapshot's 1-voxel border) is air.
 //! No greedy merging, no AO, no edge dedup - the cleanest possible baseline.
 
-use crate::meshing::MaterialConfig;
-use crate::rendering::pipelines::TerrainVertex;
+use crate::rendering::pipelines::FaceVertex;
 use crate::world::chunk::{ChunkSnapshot, CHUNK_SIZE, CHUNK_WORLD_SIZE, SNAP_PAD, SNAP_SIZE};
 use voxel_core::{ShapeId, Voxel};
 
@@ -78,10 +77,9 @@ fn covers_top(shape: ShapeId) -> bool {
 
 pub fn generate_chunk_mesh(
     snap: &ChunkSnapshot,
-    mat_config: &MaterialConfig,
-) -> (Vec<TerrainVertex>, Vec<u32>) {
+) -> (Vec<FaceVertex>, Vec<u32>) {
     // Worst case: 6 faces * 4 verts per solid voxel. Reserve modestly.
-    let mut vertices: Vec<TerrainVertex> = Vec::with_capacity(8192);
+    let mut vertices: Vec<FaceVertex> = Vec::with_capacity(8192);
     let mut indices: Vec<u32> = Vec::with_capacity(12_288);
 
     let origin = [
@@ -95,12 +93,6 @@ pub fn generate_chunk_mesh(
             for x in 0..CHUNK_SIZE as i32 {
                 let v = snap_voxel(snap, x, y, z);
                 if !v.is_solid() { continue; }
-
-                let color = mat_config
-                    .colors
-                    .get(v.material.0 as usize)
-                    .copied()
-                    .unwrap_or([1.0, 0.0, 1.0]);
 
                 // Vertical extent of this shape; corner Y is remapped onto it below.
                 let (y0, y1) = shape_y_interval(v.shape);
@@ -128,18 +120,30 @@ pub fn generate_chunk_mesh(
                     let base = vertices.len() as u32;
                     for c in corners {
                         let cy = if c[1] == 0.0 { y0 } else { y1 };
-                        vertices.push(TerrainVertex {
+                        vertices.push(FaceVertex {
                             position: [
                                 origin[0] + x as f32 + c[0],
                                 origin[1] + y as f32 + cy,
                                 origin[2] + z as f32 + c[2],
                             ],
-                            normal: *normal,
-                            color,
-                            ao: 1.0,
-                            material_id: v.material.0 as u32,
-                            cell_flags: 0,
-                            _pad_vert: [0; 2],
+                            normal: [
+                                (normal[0] * 127.0) as i8,
+                                (normal[1] * 127.0) as i8,
+                                (normal[2] * 127.0) as i8,
+                                0,
+                            ],
+                            uv: [0, 0],
+                            material_id: v.material.0,
+                            biome_tint_index: 0,
+                            variant_index: 0,
+                            face_axis: face_idx as u8,
+                            occlusion_class: 0,
+                            light_level_index: 0,
+                            enclosure_factor: 0,
+                            edge_flag: 0,
+                            sway_weight: 0,
+                            ao_factor: 255,
+                            _padding: 0,
                         });
                     }
                     // Two triangles per quad (0,1,2) and (0,2,3)
@@ -175,10 +179,6 @@ mod tests {
         snap.materials[idx] = v;
     }
 
-    fn config() -> MaterialConfig {
-        MaterialConfig { colors: vec![[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]] }
-    }
-
     fn slab(material: MaterialId, shape: ShapeId) -> Voxel {
         Voxel { material, shape, flags: 0 }
     }
@@ -187,11 +187,11 @@ mod tests {
     fn slab_bottom_top_face_sits_at_midline() {
         let mut snap = empty_snapshot();
         put(&mut snap, 0, 0, 0, slab(STONE, ShapeId::SlabBottom));
-        let (verts, _idx) = generate_chunk_mesh(&snap, &config());
+        let (verts, _idx) = generate_chunk_mesh(&snap);
 
         let has_top_midline = verts
             .iter()
-            .any(|v| v.normal == [0.0, 1.0, 0.0] && (v.position[1] - 0.5).abs() < 1e-5);
+            .any(|v| v.normal == [0, 127, 0, 0] && (v.position[1] - 0.5).abs() < 1e-5);
         assert!(has_top_midline, "slab-bottom top face should be at Y=0.5");
         assert!(
             verts.iter().all(|v| v.position[1] <= 0.5 + 1e-5),
@@ -203,11 +203,11 @@ mod tests {
     fn slab_top_bottom_face_sits_at_midline() {
         let mut snap = empty_snapshot();
         put(&mut snap, 0, 0, 0, slab(STONE, ShapeId::SlabTop));
-        let (verts, _idx) = generate_chunk_mesh(&snap, &config());
+        let (verts, _idx) = generate_chunk_mesh(&snap);
 
         let has_bottom_midline = verts
             .iter()
-            .any(|v| v.normal == [0.0, -1.0, 0.0] && (v.position[1] - 0.5).abs() < 1e-5);
+            .any(|v| v.normal == [0, -127, 0, 0] && (v.position[1] - 0.5).abs() < 1e-5);
         assert!(has_bottom_midline, "slab-top bottom face should be at Y=0.5");
         assert!(
             verts.iter().all(|v| v.position[1] >= 0.5 - 1e-5),
@@ -219,11 +219,11 @@ mod tests {
     fn cube_top_face_sits_at_full_height() {
         let mut snap = empty_snapshot();
         put(&mut snap, 0, 0, 0, Voxel::cube(STONE));
-        let (verts, _idx) = generate_chunk_mesh(&snap, &config());
+        let (verts, _idx) = generate_chunk_mesh(&snap);
 
         let has_top_full = verts
             .iter()
-            .any(|v| v.normal == [0.0, 1.0, 0.0] && (v.position[1] - 1.0).abs() < 1e-5);
+            .any(|v| v.normal == [0, 127, 0, 0] && (v.position[1] - 1.0).abs() < 1e-5);
         assert!(has_top_full, "cube top face should be at Y=1.0");
     }
 
@@ -233,12 +233,12 @@ mod tests {
         let mut snap = empty_snapshot();
         put(&mut snap, 0, 0, 0, Voxel::cube(STONE));
         put(&mut snap, 0, 1, 0, Voxel::cube(STONE));
-        let (verts, _idx) = generate_chunk_mesh(&snap, &config());
+        let (verts, _idx) = generate_chunk_mesh(&snap);
 
         // No +Y face at Y=1.0 (the interface between the two cubes is culled).
         let interface_top = verts
             .iter()
-            .any(|v| v.normal == [0.0, 1.0, 0.0] && (v.position[1] - 1.0).abs() < 1e-5);
+            .any(|v| v.normal == [0, 127, 0, 0] && (v.position[1] - 1.0).abs() < 1e-5);
         assert!(!interface_top, "shared cube interface should be culled");
     }
 }

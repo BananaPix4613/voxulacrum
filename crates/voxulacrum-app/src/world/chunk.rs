@@ -7,6 +7,8 @@ use super::layers::{DecalLayer, DetailLayers, FluidLayer, LightData, ScatterStor
 use super::overrides::ChunkOverrides;
 use super::tags::{BiomeId, ChunkTags, ZoneId};
 use super::storage::ChunkStorage;
+use super::world_generator::GeneratedChunk;
+use super::slab_smoothing::COLUMN_COUNT;
 use voxel_core::{ChunkCoord, Voxel};
 
 pub const CHUNK_SIZE: usize = voxel_core::CHUNK_DIM;
@@ -89,6 +91,13 @@ pub struct LoadedChunk {
     pub persist_dirty: bool,
     /// When the last edit occurred. None = generation-triggered dirty (no debounce).
     pub mesh_debounce: Option<Instant>,
+    /// True once the cross-chunk seam pass (`world::seam`) has finalized this
+    /// chunk's boundary slab demotions. Gates the one-shot pass.
+    pub seam_finalized: bool,
+    /// Per-column traversal smoothing distances captured at generation, so the
+    /// seam pass knows which columns smooth without re-evaluating the graph.
+    /// `None` until a generation path sets it (air/failed-gen chunks stay `None`).
+    pub smoothing_distances: Option<Box<[u8; COLUMN_COUNT]>>,
 }
 
 impl LoadedChunk {
@@ -100,6 +109,8 @@ impl LoadedChunk {
             mesh: None,
             persist_dirty: false,
             mesh_debounce: None,
+            seam_finalized: false,
+            smoothing_distances: None,
         }
     }
 
@@ -107,6 +118,41 @@ impl LoadedChunk {
     #[allow(dead_code)] // chunk-construction API; used by tests / future callers
     pub fn new_air(position: IVec3) -> Self {
         Self::new(position, Arc::new(ChunkStorage::new_air()))
+    }
+
+    /// Wire the generated sidecar layers (foliage paint, scatter, fluids, and the
+    /// per-column slab-smoothing distances) onto this chunk. This is the single
+    /// place they are set, so a new `GeneratedChunk` layer becomes a compile error
+    /// here that every construction site must satisfy - rather than a field
+    /// silently missed at one of the three sites (as `smoothing_distances` was on
+    /// the regen path). Storage and tags are set by each caller: streaming applies
+    /// overrides to storage and may take DB-persisted tags.
+    pub fn set_generated_layers(
+        &mut self,
+        detail_layers: DetailLayers,
+        scatter: ScatterStore,
+        fluids: FluidLayer,
+        smoothing_distances: Box<[u8; COLUMN_COUNT]>,
+    ) {
+        self.data.detail_layers = detail_layers;
+        self.data.scatter_instances = scatter;
+        self.data.fluids = fluids;
+        self.smoothing_distances = Some(smoothing_distances);
+    }
+
+    /// Build a loaded chunk from a freshly generated one: storage, tags, and every
+    /// generated sidecar layer. Used by the initial fill and regen; streaming is
+    /// bespoke because it modifies storage with overrides before construction.
+    pub fn from_generated(pos: IVec3, generated: GeneratedChunk) -> Self {
+        let mut chunk = Self::new(pos, Arc::new(generated.storage));
+        chunk.data.tags = generated.tags;
+        chunk.set_generated_layers(
+            generated.detail_layers,
+            generated.scatter,
+            generated.fluids,
+            generated.smoothing_distances,
+        );
+        chunk
     }
 
     /// Mark this chunk as needing re-meshing, incrementing the sequence counter.

@@ -109,7 +109,7 @@ fn box_edges(min: Vec3, max: Vec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
 }
 
 /// Wireframe box hugging a single world voxel, slightly outset to avoid z-fighting.
-fn voxel_box_lines(v: IVec3) -> Vec<DebugLineVertex> {
+fn voxel_box_lines(v: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
     let s = VOXEL_SCALE;
     let eps = s * 0.03;
     let min = Vec3::new(v.x as f32 * s - eps, v.y as f32 * s - eps, v.z as f32 * s - eps);
@@ -118,7 +118,7 @@ fn voxel_box_lines(v: IVec3) -> Vec<DebugLineVertex> {
         (v.y as f32 + 1.0) * s + eps,
         (v.z as f32 + 1.0) * s + eps,
     );
-    box_edges(min, max, [1.0, 1.0, 0.2])
+    box_edges(min, max, color)
 }
 
 #[derive(Resource)]
@@ -185,7 +185,7 @@ impl DebugLinePass {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
+                format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
@@ -233,10 +233,10 @@ impl DebugLinePass {
     }
 
     /// Set (or clear) the pick highlight box around a single world voxel.
-    pub fn set_highlight(&mut self, ctx: &RenderContext, anchor: Option<IVec3>) {
+    pub fn set_highlight(&mut self, ctx: &RenderContext, anchor: Option<IVec3>, color: [f32; 3]) {
         match anchor {
             Some(v) => {
-                let lines = voxel_box_lines(v);
+                let lines = voxel_box_lines(v, color);
                 self.highlight_count = lines.len() as u32;
                 self.highlight_buffer = Some(ctx.device.create_buffer_init(
                     &wgpu::util::BufferInitDescriptor {

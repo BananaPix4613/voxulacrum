@@ -19,6 +19,11 @@ use crate::rendering::render_context::RenderContext;
 
 pub const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Scene depth format. Carries a stencil aspect for the player-silhouette mask
+/// (marked before foliage, composited after). Every pipeline drawing into the main
+/// scene pass must declare this. The shadow pass has its own Depth32Float target.
+pub const SCENE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+
 #[derive(Resource)]
 pub struct RenderTargets {
     // RAII: these textures own the storage the matching *_view handles borrow;
@@ -32,28 +37,22 @@ pub struct RenderTargets {
     #[allow(dead_code)]
     pub depth: wgpu::Texture,
     pub depth_view: wgpu::TextureView,
+    pub depth_sample_view: wgpu::TextureView,
     #[allow(dead_code)]
     pub normal: wgpu::Texture,
     pub normal_view: wgpu::TextureView,
-    pub render_width: u32,
-    pub render_height: u32,
-    pub tex_width: u32,
-    pub tex_height: u32,
-    pub effective_pixel_scale: f32,
+    pub alloc_w: u32,
+    pub alloc_h: u32,
+    pub view_w: f32,
+    pub view_h: f32,
+    pub k: u32,
+    pub s: f32,
 }
 
 impl RenderTargets {
-    pub fn new(
-        ctx: &RenderContext,
-        render_width: u32,
-        render_height: u32,
-        effective_pixel_scale: f32,
-    ) -> Self {
-        let render_width = render_width.max(1);
-        let render_height = render_height.max(1);
-
-        let tex_width = render_width + 2;
-        let tex_height = render_height + 2;
+    pub fn new(ctx: &RenderContext, dims: &crate::RenderDims) -> Self {
+        let tex_width = dims.alloc_w.max(1);
+        let tex_height = dims.alloc_h.max(1);
 
         let scene = Self::create_color_texture(&ctx.device, tex_width, tex_height, ctx.surface_format, "lowres_scene");
         let scene_view = scene.create_view(&wgpu::TextureViewDescriptor::default());
@@ -71,24 +70,33 @@ impl RenderTargets {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
+            format: SCENE_DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-
+        // Sampling a combined depth-stencil texture requires a depth-only view; the
+        // attachment view above keeps both aspects so stencil ops work.
+        let depth_sample_view = depth.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("lowres_depth_sample"),
+            aspect: wgpu::TextureAspect::DepthOnly,
+            ..Default::default()
+        });
         let normal = Self::create_color_texture(&ctx.device, tex_width, tex_height, NORMAL_FORMAT, "lowres_normal");
         let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
 
         Self {
             scene, scene_view,
             processed, processed_view,
-            depth, depth_view,
+            depth, depth_view, depth_sample_view,
             normal, normal_view,
-            render_width, render_height,
-            tex_width, tex_height,
-            effective_pixel_scale,
+            alloc_w: tex_width,
+            alloc_h: tex_height,
+            view_w: dims.view_w,
+            view_h: dims.view_h,
+            k: dims.k,
+            s: dims.s,
         }
     }
 
@@ -116,7 +124,16 @@ impl RenderTargets {
         })
     }
 
-    pub fn needs_recreate(&self, render_width: u32, render_height: u32) -> bool {
-        self.render_width != render_width || self.render_height != render_height
+    pub fn needs_recreate(&self, dims: &crate::RenderDims) -> bool {
+        self.alloc_w != dims.alloc_w || self.alloc_h != dims.alloc_h
+    }
+
+    /// Zoom changes `view`/`k`/`s` continuously without reallocating; keep the
+    /// fields current every frame so uniforms and the camera snap read them.
+    pub fn update_view(&mut self, dims: &crate::RenderDims) {
+        self.view_w = dims.view_w;
+        self.view_h = dims.view_h;
+        self.k = dims.k;
+        self.s = dims.s;
     }
 }

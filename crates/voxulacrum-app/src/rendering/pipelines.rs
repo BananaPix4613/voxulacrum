@@ -7,28 +7,35 @@ use crate::rendering::render_context::RenderContext;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Serialize, Deserialize)]
-pub struct TerrainVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub color: [f32; 3],
-    pub ao: f32,
-    pub material_id: u32,
-    pub cell_flags: u32,
-    pub _pad_vert: [u32; 2], // Pad to 64 bytes (16-byte alignment for GPU)
+pub struct FaceVertex {
+    pub position: [f32; 3],     // 0..12
+    pub normal: [i8; 4],        // 12..16 - Snorm8x4: xyz cardinal (+/-127), w unused
+    pub uv: [u16; 2],           // 16..20 - unused in Phase 9 (written 0)
+    pub material_id: u16,       // 20..22
+    pub biome_tint_index: u8,   // 22 - §11 future (0)
+    pub variant_index: u8,      // 23 - §11 future (0)
+    pub face_axis: u8,          // 24 - 0..5 (+X,-X,+Y,-Y,+Z,-Z); read by Substep 8
+    pub occlusion_class: u8,    // 25 - §11 future (0)
+    pub light_level_index: u8,  // 26 - §11 future (0)
+    pub enclosure_factor: u8,   // 27 - filled by Substep 9 (0 now)
+    pub edge_flag: u8,          // 28 - §11 future (0)
+    pub sway_weight: u8,        // 29 - foliage sway (0 for terrain)
+    pub ao_factor: u8,          // 30 - baked AO; 255 = unoccluded
+    pub _padding: u8,           // 31
 }
 
-impl TerrainVertex {
+impl FaceVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<TerrainVertex>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<FaceVertex>() as wgpu::BufferAddress, // 32
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
-                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
-                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
-                wgpu::VertexAttribute { offset: 36, shader_location: 3, format: wgpu::VertexFormat::Float32 },
-                wgpu::VertexAttribute { offset: 40, shader_location: 4, format: wgpu::VertexFormat::Uint32 },
-                wgpu::VertexAttribute { offset: 44, shader_location: 5, format: wgpu::VertexFormat::Uint32 },
+                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Snorm8x4 },
+                wgpu::VertexAttribute { offset: 16, shader_location: 2, format: wgpu::VertexFormat::Uint16x2 },
+                wgpu::VertexAttribute { offset: 20, shader_location: 3, format: wgpu::VertexFormat::Uint16x2 },
+                wgpu::VertexAttribute { offset: 24, shader_location: 4, format: wgpu::VertexFormat::Uint8x4 },
+                wgpu::VertexAttribute { offset: 28, shader_location: 5, format: wgpu::VertexFormat::Uint8x4 },
             ],
         }
     }
@@ -57,7 +64,7 @@ pub fn create_terrain_pipeline(
         vertex: wgpu::VertexState {
             module: &shader_module,
             entry_point: Some("vs_main"),
-            buffers: &[TerrainVertex::layout()],
+            buffers: &[FaceVertex::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -87,7 +94,7 @@ pub fn create_terrain_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -126,7 +133,7 @@ pub fn create_terrain_wireframe_pipeline(
         vertex: wgpu::VertexState {
             module: &shader_module,
             entry_point: Some("vs_main"),
-            buffers: &[TerrainVertex::layout()],
+            buffers: &[FaceVertex::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -156,7 +163,7 @@ pub fn create_terrain_wireframe_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -194,7 +201,7 @@ pub fn create_shadow_pipeline(
         vertex: wgpu::VertexState {
             module: &shader_module,
             entry_point: Some("vs_main"),
-            buffers: &[TerrainVertex::layout()],
+            buffers: &[FaceVertex::layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -217,9 +224,21 @@ pub fn create_shadow_pipeline(
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
+            // Normal-offset bias (shaders/terrain.wgsl) handles self-shadowing
+            // acne across most of the angle range, decoupled from face-to-light
+            // slope. Its own bias is capped well under half a voxel so it can't
+            // overshoot into neighboring geometry at concave/interior corners;
+            // slope_scale here just picks up the residual at grazing sun angles
+            // beyond that cap. Keep this modest - the normal-offset cap was
+            // tightened specifically (0.04 base / 0.1 max in terrain.wgsl) so
+            // this bias wouldn't need to be large; pushing slope_scale much
+            // higher reintroduces peter-panning as a visible hard seam/step in
+            // the shadow, since there's no PCF blur left to mask it (see
+            // compute_shadow - PCF was dropped to a single hard sample for
+            // crisp voxel-style shadow edges).
             bias: wgpu::DepthBiasState {
                 constant: 2,
-                slope_scale: 2.0,
+                slope_scale: 1.0,
                 clamp: 0.0,
             },
         }),
@@ -330,7 +349,7 @@ pub fn create_detail_paint_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -433,7 +452,7 @@ pub fn create_water_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: false,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -521,7 +540,7 @@ pub fn create_scatter_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
+            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),

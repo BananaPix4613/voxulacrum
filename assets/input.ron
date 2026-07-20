@@ -1,0 +1,129 @@
+(
+    bindings: [
+        (
+            trigger: Key("KeyW"),
+            action: MoveForward,
+            mode: Held,
+        ),
+        (
+            trigger: Key("ArrowUp"),
+            action: MoveForward,
+            mode: Held,
+        ),
+        (
+            trigger: Key("KeyS"),
+            action: MoveBackward,
+            mode: Held,
+        ),
+        (
+            trigger: Key("ArrowDown"),
+            action: MoveBackward,
+            mode: Held,
+        ),
+        (
+            trigger: Key("KeyA"),
+            action: MoveLeft,
+            mode: Held,
+        ),
+        (
+            trigger: Key("ArrowLeft"),
+            action: MoveLeft,
+            mode: Held,
+        ),
+        (
+            trigger: Key("KeyD"),
+            action: MoveRight,
+            mode: Held,
+        ),
+        (
+            trigger: Key("ArrowRight"),
+            action: MoveRight,
+            mode: Held,
+        ),
+        (
+            trigger: Key("KeyQ"),
+            action: CameraRotateLeft,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyE"),
+            action: CameraRotateRight,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: ScrollUp,
+            action: CameraZoomIn,
+            mode: Continuous,
+        ),
+        (
+            trigger: ScrollDown,
+            action: CameraZoomOut,
+            mode: Continuous,
+        ),
+        (
+            trigger: Key("F1"),
+            action: ToggleUI,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("F2"),
+            action: ToggleGraphEditor,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("F3"),
+            action: ToggleFieldProbe,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("F5"),
+            action: TogglePlayMode,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyG"),
+            action: PourWater,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyF"),
+            action: Interact,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyR"),
+            action: PrimaryAction,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyT"),
+            action: SecondaryAction,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyX"),
+            action: CycleTool(1),
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyZ"),
+            action: CycleTool(-1),
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("BracketRight"),
+            action: CycleTargetLayer(1),
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("BracketLeft"),
+            action: CycleTargetLayer(-1),
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("KeyC"),
+            action: ToggleCutaway,
+            mode: EdgeTriggered,
+        ),
+    ],
+)

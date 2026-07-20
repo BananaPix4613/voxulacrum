@@ -163,6 +163,7 @@ impl WorldGenerator {
                     detail_layers: DetailLayers::default(),
                     scatter: ScatterStore::default(),
                     fluids: FluidLayer::default(),
+                    smoothing_distances: Box::new([0u8; super::slab_smoothing::COLUMN_COUNT]),
                 };
             }
         };
@@ -174,7 +175,7 @@ impl WorldGenerator {
         // deliberate seam between two intentionally-distinct containers.
         let mut storage = self.storage_boundary.materialize(terrain);
         
-        // Worldgen stage 7: halve single-cube walkable steps into slab transitions.
+        // Worldgen stage 7: halve single-cube surface steps into slab transitions.
         // Each column's smoothing distance comes from its biome's params (default
         // when unset), so biomes can smooth differently.
         let biome_col = self
@@ -193,6 +194,13 @@ impl WorldGenerator {
             }
         }
         super::slab_smoothing::smooth_slabs(&mut storage, &distances);
+
+        // Keep the per-column distances (u8 is ample) for the seam pass.
+        let mut smoothing_distances =
+            Box::new([0u8; super::slab_smoothing::COLUMN_COUNT]);
+        for (i, &d) in distances.iter().enumerate() {
+            smoothing_distances[i] = d.min(255) as u8;
+        }
         
         let tags = self.derive_tags(&eval);
 
@@ -212,7 +220,7 @@ impl WorldGenerator {
         let detail_layers = paint_to_detail_layers(&eval.foliage.paint, &storage, &fluids);
         let scatter = scatter_to_store(&eval.foliage.scatter, &fluids);
 
-        GeneratedChunk { storage, tags, detail_layers, scatter, fluids }
+        GeneratedChunk { storage, tags, detail_layers, scatter, fluids, smoothing_distances }
     }
 
     /// Aggregate a chunk evaluation's per-column zone/biome assignments into
@@ -357,6 +365,10 @@ pub struct GeneratedChunk {
     pub scatter: ScatterStore,
     /// Ocean/biome fluid layer for this chunk (design doc §7).
     pub fluids: FluidLayer,
+    /// Per-column traversal smoothing distances used by the isolated pass, kept
+    /// so the cross-chunk seam pass (`world::seam`) can finish boundaries without
+    /// re-evaluating the graph.
+    pub smoothing_distances: Box<[u8; super::slab_smoothing::COLUMN_COUNT]>,
 }
 
 /// Identifies one graph in the world hierarchy, for routing edits and

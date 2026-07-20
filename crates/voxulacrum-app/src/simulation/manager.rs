@@ -29,6 +29,10 @@ pub struct FrameState {
     pub clip_min: [f32; 3],
     pub clip_max: [f32; 3],
     pub clip_enabled: u32,
+    pub mask_origin: [f32; 3],
+    pub mask_enabled: u32,
+    pub volume_radius: f32,
+    pub view_dir: [f32; 3],
     pub debug_mode: u32,
     #[allow(dead_code)] // sky tint uniform; retained for shader wiring
     pub sky_color: [f32; 3],
@@ -64,7 +68,13 @@ impl SimulationManager {
     }
 
     /// Advance all simulation systems by one frame.
-    pub fn tick(&mut self, params: &EngineParams, rt: &RenderTargets, input: &InputState) -> FrameState {
+    pub fn tick(
+        &mut self,
+        params: &EngineParams,
+        rt: &RenderTargets,
+        input: &InputState,
+        follow: Option<glam::Vec3>,
+    ) -> FrameState {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -72,14 +82,10 @@ impl SimulationManager {
 
         // Camera
         self.camera.apply_params(&params.camera);
-        self.camera.update(dt, input, &params.camera);
+        self.camera.update(dt, input, &params.camera, follow);
 
         let snapped = if params.render_pipeline.camera_snap_enabled {
-            self.camera.snap_camera(
-                rt.render_width,
-                rt.render_height,
-                rt.effective_pixel_scale,
-            )
+            self.camera.snap_camera(rt.alloc_w, rt.alloc_h, rt.k, rt.s)
         } else {
             SnappedCamera {
                 view_proj: self.camera.view_projection(),
@@ -99,7 +105,11 @@ impl SimulationManager {
 
         // Frustum
         if !params.debug.freeze_culling {
-            let vp = self.camera.projection_matrix() * self.camera.view_matrix();
+            // Cull against the actual rendered lattice (snapped, alloc-sized
+            // projection) — a conservative superset of the visible view, and
+            // consistent with the stepped magnification rather than the
+            // continuous control zoom.
+            let vp = glam::Mat4::from_cols_array_2d(&snapped.view_proj);
             self.frustum = Frustum::from_view_projection(vp);
         }
 
@@ -110,18 +120,39 @@ impl SimulationManager {
             &self.camera, params, cos_r, sin_r,
         );
 
+        // Camera view direction (into the scene). Uses the smoothed `rotation` so it
+        // matches the rendered view exactly during a rotation lerp — it's a plain
+        // uniform now, so tracking it per frame costs nothing.
+        let view_pitch = (1.0_f32 / 2.0_f32.sqrt()).atan();
+        let view_dir = [
+            -(self.camera.rotation.cos() * view_pitch.cos()),
+            -view_pitch.sin(),
+            -(self.camera.rotation.sin() * view_pitch.cos()),
+        ];
+
         // Debug mode
         let debug_mode = compute_debug_mode(&params.debug);
 
         // Warm tint
         let (warm_tint_color, warm_tint_strength) = self.time_of_day.warm_tint();
 
+        // Shadow frustum coverage: scaled to the camera's actual current zoom
+        // rather than a fixed worst-case constant, so the shadow map's fixed
+        // texel budget isn't spent on ground far outside what's ever drawn.
+        // The 1.25x/+15 margin covers casters just outside the visible
+        // frustum (so their shadows don't pop in/out at the frustum edge) and
+        // the lag between `target` and the smoothed `smooth_target` actually
+        // used here. Floored so a fully zoomed-in camera doesn't shrink the
+        // frustum enough to clip tall/deep terrain or cause visible pop-in
+        // while panning.
+        let shadow_radius = (self.camera.visible_radius() * 1.25 + 15.0).max(40.0);
+
         FrameState {
             dt,
             elapsed: self.elapsed,
             view_proj: snapped.view_proj,
             subpixel_offset: snapped.subpixel_offset,
-            light_space: self.time_of_day.light_space_matrix(self.camera.smooth_target, 128.0),
+            light_space: self.time_of_day.light_space_matrix(self.camera.smooth_target, shadow_radius),
             sun_direction: self.time_of_day.sun_direction().into(),
             sun_color: self.time_of_day.sun_color(&params.lighting).into(),
             ambient_color: self.time_of_day.ambient_color(&params.lighting).into(),
@@ -131,6 +162,10 @@ impl SimulationManager {
             clip_min,
             clip_max,
             clip_enabled,
+            mask_origin: [0.0; 3],
+            mask_enabled: 0,
+            volume_radius: 0.0,
+            view_dir,
             debug_mode,
             sky_color: params.render_pipeline.sky_color,
             warm_tint_color: warm_tint_color.into(),

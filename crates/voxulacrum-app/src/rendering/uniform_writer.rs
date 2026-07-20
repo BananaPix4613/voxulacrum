@@ -63,6 +63,13 @@ pub fn write_all_uniforms(
         _pad3: 0.0,
         clip_max: frame.clip_max,
         _pad4: 0.0,
+        mask_origin: frame.mask_origin,
+        mask_enabled: frame.mask_enabled,
+        view_dir: frame.view_dir,
+        _pad5: 0.0,
+        render_size: [render_targets.view_w, render_targets.view_h],
+        volume_radius: frame.volume_radius,
+        _pad6: 0.0,
     };
     ctx.queue.write_buffer(global_buf, 0, bytemuck::cast_slice(&[uniforms]));
 
@@ -93,10 +100,7 @@ pub fn write_all_uniforms(
         clip_min: frame.clip_min,
         _pad1: 0.0,
         inv_view_proj: inv_vp,
-        render_resolution: [
-            render_targets.render_width as f32,
-            render_targets.render_height as f32,
-        ],
+        render_resolution: [render_targets.view_w, render_targets.view_h],
         _pad2: [0.0; 2],
     };
     post_process.update_uniforms(&ctx.queue, pp_uniforms);
@@ -107,8 +111,8 @@ pub fn write_all_uniforms(
         &ctx.queue,
         OutlineUniforms {
             texel_size: [
-                1.0 / render_targets.tex_width as f32,
-                1.0 / render_targets.tex_height as f32,
+                1.0 / render_targets.alloc_w as f32,
+                1.0 / render_targets.alloc_h as f32,
             ],
             depth_threshold: op.depth_threshold,
             depth_strength: op.depth_strength,
@@ -136,15 +140,9 @@ pub fn write_all_uniforms(
     // Upscale uniforms
     let upscale_uniforms = UpscaleUniforms {
         subpixel_offset: frame.subpixel_offset,
-        render_resolution: [
-            render_targets.render_width as f32,
-            render_targets.render_height as f32,
-        ],
+        render_resolution: [render_targets.view_w, render_targets.view_h],
         window_resolution: [surface_width as f32, surface_height as f32],
-        tex_resolution: [
-            render_targets.tex_width as f32,
-            render_targets.tex_height as f32,
-        ],
+        tex_resolution: [render_targets.alloc_w as f32, render_targets.alloc_h as f32],
     };
     upscale.update_uniforms(&ctx.queue, upscale_uniforms);
 }

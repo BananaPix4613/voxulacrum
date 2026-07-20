@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use bevy_ecs::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use winit::keyboard::KeyCode;
+use glam::Vec2;
 
 use crate::ui;
 
@@ -10,13 +12,15 @@ use crate::ui;
 // Game actions
 // ============================================================================
 
-/// Named game actions decoupled from physical inputs.
+/// Named game actions decoupled from physical inputs. The semantic layer systems
+/// consume - never raw winit events. Movement is a derived screen-relative
+/// [`InputState::move_vector`]; the directional `Move*` actions feed it.
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GameAction {
-    CameraPanForward,
-    CameraPanBackward,
-    CameraPanLeft,
-    CameraPanRight,
+    MoveForward,
+    MoveBackward,
+    MoveLeft,
+    MoveRight,
     CameraRotateLeft,
     CameraRotateRight,
     CameraZoomIn,
@@ -26,6 +30,17 @@ pub enum GameAction {
     ToggleFieldProbe,
     /// Debug: pour water at the picked cell.
     PourWater,
+    // --- Player-semantic actions (consumed from Substep 11/12) ---
+    Interact,
+    PrimaryAction,
+    SecondaryAction,
+    /// Cycle the active tool by a signed step (+1 next, -1 prev).
+    CycleTool(i8),
+    /// Cycle the targeted layer/instance under the cursor by a signed step.
+    CycleTargetLayer(i8),
+    ToggleCutaway,
+    /// Explicit Authoring <-> Play mode toggle (spawns/despawns the player).
+    TogglePlayMode,
 }
 
 // ============================================================================
@@ -202,28 +217,36 @@ impl Default for InputMap {
         Self {
             bindings: vec![
                 // WASD + arrows - held
-                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyW.into()),       action: CameraPanForward,  mode: Held },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowUp.into()),    action: CameraPanForward,  mode: Held },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyS.into()),       action: CameraPanBackward, mode: Held },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowDown.into()),  action: CameraPanBackward, mode: Held },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyA.into()),       action: CameraPanLeft,     mode: Held },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowLeft.into()),  action: CameraPanLeft,     mode: Held },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyD.into()),       action: CameraPanRight,    mode: Held },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowRight.into()), action: CameraPanRight,    mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyW.into()),       action: MoveForward,  mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowUp.into()),    action: MoveForward,  mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyS.into()),       action: MoveBackward, mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowDown.into()),  action: MoveBackward, mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyA.into()),       action: MoveLeft,     mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowLeft.into()),  action: MoveLeft,     mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyD.into()),       action: MoveRight,    mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::ArrowRight.into()), action: MoveRight,    mode: Held },
                 // Q/E rotation - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyQ.into()), action: CameraRotateLeft,  mode: EdgeTriggered },
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyE.into()), action: CameraRotateRight, mode: EdgeTriggered },
                 // Scroll zoom - continuous
                 InputBinding { trigger: InputTrigger::ScrollUp,   action: CameraZoomIn,  mode: Continuous },
                 InputBinding { trigger: InputTrigger::ScrollDown, action: CameraZoomOut, mode: Continuous },
-                // F1 UI toggle - edge triggered
+                // UI / editor toggles - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F1.into()), action: ToggleUI, mode: EdgeTriggered },
-                // F2 graph-editor toggle - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F2.into()), action: ToggleGraphEditor, mode: EdgeTriggered },
-                // F3 field-probe toggle - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F3.into()), action: ToggleFieldProbe, mode: EdgeTriggered },
-                // G debug: pour watch at the cursor - edge triggered
+                InputBinding { trigger: InputTrigger::Key(KeyCode::F5.into()), action: TogglePlayMode, mode: EdgeTriggered },
+                // Debug: pour watch at the cursor - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyG.into()), action: PourWater, mode: EdgeTriggered },
+                // Player-semantic actions (provisional keys; rebind in input.ron)
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyF.into()), action: Interact, mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyR.into()), action: PrimaryAction, mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyT.into()), action: SecondaryAction, mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyX.into()), action: CycleTool(1), mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyZ.into()), action: CycleTool(-1), mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::BracketRight.into()), action: CycleTargetLayer(1), mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::BracketLeft.into()), action: CycleTargetLayer(-1), mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyC.into()), action: ToggleCutaway, mode: EdgeTriggered },
             ],
         }
     }
@@ -244,6 +267,35 @@ impl InputMap {
 
     pub fn actions_for_scroll_down(&self) -> impl Iterator<Item = &InputBinding> {
         self.bindings.iter().filter(|b| b.trigger == InputTrigger::ScrollDown)
+    }
+
+    /// Load bindings from a RON file, falling back to (and writing) and defaults
+    /// if the file is missing or unparseable. Matches the data-driven materials/
+    /// prefabs pattern; edit the file and relaunch to rebind.
+    pub fn load_or_default(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(text) => match ron::from_str::<InputMap>(&text) {
+                Ok(map) => {
+                    log::info!("Loaded input bindings from {:?}", path);
+                    map
+                }
+                Err(e) => {
+                    log::warn!("input bindings parse error ({e}); using defaults");
+                    Self::default()
+                }
+            },
+            Err(_) => {
+                let map = Self::default();
+                match ron::ser::to_string_pretty(&map, ron::ser::PrettyConfig::default()) {
+                    Ok(text) => match std::fs::write(path, text) {
+                        Ok(()) => log::info!("Wrote default input bindings to {:?}", path),
+                        Err(e) => log::warn!("could not write default input.ron: {e}"),
+                    },
+                    Err(e) => log::warn!("could not serialize default input bindings: {e}"),
+                }
+                map
+            }
+        }
     }
 }
 
@@ -268,13 +320,23 @@ pub struct ActionState {
 #[derive(Resource)]
 pub struct InputState {
     actions: HashMap<GameAction, ActionState>,
+    move_vector: Vec2,
 }
 
 impl InputState {
     pub fn new() -> Self {
         Self {
             actions: HashMap::new(),
+            move_vector: Vec2::ZERO,
         }
+    }
+
+    /// Screen-relative movement intent this frame (x = right, y = forward),
+    /// magnitude 0..=1. The consumer maps it to world space (camera in Authoring,
+    /// player in Play), so controller support is an input-mapping task, not a
+    /// movement redesign.
+    pub fn move_vector(&self) -> Vec2 {
+        self.move_vector
     }
 
     pub fn pressed(&self, action: GameAction) -> bool {
@@ -503,6 +565,16 @@ pub fn process_input_system(
             action_state.just_released = true;
         }
     }
+
+    // Screen-relative movement vector from the directional actions (x = right,
+    // y = forward). Normalized so diagonals aren't faster.
+    let mv_x = (state.pressed(GameAction::MoveRight) as i32 - state.pressed(GameAction::MoveLeft) as i32) as f32;
+    let mv_y = (state.pressed(GameAction::MoveForward) as i32 - state.pressed(GameAction::MoveBackward) as i32) as f32;
+    let mut mv = Vec2::new(mv_x, mv_y);
+    if mv.length_squared() > 1.0 {
+        mv = mv.normalize();
+    }
+    state.move_vector = mv;
 }
 
 /// Handles UI / editor toggles via InputState (needs NonSend access for EguiRenderer).

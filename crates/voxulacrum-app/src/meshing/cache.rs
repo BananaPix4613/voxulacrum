@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use glam::IVec3;
 use std::time::Instant;
 
-use crate::rendering::pipelines::TerrainVertex;
+use crate::rendering::pipelines::FaceVertex;
 use crate::world::chunk::{ChunkSnapshot, CHUNK_WORLD_SIZE};
 
-/// Cache file format version. Bumped for half-step vertex quantization (v11
-/// stored integer positions, which flattened slab meshes on the round-trip).
-const CACHE_VERSION: u32 = 12;
+/// Cache file format version. Bumped for the `FaceVertex` migration (v13) and
+/// again for decoupling color from the mesh: v14 keys on voxels alone (material
+/// colors no longer affect geometry - the shader composes color at draw time).
+const CACHE_VERSION: u32 = 14;
 
 /// Positions are quantized to this many steps per voxel. Shapes occupy
 /// half-cell vertical intervals (see `shape_y_interval`), so 2 steps/voxel
@@ -30,8 +31,8 @@ struct CompactVertex {
     pos_x: u8,
     pos_y: u8,
     pos_z: u8,
-    normal_index: u8,
-    material_id: u8,
+    face_index: u8,     // 0..5 (== FaceVertex.face_axis); reconstructs the normal
+    material_id: u16,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,29 +48,18 @@ struct CacheFile {
     indices_u32: Vec<u32>,
 }
 
-/// Six face normals in the same order the cube mesher emits them.
-const FACE_NORMALS: [[f32; 3]; 6] = [
-    [ 1.0, 0.0, 0.0],
-    [-1.0, 0.0, 0.0],
-    [ 0.0, 1.0, 0.0],
-    [ 0.0,-1.0, 0.0],
-    [ 0.0, 0.0, 1.0],
-    [ 0.0, 0.0,-1.0],
+/// Six face normals as packed `i8` (Snorm8x4: +/-127 = +/-1.0), in the cube mesher's
+/// face order (== `FaceAxis` order): +X, -X, +Y, -Y, +Z, -Z.
+const FACE_NORMALS_I8: [[i8; 4]; 6] = [
+    [ 127, 0, 0, 0],
+    [-127, 0, 0, 0],
+    [ 0,  127, 0, 0],
+    [ 0, -127, 0, 0],
+    [ 0, 0,  127, 0],
+    [ 0, 0, -127, 0],
 ];
 
-fn face_normal_index(n: [f32; 3]) -> u8 {
-    for (i, fn_) in FACE_NORMALS.iter().enumerate() {
-        if (n[0] - fn_[0]).abs() < 1e-3
-            && (n[1] - fn_[1]).abs() < 1e-3
-            && (n[2] - fn_[2]).abs() < 1e-3
-        {
-            return i as u8;
-        }
-    }
-    0
-}
-
-fn to_compact(v: &TerrainVertex, chunk_origin: [f32; 3]) -> CompactVertex {
+fn to_compact(v: &FaceVertex, chunk_origin: [f32; 3]) -> CompactVertex {
     let q = |world: f32, origin: f32| -> u8 {
         (((world - origin) * POS_STEPS_PER_VOXEL).round() as i32).clamp(0, 255) as u8
     };
@@ -77,30 +67,36 @@ fn to_compact(v: &TerrainVertex, chunk_origin: [f32; 3]) -> CompactVertex {
         pos_x: q(v.position[0], chunk_origin[0]),
         pos_y: q(v.position[1], chunk_origin[1]),
         pos_z: q(v.position[2], chunk_origin[2]),
-        normal_index: face_normal_index(v.normal),
-        material_id: v.material_id as u8,
+        face_index: v.face_axis.min(5),
+        material_id: v.material_id,
     }
 }
 
-fn from_compact(
-    c: &CompactVertex,
-    chunk_origin: [f32; 3],
-    colors: &[[f32; 3]],
-) -> TerrainVertex {
-    let mat_idx = c.material_id as usize;
-    let color = if mat_idx < colors.len() { colors[mat_idx] } else { [0.0; 3] };
-    TerrainVertex {
+/// Reconstruct a `FaceVertex` from its compact form. Color is not stored - the
+/// shader composes it from `material_id` - so no color table is needed. The
+/// constant bytes here must mirror what the cube mesher writes so a cache hit is
+/// byte-identical to a fresh mesh (uv 0, ao_factor 255, §11 bytes 0).
+fn from_compact(c: &CompactVertex, chunk_origin: [f32; 3]) -> FaceVertex {
+    let face = (c.face_index as usize).min(5);
+    FaceVertex {
         position: [
             c.pos_x as f32 / POS_STEPS_PER_VOXEL + chunk_origin[0],
             c.pos_y as f32 / POS_STEPS_PER_VOXEL + chunk_origin[1],
             c.pos_z as f32 / POS_STEPS_PER_VOXEL + chunk_origin[2],
         ],
-        normal: FACE_NORMALS[(c.normal_index as usize).min(5)],
-        color,
-        ao: 1.0,
-        material_id: c.material_id as u32,
-        cell_flags: 0,
-        _pad_vert: [0; 2],
+        normal: FACE_NORMALS_I8[face],
+        uv: [0, 0],
+        material_id: c.material_id,
+        biome_tint_index: 0,
+        variant_index: 0,
+        face_axis: face as u8,
+        occlusion_class: 0,
+        light_level_index: 0,
+        enclosure_factor: 0,
+        edge_flag: 0,
+        sway_weight: 0,
+        ao_factor: 255,
+        _padding: 0,
     }
 }
 
@@ -140,21 +136,16 @@ impl AtomicCacheStats {
 // Cache key
 // ============================================================================
 
-/// Hash the entire 34^3 materials snapshot plus the material color table.
-/// The cube mesher's output depends only on materials + colors, so anything
-/// else would inflate the key without changing correctness.
-pub fn compute_cache_key(snapshot: &ChunkSnapshot, colors: &[[f32; 3]]) -> u64 {
+/// Content hash keying a chunk's cached mesh. The cube mesher's output depends
+/// only on the chunk's voxels (color is composed in the shader from the material
+/// table, not baked), so the key hashes the packed voxels alone.
+pub fn compute_cache_key(snapshot: &ChunkSnapshot) -> u64 {
     use seahash::SeaHasher;
     use std::hash::Hasher;
 
     let mut hasher = SeaHasher::new();
     for &m in snapshot.materials.iter() {
         hasher.write_u32(m.pack());
-    }
-    for color in colors {
-        for &c in color {
-            hasher.write(&c.to_le_bytes());
-        }
     }
     hasher.finish()
 }
@@ -180,8 +171,7 @@ pub fn cache_file_path(
 pub fn load_cached_mesh(
     path: &Path,
     expected_key: u64,
-    colors: &[[f32; 3]],
-) -> Option<(Vec<TerrainVertex>, Vec<u32>)> {
+) -> Option<(Vec<FaceVertex>, Vec<u32>)> {
     let compressed = std::fs::read(path).ok()?;
     let serialized = lz4_flex::decompress_size_prepended(&compressed).ok()?;
     let file: CacheFile = bincode::deserialize(&serialized).ok()?;
@@ -202,9 +192,9 @@ pub fn load_cached_mesh(
         file.chunk_pos[2] as f32 * CHUNK_WORLD_SIZE,
     ];
 
-    let vertices: Vec<TerrainVertex> = file.vertices
+    let vertices: Vec<FaceVertex> = file.vertices
         .iter()
-        .map(|c| from_compact(c, chunk_origin, colors))
+        .map(|c| from_compact(c, chunk_origin))
         .collect();
 
     let indices = if file.index_format == 0 {
@@ -247,7 +237,7 @@ pub fn save_cached_mesh(
     cache_dir: &Path,
     chunk_pos: glam::IVec3,
     key: u64,
-    vertices: &[TerrainVertex],
+    vertices: &[FaceVertex],
     indices: &[u32],
 ) -> io::Result<u64> {
     std::fs::create_dir_all(cache_dir)?;
@@ -391,7 +381,7 @@ impl MeshCacheLru {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meshing::{cube_mesher::generate_chunk_mesh, MaterialConfig};
+    use crate::meshing::cube_mesher::generate_chunk_mesh;
     use crate::world::chunk::{SNAP_PAD, SNAP_VOLUME};
     use voxel_core::{MaterialId, ShapeId, Voxel};
 
@@ -417,8 +407,7 @@ mod tests {
         put(&mut snap, 4, 4, 4, Voxel::cube(stone));
         put(&mut snap, 5, 4, 4, Voxel { material: stone, shape: ShapeId::SlabBottom, flags: 0 });
 
-        let config = MaterialConfig { colors: vec![[0.0; 3], [0.5, 0.5, 0.5]] };
-        let (vertices, indices) = generate_chunk_mesh(&snap, &config);
+        let (vertices, indices) = generate_chunk_mesh(&snap);
 
         // Guard against vacuous round-trip: the mesh must contain half-step Ys.
         assert!(
@@ -430,12 +419,12 @@ mod tests {
             "voxulacrum_mesh_cache_test_{}",
             std::process::id()
         ));
-        let key = compute_cache_key(&snap, &config.colors);
+        let key = compute_cache_key(&snap);
         let path = cache_file_path(&dir, snap.position.x, snap.position.y, snap.position.z, key);
 
         save_cached_mesh(&dir, snap.position, key, &vertices, &indices).expect("save");
         let (loaded_verts, loaded_indices) =
-            load_cached_mesh(&path, key, &config.colors).expect("load");
+            load_cached_mesh(&path, key).expect("load");
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(loaded_indices, indices);

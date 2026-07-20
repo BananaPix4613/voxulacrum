@@ -5,9 +5,6 @@ use crate::params::CameraParams;
 
 pub struct IsometricCamera {
     pub target: Vec3,
-    /// Smoothed render position - exponentially follows `target`.
-    /// All rendering (view matrix, snap) uses this, keeping the
-    /// sub-pixel offset continuous and eliminating pixel jitter.
     pub smooth_target: Vec3,
     pub zoom: f32,
     pub rotation: f32,
@@ -76,24 +73,52 @@ impl IsometricCamera {
         (self.projection_matrix() * self.view_matrix()).to_cols_array_2d()
     }
 
-    /// Advance camera state using abstract input actions.
-    pub fn update(&mut self, dt: f32, input: &InputState, cam_params: &CameraParams) {
+    /// Half-extent (world units) of a cube around the camera target that's
+    /// guaranteed to cover everything visible on screen, for any camera
+    /// rotation. Ground-plane reach in the camera's "away" direction is
+    /// larger than half_height by 1/sin(pitch), since the isometric tilt
+    /// foreshortens that axis; as the camera rotates around Y, "away" sweeps
+    /// through every world axis, so the cube has to be sized to the larger of
+    /// the two rather than either alone.
+    pub fn visible_radius(&self) -> f32 {
+        let half_height = self.zoom;
+        let half_width = half_height * self.aspect;
+        let pitch = (1.0_f32 / 2.0_f32.sqrt()).atan();
+        let ground_reach = half_height / pitch.sin();
+        ground_reach.max(half_width)
+    }
+
+    /// Advance camera state. In Play mode `follow` is the interpolated player
+    /// position to pin to (the sim-tick interpolation is the smoothing, so no
+    /// exponential lag); in Authoring it is `None` and WASD free-pans the target.
+    pub fn update(
+        &mut self,
+        dt: f32,
+        input: &InputState,
+        cam_params: &CameraParams,
+        follow: Option<Vec3>,
+    ) {
         let forward_dir = Vec3::new(-self.rotation.cos(), 0.0, -self.rotation.sin());
         let right_dir = Vec3::new(self.rotation.sin(), 0.0, -self.rotation.cos());
 
-        let mut move_dir = Vec3::ZERO;
-        if input.pressed(GameAction::CameraPanForward) { move_dir += forward_dir; }
-        if input.pressed(GameAction::CameraPanBackward) { move_dir -= forward_dir; }
-        if input.pressed(GameAction::CameraPanLeft) { move_dir -= right_dir; }
-        if input.pressed(GameAction::CameraPanRight) { move_dir += right_dir; }
-
-        if move_dir.length_squared() > 0.0 {
-            move_dir = move_dir.normalize();
+        // --- Movement source depends on mode ---
+        match follow {
+            Some(pos) => {
+                // Play: pin to the interpolated player position (already smooth).
+                self.target = pos;
+                self.smooth_target = pos;
+            }
+            None => {
+                // Authoring: WASD free-pan toward `target`, exponentially smoothed.
+                let mv = input.move_vector();
+                let move_dir = right_dir * mv.x + forward_dir * mv.y;
+                self.target += move_dir * self.pan_speed * dt;
+                let alpha = (self.smooth_speed * dt).exp().recip().mul_add(-1.0, 1.0).clamp(0.0, 1.0);
+                self.smooth_target = self.smooth_target.lerp(self.target, alpha);
+            }
         }
 
-        self.target += move_dir * self.pan_speed * dt;
-
-        // Edge-triggered rotation
+        // --- Rotation (Q/E) - edge-triggered, both modes ---
         if input.just_pressed(GameAction::CameraRotateLeft) {
             self.target_rotation += std::f32::consts::FRAC_PI_2;
         }
@@ -101,7 +126,7 @@ impl IsometricCamera {
             self.target_rotation -= std::f32::consts::FRAC_PI_2;
         }
         
-        // Scroll zoom
+        // --- Zoom (scroll) - both modes ---
         let zoom_in = input.value(GameAction::CameraZoomIn);
         let zoom_out = input.value(GameAction::CameraZoomOut);
         let scroll = zoom_in - zoom_out;
@@ -109,13 +134,8 @@ impl IsometricCamera {
             self.zoom = (self.zoom - scroll * cam_params.scroll_speed)
                 .clamp(cam_params.zoom_min, cam_params.zoom_max);
         }
-        
-        // Exponentially smooth the render position toward the logical target.
-        // alpha approaches 1 as dt grows, clamped so it never overshoots.
-        let alpha = (self.smooth_speed * dt).exp().recip().mul_add(-1.0, 1.0).clamp(0.0, 1.0);
-        self.smooth_target = self.smooth_target.lerp(self.target, alpha);
 
-        // Smooth rotation toward target (shortest path via angle wrapping)
+        // --- Rotation smoothing (shortest path) ---
         use std::f32::consts::{PI, TAU};
         let rot_alpha = (self.smooth_speed * dt).exp().recip().mul_add(-1.0, 1.0).clamp(0.0, 1.0);
         let mut delta = self.target_rotation - self.rotation;
@@ -129,42 +149,27 @@ impl IsometricCamera {
         }
     }
 
-    /// Compute a texel-snapped view-projection matrix.
+    /// Compute a texel-snapped view-projection matrix on the fixed pixel lattice.
     ///
-    /// Projects a fixed world reference point (the origin) into texel space,
-    /// computes the fractional offset from the nearest texel center, and nudges
-    /// the projection matrix to cancel that fraction.  This locks the world-space
-    /// grid to the texel grid so voxel edges land on stable texel boundaries
-    /// every frame, eliminating "pixel swimming" at low resolution.
-    ///
-    /// The previous approach projected the camera *target* through its own VP,
-    /// which always lands at clip-space (0,0) in an orthographic projection —
-    /// making the snap a no-op.  Using a fixed reference point that actually
-    /// moves in clip space as the camera pans is what makes this work.
-    pub fn snap_camera(
-        &self,
-        render_width: u32,
-        render_height: u32,
-        pixel_scale: f32,
-    ) -> SnappedCamera {
-        let content_w = render_width as f32;
-        let content_h = render_height as f32;
-        let tex_w = content_w + 2.0;  // 1-texel border each side
-        let tex_h = content_h + 2.0;
-
-        // Expand the orthographic projection to fill the border area.
-        let mut proj = self.projection_matrix();
-        proj.x_axis.x *= content_w / tex_w;
-        proj.y_axis.y *= content_h / tex_h;
+    /// The projection spans the ALLOCATED texel grid at exactly `1/k` world
+    /// units per texel - zoom never scales this projection directly (it acts
+    /// only through `k`/`s`), so voxel edges land on the same texel boundaries
+    /// at every zoom level. The origin snap then cancels sub-texel translation,
+    /// and the remainder is returned for the upscale blit to slide smoothly.
+    pub fn snap_camera(&self, alloc_w: u32, alloc_h: u32, k: u32, s: f32) -> SnappedCamera {
+        let kf = k as f32;
+        let half_w = alloc_w as f32 / (2.0 * kf);
+        let half_h = alloc_h as f32 / (2.0 * kf);
+        let proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.001, 1000.0);
 
         let view = self.view_matrix(); // centered on smooth_target
         let vp = proj * view;
 
         // Project the world origin into texel space.
-        // NDC [-1,+1] spans tex_w texels with the expanded projection.
+        // NDC [-1,+1] spans the full allocated texture.
         let origin_clip = vp.project_point3(Vec3::ZERO);
-        let tex_half_w = tex_w * 0.5;
-        let tex_half_h = tex_h * 0.5;
+        let tex_half_w = alloc_w as f32 * 0.5;
+        let tex_half_h = alloc_h as f32 * 0.5;
         let texel_x = origin_clip.x * tex_half_w;
         let texel_y = origin_clip.y * tex_half_h;
 
@@ -172,27 +177,14 @@ impl IsometricCamera {
         let frac_x = texel_x - texel_x.round();
         let frac_y = texel_y - texel_y.round();
 
-        // Nudge the projection to cancel the fractional offset.
-        // This shifts clip space so the origin (and every integer world
-        // coordinate) lands exactly on a texel center.
+        // Nudge the projection so integer world coordinates land on texel centers.
         let mut snapped_proj = proj;
         snapped_proj.w_axis.x -= frac_x / tex_half_w;
         snapped_proj.w_axis.y -= frac_y / tex_half_h;
 
         let snapped_vp = snapped_proj * view;
-
-        // Sub-pixel offset in native window pixels, expressed in the upscale
-        // shader's UV coordinate system (X = right, Y = down).
-        //
-        // The snap operates in clip/NDC space (X = right, Y = UP), but the
-        // shader compensates in UV space (X = right, Y = DOWN).  Y is flipped
-        // between the two, so frac_y's sign naturally inverts when the shader
-        // adds the offset.  X shares orientation, so we negate frac_x here to
-        // make `texel_coord + texel_shift` correct on both axes.
-        let subpixel_offset = [
-            -frac_x * pixel_scale,
-            frac_y * pixel_scale,
-        ];
+        
+        let subpixel_offset = [-frac_x * s, frac_y * s];
 
         SnappedCamera {
             view_proj: snapped_vp.to_cols_array_2d(),

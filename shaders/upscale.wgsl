@@ -67,8 +67,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // to reach into the 1-texel border (which contains valid rendered content).
     let clamped = clamp(snapped, vec2(0.0), params.render_resolution);
 
-    // Convert to texture UV: +1.0 skips the 1-texel border.
-    let sample_uv = (clamped + vec2(1.0)) / params.tex_resolution;
+    // Integer-texel margin: centering with a fractional margin would put every
+    // sample off texel-center and make the bilinear fetch blend neighbors - a
+    // whole-image blur. Flooring keeps samples exactly on texel centers; the
+    // content sits <=0.5 texel off perfect center, which is invisible (the guard
+    // margin contains real rendered content).
+    let margin = floor((params.tex_resolution - params.render_resolution) * 0.5);
+    let sample_uv = (clamped + margin) / params.tex_resolution;
 
     return textureSample(scene_tex, bilinear_sampler, sample_uv);
 }

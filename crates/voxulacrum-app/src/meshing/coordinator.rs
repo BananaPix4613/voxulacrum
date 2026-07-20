@@ -23,6 +23,13 @@ impl MeshingCoordinator {
         ctx: &RenderContext,
         ui_state: &mut UiState,
     ) -> Vec<IVec3> {
+        // Retry every frame: a chunk marked dirty this frame is still inside its
+        // debounce window and gets skipped here, but the next frame's call (or the
+        // one after) picks it up once the window clears - this is what makes an
+        // edit's mesh update land within a frame or two instead of only on the next
+        // incidental streaming-triggered sweep.
+        self.pipeline.submit_all_dirty(world);
+
         // Drain pending snapshot submissions (bounded per frame)
         self.pipeline.drain_pending_submissions(world);
         
@@ -57,10 +64,6 @@ impl MeshingCoordinator {
             ui_state.remesh_requested = false;
             ui_state.mesh_params_pending = false;
             log::info!("Remesh requested by user");
-            self.pipeline.update_material_config(
-                &ui_state.params.materials,
-                &ui_state.params.meshing,
-            );
             self.pipeline.reset_for_new_world();
             for chunk in world.chunks.values_mut() {
                 chunk.mark_mesh_dirty();

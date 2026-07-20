@@ -266,12 +266,13 @@ impl ChunkStreamingManager {
 
         self.pool.spawn(move || {
             // Generate base terrain + identity tags.
-            let GeneratedChunk { mut storage, tags: generated_tags, detail_layers, scatter, fluids } =
+            let GeneratedChunk { mut storage, tags: generated_tags, detail_layers, scatter, fluids, smoothing_distances } =
                 gen.generate_chunk(pos);
 
             // Overlay saved edits from this worker's cached read-only DB handle.
             let mut overrides = None;
             let mut loaded_tags = None;
+            let mut loaded_seam_finalized = false;
             with_worker_db(
                 generation,
                 &db_path,
@@ -279,7 +280,7 @@ impl ChunkStreamingManager {
                 |db| {
                     if let Some(db) = db {
                         match db.load_chunk_record(pos) {
-                            Ok(Some(ChunkRecord { edits, tags })) => {
+                            Ok(Some(ChunkRecord { edits, tags, seam_finalized })) => {
                                 match edits {
                                     ChunkEdits::Delta(delta) => {
                                         // Self-healing: drop overrides that already
@@ -314,6 +315,7 @@ impl ChunkStreamingManager {
                                     }
                                 }
                                 loaded_tags = Some(tags);
+                                loaded_seam_finalized = seam_finalized;
                             }
                             Ok(None) => {}
                             Err(e) => log::warn!("Streaming: load record for {pos:?} failed: {e}"),
@@ -323,17 +325,13 @@ impl ChunkStreamingManager {
             );
 
             let mut chunk = crate::world::chunk::LoadedChunk::new(pos, std::sync::Arc::new(storage));
+            chunk.seam_finalized = loaded_seam_finalized;
             chunk.data.overrides = overrides;
-            chunk.data.detail_layers = detail_layers;
-            chunk.data.scatter_instances = scatter;
-            chunk.data.fluids = fluids;
+            chunk.set_generated_layers(detail_layers, scatter, fluids, smoothing_distances);
             // Overlay persisted player-poured water on top of the generated
             // fluid, as settled (the active set is runtime-only and re-derives).
             apply_persisted_fluid(&mut chunk.data.fluids, &chunk.data.overrides);
-            // DB-persisted tags win for loaded chunks; otherwise use the freshly
-            // generated tags.
             chunk.data.tags = loaded_tags.unwrap_or(generated_tags);
-            // Not dirty - matches what's in DB.
             chunk.persist_dirty = false;
 
             let _ = tx.send(GenResult { chunk });
@@ -397,10 +395,10 @@ impl ChunkStreamingManager {
 
                 // Insert + face-neighbor mesh-dirty flow through the mutation API.
                 world
-                    .execute(MutationCommand::authoring(WorldMutation::InsertLoadedChunk {
+                    .execute(MutationCommand::system(WorldMutation::InsertLoadedChunk {
                         chunk: gen_result.chunk,
                     }))
-                    .expect("authoring chunk insert in authoring mode");
+                    .expect("system chunk insert accepted in any mode");
                 result.inserted.push(pos);
                 inserted_count += 1;
 

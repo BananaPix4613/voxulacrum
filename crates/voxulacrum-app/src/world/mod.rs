@@ -5,7 +5,7 @@ pub mod fluid_sim;
 pub mod layers;
 pub mod overrides;
 pub mod tags;
-pub mod walkability;
+pub mod seam;
 pub mod slab_smoothing;
 pub mod regen;
 pub mod streaming;
@@ -14,6 +14,7 @@ pub mod storage_boundary;
 pub mod persistence;
 pub mod world_generator;
 pub mod mutation;
+pub mod room;
 
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -44,6 +45,7 @@ pub struct World {
 
 use crate::params::TerrainGenParams;
 use voxel_core::{ChunkCoord, LocalPos, MaterialId, MaterialRegistry, Voxel};
+use crate::world::mutation::MutationOrigin;
 
 impl World {
     /// Build the initial world synchronously (blocks boot), fanning the per-chunk
@@ -74,12 +76,7 @@ impl World {
                 .par_iter()
                 .map(|&pos| {
                     let generated = generator.generate_chunk(pos);
-                    let mut chunk = LoadedChunk::new(pos, Arc::new(generated.storage));
-                    chunk.data.tags = generated.tags;
-                    chunk.data.detail_layers = generated.detail_layers;
-                    chunk.data.scatter_instances = generated.scatter;
-                    chunk.data.fluids = generated.fluids;
-                    (ChunkCoord::from(pos), chunk)
+                    (ChunkCoord::from(pos), LoadedChunk::from_generated(pos, generated))
                 })
                 .collect()
         });
@@ -112,7 +109,7 @@ impl World {
     pub fn upload_mesh_result(
         &mut self,
         chunk_key: IVec3,
-        vertices: &[crate::rendering::pipelines::TerrainVertex],
+        vertices: &[crate::rendering::pipelines::FaceVertex],
         indices: &[u32],
         device: &wgpu::Device,
         mesh_seq: u64,
@@ -179,7 +176,11 @@ impl World {
         &mut self,
         command: MutationCommand,
     ) -> Result<MutationOutcome, MutationError> {
-        if self.mode.required_origin() != command.origin {
+        // Actor edits (Authoring/PlayTime) are gated against coexistence; System
+        // mutations 9streaming, sim bookkeeping) run in any mode.
+        if command.origin != MutationOrigin::System
+            && self.mode.required_origin() != command.origin
+        {
             return Err(MutationError::WrongMode {
                 mode: self.mode,
                 origin: command.origin,
@@ -660,11 +661,7 @@ fn generate_world_background(
         .par_iter()
         .map(|&pos| {
             let generated = generator.generate_chunk(pos);
-            let mut chunk = LoadedChunk::new(pos, std::sync::Arc::new(generated.storage));
-            chunk.data.tags = generated.tags;
-            chunk.data.detail_layers = generated.detail_layers;
-            chunk.data.scatter_instances = generated.scatter;
-            chunk.data.fluids = generated.fluids;
+            let chunk = LoadedChunk::from_generated(pos, generated);
             progress.fetch_add(1, Ordering::Relaxed);
             chunk
         })
@@ -1006,5 +1003,16 @@ mod mutation_tests {
             .unwrap();
         assert!(outcome.mesh_invalidated.is_empty());
         assert!(!world.get_chunk(IVec3::ZERO).unwrap().persist_dirty, "empty batch marks nothing");
+    }
+    
+    #[test]
+    fn system_command_accepted_in_both_modes() {
+        for mode in [EngineMode::Authoring, EngineMode::Play] {
+            let mut world = world_with_air_chunk(mode);
+            let chunk = crate::world::chunk::LoadedChunk::new_air(IVec3::new(9, 0, 0));
+            world
+                .execute(MutationCommand::system(WorldMutation::InsertLoadedChunk { chunk }))
+                .expect("system command accepted regardless of mode");
+        }
     }
 }

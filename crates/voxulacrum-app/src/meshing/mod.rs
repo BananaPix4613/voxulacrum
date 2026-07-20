@@ -7,13 +7,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use bevy_ecs::prelude::Resource;
 
 use crate::core_budget::CoreBudget;
-use crate::params::MaterialParams;
-use crate::rendering::pipelines::TerrainVertex;
+use crate::rendering::pipelines::FaceVertex;
 use crate::world::chunk::ChunkSnapshot;
 use cache::AtomicCacheStats;
 use cube_mesher::generate_chunk_mesh;
@@ -24,7 +23,7 @@ use cube_mesher::generate_chunk_mesh;
 
 pub struct MeshResult {
     pub chunk_key: IVec3,
-    pub vertices: Vec<TerrainVertex>,
+    pub vertices: Vec<FaceVertex>,
     pub indices: Vec<u32>,
     pub mesh_seq: u64,
 }
@@ -67,20 +66,6 @@ struct CacheConfig {
     eviction_batch_size: usize,
 }
 
-/// Runtime material properties shared with worker threads. The cube mesher
-/// only needs per-material colors; greedy/snap knobs were marching-cubes only.
-pub struct MaterialConfig {
-    pub colors: Vec<[f32; 3]>,
-}
-
-impl MaterialConfig {
-    pub fn from_params(mat_params: &MaterialParams) -> Self {
-        Self {
-            colors: mat_params.entries.iter().map(|e| e.color).collect(),
-        }
-    }
-}
-
 // ============================================================================
 // MeshingPipeline
 // ============================================================================
@@ -101,7 +86,6 @@ pub struct MeshingPipeline {
     max_in_flight: usize,
 
     chunk_states: HashMap<IVec3, ChunkMeshState>,
-    material_config: Arc<RwLock<MaterialConfig>>,
 
     pub stats: MeshingStats,
     batch_start: Option<Instant>,
@@ -117,8 +101,6 @@ pub struct MeshingPipeline {
 impl MeshingPipeline {
     pub fn new(
         pool: Arc<rayon::ThreadPool>,
-        materials: &MaterialParams,
-        _meshing: &crate::params::MeshingParams,
         mesh_cache: &crate::params::MeshCacheParams,
     ) -> Self {
         let budget = CoreBudget::detect();
@@ -133,8 +115,6 @@ impl MeshingPipeline {
         let lru = cache::MeshCacheLru::from_scan(&cache_dir);
         cache_stats.total_bytes.store(lru.total_bytes(), Ordering::Relaxed);
         let cache_lru = Arc::new(Mutex::new(lru));
-
-        let material_config = Arc::new(RwLock::new(MaterialConfig::from_params(materials)));
 
         let cache_config = Arc::new(CacheConfig {
             cache_dir: cache_dir.clone(),
@@ -159,7 +139,6 @@ impl MeshingPipeline {
             cache_config,
             max_in_flight: budget.mesh_in_flight,
             chunk_states: HashMap::new(),
-            material_config,
             stats: MeshingStats { worker_count, ..Default::default() },
             batch_start: None,
             pending_submissions: Vec::new(),
@@ -245,9 +224,8 @@ impl MeshingPipeline {
             // channel, which `poll` drains.
             let res_tx = self.result_tx.lock().unwrap().clone();
             let cache_config = self.cache_config.clone();
-            let material_config = self.material_config.clone();
             self.pool.spawn(move || {
-                mesh_chunk_task(pos, snapshot, mesh_seq, res_tx, cache_config, material_config);
+                mesh_chunk_task(pos, snapshot, mesh_seq, res_tx, cache_config);
             });
             self.chunk_states.insert(pos, ChunkMeshState::InProgress);
             submitted += 1;
@@ -333,11 +311,6 @@ impl MeshingPipeline {
         log::info!("MeshingPipeline reset for new world");
     }
 
-    pub fn update_material_config(&self, materials: &MaterialParams, _meshing: &crate::params::MeshingParams) {
-        let mut config = self.material_config.write().unwrap();
-        *config = MaterialConfig::from_params(materials);
-    }
-
     pub fn clear_cache(&self) {
         match cache::clear_cache(&self.cache_dir) {
             Ok(n) => log::info!("Cleared {} cached mesh files", n),
@@ -363,10 +336,8 @@ fn mesh_chunk_task(
     mesh_seq: u64,
     res_tx: Sender<MeshResult>,
     cache_config: Arc<CacheConfig>,
-    material_config: Arc<RwLock<MaterialConfig>>,
 ) {
-    let mat_config = material_config.read().unwrap();
-    let cache_key = cache::compute_cache_key(&snapshot, &mat_config.colors);
+    let cache_key = cache::compute_cache_key(&snapshot);
 
     let cache_path = cache::cache_file_path(
         &cache_config.cache_dir,
@@ -376,9 +347,7 @@ fn mesh_chunk_task(
         cache_key,
     );
 
-    if let Some((vertices, indices)) =
-        cache::load_cached_mesh(&cache_path, cache_key, &mat_config.colors)
-    {
+    if let Some((vertices, indices)) = cache::load_cached_mesh(&cache_path, cache_key) {
         cache_config.stats.hits.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut lru) = cache_config.lru.lock() {
             lru.touch(snapshot.position);
@@ -388,8 +357,7 @@ fn mesh_chunk_task(
     }
 
     cache_config.stats.misses.fetch_add(1, Ordering::Relaxed);
-    let (vertices, indices) = generate_chunk_mesh(&snapshot, &mat_config);
-    drop(mat_config);
+    let (vertices, indices) = generate_chunk_mesh(&snapshot);
 
     match cache::save_cached_mesh(
         &cache_config.cache_dir,

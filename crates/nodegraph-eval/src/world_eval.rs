@@ -376,7 +376,7 @@ impl WorldEvaluator {
                 }
             }
         }
-        let mut layers: HashMap<u16, (Arc<ScalarField>, Arc<ChunkBuffer<MaterialId, 32>>)> =
+        let mut layers: HashMap<u16, LayerEval> =
             HashMap::new();
         for bid in needed {
             if let Some(layer) = self.eval_biome_layer(ctx, bid)? {
@@ -394,7 +394,7 @@ impl WorldEvaluator {
         for z in 0..CHUNK_DIM {
             for x in 0..CHUNK_DIM {
                 let own = biome_at(x, z);
-                let Some((own_density, own_material)) = layers.get(&own) else {
+                let Some(own_layer) = layers.get(&own) else {
                     continue; // own biome has no layer -> air column
                 };
                 let (weight, neighbor) = match border {
@@ -407,9 +407,9 @@ impl WorldEvaluator {
                 // Blended density column + its surface (topmost solid cell).
                 let mut composed_surface = None;
                 for y in 0..CHUNK_DIM {
-                    let od = own_density.get(x, y, z);
+                    let od = own_layer.density.get(x, y, z);
                     col[y] = match neighbor {
-                        Some((nd, _)) => blend_density(od, nd.get(x, y, z), weight),
+                        Some(nl) => blend_density(od, nl.density.get(x, y, z), weight),
                         None => od,
                     };
                     if col[y] > 0.0 {
@@ -421,10 +421,43 @@ impl WorldEvaluator {
                 // depth below the blended surface `cs` - so it stays consistent
                 // with the biome the column belongs to, never the fade neighbor's.
                 let own_rule = self.biomes.iter().find(|b| b.id == own).map(|b| &b.material_rule);
-                let own_surface = (0..CHUNK_DIM).rev().find(|&y| own_density.get(x, y, z) > 0.0);
+                // Chunk-Y seam depth continuation: a solid window-top cell may be
+                // buried - the true surface can lie in the chunk above, and
+                // measuring band depth from the window top paints surface
+                // material (grass strata) along every chunk-Y seam. Sample the
+                // blended density above the window, up to the material cake's
+                // total band depth (anything deeper is fill regardless), and
+                // push banding depth down by the continuation. Unsampleable
+                // density chains fall back to the pre-continuation behavior.
+                let max_above = match own_rule {
+                    Some(BiomeMaterialRule::Layer { bands, .. }) => {
+                        bands.iter().map(|&(_, thickness)| thickness).sum::<u32>()
+                    }
+                    _ => 0,
+                };
+                let mut above = 0u32;
+                if cs == CHUNK_DIM - 1 && max_above > 0 {
+                    while above < max_above {
+                        let ay = CHUNK_DIM + above as usize;
+                        let Some(od) = own_layer.sample_density(x, ay, z) else { break };
+                        let d = match neighbor {
+                            Some(nl) => match nl.sample_density(x, ay, z) {
+                                Some(nd) => blend_density(od, nd, weight),
+                                None => od,
+                            },
+                            None => od,
+                        };
+                        if d <= 0.0 {
+                            break;
+                        }
+                        above += 1;
+                    }
+                }
+                let own_surface =
+                    (0..CHUNK_DIM).rev().find(|&y| own_layer.density.get(x, y, z) > 0.0);
                 for y in 0..CHUNK_DIM {
                     if col[y] > 0.0 {
-                        let depth = (cs - y) as u32;
+                        let depth = (cs - y) as u32 + above;
                         let material = match own_rule {
                             Some(BiomeMaterialRule::Layer { bands, fill }) => {
                                 surface_layering(depth, bands, *fill)
@@ -432,10 +465,12 @@ impl WorldEvaluator {
                             Some(BiomeMaterialRule::Uniform(m)) => *m,
                             _ => {
                                 // Fallback for other material chains: shift the
-                                // precomputed surface-relative field.
+                                // precomputed surface-relative field. (Window-
+                                // relative; a Field-rule biome still bands from
+                                // the window top at chunk-Y seams.)
                                 let shift = own_surface.map_or(0, |os| os as i32 - cs as i32);
                                 let src = (y as i32 + shift).clamp(0, CHUNK_DIM as i32 - 1) as usize;
-                                own_material.get(x, src, z)
+                                own_layer.material.get(x, src, z)
                             }
                         };
                         out.set(x, y, z, Voxel { shape: ShapeId::Cube, material, flags: 0 });
@@ -448,12 +483,10 @@ impl WorldEvaluator {
     }
 
     /// Evaluate one biome graph's (density, material) layer, or `None` if the
-    /// biome id has no graph or the graph has no `DensityOutput`.
-    fn eval_biome_layer(
-        &self,
-        ctx: EvalContext,
-        bid: u16,
-    ) -> EvalResult<Option<(Arc<ScalarField>, Arc<ChunkBuffer<MaterialId, 32>>)>> {
+    /// biome id has no graph or the graph has no `DensityOutput`. The evaluator
+    /// is kept alive on the returned [`LayerEval`] so the composite can
+    /// pointwise-sample density above the chunk window (chunk-Y seam depth).
+    fn eval_biome_layer(&self, ctx: EvalContext, bid: u16) -> EvalResult<Option<LayerEval<'_>>> {
         let Some(bg) = self.biomes.iter().find(|b| b.id == bid) else {
             return Ok(None);
         };
@@ -462,11 +495,17 @@ impl WorldEvaluator {
         };
         let mut eval = Evaluator::new(&bg.graph, ctx).with_biome_params(&bg.params);
         eval.evaluate()?;
-        Ok(eval
+        let fields = eval
             .cache()
             .get(density_node)
             .and_then(|out| out.as_biome_layer())
-            .map(|(d, m)| (d.clone(), m.clone())))
+            .map(|(d, m)| (d.clone(), m.clone()));
+        Ok(fields.map(|(density, material)| LayerEval {
+            density,
+            material,
+            density_src: input_source(&bg.graph, density_node, 0),
+            eval,
+        }))
     }
 
     /// Evaluate a per-column (World/Zone) graph into a cache, or return an empty
@@ -509,6 +548,29 @@ impl WorldEvaluator {
         if let Some(cycle) = self.libraries.detect_cycle() {
             log::error!("library graphs contain a reference cycle: {cycle:?}");
         }
+    }
+}
+
+/// One biome's evaluated (density, material) layer, kept alive with its
+/// evaluator so the composite can pointwise-sample density above the chunk
+/// window (chunk-Y seam depth continuation).
+struct LayerEval<'g> {
+    density: Arc<ScalarField>,
+    material: Arc<ChunkBuffer<MaterialId, 32>>,
+    /// Root of the density expression feeding the `DensityOutput` (pin 0),
+    /// for pull-based sampling outside the filled window.
+    density_src: Option<NodeId>,
+    eval: Evaluator<'g>,
+}
+
+impl LayerEval<'_> {
+    /// Pointwise density at chunk-local coords (which may lie above the filled
+    /// window, e.g. `y >= CHUNK_DIM`). `None` when the density chain has no
+    /// single source or contains nodes the pointwise sampler doesn't support -
+    /// callers treat that as "unknown, assume air" (the pre-continuation
+    /// behavior).
+    fn sample_density(&self, x: usize, y: usize, z: usize) -> Option<f32> {
+        self.density_src.and_then(|n| self.eval.sample_density(n, x, y, z).ok())
     }
 }
 
@@ -576,7 +638,7 @@ pub struct ChunkEvaluation {
 mod tests {
     use super::*;
     use glam::IVec3;
-    use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, NoiseParams, PinRef, ZoneOutputParams};
+    use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, LayerParams, NoiseParams, PinRef, YBandParams, ZoneOutputParams};
 
     /// A biome graph filling the chunk with uniform `density` + a constant
     /// material: Constant -> BuildTerrain <- ConstantMaterial -> TerrainOutput.
@@ -850,5 +912,73 @@ mod tests {
         // Deterministic.
         let b = we.evaluate_chunk(EvalContext::new(0, IVec3::ZERO)).unwrap();
         assert_eq!(b.fluid_levels.unwrap().get(5, 5), 30.0);
+    }
+    const T_GRASS: MaterialId = MaterialId(6);
+    const T_SOIL: MaterialId = MaterialId(3);
+    const T_STONE: MaterialId = MaterialId(1);
+
+    /// A biome solid below world `max_y` (YBand) with a grass/soil/stone cake,
+    /// for chunk-Y seam banding tests.
+    fn banded_terrain_graph(max_y: f32) -> Graph {
+        let mut g = Graph::new();
+        let band = g.add_node(NodeKind::YBand(YBandParams { min: -1024.0, max: max_y }));
+        let layer = g.add_node(NodeKind::Layer(LayerParams {
+            bands: vec![(T_GRASS, 1), (T_SOIL, 3)],
+            fill: T_STONE,
+        }));
+        let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
+        g.connect(PinRef::new(band, 0), PinRef::new(layer, 0)).unwrap(); // Layer reads the density
+        g.connect(PinRef::new(band, 0), PinRef::new(out, 0)).unwrap();
+        g.connect(PinRef::new(layer, 0), PinRef::new(out, 1)).unwrap();
+        g
+    }
+
+    fn material_at(eval: &ChunkEvaluation, x: usize, y: usize, z: usize) -> MaterialId {
+        eval.terrain.get(x, y, z).material
+    }
+
+    /// A column whose terrain continues into the chunk above must band its
+    /// window-top cells by depth from the TRUE surface (in the chunk above),
+    /// not paint surface material at the chunk-Y seam (the grass-strata bug).
+    #[test]
+    fn chunk_y_seam_bands_depth_from_true_surface() {
+        // Surface at world y=39: chunk (0,0,0)'s window (0..32) is entirely
+        // buried - its top cell is 8 deep, well past the 4-cell cake -> stone.
+        let we = WorldEvaluator::new(banded_terrain_graph(40.0));
+        let below = we.evaluate_chunk(EvalContext::new(7, IVec3::new(0, 0, 0))).unwrap();
+        assert_eq!(material_at(&below, 5, 31, 5), T_STONE, "buried window top is fill");
+        assert_eq!(material_at(&below, 5, 30, 5), T_STONE);
+
+        // The chunk above (window 32..64) holds the real surface at local y=7:
+        // grass there, soil for the 3 cells beneath, stone below - unchanged.
+        let above = we.evaluate_chunk(EvalContext::new(7, IVec3::new(0, 1, 0))).unwrap();
+        assert_eq!(material_at(&above, 5, 7, 5), T_GRASS, "true surface keeps grass");
+        assert_eq!(material_at(&above, 5, 6, 5), T_SOIL);
+        assert_eq!(material_at(&above, 5, 4, 5), T_SOIL);
+        assert_eq!(material_at(&above, 5, 3, 5), T_STONE);
+    }
+
+    /// A surface genuinely at the window top (air in the chunk above) keeps its
+    /// surface bands - the continuation only engages when terrain continues.
+    #[test]
+    fn exposed_window_top_keeps_surface_bands() {
+        // Surface at world y=31: the window-top cell IS the surface.
+        let we = WorldEvaluator::new(banded_terrain_graph(32.0));
+        let eval = we.evaluate_chunk(EvalContext::new(7, IVec3::new(0, 0, 0))).unwrap();
+        assert_eq!(material_at(&eval, 5, 31, 5), T_GRASS, "exposed top stays grass");
+        assert_eq!(material_at(&eval, 5, 30, 5), T_SOIL);
+        assert_eq!(material_at(&eval, 5, 27, 5), T_STONE);
+    }
+
+    /// A partially-buried window top: surface 2 cells into the chunk above ->
+    /// the window-top cell is 2 deep (soil), not stone and not grass.
+    #[test]
+    fn shallow_continuation_shifts_bands_partially() {
+        // Surface at world y=33 (2 cells above the window top at 31).
+        let we = WorldEvaluator::new(banded_terrain_graph(34.0));
+        let eval = we.evaluate_chunk(EvalContext::new(7, IVec3::new(0, 0, 0))).unwrap();
+        assert_eq!(material_at(&eval, 5, 31, 5), T_SOIL, "2 deep -> soil band");
+        assert_eq!(material_at(&eval, 5, 30, 5), T_SOIL, "3 deep -> last soil");
+        assert_eq!(material_at(&eval, 5, 29, 5), T_STONE, "4 deep -> fill");
     }
 }

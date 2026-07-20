@@ -1,6 +1,6 @@
 use bevy_ecs::prelude::*;
 use glam::IVec3;
-
+use voxel_core::Voxel;
 use crate::ecs::resources::*;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::ParamChangeKind;
@@ -20,6 +20,7 @@ use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
+use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::frustum::Frustum;
 use crate::shader_reload::ShaderWatcher;
 use crate::graph_reload::GraphWatcherRes;
@@ -33,8 +34,9 @@ use crate::{compute_render_dimensions, palette, FrameCounter};
 use crate::world::chunk::{LoadedChunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
 use crate::world::persistence::WorldPersistence;
-use crate::world::mutation::{MutationCommand, WorldMutation};
+use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 use crate::materials::MaterialRegistryRes;
+use crate::player::sim::WorldView;
 
 // ==========================================================================
 // Input stage
@@ -226,14 +228,33 @@ pub fn graph_hot_reload_system(
 // Simulation stage
 // ==========================================================================
 
+/// Vertical offset from the player's feet to the camera look-at point, framing
+/// the player's middle (AABB is 1.8 tall).
+const CAMERA_FOLLOW_OFFSET: glam::Vec3 = glam::Vec3::new(0.0, 1.0, 0.0);
+
 pub fn simulation_tick_system(
     mut sim: ResMut<SimulationManager>,
     ui: Res<UiState>,
     render_targets: Res<RenderTargets>,
     input: Res<InputState>,
+    world: Res<VoxelWorld>,
+    clock: Res<crate::player::systems::PlayerClock>,
+    players: Query<&crate::player::systems::Player>,
     mut commands: Commands,
 ) {
-    let frame = sim.tick(&ui.params, &render_targets, &input);
+    // Interpolated player feet position (Play mode), for both camera follow and cutaway.
+    let player_pos = if world.0.mode == EngineMode::Play {
+        players
+            .iter()
+            .next()
+            .map(|p| p.prev.position.lerp(p.curr.position, clock.alpha()))
+    } else {
+        None
+    };
+    let follow = player_pos.map(|p| p + CAMERA_FOLLOW_OFFSET);
+
+    let frame = sim.tick(&ui.params, &render_targets, &input, follow);
+
     commands.insert_resource(frame);
 }
 
@@ -286,9 +307,12 @@ pub fn fluid_tick_system(
 ) {
     let mut changed: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
 
-    // Debug disturbance (press G with the cursor over terrain): pour a short
-    // water column at the picked cell.
-    if input.just_pressed(crate::input::GameAction::PourWater) {
+    // Debug disturbance (Authoring dev tool): press G with the cursor over terrain
+    // to pour a short water column. Inert in Play mode (fluid interaction there is
+    // a later substep) rather than a mode-rejected panic.
+    if world.0.mode == EngineMode::Authoring
+        && input.just_pressed(crate::input::GameAction::PourWater)
+    {
         if let Some(anchor) = pick.anchor {
             let out = world
                 .0
@@ -361,15 +385,15 @@ pub fn fluid_tick_system(
         }
     }
 
-    // Any chunk whose fluid changed must persist its field. Route the marking
-    // through the mutation API so all persistence bookkeeping lives in one place.
+    // Any chunk whose fluid changed must persist its field. The fluid sim runs in
+    // any mode, so this bookkeeping is a System mutation, not an actor edit.
     if !changed.is_empty() {
         world
             .0
-            .execute(MutationCommand::authoring(WorldMutation::MarkFluidDirty {
+            .execute(MutationCommand::system(WorldMutation::MarkFluidDirty {
                 chunks: changed.iter().copied().collect(),
             }))
-            .expect("authoring fluid mark in authoring mode");
+            .expect("system fluid mark accepted in any mode");
     }
     for pos in changed {
         water_pass.add_chunk_water(pos, &world.0, &ctx.device);
@@ -423,6 +447,159 @@ fn fluid_edge_mirrors(
     if pos.z == d - 1 {
         out.push((ChunkCoord::new(coord.x, coord.y, coord.z + 1), LocalPos::new_unchecked(pos.x, pos.y, 0)));
     }
+}
+
+/// Rebuild the player avatar mesh each frame at the interpolated render position
+/// (same interpolation the camera follows), with a drop shadow on the first solid
+/// ground below. Hidden outside Play mode / when no player exists.
+pub fn player_render_prep_system(
+    ctx: Res<RenderContext>,
+    world: Res<VoxelWorld>,
+    clock: Res<crate::player::systems::PlayerClock>,
+    sim: Res<SimulationManager>,
+    render_targets: Res<RenderTargets>,
+    players: Query<&crate::player::systems::Player>,
+    mut player_pass: ResMut<PlayerPass>,
+) {
+    let player = players.iter().next();
+    if world.0.mode != EngineMode::Play || player.is_none() {
+        player_pass.visible = false;
+        return;
+    }
+    let p = player.unwrap();
+    let feet = p.prev.position.lerp(p.curr.position, clock.alpha());
+
+    // Snap the RENDERED position to the world texel lattice (sim untouched).
+    // The lattice anchor is the world origin - snap_camera pins integer world
+    // offsets from the origin to texel centers - so quantizing the player's
+    // view-space offset RELATIVE to the origin's puts it at the same sub-texel
+    // phase every frame, still or moving. (Quantizing absolute view coords is
+    // a no-op under a player-pinned camera and scrambles with the camera frac.)
+    let view = sim.camera.view_matrix();
+    let k = render_targets.k as f32;
+    let o = view.transform_point3(glam::Vec3::ZERO);
+    let mut v = view.transform_point3(feet);
+    v.x = o.x + ((v.x - o.x) * k).round() / k;
+    v.y = o.y + ((v.y - o.y) * k).round() / k;
+    let feet = view.inverse().transform_point3(v);
+
+    let ground_y = player_ground_below(&world.0, feet);
+    let (verts, indices, body) = crate::rendering::player_pass::build_player_mesh(feet, p.curr.facing, ground_y);
+    player_pass.update(&ctx.queue, &verts, &indices, body);
+    player_pass.visible = true;
+}
+
+/// Top surface Y of the first solid voxel at or below the player's feet column
+/// (scans down a bounded distance; finds the floor of a hole the player is over).
+fn player_ground_below(world: &crate::world::World, feet: glam::Vec3) -> Option<f32> {
+    use crate::player::sim::WorldView;
+    let vx = feet.x.floor() as i32;
+    let vz = feet.z.floor() as i32;
+    let start = feet.y.floor() as i32;
+    for y in (start - 64..=start).rev() {
+        if let Some((_, iy1)) = world.solid_interval(glam::IVec3::new(vx, y, vz)) {
+            return Some(y as f32 + iy1);
+        }
+    }
+    None
+}
+
+/// Visibility flood each time the player crosses into a new head cell. Produces
+/// undergroundness `u` and the `visible` air set the mask marks; the shader's
+/// air-side face rule does the rest (note v2 §3 — no cut set, view-independent, so
+/// no rotation recompute). A cheap overhead pre-filter skips the flood outdoors.
+pub fn room_detection_system(
+    world: Res<VoxelWorld>,
+    players: Query<&crate::player::systems::Player>,
+    mut room: ResMut<crate::world::room::RoomState>,
+) {
+    use crate::player::sim::WorldView;
+    use crate::world::room::{flood_visibility, overhead_coverage};
+
+    const BUDGET: u32 = 22;             // through-air flood budget (note §4.1)
+    const OPEN_SKY_COVERAGE: f32 = 0.3; // below this overhead, skip the flood
+    const U_THRESHOLD: f32 = 0.6;       // u above this = enclosed (mask on)
+    const CLARITY_RADIUS: u32 = 24;     // MUST match CLARITY_RADIUS in terrain.wgsl
+
+    let player = players.iter().next();
+    if world.0.mode != EngineMode::Play || player.is_none() {
+        if room.enclosed {
+            log::info!("player left enclosed space (play/mode ended)");
+        }
+        room.enclosed = false;
+        room.undergroundness = 0.0;
+        room.last_origin = None;
+        return;
+    }
+
+    let feet = player.unwrap().curr.position;
+    let head = glam::IVec3::new(
+        feet.x.floor() as i32,
+        (feet.y + 1.6).floor() as i32,
+        feet.z.floor() as i32,
+    );
+
+    // Throttle: only recompute when the player enters a new head cell.
+    if room.last_origin == Some(head) {
+        return;
+    }
+    room.last_origin = Some(head);
+
+    let is_solid = |c: glam::IVec3| world.0.solid_interval(c).is_some();
+
+    // Cheap pre-filter: little overhead => outdoors => no flood.
+    let coverage = overhead_coverage(head, 1, 16, &is_solid);
+    if coverage < OPEN_SKY_COVERAGE {
+        if room.enclosed {
+            log::info!("player left enclosed space (open sky)");
+        }
+        room.enclosed = false;
+        room.undergroundness = 0.0;
+        return;
+    }
+
+    let top = world.0.max_chunk_y * crate::world::chunk::CHUNK_SIZE as i32;
+    let is_air = |c: glam::IVec3| world.0.solid_interval(c) != Some((0.0, 1.0));
+    let sky_lit = |c: glam::IVec3| {
+        let mut y = c.y + 1;
+        while y < top {
+            if is_solid(glam::IVec3::new(c.x, y, c.z)) {
+                return false;
+            }
+            y += 1;
+        }
+        true
+    };
+
+    let vol = flood_visibility(head, BUDGET, is_air, sky_lit);
+    let u = vol.undergroundness;
+    let cell_count = vol.visible.len();
+
+    // Size the volume circle from the *lit* region only (cost <= CLARITY_RADIUS), so it
+    // matches what actually renders in color - not the full BUDGET-22 flood.
+    let mut vr = 0.0f32;
+    for (&c, &cost) in vol.visible.iter() {
+        if cost <= CLARITY_RADIUS {
+            vr = vr.max((c - head).as_vec3().length());
+        }
+    }
+    for &c in vol.visible.keys() {
+        vr = vr.max((c - head).as_vec3().length());
+    }
+
+    room.enclosed = u >= U_THRESHOLD;
+    room.undergroundness = u;
+    room.volume_radius = vr;
+    room.visible = vol.visible;
+    room.dirty = true;
+
+    log::info!(
+        "visibility: u {:.2}, {} cells, overhead {:.2}{}",
+        u,
+        cell_count,
+        coverage,
+        if room.enclosed { ", enclosed" } else { "" }
+    );
 }
 
 // ==========================================================================
@@ -511,6 +688,99 @@ pub fn meshing_tick_system(
     }
 }
 
+/// Cross-chunk seam finalization (Substep 2b): once a chunk's six face neighbors
+/// are resident, derive the boundary slab demotions the isolated generation pass
+/// could not see (surface steps that straddle a chunk border, including chunk-Y
+/// seams). One-shot per chunk (`seam_finalized`), bounded per frame, and runs
+/// before meshing so the first mesh already carries the seam slabs. Mutates
+/// generated storage directly (this is generation finalization, not an actor
+/// edit - see world::seam).
+pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
+    const MAX_PER_FRAME: usize = 16;
+
+    let mut candidates: Vec<IVec3> = Vec::new();
+    for (coord, chunk) in world.0.chunks.iter() {
+        if chunk.seam_finalized {
+            continue;
+        }
+        let pos: IVec3 = (*coord).into();
+        if world.0.has_face_neighbors(pos) {
+            candidates.push(pos);
+            if candidates.len() >= MAX_PER_FRAME {
+                break;
+            }
+        }
+    }
+
+    for pos in candidates {
+        let nb = crate::world::seam::NeighborStorages::capture(&world.0, pos);
+
+        let distances = world
+            .0
+            .get_chunk(pos)
+            .and_then(|c| c.smoothing_distances.clone());
+        let demotions = match &distances {
+            Some(d) => crate::world::seam::seam_demotions(&nb, d.as_ref()),
+            None => Vec::new(),
+        };
+
+        if let Some(chunk) = world.0.get_chunk_mut(pos) {
+            // Never let a worldgen-derived demotion overwrite a player-placed voxel:
+            // seam demotions are recomputed from current (already edit-overlaid)
+            // storage, so without this guard a border edit could be reverted.
+            let applied: Vec<(usize, Voxel)> = demotions
+                .iter()
+                .filter(|(index, _)| {
+                    !chunk.data.overrides.as_ref().is_some_and(|ovr| {
+                        ovr.voxel_diffs.contains_key(&voxel_core::LocalPos::from_index(*index))
+                    })
+                })
+                .copied()
+                .collect();
+            if !applied.is_empty() {
+                let mut storage = (*chunk.data.voxels).clone();
+                for (index, voxel) in &applied {
+                    storage.set_voxel(*index, *voxel);
+                }
+                chunk.data.voxels = std::sync::Arc::new(storage);
+                chunk.mark_mesh_dirty();
+
+                // Persist the decision through the same diff mechanism player edits
+                // use, so `seam_finalized` (below) can be persisted without the
+                // demotion reverting to a sharp cube on the next load. These are
+                // worldgen-finalization entries, not player edits, but the override
+                // guard above treats "present in voxel_diffs" as "already decided"
+                // either way, so sharing the bucket is safe.
+                let ovr = chunk
+                    .data
+                    .overrides
+                    .get_or_insert_with(crate::world::overrides::ChunkOverrides::default);
+                for (index, voxel) in &applied {
+                    ovr.set_voxel(*index, *voxel);
+                }
+                chunk.persist_dirty = true;
+            }
+            chunk.seam_finalized = true;
+        }
+
+        // Boundary demotions change face culling for the six neighbors: re-mesh them.
+        if !demotions.is_empty() {
+            for offset in [
+                IVec3::new(1, 0, 0),
+                IVec3::new(-1, 0, 0),
+                IVec3::new(0, 1, 0),
+                IVec3::new(0, -1, 0),
+                IVec3::new(0, 0, 1),
+                IVec3::new(0, 0, -1),
+            ] {
+                if let Some(n) = world.0.get_chunk_mut(pos + offset) {
+                    n.mark_mesh_dirty();
+                }
+            }
+        }
+    }
+}
+
 // ==========================================================================
 // UniformWrite stage
 // ==========================================================================
@@ -544,6 +814,81 @@ pub fn write_uniforms_system(
         surface.surface_config.width,
         surface.surface_config.height,
     );
+}
+
+/// Rebuild + upload the 64^3 visibility mask when the flood changed, and drive the
+/// mask uniforms every frame (FrameState is rebuilt per frame). The mask marks the
+/// visible set dilated by one cell - the +1 pulls in the solid cave-wall shell so
+/// walls render; everything else stays 0 (capped), which is what hides the surface
+/// world (R3). Runs in UniformWrite before `write_uniforms_system`.
+pub fn visibility_mask_upload_system(
+    ctx: Res<RenderContext>,
+    mut room: ResMut<crate::world::room::RoomState>,
+    mask: Res<VisibilityMask>,
+    mut frame: ResMut<FrameState>,
+    world: Res<VoxelWorld>,
+) {
+    const N: i32 = 64;
+    const HALF: i32 = 32;
+
+    // Drive the uniform every frame from the current window center.
+    let Some(head) = room.last_origin else {
+        frame.mask_enabled = 0;
+        return;
+    };
+    let origin = head - IVec3::splat(HALF); // min corner of the window (world cells)
+    frame.mask_origin = [origin.x as f32, origin.y as f32, origin.z as f32];
+    frame.mask_enabled = if room.enclosed { 1 } else { 0 };
+    frame.volume_radius = room.volume_radius;
+
+    // Re-upload texture contents only when the flood actually changed.
+    if !room.dirty {
+        return;
+    }
+    room.dirty = false;
+
+    let mut bytes = vec![0u8; (N * N * N) as usize];
+    for (&cell, &cost) in room.visible.iter() {
+        let l = cell - origin;
+        if l.x >= 0 && l.x < N && l.y >= 0 && l.y < N && l.z >= 0 && l.z < N {
+            // Low 7 bits = flood cost + 1 (0 = unknown). High bit flags a slab cell:
+            // visible for rendering, but half-solid - the shader's occluder march must
+            // not count it as free space behind a face, or slab floors/slopes cull the
+            // faces sitting in front of them. (Visible cells are empty or slab; a slab
+            // has a solid_interval, empty does not.)
+            let slab_bit: u8 = if world.0.solid_interval(cell).is_some() { 0x80 } else { 0 };
+            bytes[(l.x + l.y * N + l.z * N * N) as usize] = ((cost + 1).min(0x7F) as u8) | slab_bit;
+        }
+    }
+
+    ctx.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &mask.0,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(N as u32),
+            rows_per_image: Some(N as u32),
+        },
+        wgpu::Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: N as u32 },
+    );
+}
+
+/// Re-upload the material color table each frame so live material-color edits in
+/// the UI recolor terrain immediately (the color is composed in the shader from
+/// this table, not baked into the mesh). The table is `MATERIAL_COLOR_SLOTS`
+/// `vec4`s (~4 KB) - cheap enough to write unconditionally.
+pub fn material_color_upload_system(
+    ctx: Res<RenderContext>,
+    ui: Res<UiState>,
+    buffer: Res<MaterialColorBuffer>,
+) {
+    let table = crate::rendering::uniforms::material_color_table(&ui.params.materials);
+    ctx.queue.write_buffer(&buffer.0, 0, bytemuck::cast_slice(&table));
 }
 
 pub fn compute_stats_system(
@@ -588,7 +933,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     let ctx = ecs.resource::<RenderContext>().clone();
 
     // --- Render target resize check ---
-    let (rw, rh, eff_scale) = {
+    let dims = {
         let surface = ecs.resource::<SurfaceState>();
         let sim = ecs.resource::<SimulationManager>();
         let ui = ecs.resource::<UiState>();
@@ -600,19 +945,19 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         )
     };
 
-    if ecs.resource::<RenderTargets>().needs_recreate(rw, rh) {
-        let new_rt = RenderTargets::new(&ctx, rw, rh, eff_scale);
+    if ecs.resource::<RenderTargets>().needs_recreate(&dims) {
+        let new_rt = RenderTargets::new(&ctx, &dims);
 
         ecs.resource_mut::<OutlinePass>().rebuild_bind_group(
             &ctx,
             &new_rt.scene_view,
-            &new_rt.depth_view,
+            &new_rt.depth_sample_view,
             &new_rt.normal_view,
         );
         ecs.resource_mut::<PostProcessPass>().rebuild_bind_group(
             &ctx,
             &new_rt.processed_view,
-            &new_rt.depth_view,
+            &new_rt.depth_sample_view,
         );
         ecs.resource_mut::<PalettePass>().rebuild_bind_group(
             &ctx,
@@ -625,6 +970,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
         *ecs.resource_mut::<RenderTargets>() = new_rt;
     }
+    // Zoom moves view/k/s continuously without reallocating - keep fields fresh.
+    ecs.resource_mut::<RenderTargets>().update_view(&dims);
 
     // --- Acquire swapchain ---
     let surface_result = ecs.resource::<SurfaceState>().surface.get_current_texture();
@@ -672,7 +1019,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let frame = ecs.resource::<FrameState>();
         let cs_enabled = ecs.resource::<UiState>().params.cross_section.enabled;
         (
-            cs_enabled && frame.clip_enabled != 0,
+            cs_enabled && frame.clip_enabled == 1,
             frame.cos_r,
             frame.sin_r,
             frame.clip_max,
@@ -748,8 +1095,16 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             shadow_depth_view: &shadow_depth_view.0,
             chunks: &shadow_chunks,
         };
+        
+        let player_pass = ecs.resource::<PlayerPass>();
 
-        let sky = ui.params.render_pipeline.sky_color;
+        let room_enclosed = ecs.resource::<crate::world::room::RoomState>().enclosed;
+
+        let sky = if room_enclosed {
+            [0.02, 0.02, 0.028] // dark void-gray while enclosed; the wireframe sits just above this
+        } else {
+            ui.params.render_pipeline.sky_color
+        };
         let scene_node = MainScenePassNode {
             sky_color: wgpu::Color {
                 r: sky[0] as f64,
@@ -779,8 +1134,9 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             water_pipeline: &pipeline_registry.water_pipeline,
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
-            hide_water: ui.params.debug.hide_water,
-            hide_foliage: ui.params.debug.hide_foliage,
+            hide_water: ui.params.debug.hide_water || room_enclosed,
+            hide_foliage: ui.params.debug.hide_foliage || room_enclosed,
+            player_pass: &player_pass,
         };
 
         let mut graph = RenderGraph::new();
@@ -819,6 +1175,14 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     let registry = ecs.resource::<MaterialRegistryRes>().0.clone();
     ecs.resource_scope::<UiState, _>(|ecs, mut ui_state| {
         ecs.resource_scope::<ui::field_probe::FieldProbe, _>(|ecs, mut probe| {
+            let mode = ecs.resource::<VoxelWorld>().0.mode;
+            let material_idx = ecs.resource::<crate::interaction::PlayerToolState>().material_index;
+            let (material_name, material_color): (String, [f32; 3]) =
+                match ui_state.params.materials.entries.get(material_idx) {
+                    Some(e) => (e.name.clone(), e.color),
+                    None => ("-".to_string(), [0.6, 0.6, 0.6]),
+                };
+
             let mut egui = ecs.non_send_resource_mut::<ui::EguiRenderer>();
             egui.draw(
                 &mut *ui_state,
@@ -828,6 +1192,9 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
                 &mut encoder,
                 &surface_view,
                 &window_arc,
+                mode,
+                &material_name,
+                material_color,
             );
             // Auto-regen: hand a dirty editor edit to the regen path. Coalesced by
             // WorldRegenCoordinator - only the latest pending graph is applied, and

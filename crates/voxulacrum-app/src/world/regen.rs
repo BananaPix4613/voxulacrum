@@ -13,7 +13,7 @@ use crate::world::{World, WorldManager};
 use crate::world::persistence::WorldPersistence;
 use crate::world::streaming::ChunkStreamingManager;
 use crate::world::tags::{BiomeId, ChunkTags, ZoneId};
-use crate::world::mutation::{MutationCommand, WorldMutation};
+use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 
 #[derive(Resource)]
 pub struct WorldRegenCoordinator {
@@ -43,73 +43,77 @@ impl WorldRegenCoordinator {
         // Feed regeneration status to UI
         ui_state.regenerating = self.manager.is_regenerating();
         ui_state.regen_progress = self.manager.progress();
-        
-        // Poll for completed background regeneration
-        if let Some((new_chunks, regen_params, regen_generator)) = self.manager.poll_regeneration() {
-            // Swap the completed regeneration into the world through the mutation
-            // API: merge regenerated chunks (retaining untouched ones; a full regen
-            // overwrites all), adopt the shared generator, and mark every chunk
-            // mesh-dirty. Authoring-mode authoritative regen (§9).
-            world
-                .execute(MutationCommand::authoring(WorldMutation::SwapRegeneratedChunks {
-                    chunks: new_chunks,
-                    generator: regen_generator.clone(),
-                }))
-                .expect("authoring regen swap in authoring mode");
 
-            // Reset the meshing pipeline, then resubmit every (now-dirty) chunk.
-            meshing.pipeline.reset_for_new_world();
-            meshing.pipeline.submit_all_dirty(world);
+        // Regen is authoritative Authoring-mode work (§9). If the user is in Play
+        // mode, leave the completed result pending until they return to Authoring
+        // rather than swapping (and mode-rejecting) mid-Play.
+        if world.mode == EngineMode::Authoring {
+            if let Some((new_chunks, regen_params, regen_generator)) = self.manager.poll_regeneration() {
+                // Swap the completed regeneration into the world through the mutation
+                // API: merge regenerated chunks (retaining untouched ones; a full regen
+                // overwrites all), adopt the shared generator, and mark every chunk
+                // mesh-dirty. Authoring-mode authoritative regen (§9).
+                world
+                    .execute(MutationCommand::authoring(WorldMutation::SwapRegeneratedChunks {
+                        chunks: new_chunks,
+                        generator: regen_generator.clone(),
+                    }))
+                    .expect("authoring regen swap in authoring mode");
 
-            *detail_paint = DetailPaintPass::new(ctx, world);
-            let prefabs = scatter.prefabs().clone();
-            *scatter = ScatterPass::new(ctx, world, &prefabs);
-            log::info!("Detail paint + scatter passes rebuilt after regeneration");
+                // Reset the meshing pipeline, then resubmit every (now-dirty) chunk.
+                meshing.pipeline.reset_for_new_world();
+                meshing.pipeline.submit_all_dirty(world);
 
-            // Water is a Phase 1 no-op; just clear any retained meshes.
-            water_pass.clear_all();
+                *detail_paint = DetailPaintPass::new(ctx, world);
+                let prefabs = scatter.prefabs().clone();
+                *scatter = ScatterPass::new(ctx, world, &prefabs);
+                log::info!("Detail paint + scatter passes rebuilt after regeneration");
 
-            // Clear saved chunk edits (stale under new terrain params)
-            match persistence.clear_all_chunks() {
-                Ok(n) if n > 0 => log::info!("Cleared {n} saved chunk edits for new terrain params"),
-                Err(e) => log::warn!("Failed to clear saved chunks: {e}"),
-                _ => {}
-            }
-            
-            // Clear stale caches and save new world
-            let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
-            meshing.pipeline.clear_cache();
-            let _ = meshing::cache::clear_world_cache(&cache_dir);
+                // Water is a Phase 1 no-op; just clear any retained meshes.
+                water_pass.clear_all();
 
-            // let world_key = meshing::cache::compute_world_cache_key(&regen_params);
-            // let world_cache_path = meshing::cache::world_cache_path(&cache_dir, world_key);
-            // if let Err(e) = meshing::cache::save_world_cache(
-            //     &world_cache_path, world_key, world,
-            // ) {
-            //     log::warn!("Failed to save regenerated world cache: {}", e);
-            // } else {
-            //     log::info!("Regenerated world saved to cache");
-            // }
+                // Clear saved chunk edits (stale under new terrain params)
+                match persistence.clear_all_chunks() {
+                    Ok(n) if n > 0 => log::info!("Cleared {n} saved chunk edits for new terrain params"),
+                    Err(e) => log::warn!("Failed to clear saved chunks: {e}"),
+                    _ => {}
+                }
 
-            // Rebuild streaming workers so new chunks use the new generator
-            streaming.rebuild_for_new_params(
-                regen_generator.clone(),
-                persistence.db_path.clone(),
-                persistence.dictionary_bytes().map(|b| std::sync::Arc::new(b)),
-            );
-            log::info!("Streaming workers rebuilt for new generator");
+                // Clear stale caches and save new world
+                let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
+                meshing.pipeline.clear_cache();
+                let _ = meshing::cache::clear_world_cache(&cache_dir);
 
-            ui_state.regenerating = false;
-            
-            // If terrain params changed during regen, restart
-            if regen_params != ui_state.params.terrain_gen {
-                log::info!("Terrain params changed during regeneration, restarting");
-                match crate::world::world_generator::load_default(&ui_state.params.terrain_gen) {
-                    Ok(gen) => {
-                        let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
-                        self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
+                // let world_key = meshing::cache::compute_world_cache_key(&regen_params);
+                // let world_cache_path = meshing::cache::world_cache_path(&cache_dir, world_key);
+                // if let Err(e) = meshing::cache::save_world_cache(
+                //     &world_cache_path, world_key, world,
+                // ) {
+                //     log::warn!("Failed to save regenerated world cache: {}", e);
+                // } else {
+                //     log::info!("Regenerated world saved to cache");
+                // }
+
+                // Rebuild streaming workers so new chunks use the new generator
+                streaming.rebuild_for_new_params(
+                    regen_generator.clone(),
+                    persistence.db_path.clone(),
+                    persistence.dictionary_bytes().map(|b| std::sync::Arc::new(b)),
+                );
+                log::info!("Streaming workers rebuilt for new generator");
+
+                ui_state.regenerating = false;
+
+                // If terrain params changed during regen, restart
+                if regen_params != ui_state.params.terrain_gen {
+                    log::info!("Terrain params changed during regeneration, restarting");
+                    match crate::world::world_generator::load_default(&ui_state.params.terrain_gen) {
+                        Ok(gen) => {
+                            let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
+                            self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
+                        }
+                        Err(e) => log::error!("Regen restart: failed to load generator: {e}"),
                     }
-                    Err(e) => log::error!("Regen restart: failed to load generator: {e}"),
                 }
             }
         }

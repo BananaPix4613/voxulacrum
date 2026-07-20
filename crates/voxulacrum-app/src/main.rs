@@ -17,11 +17,13 @@ mod materials;
 mod prefabs;
 mod libraries;
 mod core_budget;
+mod player;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use bevy_ecs::event::Events;
+use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -58,8 +60,9 @@ use ecs::resources::*;
 use ecs::events::*;
 use ecs::schedule::build_frame_schedule;
 use input::{InputMap, InputState, PointerButton, PointerState, RawInputBuffer, RawInputEvent};
+use crate::world::room::RoomState;
 
-const SHADOW_MAP_SIZE: u32 = 4096;
+pub const SHADOW_MAP_SIZE: u32 = 8192;
 
 // ---------------------------------------------------------------------------
 // FrameCounter
@@ -95,17 +98,44 @@ impl FrameCounter {
 // compute_render_dimensions
 // ---------------------------------------------------------------------------
 
+/// The pixel-art lattice for one frame. `k` fixes the world->texel mapping
+/// (integer texels per voxel - the image is always painted at this density);
+/// `s` is how big one texel appears on screen (continuous, non-integer fine).
+/// Zoom only ever changes `s` (and, in octaves, `k`) - never the lattice phase.
+pub struct RenderDims {
+    /// Texels per voxel — integer, stepped in octaves.
+    pub k: u32,
+    /// Native pixels per texel — continuous screen magnification.
+    pub s: f32,
+    /// Visible content in texels (= surface / s, fractional).
+    pub view_w: f32,
+    pub view_h: f32,
+    /// Texture allocation in texels (bucketed so zoom doesn't reallocate).
+    pub alloc_w: u32,
+    pub alloc_h: u32,
+}
+
 pub fn compute_render_dimensions(
     surface_w: u32,
     surface_h: u32,
     zoom: f32,
-    world_pixel_density: f32,
-) -> (u32, u32, f32) {
-    let base_scale = (surface_h as f32 / (zoom * 2.0)) / world_pixel_density;
-    let scale = base_scale.max(1.0).round();
-    let rw = ((surface_w as f32 / scale).ceil() as u32).max(1);
-    let rh = ((surface_h as f32 / scale).ceil() as u32).max(1);
-    (rw, rh, scale)
+    world_pixel_density: f32
+) -> RenderDims {
+    let base_k = world_pixel_density.round().max(1.0) as u32;
+    let mut k = base_k;
+    let mut s = surface_h as f32 / (2.0 * zoom * k as f32);
+    // Octave ladder: never minify (s < 1 would downsample the texel image).
+    while s < 1.0 && k > 1 {
+        k /= 2;
+        s *= 2.0;
+    }
+    let view_w = surface_w as f32 / s;
+    let view_h = surface_h as f32 / s;
+    // Bucket allocation to 64-texel steps (+2 guard) so continuous zoom only
+    // reallocates at bucket boundaries, not every tick.
+    let alloc_w = (view_w.ceil() as u32 + 2).div_ceil(64) * 64;
+    let alloc_h = (view_h.ceil() as u32 + 2).div_ceil(64) * 64;
+    RenderDims { k, s, view_w, view_h, alloc_w, alloc_h }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,13 +212,13 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     camera.resize(surface_state.surface_config.width, surface_state.surface_config.height);
 
     // Render targets
-    let (rw, rh, eff_scale) = compute_render_dimensions(
+    let dims = compute_render_dimensions(
         surface_state.surface_config.width,
         surface_state.surface_config.height,
         camera.zoom,
         initial_params.render_pipeline.world_pixel_density,
     );
-    let render_targets = RenderTargets::new(&ctx, rw, rh, eff_scale);
+    let render_targets = RenderTargets::new(&ctx, &dims);
 
     // Shadow map
     let shadow_depth_texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
@@ -225,8 +255,32 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    
+    // Material color table (group 0, binding 5). Populated from the initial
+    // material params; re-uploaded each frame by `material_color_upload_system`.
+    let material_color_data = uniforms::material_color_table(&initial_params.materials);
+    let material_color_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("material_color_buffer"),
+        contents: bytemuck::cast_slice(&material_color_data),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
 
     let cloud_shadow = CloudShadowState::new(&ctx, &initial_params.cloud);
+
+    // Visibility mask (group 0, binding 6): a 64^3 window of one-byte cell states
+    // centered on the player, rewritten on movement by visibility_mask_upload_system.
+    let visibility_mask_texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("visibility_mask"),
+        size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 64 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::R8Uint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let visibility_mask_view =
+        visibility_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     let uniform_bind_group = uniforms::create_bind_group(
         &ctx.device,
@@ -236,6 +290,8 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         &cloud_shadow.sampler,
         &shadow_depth_view,
         &shadow_sampler,
+        &material_color_buffer,
+        &visibility_mask_view,
     );
 
     let simulation = SimulationManager::new(camera, cloud_shadow);
@@ -293,6 +349,14 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         &pipeline_resources.global_bind_group_layout,
         &cap_source,
     );
+    
+    let player_source = std::fs::read_to_string(shader_dir.join("player.wgsl"))
+        .expect("Failed to read player.wgsl");
+    let player_pass = rendering::player_pass::PlayerPass::new(
+        &ctx,
+        &pipeline_resources.global_bind_group_layout,
+        &player_source,
+    );
 
     // World
     let gen_start = std::time::Instant::now();
@@ -341,7 +405,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let post_process = PostProcessPass::new(
         &ctx,
         &render_targets.processed_view,
-        &render_targets.depth_view,
+        &render_targets.depth_sample_view,
         &pp_source,
     );
 
@@ -351,7 +415,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let outline_pass = OutlinePass::new(
         &ctx,
         &render_targets.scene_view,
-        &render_targets.depth_view,
+        &render_targets.depth_sample_view,
         &render_targets.normal_view,
         &outline_source,
     );
@@ -387,8 +451,6 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Meshing
     let mut meshing_pipeline = MeshingPipeline::new(
         gen_pool.clone(),
-        &ui_state.params.materials,
-        &ui_state.params.meshing,
         &ui_state.params.mesh_cache,
     );
     meshing_pipeline.submit_all_dirty(&world);
@@ -405,10 +467,14 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(ShadowUniformBuffer(shadow_uniform_buffer));
     ecs.insert_resource(ShadowBindGroup(shadow_bind_group));
     ecs.insert_resource(ShadowDepthView(shadow_depth_view));
+    ecs.insert_resource(MaterialColorBuffer(material_color_buffer));
+    ecs.insert_resource(VisibilityMask(visibility_mask_texture));
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
     ecs.insert_resource(FluidClock::new());
+    ecs.insert_resource(player::systems::PlayerClock::new());
+    ecs.insert_resource(RoomState::default());
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
     ecs.insert_resource(prefabs::PrefabRegistryRes(prefab_registry));
     ecs.insert_resource(libraries::LibrariesRes(libraries));
@@ -429,6 +495,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(outline_pass);
     ecs.insert_resource(palette_pass);
     ecs.insert_resource(cap_pass);
+    ecs.insert_resource(player_pass);
     ecs.insert_resource(shader_watcher);
     ecs.insert_resource(graph_watcher);
     ecs.insert_resource(meshing);
@@ -455,10 +522,13 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(ui::field_probe::FieldProbe::new(gen_pool.clone()));
     ecs.insert_resource(FrameCounter::new());
     ecs.insert_resource(RawInputBuffer::default());
-    ecs.insert_resource(InputMap::default());
+    let input_bindings_path = paths::asset_root().join("assets").join("input.ron");
+    ecs.insert_resource(InputMap::load_or_default(&input_bindings_path));
     ecs.insert_resource(InputState::new());
     ecs.insert_resource(PointerState::default());
     ecs.insert_resource(interaction::PickState::default());
+    ecs.insert_resource(interaction::TargetState::default());
+    ecs.insert_resource(interaction::PlayerToolState::default());
 
     // EguiRenderer — NonSend because egui_winit::State may be !Send
     ecs.insert_non_send_resource(egui_renderer);
@@ -479,6 +549,10 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         clip_min: [-10000.0; 3],
         clip_max: [10000.0; 3],
         clip_enabled: 0,
+        mask_origin: [0.0; 3],
+        mask_enabled: 0,
+        volume_radius: 0.0,
+        view_dir: [0.0, -1.0, 0.0],
         debug_mode: 0,
         sky_color: [0.5, 0.7, 1.0],
         warm_tint_color: [1.0; 3],
@@ -509,6 +583,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 struct App {
     ecs_world: Option<bevy_ecs::world::World>,
     schedule: Option<Schedule>,
+    exiting: bool,
 }
 
 impl App {
@@ -516,6 +591,7 @@ impl App {
         Self {
             ecs_world: None,
             schedule: None,
+            exiting: false,
         }
     }
 }
@@ -550,6 +626,9 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.exiting {
+            return; // no more frames once exit is requested - the surface is tearing down
+        }
         let Some(ecs) = &mut self.ecs_world else { return; };
 
         match event {
@@ -567,6 +646,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                self.exiting = true;
                 event_loop.exit();
             }
 
@@ -586,25 +666,25 @@ impl ApplicationHandler for App {
                     .params
                     .render_pipeline
                     .world_pixel_density;
-                let (rw, rh, eff_scale) = compute_render_dimensions(
+                let dims = compute_render_dimensions(
                     new_size.width,
                     new_size.height,
                     zoom,
                     density,
                 );
 
-                let new_rt = RenderTargets::new(&ctx, rw, rh, eff_scale);
+                let new_rt = RenderTargets::new(&ctx, &dims);
 
                 ecs.resource_mut::<OutlinePass>().rebuild_bind_group(
                     &ctx,
                     &new_rt.scene_view,
-                    &new_rt.depth_view,
+                    &new_rt.depth_sample_view,
                     &new_rt.normal_view,
                 );
                 ecs.resource_mut::<PostProcessPass>().rebuild_bind_group(
                     &ctx,
                     &new_rt.processed_view,
-                    &new_rt.depth_view,
+                    &new_rt.depth_sample_view,
                 );
                 ecs.resource_mut::<PalettePass>()
                     .rebuild_bind_group(&ctx, &new_rt.scene_view);

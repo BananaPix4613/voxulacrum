@@ -43,7 +43,10 @@ pub fn build_frame_schedule() -> Schedule {
     ));
     // Simulation
     schedule.add_systems((
-        systems::simulation_tick_system.in_set(FrameStage::Simulation),
+        systems::simulation_tick_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::player::systems::player_sim_system)
+            .after(systems::room_detection_system),
         systems::param_change_detection_system.in_set(FrameStage::Simulation),
         systems::palette_load_system.in_set(FrameStage::Simulation),
         systems::fluid_tick_system
@@ -57,10 +60,34 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::picking_system),
     ));
+    // Player sim (Substep 4)
+    schedule.add_systems((
+        crate::player::systems::player_mode_toggle_system.in_set(FrameStage::Input),
+        crate::player::systems::player_input_gather_system.in_set(FrameStage::Simulation),
+        crate::player::systems::player_sim_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::player::systems::player_input_gather_system),
+        systems::room_detection_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::player::systems::player_sim_system),
+        crate::interaction::player_targeting_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::player::systems::player_sim_system),
+        crate::interaction::player_tool_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::interaction::player_targeting_system),
+        crate::interaction::player_action_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::interaction::player_tool_system),
+    ));
     // Streaming + Meshing
     schedule.add_systems((
         systems::streaming_tick_system
             .in_set(FrameStage::Meshing)
+            .before(systems::meshing_tick_system),
+        systems::seam_smoothing_system
+            .in_set(FrameStage::Meshing)
+            .after(systems::streaming_tick_system)
             .before(systems::meshing_tick_system),
         systems::meshing_tick_system.in_set(FrameStage::Meshing),
     ));
@@ -70,7 +97,12 @@ pub fn build_frame_schedule() -> Schedule {
     );
     // UniformWrite
     schedule.add_systems((
+        systems::visibility_mask_upload_system
+            .in_set(FrameStage::UniformWrite)
+            .before(systems::write_uniforms_system),
         systems::write_uniforms_system.in_set(FrameStage::UniformWrite),
+        systems::material_color_upload_system.in_set(FrameStage::UniformWrite),
+        systems::player_render_prep_system.in_set(FrameStage::UniformWrite),
         systems::compute_stats_system.in_set(FrameStage::UniformWrite),
     ));
     // Render

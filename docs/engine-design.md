@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.4
+**Status:** Baseline reference, v1.5
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -10,6 +10,7 @@
 - v1.2 — Documented previously-implicit foundational systems: ECS runtime (bevy_ecs + FrameStage schedule), chunk persistence (rusqlite + zstd), mesh disk cache (graph-hash-keyed), and chunk streaming. Added material registry pattern. Clarified that `ChunkOverrides` is the canonical in-memory representation of player edits that the persistence layer serializes.
 - v1.3 — Documented settled architectural additions from Phases 2 through 7: cross-graph dataflow (`GraphRef` + `GraphOutput`), named boundary pins for libraries, per-biome parameter sidecar, standard libraries as authored assets with `LibraryKernel` backing, and the manifest-driven world structure. Reframed traversal smoothing distance in §5 to reflect the coupled tensions Phase 6 surfaced (multi-distance smoothing requires terrain modification, foliage reordering, and cross-chunk generation infrastructure). Revised LOD strategy in §11 for the orthographic isometric camera model. Renamed the pin type `ScatterPoints` → `Positions` to match the general-mechanism naming pattern used throughout. Renamed `FluidProvider` → `FluidOutput` to match code. Added explicit interim-vs-target notes for three items where current implementation is scheduled to migrate: the mesh vertex format (current `TerrainVertex` → target `FaceVertex`), save format versioning (current wipe-on-bump → target per-layer versioning), and fluid persistence (current full-snapshot → target diff-with-tombstones).
 - v1.4 — Clarified §9 to document the content-authoring-vs-play mode model the engine implements. Added an explicit "Modes: content authoring vs. play" subsection to §9 stating that authoring and play do not coexist: authoring-mode regeneration is authoritative and wipes overrides by design; play-mode graphs are read-only. Removed the "worldgen edits don't destroy player work" property from §9's rationale, which described a coexistence case that is not a design goal. Updated the Stable Instance IDs paragraph to distinguish play-mode chunk reload (applies tombstones and additions) from authoring-mode regeneration (wipes). Removed property #3 from the fluid persistence interim justification since it described the same coexistence case. Introduced the mutation command API as the enforcement mechanism for the mode separation; the API becomes real in Phase 8.
+- v1.5 — Expanded §12 Networking with the settled decisions from the companion `networking-architecture-proposal.md`: authoritative-state model over lockstep, determinism-in-generation as the bandwidth story, per-chunk base-content hash for self-healing terrain divergence, single mutation door as the sole write entry point, server-only fluid simulation, fixed-timestep player sim as a shared pure function, snapshot interpolation for other entities, per-observer streaming generalizing from the current camera-driven model. Documented the phase sequencing that follows Phase 8: player character (networking-aware but standalone) → server-core crate extraction → observer-set streaming → loopback milestone → LAN and internet transport. The proposal itself remains a companion document labeled PROPOSAL until the networking arc completes.
 
 ---
 
@@ -924,11 +925,26 @@ Mandatory across all systems. Specific rules:
 
 ### Networking
 
-If/when multiplayer:
+A detailed networking architecture proposal exists as a companion document (`networking-architecture-proposal.md`), authored ahead of implementation so player-facing systems can be built against the shapes networking will require. That proposal remains labeled PROPOSAL until the networking arc completes; the settled decisions summarized below become authoritative for player-phase and networking-phase planning:
 
-- Server is authoritative for generation, fluid simulation, and override application.
-- Clients receive chunk deltas, not full chunks.
-- Determinism guarantees same input produces same output across machines.
+- **Authoritative-state model**, not lockstep. The server owns the simulation; clients render replicated state and predict only their own avatar. Divergence is a bounded rendering artifact, not a fatal desync.
+- **Determinism earns its keep in generation, not simulation.** Clients generate terrain locally from `(seed, graphs)`; the server ships only deviations (`ChunkOverrides` + fluid diff). The generated/authored split (§9) is already wire-shaped; the persistence blob encoders (§3) are the wire encoding for chunk payloads.
+- **Per-chunk base-content hash** on subscribe; mismatch triggers authoritative-fetch fallback. Cross-machine generation divergence (SIMD variants, compiler drift) is self-healing, not fatal.
+- **Single mutation door.** The mutation command API (Phase 8) is the sole entry point for world writes; server-side, it validates and broadcasts authoritative deltas; client-side, it applies predictively with server-corrected reconciliation.
+- **Fluid stays server-only.** Clients render received fluid deltas and interpolate cosmetically. Client-side fluid simulation is not built.
+- **Fixed-timestep player sim as a pure function** `step(state, input, &world) -> state` in shared server-core code. Both client and server run the identical function; this is the one place client and server share simulation.
+- **Snapshot interpolation for other entities** at ~100–150 ms behind real time. No extrapolation — for a builder game, late is better than wrong.
+- **Per-observer streaming.** `ChunkStreamingManager` generalizes from camera-driven to per-observer subscription sets; the local player is observer 0.
+
+**Sequencing** (planned across phases 9 through 13+):
+
+1. Player character built networking-aware but standalone. Prerequisites (mutation door, fluid diff/tombstones, fixed-timestep player sim, semantic action input layer) land alongside it.
+2. Server-core crate extraction — a compiler-enforced client/server boundary. Pure refactor.
+3. Observer-set streaming — `ChunkStreamingManager` generalizes.
+4. Loopback milestone — client and server as separate processes on one machine over in-memory channel. This is where 90% of protocol issues surface.
+5. LAN transport, artificial latency/loss testing, internet exposure.
+
+Legacy summary retained for cross-reference: server is authoritative for generation, fluid simulation, and override application; clients receive chunk deltas, not full chunks; determinism guarantees enable client-side terrain generation. See the companion proposal for wire model, desync taxonomy, and channel/transport recommendations.
 
 ### Hot reload
 

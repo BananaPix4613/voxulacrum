@@ -44,7 +44,8 @@ impl From<std::io::Error> for PersistError { fn from(e: std::io::Error) -> Self 
 
 // -- Format constants --------------------------------------------------------
 
-const BLOB_VERSION: u8 = 6; // v6 - scatter instances carry stable_id
+const BLOB_VERSION: u8 = 7; // v7 - persists seam_finalized (world::seam) so the
+                            // cross-chunk seam pass isn't recomputed every load
 
 /// Bumped whenever the on-disk voxel/override encoding changes. A stored value
 /// older than this forces a one-shot save wipe on open (pre-release; saves are
@@ -84,6 +85,12 @@ pub struct ChunkRecord {
     pub edits: ChunkEdits,
     /// Zone / biome / library identity (design doc §16 targeted invalidation).
     pub tags: ChunkTags,
+    /// Whether `world::seam`'s cross-chunk finalization has already run for this
+    /// chunk. Gates the one-shot pass; persisted so an already-finalized chunk
+    /// isn't recomputed on every reload (its demotions round-trip through the
+    /// same override/diff mechanism player edits use, so skipping the pass loses
+    /// nothing).
+    pub seam_finalized: bool,
 }
 
 // -- Serialization -----------------------------------------------------------
@@ -392,6 +399,7 @@ pub fn serialize_chunk_record_raw(record: &ChunkRecord) -> Result<Vec<u8>, Persi
     }
 
     write_tags(&mut raw, &record.tags);
+    raw.push(record.seam_finalized as u8);
     Ok(raw)
 }
 
@@ -425,7 +433,8 @@ pub fn deserialize_chunk_record_raw(raw: &[u8]) -> Result<ChunkRecord, PersistEr
     };
 
     let tags = read_tags(&mut r)?;
-    Ok(ChunkRecord { edits, tags })
+    let seam_finalized = r.u8()? != 0;
+    Ok(ChunkRecord { edits, tags, seam_finalized })
 }
 
 // -- WorldDatabase -----------------------------------------------------------
@@ -726,7 +735,7 @@ pub fn build_chunk_edits(chunk: &LoadedChunk) -> Option<ChunkEdits> {
 /// Returns None when the chunk has no edits to save.
 pub fn build_chunk_record(chunk: &LoadedChunk) -> Option<ChunkRecord> {
     let edits = build_chunk_edits(chunk)?;
-    Some(ChunkRecord { edits, tags: chunk.data.tags.clone() })
+    Some(ChunkRecord { edits, tags: chunk.data.tags.clone(), seam_finalized: chunk.seam_finalized })
 }
 
 // -- WorldPersistence (Bevy Resource) ----------------------------------------
@@ -950,6 +959,7 @@ mod tests {
         let record = ChunkRecord {
             edits: ChunkEdits::Delta(overrides.clone()),
             tags: tags.clone(),
+            seam_finalized: false,
         };
         let raw = serialize_chunk_record_raw(&record).unwrap();
         let back = deserialize_chunk_record_raw(&raw).unwrap();
@@ -968,6 +978,7 @@ mod tests {
         let record = ChunkRecord {
             edits: ChunkEdits::Full(ChunkStorage::Uniform { voxel }),
             tags: tags.clone(),
+            seam_finalized: false,
         };
         let raw = serialize_chunk_record_raw(&record).unwrap();
         let back = deserialize_chunk_record_raw(&raw).unwrap();
@@ -992,6 +1003,7 @@ mod tests {
                 material_id: material_id.clone(),
             }))),
             tags: tags.clone(),
+            seam_finalized: false,
         };
         let raw = serialize_chunk_record_raw(&record).unwrap();
         let back = deserialize_chunk_record_raw(&raw).unwrap();
@@ -1013,6 +1025,7 @@ mod tests {
         let record = ChunkRecord {
             edits: ChunkEdits::Delta(ChunkOverrides::default()),
             tags: ChunkTags::default(),
+            seam_finalized: false,
         };
         let raw = serialize_chunk_record_raw(&record).unwrap();
         assert_eq!(raw.len(), 2 + 7 * 4 + 2 + 4 + 4, "empty v5 blob should be 40 bytes");
@@ -1043,11 +1056,13 @@ mod tests {
         let ra = serialize_chunk_record_raw(&ChunkRecord {
             edits: ChunkEdits::Delta(a),
             tags: tags.clone(),
+            seam_finalized: false,
         })
             .unwrap();
         let rb = serialize_chunk_record_raw(&ChunkRecord {
             edits: ChunkEdits::Delta(b),
             tags,
+            seam_finalized: false,
         })
             .unwrap();
         assert_eq!(ra, rb);
@@ -1060,6 +1075,7 @@ mod tests {
         let mut raw = serialize_chunk_record_raw(&ChunkRecord {
             edits: ChunkEdits::Full(ChunkStorage::Uniform { voxel: vox(1) }),
             tags: ChunkTags::default(),
+            seam_finalized: false,
         })
             .unwrap();
         raw[0] = 0xFF; // clobber BLOB_VERSION

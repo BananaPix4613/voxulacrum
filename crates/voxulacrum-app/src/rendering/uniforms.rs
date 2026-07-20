@@ -1,4 +1,22 @@
 use bytemuck::{Pod, Zeroable};
+use crate::params::MaterialParams;
+
+/// Number of material slots the fragment-shader color table holds. Sized
+/// generously so the storage buffer never reallocates when the registry grows
+/// (mods add materials); ids past the registry length read the magenta pad.
+pub const MATERIAL_COLOR_SLOTS: usize = 256;
+
+/// Pack `MaterialParams` colors into a fixed-size table of `vec4<f32>` (rgb + 1.0
+/// pad). `array<vec4>` sidesteps WGSL's 16-byte stride rule for `vec3`, so the
+/// CPU array and the shader's `array<vec4<f32>>` agree byte-for-byte. Unfilled
+/// slots stay magenta so an out-of-range `material_id` is visibly wrong.
+pub fn material_color_table(materials: &MaterialParams) -> [[f32; 4]; MATERIAL_COLOR_SLOTS] {
+    let mut table = [[1.0, 0.0, 1.0, 1.0]; MATERIAL_COLOR_SLOTS];
+    for (i, e) in materials.entries.iter().enumerate().take(MATERIAL_COLOR_SLOTS) {
+        table[i] = [e.color[0], e.color[1], e.color[2], 1.0];
+    }
+    table
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -24,8 +42,15 @@ pub struct GlobalUniforms {
     pub _pad3: f32,                        //  4 bytes, offset 236
     pub clip_max: [f32; 3],                // 12 bytes, offset 240
     pub _pad4: f32,                        //  4 bytes, offset 252
+    pub mask_origin: [f32; 3],             // 12 bytes, offset 256 (min corner of the 64^3 window, world cells)
+    pub mask_enabled: u32,                 //  4 bytes, offset 268
+    pub view_dir: [f32; 3],                // 12 bytes, offset 272
+    pub _pad5: f32,                        //  4 bytes, offset 284
+    pub render_size: [f32; 2],             //  8 bytes, offset 288
+    pub volume_radius: f32,                //  4 bytes, offset 296 (world units)
+    pub _pad6: f32,                        //  4 bytes, offset 300
 }
-// Total: 256 bytes (16 * 16). WGSL vec3 alignment satisfied: clip_min at 224, clip_max at 240.
+// Total: 304 bytes (19 * 16).
 
 impl Default for GlobalUniforms {
     fn default() -> Self {
@@ -51,6 +76,13 @@ impl Default for GlobalUniforms {
             _pad3: 0.0,
             clip_max: [10000.0; 3],
             _pad4: 0.0,
+            mask_origin: [0.0; 3],
+            mask_enabled: 0,
+            view_dir: [0.0, -1.0, 0.0],
+            _pad5: 0.0,
+            render_size: [1.0, 1.0],
+            volume_radius: 0.0,
+            _pad6: 0.0,
         }
     }
 }
@@ -178,6 +210,28 @@ pub fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                 count: None,
             },
+            // binding 5: material color table (read-only storage, indexed by material_id)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 6: visibility mask (64^3 window, one uint byte per world cell)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
         ],
     })
 }
@@ -190,6 +244,8 @@ pub fn create_bind_group(
     cloud_sampler: &wgpu::Sampler,
     shadow_texture_view: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
+    material_color_buffer: &wgpu::Buffer,
+    mask_texture_view: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("global_uniforms_bind_group"),
@@ -214,6 +270,14 @@ pub fn create_bind_group(
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: wgpu::BindingResource::Sampler(shadow_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: material_color_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(mask_texture_view),
             },
         ],
     })

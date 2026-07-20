@@ -446,7 +446,7 @@ fn draw_render_pipeline(ui: &mut egui::Ui, p: &mut RenderPipelineParams) {
         ui.horizontal(|ui| {
             dot_green(ui);
             ui.label("Pixel scale:");
-            ui.add(egui::Slider::new(&mut p.world_pixel_density, 1.0..=20.0));
+            ui.add(egui::Slider::new(&mut p.world_pixel_density, 1.0..=50.0));
         });
         ui.horizontal(|ui| {
             dot_green(ui);
@@ -822,4 +822,26 @@ fn draw_preset_controls(ui: &mut egui::Ui, state: &mut UiState) {
             state.params = EngineParams::default();
         }
     });
+}
+
+/// Play-mode HUD (Substep 12): the selected build material readout.
+pub fn draw_play_hud(ctx: &egui::Context, material_name: &str, material_color: [f32; 3]) {
+    egui::Area::new(egui::Id::new("play_hud_material"))
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    rect,
+                    2.0,
+                    egui::Color32::from_rgb(
+                        (material_color[0] * 255.0) as u8,
+                        (material_color[1] * 255.0) as u8,
+                        (material_color[2] * 255.0) as u8,
+                    ),
+                );
+                ui.label(material_name);
+            });
+        });
 }
