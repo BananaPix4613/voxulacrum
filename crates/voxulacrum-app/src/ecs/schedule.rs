@@ -47,6 +47,9 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::Simulation)
             .after(crate::player::systems::player_sim_system)
             .after(systems::room_detection_system),
+        systems::climate_tick_system
+            .in_set(FrameStage::Simulation)
+            .after(systems::simulation_tick_system),
         systems::param_change_detection_system.in_set(FrameStage::Simulation),
         systems::palette_load_system.in_set(FrameStage::Simulation),
         systems::fluid_tick_system

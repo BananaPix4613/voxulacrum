@@ -134,27 +134,117 @@ impl Default for WindParams {
 // Cloud parameters
 // ============================================================================
 
+/// Number of independently-moving cloud layers. Each gets its own wind
+/// deflection and simulated macro-grid, composited together in the terrain
+/// shader. A named constant (not a growable Vec) because both the shared
+/// texture (one channel per layer) and the uniform buffer layout are sized
+/// for it at compile time.
+pub const CLOUD_LAYER_COUNT: usize = 4;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct CloudParams {
+pub struct CloudLayerParams {
     pub base_coverage: f32,
     pub coverage_variation: f32,
     pub coverage_frequency: f32,
-    pub scroll_speed: f32,
-    pub noise_freq_1: f32,
-    pub noise_freq_2: f32,
-    pub noise_freq_3: f32,
+    /// Radians this layer's wind is rotated from the shared base wind vector
+    /// (`WindState::wind_vector`). Higher layers typically deflect further.
+    pub wind_dir_offset: f32,
+    /// Multiplier on the (rotated) base wind's magnitude, driving this
+    /// layer's macro-grid advection - higher layers usually move faster.
+    pub wind_speed_scale: f32,
+    /// World-to-UV scale for sampling the live cloud texture - `1 / uv_scale`
+    /// is the world-space width of the camera-centered render window.
+    /// Independent per layer so the layers' window sizes don't line up.
+    pub uv_scale: f32,
+    /// Relaxation rate toward each cell's condensation target (higher =
+    /// clouds build/dissipate faster).
+    pub decay_rate: f32,
+    /// Fallback humidity for biomes that don't declare `cloud_humidity`.
+    pub default_humidity: f32,
+    /// Fallback condensation threshold for biomes that don't declare
+    /// `cloud_condensation`.
+    pub default_condensation: f32,
+    /// How much a macro cell's ambient humidity increases when its
+    /// representative chunk has water present. Low layers should be much
+    /// more responsive to nearby water than high ones.
+    pub water_humidity_boost: f32,
+    /// Frequency of the fine coherent noise applied at rasterization time to
+    /// carve the coarse simulated density into individual cloud-shaped
+    /// patches. `1 / blob_frequency` is roughly a single blob's width in
+    /// world units - independent of `CELL_SIZE` (the simulation's own
+    /// resolution), so this can be tuned purely for visual scale without
+    /// touching simulation cost.
+    pub blob_frequency: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CloudParams {
+    pub layers: [CloudLayerParams; CLOUD_LAYER_COUNT],
 }
 
 impl Default for CloudParams {
     fn default() -> Self {
         Self {
-            base_coverage: 0.45,
-            coverage_variation: 0.10,
-            coverage_frequency: 0.05,
-            scroll_speed: 0.005,
-            noise_freq_1: 0.8,
-            noise_freq_2: 1.6,
-            noise_freq_3: 3.2,
+            layers: [
+                // Layer 0: low stratus - broad, slow regional dimming. The most
+                // water/humidity-coupled layer: coasts run noticeably cloudier.
+                CloudLayerParams {
+                    base_coverage: 0.12,        // occasional big soft masses, not a lid
+                    coverage_variation: 0.06,
+                    coverage_frequency: 0.010,  // ~10 min swell - weather, not flicker
+                    wind_dir_offset: 0.0,
+                    wind_speed_scale: 0.5,      // target ~2.5 u/s drift (see check below)
+                    uv_scale: 1.0 / 2048.0,     // masses 150-300 u: several screens wide
+                    decay_rate: 0.25,           // stately fronts
+                    default_humidity: 0.75,
+                    default_condensation: 0.24, // just above 0.3*h: rare clear holes only
+                    water_humidity_boost: 0.20,
+                    blob_frequency: 1.0 / 80.0, // unused post-rework; kept for serde
+                },
+                // Layer 1: cumulus - the picturesque layer, carries the look.
+                CloudLayerParams {
+                    base_coverage: 0.28,        // the main visible coverage dial
+                    coverage_variation: 0.10,
+                    coverage_frequency: 0.018,  // ~6 min
+                    wind_dir_offset: 0.5,
+                    wind_speed_scale: 0.8,      // target ~4 u/s: walking pace
+                    uv_scale: 1.0 / 1024.0,     // puffs 35-60 u: 3-4 per screen width
+                    decay_rate: 0.35,
+                    default_humidity: 0.70,
+                    default_condensation: 0.20, // essentially no holes; placement bias only
+                    water_humidity_boost: 0.12,
+                    blob_frequency: 1.0 / 56.0,
+                },
+                // Layer 2: high broken - sparse fast accents; subtle at 0.8 darkness.
+                CloudLayerParams {
+                    base_coverage: 0.15,
+                    coverage_variation: 0.08,
+                    coverage_frequency: 0.030,
+                    wind_dir_offset: 1.1,
+                    wind_speed_scale: 1.2,      // target ~6 u/s
+                    uv_scale: 1.0 / 768.0,      // puffs 18-30 u
+                    decay_rate: 0.5,
+                    default_humidity: 0.65,
+                    default_condensation: 0.18,
+                    water_humidity_boost: 0.05,
+                    blob_frequency: 1.0 / 40.0,
+                },
+                // Layer 3: cirrus veil - motion texture at 0.92 darkness; barely
+                // a shadow, mostly life in the light.
+                CloudLayerParams {
+                    base_coverage: 0.20,
+                    coverage_variation: 0.10,
+                    coverage_frequency: 0.045,
+                    wind_dir_offset: 1.8,
+                    wind_speed_scale: 1.8,      // target ~9 u/s
+                    uv_scale: 1.0 / 1536.0,     // long period for long streaks
+                    decay_rate: 0.7,
+                    default_humidity: 0.60,
+                    default_condensation: 0.15,
+                    water_humidity_boost: 0.02,
+                    blob_frequency: 1.0 / 32.0,
+                },
+            ],
         }
     }
 }

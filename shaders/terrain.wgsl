@@ -33,12 +33,27 @@ struct GlobalUniforms {
     wind_vector: vec2<f32>,
     time: f32,
     debug_mode: u32,
-    cloud_shadow_offset: vec2<f32>,
-    cloud_coverage: f32,
+    cloud_offset_0: vec2<f32>,
+    cloud_coverage_0: f32,
+    cloud_uv_scale_0: f32,
+    cloud_offset_1: vec2<f32>,
+    cloud_coverage_1: f32,
+    cloud_uv_scale_1: f32,
+    cloud_offset_2: vec2<f32>,
+    cloud_coverage_2: f32,
+    cloud_uv_scale_2: f32,
+    cloud_offset_3: vec2<f32>,
+    cloud_coverage_3: f32,
+    cloud_uv_scale_3: f32,
+    env_origin: vec2<f32>,
+    env_extent: f32,
+    _pad_env: f32,
+    cloud_defaults: vec4<f32>,
+    env_typical: vec4<f32>,
     edge_strength: f32,
     ortho_ao_strength: f32,
     clip_enabled: u32,
-    _pad_a: vec2<f32>,
+    _pad_a: f32,
     clip_min: vec3<f32>,
     _pad3: f32,
     clip_max: vec3<f32>,
@@ -72,6 +87,12 @@ var<storage, read> material_colors: array<vec4<f32>>;
 
 @group(0) @binding(6)
 var visibility_mask: texture_3d<u32>;
+
+@group(0) @binding(7)
+var cloud_env_texture: texture_2d<f32>;
+
+@group(0) @binding(8)
+var cloud_env_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -224,6 +245,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         }
     }
 
+
     if globals.mask_enabled == 1u {
         let nrm = normalize(in.normal);
         let air_w = floor(clip_wp + 0.25 * nrm);
@@ -288,10 +310,59 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     // --- Tri-tonal axis lighting (design §11) ---
     let axis_factor = tri_tonal_factor(in.face_axis);
 
-    let cloud_uv = in.world_position.xz * 0.015 + globals.cloud_shadow_offset;
-    let cloud_sample = textureSample(cloud_texture, cloud_sampler, cloud_uv).r;
-    let cloud_threshold = smoothstep(globals.cloud_coverage - 0.15, globals.cloud_coverage + 0.15, cloud_sample);
-    let cloud_factor = mix(0.25, 1.0, cloud_threshold);
+    let env_uv_0 = (in.world_position.xz - globals.env_origin) / globals.env_extent;
+    var env_0 = globals.cloud_defaults.x;
+    if env_uv_0.x >= 0.0 && env_uv_0.x <= 1.0 && env_uv_0.y >= 0.0 && env_uv_0.y <= 1.0 {
+        env_0 = textureSample(cloud_env_texture, cloud_env_sampler, env_uv_0).r;
+    }
+    let cloud_uv_0 = in.world_position.xz * globals.cloud_uv_scale_0 + globals.cloud_offset_0;
+    let detail_0 = textureSample(cloud_texture, cloud_sampler, cloud_uv_0).r;
+    let density_0 = env_0 * detail_0;
+    let cloud_threshold_0 = smoothstep(globals.cloud_coverage_0 - 0.015, globals.cloud_coverage_0 + 0.015, density_0);
+    let cloud_depth_0 = clamp(env_0 / max(globals.env_typical.x, 0.05), 0.0, 2.0);
+    let storm_dark_0 = clamp(mix(1.0, 0.35, cloud_depth_0), 0.0, 1.0);
+    let cloud_factor_0 = mix(1.0, storm_dark_0, cloud_threshold_0);
+
+    let env_uv_1 = (in.world_position.xz - globals.env_origin) / globals.env_extent;
+    var env_1 = globals.cloud_defaults.y;
+    if env_uv_1.x >= 0.0 && env_uv_1.x <= 1.0 && env_uv_1.y >= 0.0 && env_uv_1.y <= 1.0 {
+        env_1 = textureSample(cloud_env_texture, cloud_env_sampler, env_uv_1).r;
+    }
+    let cloud_uv_1 = in.world_position.xz * globals.cloud_uv_scale_1 + globals.cloud_offset_1;
+    let detail_1 = textureSample(cloud_texture, cloud_sampler, cloud_uv_1).g;
+    let density_1 = env_1 * detail_1;
+    let cloud_threshold_1 = smoothstep(globals.cloud_coverage_1 - 0.015, globals.cloud_coverage_1 + 0.015, density_1);
+    let cloud_depth_1 = clamp(env_1 / max(globals.env_typical.y, 0.05), 0.0, 2.0);
+    let storm_dark_1 = clamp(mix(1.0, 0.5, cloud_depth_1), 0.0, 1.0);
+    let cloud_factor_1 = mix(1.0, storm_dark_1, cloud_threshold_1);
+
+    let env_uv_2 = (in.world_position.xz - globals.env_origin) / globals.env_extent;
+    var env_2 = globals.cloud_defaults.z;
+    if env_uv_2.x >= 0.0 && env_uv_2.x <= 1.0 && env_uv_2.y >= 0.0 && env_uv_2.y <= 1.0 {
+        env_2 = textureSample(cloud_env_texture, cloud_env_sampler, env_uv_2).r;
+    }
+    let cloud_uv_2 = in.world_position.xz * globals.cloud_uv_scale_2 + globals.cloud_offset_2;
+    let detail_2 = textureSample(cloud_texture, cloud_sampler, cloud_uv_2).b;
+    let density_2 = env_2 * detail_2;
+    let cloud_threshold_2 = smoothstep(globals.cloud_coverage_2 - 0.015, globals.cloud_coverage_2 + 0.015, density_2);
+    let cloud_depth_2 = clamp(env_2 / max(globals.env_typical.z, 0.05), 0.0, 2.0);
+    let storm_dark_2 = clamp(mix(1.0, 0.8, cloud_depth_2), 0.0, 1.0);
+    let cloud_factor_2 = mix(1.0, storm_dark_2, cloud_threshold_2);
+
+    let env_uv_3 = (in.world_position.xz - globals.env_origin) / globals.env_extent;
+    var env_3 = globals.cloud_defaults.w;
+    if env_uv_3.x >= 0.0 && env_uv_3.x <= 1.0 && env_uv_3.y >= 0.0 && env_uv_3.y <= 1.0 {
+        env_3 = textureSample(cloud_env_texture, cloud_env_sampler, env_uv_3).r;
+    }
+    let cloud_uv_3 = in.world_position.xz * globals.cloud_uv_scale_3 + globals.cloud_offset_3;
+    let detail_3 = textureSample(cloud_texture, cloud_sampler, cloud_uv_3).a;
+    let density_3 = env_3 * detail_3;
+    let cloud_threshold_3 = smoothstep(globals.cloud_coverage_3 - 0.015, globals.cloud_coverage_3 + 0.015, density_3);
+    let cloud_depth_3 = clamp(env_3 / max(globals.env_typical.w, 0.05), 0.0, 2.0);
+    let storm_dark_3 = clamp(mix(1.0, 0.92, cloud_depth_3), 0.0, 1.0);
+    let cloud_factor_3 = mix(1.0, storm_dark_3, cloud_threshold_3);
+
+    let cloud_factor = cloud_factor_0 * cloud_factor_1 * cloud_factor_2 * cloud_factor_3;
 
     let sun_dir = normalize(globals.sun_direction);
     let n_dot_l = max(dot(n, sun_dir), 0.0);

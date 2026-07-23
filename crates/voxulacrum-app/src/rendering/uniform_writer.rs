@@ -1,3 +1,4 @@
+use crate::cloud_shadow::CloudShadowState;
 use crate::palette::{self, Palette};
 use crate::params::EngineParams;
 use crate::rendering::outline_pass::OutlinePass;
@@ -15,6 +16,7 @@ pub fn write_all_uniforms(
     ctx: &RenderContext,
     frame: &FrameState,
     params: &EngineParams,
+    cloud_shadow: &CloudShadowState,
     global_buf: &wgpu::Buffer,
     shadow_buf: &wgpu::Buffer,
     post_process: &PostProcessPass,
@@ -49,8 +51,23 @@ pub fn write_all_uniforms(
         wind_vector: frame.wind_vector,
         time: frame.elapsed,
         debug_mode: frame.debug_mode,
-        cloud_shadow_offset: frame.cloud_shadow_offset,
-        cloud_coverage: frame.cloud_coverage,
+        cloud_offset_0: cloud_shadow.offsets[0].into(),
+        cloud_coverage_0: cloud_shadow.coverages[0],
+        cloud_uv_scale_0: params.cloud.layers[0].uv_scale,
+        cloud_offset_1: cloud_shadow.offsets[1].into(),
+        cloud_coverage_1: cloud_shadow.coverages[1],
+        cloud_uv_scale_1: params.cloud.layers[1].uv_scale,
+        cloud_offset_2: cloud_shadow.offsets[2].into(),
+        cloud_coverage_2: cloud_shadow.coverages[2],
+        cloud_uv_scale_2: params.cloud.layers[2].uv_scale,
+        cloud_offset_3: cloud_shadow.offsets[3].into(),
+        cloud_coverage_3: cloud_shadow.coverages[3],
+        cloud_uv_scale_3: params.cloud.layers[3].uv_scale,
+        env_origin: cloud_shadow.env_origin_world.into(),
+        env_extent: cloud_shadow.env_extent_world,
+        _pad_env: 0.0,
+        cloud_defaults: cloud_shadow.cloud_defaults,
+        env_typical: cloud_shadow.env_typical,
         edge_strength: params.meshing.edge_strength,
         ortho_ao_strength: if params.meshing.ortho_ao_enabled {
             params.meshing.ortho_ao_strength
@@ -58,7 +75,7 @@ pub fn write_all_uniforms(
             0.0
         },
         clip_enabled: frame.clip_enabled,
-        _pad_a: [0.0; 2],
+        _pad_a: 0.0,
         clip_min: frame.clip_min,
         _pad3: 0.0,
         clip_max: frame.clip_max,
@@ -89,7 +106,12 @@ pub fn write_all_uniforms(
     let pp_uniforms = PostProcessUniforms {
         warm_tint: frame.warm_tint_color,
         warm_tint_strength: frame.warm_tint_strength,
-        desaturation: frame.cloud_coverage * pp.overcast_desaturation_factor,
+        desaturation: (cloud_shadow.coverages[0]
+            + cloud_shadow.coverages[1]
+            + cloud_shadow.coverages[2]
+            + cloud_shadow.coverages[3])
+            * 0.25
+            * pp.overcast_desaturation_factor,
         vignette_strength: pp.vignette_strength,
         exposure: pp.exposure,
         clip_fog_enabled,

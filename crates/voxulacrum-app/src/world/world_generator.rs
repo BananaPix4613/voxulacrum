@@ -145,6 +145,37 @@ impl WorldGenerator {
         &self.world_eval.biome_graph()
     }
     
+    /// The multi-graph evaluator itself, for callers that need per-biome
+    /// parameters outside chunk generation (e.g. the climate simulation's
+    /// biome-driven condensation targets, Substep 3c).
+    pub fn world_eval(&self) -> &WorldEvaluator {
+        &self.world_eval
+    }
+
+    /// The global ocean surface (world-Y) this generator fills at/below (design
+    /// doc §7). Exposed so generation-finalization passes outside this module
+    /// (the seam pass) can apply the same ocean rule to voxels they mutate after
+    /// initial generation.
+    pub fn sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    /// Biome id at a world XZ position, resolved straight from generation via
+    /// a cheap column eval - independent of whether that region's chunks are
+    /// currently streamed in. `None` for single-biome worlds (no Zone graph).
+    /// Used by the climate sim so the cloud humidity field no longer recedes
+    /// when zoom shrinks the chunk-load radius.
+    pub fn biome_id_at_world(&self, wx: f32, wz: f32) -> Option<u16> {
+        let dim = CHUNK_SIZE as i32;
+        let chunk_x = (wx / CHUNK_SIZE as f32).floor() as i32;
+        let chunk_z = (wz / CHUNK_SIZE as f32).floor() as i32;
+        let lx = (wx.floor() as i32).rem_euclid(dim) as usize;
+        let lz = (wz.floor() as i32).rem_euclid(dim) as usize;
+        let ctx = EvalContext::new(self.world_seed, IVec3::new(chunk_x, 0, chunk_z));
+        let col = self.world_eval.biome_column(ctx).ok().flatten()?;
+        Some(col.get(lx, lz))
+    }
+
     /// Generate the voxel storage and identity tags for one chunk by evaluating
     /// the graph set. On any evaluation failure this logs and returns an air
     /// chunk with default tags, so callers (streaming workers, initial fill)

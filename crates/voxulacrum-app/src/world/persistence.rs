@@ -1019,7 +1019,8 @@ mod tests {
     }
 
     /// An empty Delta with default tags is the minimal blob: version + tag, seven
-    /// zero-count override sections, then zone u16 + two zero-count tag sections.
+    /// zero-count override sections, then zone u16 + two zero-count tag sections,
+    /// then the trailing seam_finalized byte.
     #[test]
     fn roundtrip_empty_is_compact() {
         let record = ChunkRecord {
@@ -1028,7 +1029,7 @@ mod tests {
             seam_finalized: false,
         };
         let raw = serialize_chunk_record_raw(&record).unwrap();
-        assert_eq!(raw.len(), 2 + 7 * 4 + 2 + 4 + 4, "empty v5 blob should be 40 bytes");
+        assert_eq!(raw.len(), 2 + 7 * 4 + 2 + 4 + 4 + 1, "empty v7 blob should be 41 bytes");
 
         let back = deserialize_chunk_record_raw(&raw).unwrap();
         assert_eq!(back.tags, ChunkTags::default());

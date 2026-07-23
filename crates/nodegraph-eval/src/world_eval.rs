@@ -239,6 +239,27 @@ impl WorldEvaluator {
             .and_then(|b| b.params.get(name))
     }
 
+    /// Cheap, terrain-free per-column biome id lookup for one chunk: runs only
+    /// the World and Zone column graphs (both 2D), skipping terrain composite,
+    /// foliage, and fluid. Deterministic and independent of chunk residency,
+    /// so callers (e.g. the climate sim's humidity field) can sample biome
+    /// anywhere without a full `evaluate_chunk`. Returns `None` when there is
+    /// no Zone graph (single-biome world) - callers treat that as biome 0.
+    pub fn biome_column(&self, ctx: EvalContext) -> EvalResult<Option<Arc<IdColumn>>> {
+        if self.zone.nodes.is_empty() {
+            return Ok(None);
+        }
+        let world_columns = Self::eval_columns(&self.world, ctx, None)?;
+        let mut upstream = UpstreamGraphs::new();
+        if !self.world.nodes.is_empty() {
+            upstream.insert(GraphRefTarget::World, &self.world, ctx, &world_columns);
+        }
+        let mut zone_eval = ColumnEvaluator::new(&self.zone, ctx).with_upstream(&upstream);
+        zone_eval.evaluate()?;
+        let zone_columns = zone_eval.into_cache();
+        Ok(self.biome_id_column(&zone_columns))
+    }
+
     /// Evaluate the graph set for one chunk: World -> per-column zone ids, Zone
     /// -> per-column biome ids, then composite the biome graphs' terrain by that
     /// biome assignment.

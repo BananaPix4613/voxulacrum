@@ -203,6 +203,22 @@ impl FluidClock {
     }
 }
 
+/// Wall-clock-driven tick timer for the cloud/climate simulation (Substep
+/// 3c). Unlike `FluidClock`'s fixed-rate catch-up scheme, this just tracks
+/// real elapsed time between frames - the climate grids tick once per frame,
+/// the same rate as rendering.
+#[derive(Resource)]
+pub struct ClimateClock {
+    pub last_tick: std::time::Instant,
+    pub elapsed: f32,
+}
+
+impl ClimateClock {
+    pub fn new() -> Self {
+        Self { last_tick: std::time::Instant::now(), elapsed: 0.0 }
+    }
+}
+
 #[cfg(test)]
 mod fluid_clock_tests {
     use super::FluidClock;

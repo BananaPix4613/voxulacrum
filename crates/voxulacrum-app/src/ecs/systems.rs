@@ -400,6 +400,75 @@ pub fn fluid_tick_system(
     }
 }
 
+/// The primary biome tag and a cheap "has notable water" signal for
+/// whichever loaded chunk column covers `world_pos` (`None` if that column
+/// isn't loaded yet). The water check reuses the chunk's already-resident
+/// `FluidLayer` - no new persisted data, no extra generation cost, and it's
+/// a one-way read (never mutates fluid state), so it doesn't reintroduce the
+/// fluid/weather coupling the climate design deliberately avoids.
+fn regional_weather_data_at(world: &crate::world::World, world_pos: glam::Vec2) -> Option<(u16, bool)> {
+    let chunk_x = (world_pos.x / CHUNK_WORLD_SIZE).floor() as i32;
+    let chunk_z = (world_pos.y / CHUNK_WORLD_SIZE).floor() as i32;
+    for chunk_y in world.min_chunk_y..world.max_chunk_y {
+        let coord = voxel_core::ChunkCoord::from(IVec3::new(chunk_x, chunk_y, chunk_z));
+        if let Some(chunk) = world.chunks.get(&coord) {
+            let biome = chunk.data.tags.biomes.first().map(|b| b.0).unwrap_or(0);
+            let has_water = !chunk.data.fluids.cells.is_empty();
+            return Some((biome, has_water));
+        }
+    }
+    None
+}
+
+/// Advance the simulated cloud layers, rasterize them into the shared cloud
+/// texture, and refresh the offsets/coverages `simulation_tick_system` reads
+/// into this frame's `FrameState`. Runs before `simulation_tick_system` and
+/// reads last frame's camera position - a one-frame lag, imperceptible for a
+/// slowly-panning macro-scale field (the same trade-off already accepted for
+/// the shadow frustum's smoothed camera).
+pub fn climate_tick_system(
+    mut sim: ResMut<SimulationManager>,
+    ui: Res<UiState>,
+    world: Res<VoxelWorld>,
+    ctx: Res<RenderContext>,
+    mut clock: ResMut<ClimateClock>,
+) {
+    let now = std::time::Instant::now();
+    let dt = (now - clock.last_tick).as_secs_f32().min(0.25);
+    clock.last_tick = now;
+    clock.elapsed += dt;
+
+    let camera_xz = glam::Vec2::new(sim.camera.smooth_target.x, sim.camera.smooth_target.z);
+    let base_wind = sim.wind.wind_vector;
+    let elapsed = clock.elapsed;
+    let world_eval = world.0.generator.world_eval();
+
+    sim.cloud_shadow.tick(
+        &ctx,
+        &ui.params.cloud,
+        camera_xz,
+        base_wind,
+        dt,
+        elapsed,
+        world_eval,
+        |world_pos| {
+            match world.0.generator.biome_id_at_world(world_pos.x, world_pos.y) {
+                // Biome from the generator (residency-independent); water as a
+                // best-effort refinement only where the chunk is resident.
+                Some(biome) => {
+                    let has_water = regional_weather_data_at(&world.0, world_pos)
+                        .is_some_and(|(_, w)| w);
+                    Some((biome, has_water))
+                }
+                // Single-biome world (no Zone graph): fall back to the old
+                // loaded-chunk lookup wholesale.
+                None => regional_weather_data_at(&world.0, world_pos),
+            }
+        },
+        |world_pos| regional_weather_data_at(&world.0, world_pos).map(|(_, w)| w),
+    );
+}
+
 /// Read-only `(fluids, storage)` of the six face-neighbors of `coord`, in the
 /// order `NeighborSample` expects: `[-x, +x, -y, +y, -z, +z]`.
 fn fluid_neighbor_faces<'a>(
@@ -697,6 +766,7 @@ pub fn meshing_tick_system(
 /// edit - see world::seam).
 pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
     const MAX_PER_FRAME: usize = 16;
+    let sea_level = world.0.generator.sea_level();
 
     let mut candidates: Vec<IVec3> = Vec::new();
     for (coord, chunk) in world.0.chunks.iter() {
@@ -745,6 +815,43 @@ pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
                 chunk.data.voxels = std::sync::Arc::new(storage);
                 chunk.mark_mesh_dirty();
 
+                // A seam demotion only ever turns a Cube (fluid capacity 0, so
+                // ocean_fill correctly placed no water) into a SlabBottom (fluid
+                // capacity SLAB_MASS). ocean_fill already ran before this chunk's
+                // neighbors were resident, so it never saw the new empty half -
+                // without this, a seam-demoted slab stays permanently dry even
+                // when it sits at/below sea level right next to water-bearing
+                // cells the isolated pass got right. Submerged fast-path chunks
+                // don't need this: their capacity is read live off current
+                // storage, so a demotion there is already reflected for free.
+                // Pond water is not covered here - the per-column pond level
+                // isn't retained after generation, so a seam-demoted slab on a
+                // pond shoreline (above sea level) can still come up dry.
+                if !matches!(
+                    chunk.data.fluids.fill_mode,
+                    crate::world::layers::FluidFillMode::Submerged(_)
+                ) {
+                    for (index, voxel) in &applied {
+                        let lp = voxel_core::LocalPos::from_index(*index);
+                        let world_y =
+                            pos.y * crate::world::chunk::CHUNK_SIZE as i32 + lp.y as i32;
+                        if world_y > sea_level {
+                            continue;
+                        }
+                        let capacity = crate::world::fluid_gen::fluid_capacity(*voxel);
+                        if capacity > 0 {
+                            chunk.data.fluids.cells.insert(
+                                lp,
+                                crate::world::layers::FluidCell {
+                                    fluid_id: crate::world::layers::FluidId::WATER,
+                                    mass: capacity,
+                                    flags: crate::world::layers::FluidCell::FLAG_SETTLED,
+                                },
+                            );
+                        }
+                    }
+                }
+
                 // Persist the decision through the same diff mechanism player edits
                 // use, so `seam_finalized` (below) can be persisted without the
                 // demotion reverting to a sharp cube on the next load. These are
@@ -790,6 +897,7 @@ pub fn write_uniforms_system(
     surface: Res<SurfaceState>,
     frame: Res<FrameState>,
     ui: Res<UiState>,
+    sim: Res<SimulationManager>,
     global_buf: Res<GlobalUniformBuffer>,
     shadow_buf: Res<ShadowUniformBuffer>,
     post_process: Res<PostProcessPass>,
@@ -803,6 +911,7 @@ pub fn write_uniforms_system(
         &ctx,
         &frame,
         &ui.params,
+        &sim.cloud_shadow,
         &global_buf.0,
         &shadow_buf.0,
         &post_process,

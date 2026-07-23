@@ -2,6 +2,7 @@ pub mod chunk;
 pub mod generation;
 pub mod fluid_gen;
 pub mod fluid_sim;
+pub mod climate;
 pub mod layers;
 pub mod overrides;
 pub mod tags;

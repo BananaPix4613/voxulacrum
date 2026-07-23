@@ -265,7 +265,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    let cloud_shadow = CloudShadowState::new(&ctx, &initial_params.cloud);
+    let cloud_shadow = CloudShadowState::new(&ctx);
 
     // Visibility mask (group 0, binding 6): a 64^3 window of one-byte cell states
     // centered on the player, rewritten on movement by visibility_mask_upload_system.
@@ -288,6 +288,8 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         &uniform_buffer,
         &cloud_shadow.texture_view,
         &cloud_shadow.sampler,
+        &cloud_shadow.env_texture_view,
+        &cloud_shadow.env_sampler,
         &shadow_depth_view,
         &shadow_sampler,
         &material_color_buffer,
@@ -473,6 +475,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
     ecs.insert_resource(FluidClock::new());
+    ecs.insert_resource(ClimateClock::new());
     ecs.insert_resource(player::systems::PlayerClock::new());
     ecs.insert_resource(RoomState::default());
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
@@ -544,8 +547,6 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         sun_color: [1.0; 3],
         ambient_color: [0.1; 3],
         wind_vector: [0.0; 2],
-        cloud_shadow_offset: [0.0; 2],
-        cloud_coverage: 0.0,
         clip_min: [-10000.0; 3],
         clip_max: [10000.0; 3],
         clip_enabled: 0,

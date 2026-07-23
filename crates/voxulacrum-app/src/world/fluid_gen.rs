@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use nodegraph_eval::{ColumnField, NO_POND};
-use voxel_core::LocalPos;
+use voxel_core::{LocalPos, ShapeId, Voxel};
 
 use super::chunk::CHUNK_SIZE;
 use super::layers::{FluidCell, FluidFillMode, FluidId, FluidLayer};
@@ -17,15 +17,34 @@ use super::storage::ChunkStorage;
 /// Fixed-point mass of one completely full fluid cell (design doc §7: 65535).
 pub const FULL_MASS: u16 = u16::MAX;
 
+/// Fluid capacity of a half-height slab: only its empty half can hold fluid, so
+/// it holds half of what a fully empty voxel holds.
+pub const SLAB_MASS: u16 = FULL_MASS / 2;
+
+/// Fluid capacity of `voxel`: the mass its empty portion can hold before it's
+/// full. A full cube has none (fully occupied by material); a half-height slab
+/// holds [`SLAB_MASS`] in its empty half; a fully empty voxel (AIR) holds [`FULL_MASS`].
+pub fn fluid_capacity(voxel: Voxel) -> u16 {
+    match voxel.shape {
+        ShapeId::Empty => FULL_MASS,
+        ShapeId::SlabBottom | ShapeId::SlabTop => SLAB_MASS,
+        ShapeId::Cube => 0,
+    }
+}
+
 /// Initialize a chunk's ocean fluid from the global `sea_level` (a world-Y
 /// plane). `chunk_y` is the chunk's Y coordinate; a voxel at local y sits at
-/// world Y `chunk_y * CHUNK_SIZE + y`. Every empty voxel at or below `sea_level`
-/// becomes full, settled water.
+/// world Y `chunk_y * CHUNK_SIZE + y`. Every voxel at or below `sea_level` with
+/// fluid capacity ([`fluid_capacity`]) becomes settled water at that capacity:
+/// full for an empty voxel, half for a slab (filling its empty half so the
+/// surface lines up flush with neighboring full-depth water instead of leaving
+/// a dry seam at slab steps near the shoreline).
 ///
 /// - Entirely above sea level -> [`FluidFillMode::Empty`], no cells.
 /// - Entirely at/below sea level -> [`FluidFillMode::Submerged`] (O(1); the
-///   renderer treats every empty voxel as water, no per-cell storage).
-/// - Straddling sea level -> explicit settled cells for its below-sea empty voxels.
+///   renderer treats every voxel as filled to its fluid capacity, no per-cell
+///   storage).
+/// - Straddling sea level -> explicit settled cells for its below-sea voxels.
 pub fn ocean_fill(storage: &ChunkStorage, chunk_y: i32, sea_level: i32) -> FluidLayer {
     let dim = CHUNK_SIZE as i32;
     let base_y = chunk_y * dim;
@@ -54,12 +73,13 @@ pub fn ocean_fill(storage: &ChunkStorage, chunk_y: i32, sea_level: i32) -> Fluid
         for y in 0..=top_local {
             for x in 0..CHUNK_SIZE {
                 let idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE;
-                if !storage.voxel(idx).is_solid() {
+                let capacity = fluid_capacity(storage.voxel(idx));
+                if capacity > 0 {
                     cells.insert(
                         LocalPos::new_unchecked(x as u8, y as u8, z as u8),
                         FluidCell {
                             fluid_id: FluidId::WATER,
-                            mass: FULL_MASS,
+                            mass: capacity,
                             flags: FluidCell::FLAG_SETTLED,
                         },
                     );
@@ -116,12 +136,13 @@ pub fn apply_biome_ponds(
                     continue; // ocean's domain
                 }
                 let idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE;
-                if !storage.voxel(idx).is_solid() {
+                let capacity = fluid_capacity(storage.voxel(idx));
+                if capacity > 0 {
                     fluids.cells.insert(
                         LocalPos::new_unchecked(x as u8, y as u8, z as u8),
                         FluidCell {
                             fluid_id: FluidId::WATER,
-                            mass: FULL_MASS,
+                            mass: capacity,
                             flags: FluidCell::FLAG_SETTLED,
                         },
                     );

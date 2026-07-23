@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use voxel_core::LocalPos;
 
 use super::chunk::CHUNK_SIZE;
-use super::fluid_gen::FULL_MASS;
+use super::fluid_gen::{fluid_capacity, FULL_MASS};
 use super::layers::{FluidCell, FluidFillMode, FluidId, FluidLayer};
 use super::storage::ChunkStorage;
 
@@ -24,12 +24,15 @@ const MAX_MASS: u16 = FULL_MASS;
 /// residue can't accumulate (the design's "small loss threshold").
 const MIN_MASS: u16 = 64;
 
-/// Read-only fluid mass + solidity at any local position, including positions in
+/// Read-only fluid mass + capacity at any local position, including positions in
 /// neighbor chunks (outside `0..CHUNK_SIZE`). Edge cells sample across the
 /// boundary through this; the neighbor lookups are wired in Substep 6b.
 pub trait FluidSample {
     fn mass(&self, x: i32, y: i32, z: i32) -> u16;
-    fn solid(&self, x: i32, y: i32, z: i32) -> bool;
+    /// Mass this position can hold before it's full: `0` for a full cube (blocks
+    /// flow entirely), half of a full cell for a slab (only its empty half holds
+    /// fluid), full for an empty voxel. See [`fluid_capacity`].
+    fn capacity(&self, x: i32, y: i32, z: i32) -> u16;
     /// Whether the cell is ticking in its chunk. A boundary transfer fires only
     /// when both edge cells are active, keeping the two sides symmetric.
     fn active(&self, x: i32, y: i32, z: i32) -> bool;
@@ -66,20 +69,18 @@ impl FluidSample for SelfSample<'_> {
         let p = LocalPos::new_unchecked(x as u8, y as u8, z as u8);
         if let Some(c) = self.fluids.cells.get(&p) {
             c.mass
-        } else if self.submerged && !self.storage.voxel(p.to_index()).is_solid() {
-            MAX_MASS
+        } else if self.submerged {
+            fluid_capacity(self.storage.voxel(p.to_index()))
         } else {
             0
         }
     }
 
-    fn solid(&self, x: i32, y: i32, z: i32) -> bool {
+    fn capacity(&self, x: i32, y: i32, z: i32) -> u16 {
         if !in_chunk(x, y, z) {
-            return true; // no neighbor here -> solid (no flow through)
+            return 0; // no neighbor here -> no capacity (no flow through)
         }
-        self.storage
-            .voxel(LocalPos::new_unchecked(x as u8, y as u8, z as u8).to_index())
-            .is_solid()
+        fluid_capacity(self.storage.voxel(LocalPos::new_unchecked(x as u8, y as u8, z as u8).to_index()))
     }
 
     fn active(&self, x: i32, y: i32, z: i32) -> bool {
@@ -142,18 +143,18 @@ impl FluidSample for NeighborSample<'_> {
         let p = LocalPos::new_unchecked(lx, ly, lz);
         if let Some(c) = fl.cells.get(&p) {
             c.mass
-        } else if matches!(fl.fill_mode, FluidFillMode::Submerged(_)) && !st.voxel(p.to_index()).is_solid() {
-            MAX_MASS
+        } else if matches!(fl.fill_mode, FluidFillMode::Submerged(_)) {
+            fluid_capacity(st.voxel(p.to_index()))
         } else {
             let _ = self.submerged;
             0
         }
     }
 
-    fn solid(&self, x: i32, y: i32, z: i32) -> bool {
-        let Some((t, lx, ly, lz)) = Self::resolve(x, y, z) else { return true };
-        let Some((_, st)) = self.chunk(t) else { return false }; // unloaded = air (flow out, lost)
-        st.voxel(LocalPos::new_unchecked(lx, ly, lz).to_index()).is_solid()
+    fn capacity(&self, x: i32, y: i32, z: i32) -> u16 {
+        let Some((t, lx, ly, lz)) = Self::resolve(x, y, z) else { return 0 };
+        let Some((_, st)) = self.chunk(t) else { return FULL_MASS }; // unloaded = air, unrestricted (flow out, lost)
+        fluid_capacity(st.voxel(LocalPos::new_unchecked(lx, ly, lz).to_index()))
     }
 
     fn active(&self, x: i32, y: i32, z: i32) -> bool {
@@ -201,8 +202,9 @@ pub fn plan_chunk(fluids: &FluidLayer, sample: &impl FluidSample) -> ChunkPlan {
         let m = sample.mass(x, y, z);
 
         // Down outflow (this cell falls into the cell below).
-        if m > 0 && !sample.solid(x, y - 1, z) {
-            let flow = m.min(MAX_MASS - sample.mass(x, y - 1, z));
+        let below_capacity = sample.capacity(x, y - 1, z);
+        if m > 0 && below_capacity > 0 {
+            let flow = m.min(below_capacity - sample.mass(x, y - 1, z));
             if flow > 0 {
                 if in_chunk(x, y - 1, z) {
                     flows.push((0, Some(pos), Some(lp(x, y - 1, z)), flow));
@@ -213,15 +215,15 @@ pub fn plan_chunk(fluids: &FluidLayer, sample: &impl FluidSample) -> ChunkPlan {
         }
         // Down inflow from a neighbor chunk above (in-chunk above is handled by
         // that cell's own down flow).
-        if !in_chunk(x, y + 1, z) && !sample.solid(x, y + 1, z) && sample.active(x, y + 1, z) {
-            let flow = sample.mass(x, y + 1, z).min(MAX_MASS - m);
+        if !in_chunk(x, y + 1, z) && sample.capacity(x, y + 1, z) > 0 && sample.active(x, y + 1, z) {
+            let flow = sample.mass(x, y + 1, z).min(sample.capacity(x, y, z) - m);
             if flow > 0 {
                 flows.push((0, None, Some(pos), flow));
             }
         }
         // Horizontal.
         for (dx, dz) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
-            if sample.solid(x + dx, y, z + dz) {
+            if sample.capacity(x + dx, y, z + dz) == 0 {
                 continue;
             }
             let nm = sample.mass(x + dx, y, z + dz);
@@ -264,7 +266,8 @@ pub fn plan_chunk(fluids: &FluidLayer, sample: &impl FluidSample) -> ChunkPlan {
     for (_, s, d, amt) in flows {
         match (s, d) {
             (Some(s), Some(d)) => {
-                let a = amt.min(live[&s]).min(MAX_MASS - live[&d]);
+                let cap_d = sample.capacity(d.x as i32, d.y as i32, d.z as i32);
+                let a = amt.min(live[&s]).min(cap_d - live[&d]);
                 if a > 0 {
                     *live.get_mut(&s).unwrap() -= a;
                     *live.get_mut(&d).unwrap() += a;
@@ -275,7 +278,8 @@ pub fn plan_chunk(fluids: &FluidLayer, sample: &impl FluidSample) -> ChunkPlan {
                 *live.get_mut(&s).unwrap() -= a;
             }
             (None, Some(d)) => {
-                let a = amt.min(MAX_MASS - live[&d]);
+                let cap_d = sample.capacity(d.x as i32, d.y as i32, d.z as i32);
+                let a = amt.min(cap_d - live[&d]);
                 *live.get_mut(&d).unwrap() += a;
             }
             (None, None) => {}

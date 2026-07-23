@@ -24,8 +24,6 @@ pub struct FrameState {
     pub sun_color: [f32; 3],
     pub ambient_color: [f32; 3],
     pub wind_vector: [f32; 2],
-    pub cloud_shadow_offset: [f32; 2],
-    pub cloud_coverage: f32,
     pub clip_min: [f32; 3],
     pub clip_max: [f32; 3],
     pub clip_enabled: u32,
@@ -93,15 +91,10 @@ impl SimulationManager {
             }
         };
 
-        // Time, wind, clouds
+        // Time, wind (clouds are ticked by climate_tick_system - Substep 3c -
+        // which needs World/RenderContext access this method doesn't have)
         self.time_of_day.update(dt, &params.time_control);
         self.wind.update(dt, &params.wind);
-        self.cloud_shadow.update(
-            dt,
-            &self.wind.wind_vector,
-            self.elapsed,
-            &params.cloud,
-        );
 
         // Frustum
         if !params.debug.freeze_culling {
@@ -157,8 +150,6 @@ impl SimulationManager {
             sun_color: self.time_of_day.sun_color(&params.lighting).into(),
             ambient_color: self.time_of_day.ambient_color(&params.lighting).into(),
             wind_vector: self.wind.wind_vector.into(),
-            cloud_shadow_offset: self.cloud_shadow.offset.into(),
-            cloud_coverage: self.cloud_shadow.coverage,
             clip_min,
             clip_max,
             clip_enabled,

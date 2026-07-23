@@ -316,10 +316,21 @@ fn draw_wind(ui: &mut egui::Ui, p: &mut WindParams) {
 
 fn draw_cloud(ui: &mut egui::Ui, p: &mut CloudParams) {
     ui.collapsing("Clouds", |ui| {
-        ui.horizontal(|ui| { dot_green(ui); ui.label("Base coverage:"); ui.add(egui::Slider::new(&mut p.base_coverage, 0.0..=1.0)); });
-        ui.horizontal(|ui| { dot_green(ui); ui.label("Variation:"); ui.add(egui::Slider::new(&mut p.coverage_variation, 0.0..=0.5)); });
-        ui.horizontal(|ui| { dot_green(ui); ui.label("Coverage freq:"); ui.add(egui::Slider::new(&mut p.coverage_frequency, 0.001..=0.2)); });
-        ui.horizontal(|ui| { dot_green(ui); ui.label("Scroll speed:"); ui.add(egui::Slider::new(&mut p.scroll_speed, 0.0..=0.05)); });
+        for (i, layer) in p.layers.iter_mut().enumerate() {
+            ui.collapsing(format!("Layer {i}"), |ui| {
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Base coverage:"); ui.add(egui::Slider::new(&mut layer.base_coverage, 0.0..=1.0)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Variation:"); ui.add(egui::Slider::new(&mut layer.coverage_variation, 0.0..=0.5)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Coverage freq:"); ui.add(egui::Slider::new(&mut layer.coverage_frequency, 0.001..=0.2)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Wind dir offset:"); ui.add(egui::Slider::new(&mut layer.wind_dir_offset, -3.14..=3.14)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Wind speed scale:"); ui.add(egui::Slider::new(&mut layer.wind_speed_scale, 0.0..=3.0)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("UV scale:"); ui.add(egui::Slider::new(&mut layer.uv_scale, 0.0003..=0.0015)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Decay rate:"); ui.add(egui::Slider::new(&mut layer.decay_rate, 0.0..=1.0)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Default humidity:"); ui.add(egui::Slider::new(&mut layer.default_humidity, 0.0..=1.0)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Default condensation:"); ui.add(egui::Slider::new(&mut layer.default_condensation, 0.0..=1.0)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Water humidity boost:"); ui.add(egui::Slider::new(&mut layer.water_humidity_boost, 0.0..=0.5)); });
+                ui.horizontal(|ui| { dot_green(ui); ui.label("Blob frequency:"); ui.add(egui::Slider::new(&mut layer.blob_frequency, 0.005..=0.05)); });
+            });
+        }
     });
 }
 

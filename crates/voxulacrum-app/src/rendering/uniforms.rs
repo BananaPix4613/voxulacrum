@@ -32,25 +32,40 @@ pub struct GlobalUniforms {
     pub wind_vector: [f32; 2],             //  8 bytes, offset 176
     pub time: f32,                         //  4 bytes, offset 184
     pub debug_mode: u32,                   //  4 bytes, offset 188
-    pub cloud_shadow_offset: [f32; 2],     //  8 bytes, offset 192
-    pub cloud_coverage: f32,               //  4 bytes, offset 200
-    pub edge_strength: f32,                //  4 bytes, offset 204
-    pub ortho_ao_strength: f32,            //  4 bytes, offset 208
-    pub clip_enabled: u32,                 //  4 bytes, offset 212
-    pub _pad_a: [f32; 2],                  //  8 bytes, offset 216 (aligns clip_min to 224)
-    pub clip_min: [f32; 3],                // 12 bytes, offset 224
-    pub _pad3: f32,                        //  4 bytes, offset 236
-    pub clip_max: [f32; 3],                // 12 bytes, offset 240
-    pub _pad4: f32,                        //  4 bytes, offset 252
-    pub mask_origin: [f32; 3],             // 12 bytes, offset 256 (min corner of the 64^3 window, world cells)
-    pub mask_enabled: u32,                 //  4 bytes, offset 268
-    pub view_dir: [f32; 3],                // 12 bytes, offset 272
-    pub _pad5: f32,                        //  4 bytes, offset 284
-    pub render_size: [f32; 2],             //  8 bytes, offset 288
-    pub volume_radius: f32,                //  4 bytes, offset 296 (world units)
-    pub _pad6: f32,                        //  4 bytes, offset 300
+    pub cloud_offset_0: [f32; 2],          //  8 bytes, offset 192
+    pub cloud_coverage_0: f32,             //  4 bytes, offset 200
+    pub cloud_uv_scale_0: f32,             //  4 bytes, offset 204
+    pub cloud_offset_1: [f32; 2],          //  8 bytes, offset 208
+    pub cloud_coverage_1: f32,             //  4 bytes, offset 216
+    pub cloud_uv_scale_1: f32,             //  4 bytes, offset 220
+    pub cloud_offset_2: [f32; 2],          //  8 bytes, offset 224
+    pub cloud_coverage_2: f32,             //  4 bytes, offset 232
+    pub cloud_uv_scale_2: f32,             //  4 bytes, offset 236
+    pub cloud_offset_3: [f32; 2],          //  8 bytes, offset 240
+    pub cloud_coverage_3: f32,             //  4 bytes, offset 248
+    pub cloud_uv_scale_3: f32,             //  4 bytes, offset 252
+    pub env_origin: [f32; 2],              //  8 bytes, offset 256 (world-space, always a multiple of climate::CELL_SIZE)
+    pub env_extent: f32,                   //  4 bytes, offset 264 (ENV_SIZE * CELL_SIZE)
+    pub _pad_env: f32,                     //  4 bytes, offset 268 (aligns cloud_defaults to 16)
+    pub cloud_defaults: [f32; 4],          // 16 bytes, offset 272 (per-layer out-of-window ambient density)
+    pub env_typical: [f32; 4],             // 16 bytes, offset 288 (this tick's actual avg simulated density per layer - §8 darkness modulation)
+    pub edge_strength: f32,                //  4 bytes, offset 304
+    pub ortho_ao_strength: f32,            //  4 bytes, offset 308
+    pub clip_enabled: u32,                 //  4 bytes, offset 312
+    pub _pad_a: f32,                       //  4 bytes, offset 316 (aligns clip_min to 320)
+    pub clip_min: [f32; 3],                // 12 bytes, offset 320
+    pub _pad3: f32,                        //  4 bytes, offset 332
+    pub clip_max: [f32; 3],                // 12 bytes, offset 336
+    pub _pad4: f32,                        //  4 bytes, offset 348
+    pub mask_origin: [f32; 3],             // 12 bytes, offset 352 (min corner of the 64^3 window, world cells)
+    pub mask_enabled: u32,                 //  4 bytes, offset 364
+    pub view_dir: [f32; 3],                // 12 bytes, offset 368
+    pub _pad5: f32,                        //  4 bytes, offset 380
+    pub render_size: [f32; 2],             //  8 bytes, offset 384
+    pub volume_radius: f32,                //  4 bytes, offset 392 (world units)
+    pub _pad6: f32,                        //  4 bytes, offset 396
 }
-// Total: 304 bytes (19 * 16).
+// Total: 400 bytes (25 * 16).
 
 impl Default for GlobalUniforms {
     fn default() -> Self {
@@ -66,12 +81,27 @@ impl Default for GlobalUniforms {
             wind_vector: [0.0, 0.0],
             time: 0.0,
             debug_mode: 0,
-            cloud_shadow_offset: [0.0, 0.0],
-            cloud_coverage: 0.55,
+            cloud_offset_0: [0.0, 0.0],
+            cloud_coverage_0: 0.45,
+            cloud_uv_scale_0: 0.000488,
+            cloud_offset_1: [0.0, 0.0],
+            cloud_coverage_1: 0.4,
+            cloud_uv_scale_1: 0.000651,
+            cloud_offset_2: [0.0, 0.0],
+            cloud_coverage_2: 0.32,
+            cloud_uv_scale_2: 0.000868,
+            cloud_offset_3: [0.0, 0.0],
+            cloud_coverage_3: 0.25,
+            cloud_uv_scale_3: 0.001116,
+            env_origin: [0.0, 0.0],
+            env_extent: 16384.0,
+            _pad_env: 0.0,
+            cloud_defaults: [0.0; 4],
+            env_typical: [0.05; 4],
             edge_strength: 0.15,
             ortho_ao_strength: 0.3,
             clip_enabled: 0,
-            _pad_a: [0.0; 2],
+            _pad_a: 0.0,
             clip_min: [-10000.0; 3],
             _pad3: 0.0,
             clip_max: [10000.0; 3],
@@ -232,6 +262,24 @@ pub fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
                 },
                 count: None,
             },
+            // binding 7: cloud envelope texture (Layer A - sim-driven, world-lattice-anchored)
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // binding 8: cloud envelope sampler
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
         ],
     })
 }
@@ -242,6 +290,8 @@ pub fn create_bind_group(
     buffer: &wgpu::Buffer,
     cloud_texture_view: &wgpu::TextureView,
     cloud_sampler: &wgpu::Sampler,
+    env_texture_view: &wgpu::TextureView,
+    env_sampler: &wgpu::Sampler,
     shadow_texture_view: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
     material_color_buffer: &wgpu::Buffer,
@@ -262,6 +312,14 @@ pub fn create_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::Sampler(cloud_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(env_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::Sampler(env_sampler),
             },
             wgpu::BindGroupEntry {
                 binding: 3,

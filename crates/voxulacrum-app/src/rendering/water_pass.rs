@@ -6,10 +6,10 @@ use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::WaterVertex;
 use crate::world::chunk::{LoadedChunk, CHUNK_SIZE, VOXEL_SCALE};
-use crate::world::fluid_gen::FULL_MASS;
+use crate::world::fluid_gen::{fluid_capacity, FULL_MASS, SLAB_MASS};
 use crate::world::layers::FluidFillMode;
 use crate::world::World;
-use voxel_core::LocalPos;
+use voxel_core::{LocalPos, ShapeId};
 
 /// Per-chunk water surface mesh on GPU.
 pub struct ChunkWaterMesh {
@@ -101,8 +101,8 @@ fn build_water_mesh(pos: IVec3, chunk: &LoadedChunk) -> (Vec<WaterVertex>, Vec<u
         let lp = LocalPos::new_unchecked(x as u8, y as u8, z as u8);
         if let Some(cell) = fluids.cells.get(&lp) {
             cell.mass
-        } else if submerged && !storage.voxel(lp.to_index()).is_solid() {
-            FULL_MASS
+        } else if submerged {
+            fluid_capacity(storage.voxel(lp.to_index()))
         } else {
             0
         }
@@ -138,8 +138,21 @@ fn build_water_mesh(pos: IVec3, chunk: &LoadedChunk) -> (Vec<WaterVertex>, Vec<u
                     continue;
                 }
 
-                // Surface height: top of this (possibly partial) cell.
-                let surf_y = origin[1] + (y as f32 + m as f32 / FULL_MASS as f32) * VOXEL_SCALE;
+                // Surface height: top of this (possibly partial) cell. A slab's
+                // fluid lives in its empty half only, so the fill fraction maps
+                // onto that half instead of the whole cell - the top half for a
+                // bottom slab, the bottom half for a top slab - so a brim-full
+                // slab's surface lines up flush with a neighboring full cell.
+                let shape = storage
+                    .voxel(LocalPos::new_unchecked(x as u8, y as u8, z as u8).to_index())
+                    .shape;
+                let (base_frac, span_frac, capacity) = match shape {
+                    ShapeId::SlabBottom => (0.5, 0.5, SLAB_MASS),
+                    ShapeId::SlabTop => (0.0, 0.5, SLAB_MASS),
+                    _ => (0.0, 1.0, FULL_MASS),
+                };
+                let fill_frac = m as f32 / capacity as f32;
+                let surf_y = origin[1] + (y as f32 + base_frac + fill_frac * span_frac) * VOXEL_SCALE;
                 // Depth: contiguous water cells downward from here, in voxels.
                 let mut depth = 0u32;
                 let mut yy = y as i32;
