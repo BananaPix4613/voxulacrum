@@ -296,6 +296,26 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         &visibility_mask_view,
     );
 
+    let reflection_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("reflection_uniform_buffer"),
+        size: std::mem::size_of::<GlobalUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let reflection_bind_group = uniforms::create_bind_group(
+        &ctx.device,
+        &global_bind_group_layout,
+        &reflection_uniform_buffer,
+        &cloud_shadow.texture_view,
+        &cloud_shadow.sampler,
+        &cloud_shadow.env_texture_view,
+        &cloud_shadow.env_sampler,
+        &shadow_depth_view,
+        &shadow_sampler,
+        &material_color_buffer,
+        &visibility_mask_view,
+    );
+
     let simulation = SimulationManager::new(camera, cloud_shadow);
 
     let shadow_bind_group_layout =
@@ -324,9 +344,12 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let post_process_bind_group_layout =
         uniforms::create_post_process_bind_group_layout(&ctx.device);
 
+    let water_bind_group_layout = uniforms::create_water_bind_group_layout(&ctx.device);
+
     let pipeline_resources = PipelineResources {
         surface_format: ctx.surface_format,
         global_bind_group_layout,
+        water_bind_group_layout,
         shadow_bind_group_layout,
         post_process_bind_group_layout,
     };
@@ -399,7 +422,14 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Tier-1 detail paint + Tier-2/3 scatter + water
     let detail_paint_pass = DetailPaintPass::new(&ctx, &world);
     let scatter_pass = ScatterPass::new(&ctx, &world, &prefab_registry);
-    let water_pass = WaterPass::new();
+    let water_pass = WaterPass::new(
+        &ctx.device,
+        &pipeline_resources.water_bind_group_layout,
+        &render_targets.scene_copy_view,
+        &render_targets.depth_sample_view,
+        &render_targets.reflection_color_view,
+        &render_targets.reflection_depth_sample_view,
+    );
 
     // Post-process pass
     let pp_source = std::fs::read_to_string(shader_dir.join("post_process.wgsl"))
@@ -467,6 +497,8 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(GlobalUniformBuffer(uniform_buffer));
     ecs.insert_resource(GlobalUniformBindGroup(uniform_bind_group));
     ecs.insert_resource(ShadowUniformBuffer(shadow_uniform_buffer));
+    ecs.insert_resource(ReflectionUniformBuffer(reflection_uniform_buffer));
+    ecs.insert_resource(ReflectionUniformBindGroup(reflection_bind_group));
     ecs.insert_resource(ShadowBindGroup(shadow_bind_group));
     ecs.insert_resource(ShadowDepthView(shadow_depth_view));
     ecs.insert_resource(MaterialColorBuffer(material_color_buffer));
@@ -673,6 +705,10 @@ impl ApplicationHandler for App {
                     zoom,
                     density,
                 );
+                let water_layout = ecs
+                    .resource::<PipelineResources>()
+                    .water_bind_group_layout
+                    .clone();
 
                 let new_rt = RenderTargets::new(&ctx, &dims);
 
@@ -691,6 +727,14 @@ impl ApplicationHandler for App {
                     .rebuild_bind_group(&ctx, &new_rt.scene_view);
                 ecs.resource_mut::<UpscalePass>()
                     .rebuild_bind_group(&ctx, &new_rt.processed_view);
+                ecs.resource_mut::<WaterPass>().rebuild_bind_group(
+                    &ctx.device,
+                    &water_layout,
+                    &new_rt.scene_copy_view,
+                    &new_rt.depth_sample_view,
+                    &new_rt.reflection_color_view,
+                    &new_rt.reflection_depth_sample_view,
+                );
 
                 *ecs.resource_mut::<RenderTargets>() = new_rt;
             }

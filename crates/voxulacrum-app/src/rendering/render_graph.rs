@@ -7,6 +7,7 @@ pub struct ResourceId(pub &'static str);
 impl ResourceId {
     pub const SHADOW_DEPTH: Self = Self("shadow_depth");
     pub const SCENE: Self = Self("scene");
+    pub const SCENE_COPY: Self = Self("scene_copy");
     pub const NORMAL: Self = Self("normal");
     pub const DEPTH: Self = Self("depth");
     pub const PROCESSED: Self = Self("processed");

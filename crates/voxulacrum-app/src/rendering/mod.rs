@@ -9,6 +9,8 @@ pub mod upscale_pass;
 pub mod detail_paint_pass;
 pub mod scatter_pass;
 pub mod water_pass;
+pub mod water_scene_pass;
+pub mod reflection_pass;
 pub mod post_process;
 pub mod palette_pass;
 pub mod outline_pass;

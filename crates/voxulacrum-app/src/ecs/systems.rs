@@ -20,6 +20,7 @@ use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
+use crate::rendering::reflection_pass::ReflectionPassNode;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::frustum::Frustum;
 use crate::shader_reload::ShaderWatcher;
@@ -296,6 +297,33 @@ pub fn palette_load_system(
     }
 }
 
+/// Re-mesh water for `chunks` plus each one's 4 horizontal neighbors. The water
+/// mesher welds surface heights across chunk seams (design §7 rendering), so a
+/// chunk whose fluid changed shifts its neighbors' boundary columns too. Only
+/// X/Z neighbors matter: the mesher samples horizontally within one chunk-Y band.
+/// Neighbors that aren't resident are a no-op (`add_chunk_water` early-outs), and
+/// the set dedups overlap so each chunk rebuilds at most once per call.
+fn rebuild_water_with_neighbors(
+    water_pass: &mut WaterPass,
+    world: &crate::world::World,
+    device: &wgpu::Device,
+    chunks: impl IntoIterator<Item = IVec3>,
+) {
+    let mut set: std::collections::HashSet<IVec3> = std::collections::HashSet::new();
+    for pos in chunks {
+        set.insert(pos);
+        for d in [
+            IVec3::new(1, 0, 0), IVec3::new(-1, 0, 0),
+            IVec3::new(0, 0, 1), IVec3::new(0, 0, -1),
+        ] {
+            set.insert(pos + d);
+        }
+    }
+    for pos in set {
+        water_pass.add_chunk_water(pos, world, device);
+    }
+}
+
 pub fn fluid_tick_system(
     mut clock: ResMut<FluidClock>,
     frame: Res<FrameState>,
@@ -395,9 +423,7 @@ pub fn fluid_tick_system(
             }))
             .expect("system fluid mark accepted in any mode");
     }
-    for pos in changed {
-        water_pass.add_chunk_water(pos, &world.0, &ctx.device);
-    }
+    rebuild_water_with_neighbors(&mut water_pass, &world.0, &ctx.device, changed);
 }
 
 /// The primary biome tag and a cheap "has notable water" signal for
@@ -752,8 +778,36 @@ pub fn meshing_tick_system(
         for pos in &meshed {
             detail_paint.add_chunk(*pos, &world.0, &ctx.device);
             scatter.add_chunk(*pos, &world.0, &ctx.device);
-            water_pass.add_chunk_water(*pos, &world.0, &ctx.device);
         }
+        // Water welds across seams, so also refresh newly-meshed chunks' neighbors
+        // (detail/scatter are per-chunk and don't need this).
+        rebuild_water_with_neighbors(&mut water_pass, &world.0, &ctx.device, meshed.iter().copied());
+    }
+}
+
+/// Remove the foliage generation placed on a column whose surface a seam demotion
+/// just put underwater (the demoted slab's empty half is now water). Mirrors the
+/// submersion cull `world_generator` runs at generation time (design §5 stage 9
+/// before stage 10) - the isolated per-chunk pass ran before this chunk's neighbors
+/// were resident, so it couldn't see this seam-created water.
+fn remove_submerged_column_foliage(
+    data: &mut crate::world::chunk::Chunk,
+    x: usize,
+    z: usize,
+    sy: u8,
+) {
+    let col = x + z * crate::world::chunk::CHUNK_SIZE;
+    // Tier-1 paint: zero the column's texel in every layer.
+    for layer in data.detail_layers.layers.iter_mut() {
+        layer.map[col] = crate::world::layers::DetailTexel::default();
+    }
+    // Tier-2/3 scatter: drop instances anchored to this column's surface voxel.
+    for insts in data.scatter_instances.by_type.values_mut() {
+        insts.retain(|inst| {
+            !(inst.anchor.x as usize == x
+                && inst.anchor.z as usize == z
+                && inst.anchor.y == sy)
+        });
     }
 }
 
@@ -840,13 +894,30 @@ pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
                         }
                         let capacity = crate::world::fluid_gen::fluid_capacity(*voxel);
                         if capacity > 0 {
+                            // Sea-level layer fills to the 3/4 waterline (slab-aware),
+                            // matching ocean_fill so the seam slab lines up with the
+                            // surrounding sea instead of bumping up to a full cell.
+                            let mass = if world_y == sea_level {
+                                crate::world::fluid_gen::sea_surface_mass(*voxel)
+                            } else {
+                                capacity
+                            };
                             chunk.data.fluids.cells.insert(
                                 lp,
                                 crate::world::layers::FluidCell {
                                     fluid_id: crate::world::layers::FluidId::WATER,
-                                    mass: capacity,
+                                    mass,
                                     flags: crate::world::layers::FluidCell::FLAG_SETTLED,
                                 },
+                            );
+                            // The demoted cube-turned-slab is now a submerged surface,
+                            // so the foliage generation placed on its (then-dry) cube
+                            // top is underwater. Apply the same submersion cull here.
+                            remove_submerged_column_foliage(
+                                &mut chunk.data,
+                                lp.x as usize,
+                                lp.z as usize,
+                                lp.y,
                             );
                         }
                     }
@@ -900,13 +971,16 @@ pub fn write_uniforms_system(
     sim: Res<SimulationManager>,
     global_buf: Res<GlobalUniformBuffer>,
     shadow_buf: Res<ShadowUniformBuffer>,
+    reflection_buf: Res<ReflectionUniformBuffer>,
     post_process: Res<PostProcessPass>,
     outline: Res<OutlinePass>,
     palette_pass: Res<PalettePass>,
     upscale: Res<UpscalePass>,
+    water_pass: Res<WaterPass>,
     render_targets: Res<RenderTargets>,
     loaded_palette: Res<LoadedPalette>,
 ) {
+    let reflect_plane = water_pass.avg_surface_y;
     crate::rendering::uniform_writer::write_all_uniforms(
         &ctx,
         &frame,
@@ -914,10 +988,13 @@ pub fn write_uniforms_system(
         &sim.cloud_shadow,
         &global_buf.0,
         &shadow_buf.0,
+        &reflection_buf.0,
+        reflect_plane,
         &post_process,
         &outline,
         &palette_pass,
         &upscale,
+        &water_pass,
         &render_targets,
         &loaded_palette.0,
         surface.surface_config.width,
@@ -1057,6 +1134,15 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     if ecs.resource::<RenderTargets>().needs_recreate(&dims) {
         let new_rt = RenderTargets::new(&ctx, &dims);
 
+        let water_layout = &ecs.resource::<PipelineResources>().water_bind_group_layout.clone();
+        ecs.resource_mut::<WaterPass>().rebuild_bind_group(
+            &ctx.device,
+            water_layout,
+            &new_rt.scene_copy_view,
+            &new_rt.depth_sample_view,
+            &new_rt.reflection_color_view,
+            &new_rt.reflection_depth_sample_view,
+        );
         ecs.resource_mut::<OutlinePass>().rebuild_bind_group(
             &ctx,
             &new_rt.scene_view,
@@ -1106,21 +1192,19 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         .create_view(&wgpu::TextureViewDescriptor::default());
 
     // --- Debug lines update ---
-    {
-        let show_debug = ecs.resource::<UiState>().params.debug.show_chunk_boundaries;
-        if show_debug {
-            let chunk_positions: Vec<IVec3> = ecs
-                .resource::<VoxelWorld>()
-                .0
-                .chunks
-                .keys()
-                .map(|c| IVec3::from(*c))
-                .collect();
-            ecs.resource_scope::<DebugLinePass, _>(|ecs, mut debug| {
-                let sim = ecs.resource::<SimulationManager>();
-                debug.update(&ctx, &chunk_positions, &sim.frustum);
-            });
-        }
+    let show_debug = ecs.resource::<UiState>().params.debug.show_chunk_boundaries;
+    if show_debug {
+        let chunk_positions: Vec<IVec3> = ecs
+            .resource::<VoxelWorld>()
+            .0
+            .chunks
+            .keys()
+            .map(|c| IVec3::from(*c))
+            .collect();
+        ecs.resource_scope::<DebugLinePass, _>(|ecs, mut debug| {
+            let sim = ecs.resource::<SimulationManager>();
+            debug.update(&ctx, &chunk_positions, &sim.frustum);
+        });
     }
 
     // --- Cap mesh update ---
@@ -1239,18 +1323,51 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
             scatter_pass: &scatter_pass,
             scatter_pipeline: &pipeline_registry.scatter_pipeline,
-            water_pass: &water_pass,
-            water_pipeline: &pipeline_registry.water_pipeline,
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
-            hide_water: ui.params.debug.hide_water || room_enclosed,
             hide_foliage: ui.params.debug.hide_foliage || room_enclosed,
             player_pass: &player_pass,
         };
 
+        let reflection_bind_group = ecs.resource::<ReflectionUniformBindGroup>();
+        let reflection_node = ReflectionPassNode {
+            color_view: &render_targets.reflection_color_view,
+            normal_view: &render_targets.reflection_normal_view,
+            depth_view: &render_targets.reflection_depth_view,
+            sky_color: wgpu::Color { r: sky[0] as f64, g: sky[1] as f64, b: sky[2] as f64, a: 1.0 },
+            terrain_pipeline: &pipeline_registry.terrain_reflection_pipeline,
+            reflection_bind_group: &reflection_bind_group.0,
+            chunks: &visible_chunks,
+            frustum: &sim.frustum,
+            detail_paint_pass: &detail_paint_pass,
+            detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
+            scatter_pass: &scatter_pass,
+            scatter_pipeline: &pipeline_registry.scatter_pipeline,
+            player_pass: &player_pass,
+            hide_foliage: ui.params.debug.hide_foliage || room_enclosed,
+            enabled: !ui.params.debug.hide_water && !water_pass.chunk_meshes.is_empty(),
+        };
+
+        let water_node = crate::rendering::water_scene_pass::WaterScenePassNode {
+            pipeline: &pipeline_registry.water_pipeline,
+            global_bind_group: &uniform_bind_group.0,
+            water_pass: &water_pass,
+            frustum: &sim.frustum,
+            hide_water: ui.params.debug.hide_water || room_enclosed,
+            scene_tex: &render_targets.scene,
+            scene_copy_tex: &render_targets.scene_copy,
+            tex_size: wgpu::Extent3d {
+                width: render_targets.alloc_w,
+                height: render_targets.alloc_h,
+                depth_or_array_layers: 1,
+            },
+        };
+
         let mut graph = RenderGraph::new();
         graph.add_pass(&shadow_node);
+        graph.add_pass(&reflection_node);
         graph.add_pass(&scene_node);
+        graph.add_pass(&water_node);
         graph.add_pass(&*outline_pass);
         graph.add_pass(&*post_process);
         graph.add_pass(&*palette_pass);
@@ -1261,6 +1378,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             .validate(&[
                 ResourceId::SHADOW_DEPTH,
                 ResourceId::SCENE,
+                ResourceId::SCENE_COPY,
                 ResourceId::NORMAL,
                 ResourceId::DEPTH,
                 ResourceId::PROCESSED,
@@ -1270,6 +1388,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
         let mut resources = ResourceMap::new();
         resources.insert(ResourceId::SCENE, &render_targets.scene_view);
+        resources.insert(ResourceId::SCENE_COPY, &render_targets.scene_copy_view);
         resources.insert(ResourceId::NORMAL, &render_targets.normal_view);
         resources.insert(ResourceId::DEPTH, &render_targets.depth_view);
         resources.insert(ResourceId::PROCESSED, &render_targets.processed_view);

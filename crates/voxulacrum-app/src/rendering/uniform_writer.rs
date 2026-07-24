@@ -8,7 +8,9 @@ use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::uniforms::{
     GlobalUniforms, OutlineUniforms, PostProcessUniforms, ShadowUniforms, UpscaleUniforms,
+    WaterUniforms,
 };
+use crate::rendering::water_pass::WaterPass;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::simulation::manager::FrameState;
 
@@ -19,10 +21,13 @@ pub fn write_all_uniforms(
     cloud_shadow: &CloudShadowState,
     global_buf: &wgpu::Buffer,
     shadow_buf: &wgpu::Buffer,
+    reflection_buf: &wgpu::Buffer,
+    reflect_plane: f32,
     post_process: &PostProcessPass,
     outline: &OutlinePass,
     palette_pass: &PalettePass,
     upscale: &UpscalePass,
+    water_pass: &WaterPass,
     render_targets: &RenderTargets,
     loaded_palette: &Option<Palette>,
     surface_width: u32,
@@ -90,12 +95,44 @@ pub fn write_all_uniforms(
     };
     ctx.queue.write_buffer(global_buf, 0, bytemuck::cast_slice(&[uniforms]));
 
+    // Mirror the view-projection across the reference water plane for the planar
+    // reflection pass. Reflection across y = P sends (x, y, z) -> (x, 2P - y, z).
+    // Only view_proj changes; lighting/shadows use the un-reflected world_position,
+    // so reflected geometry draws at its mirror position but stays correctly lit.
+    let reflect = glam::Mat4::from_cols_array(&[
+        1.0, 0.0, 0.0, 0.0,
+        0.0, -1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 2.0 * reflect_plane, 0.0, 1.0,
+    ]);
+    let mirrored_vp = glam::Mat4::from_cols_array_2d(&frame.view_proj) * reflect;
+    let mut reflection_uniforms = uniforms;
+    reflection_uniforms.view_proj = mirrored_vp.to_cols_array_2d();
+
+    // Clip geometry below the reflection plane. Without this, everything under the
+    // water (banks, caves, terrain) mirrors UP over the water and occludes the real
+    // above-water reflection in the depth buffer. Reuses the cross-section clip:
+    // discard fragments with original world-Y < reflect_plane.
+    reflection_uniforms.clip_enabled = 1;
+    reflection_uniforms.clip_min = [-1.0e9, reflect_plane, -1.0e9];
+    reflection_uniforms.clip_max = [1.0e9, 1.0e9, 1.0e9];
+
+    ctx.queue.write_buffer(reflection_buf, 0, bytemuck::cast_slice(&[reflection_uniforms]));
+
     // Post-process uniforms
     let pp = &params.post_process;
     let cs = &params.cross_section;
 
     let vp_mat = glam::Mat4::from_cols_array_2d(&frame.view_proj);
     let inv_vp = vp_mat.inverse().to_cols_array_2d();
+    water_pass.update_uniforms(
+        &ctx.queue,
+        &WaterUniforms {
+            inv_view_proj: inv_vp,
+            params: [0.08, 0.08, 0.35, 0.6], // refraction, caustic_scale, reflection, flow_scroll
+            params2: [3.0, 0.06, 0.9, reflect_plane], // depth_fade, wave_strength, foam_width, reflect_plane
+        },
+    );
 
     let clip_fog_enabled: u32 = if cs.enabled {
         if cs.show_edges { 2 } else { 1 }

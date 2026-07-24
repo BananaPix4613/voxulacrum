@@ -46,6 +46,7 @@ pub fn create_terrain_pipeline(
     surface_format: wgpu::TextureFormat,
     global_bind_group_layout: &wgpu::BindGroupLayout,
     shader_source: &str,
+    cull_mode: Option<wgpu::Face>,
 ) -> wgpu::RenderPipeline {
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("terrain_shader"),
@@ -88,7 +89,7 @@ pub fn create_terrain_pipeline(
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: Some(wgpu::Face::Back),
+            cull_mode,
             unclipped_depth: false,
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
@@ -368,32 +369,22 @@ pub fn create_detail_paint_pipeline(
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct WaterVertex {
-    pub position: [f32; 3],
-    pub flow: [f32; 2],
-    pub depth: f32,
+    pub position: [f32; 3], // 0..12
+    pub normal: [f32; 3],   // 12..24 - smoothed surface normal from the height field
+    pub flow: [f32; 2],     // 24..32 - world-XZ downhill flow (0 on flat water)
+    pub depth: f32,         // 32..36 - contiguous water depth below the surface, voxels
 }
 
 impl WaterVertex {
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<WaterVertex>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<WaterVertex>() as wgpu::BufferAddress, // 36
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute {
-                    offset: 12,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: 20,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32,
-                },
+                wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
+                wgpu::VertexAttribute { offset: 32, shader_location: 3, format: wgpu::VertexFormat::Float32 },
             ],
         }
     }
@@ -403,6 +394,7 @@ pub fn create_water_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     global_bind_group_layout: &wgpu::BindGroupLayout,
+    water_bind_group_layout: &wgpu::BindGroupLayout,
     shader_source: &str,
 ) -> wgpu::RenderPipeline {
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -412,7 +404,7 @@ pub fn create_water_pipeline(
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("water_pipeline_layout"),
-        bind_group_layouts: &[global_bind_group_layout],
+        bind_group_layouts: &[global_bind_group_layout, water_bind_group_layout],
         push_constant_ranges: &[],
     });
 
@@ -451,18 +443,8 @@ pub fn create_water_pipeline(
             polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
-            depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::Less,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState {
-            count: 1,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
+        depth_stencil: None, // manual depth occlusion via the sampled scene depth
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
         multiview: None,
         cache: None,
     })
@@ -629,6 +611,7 @@ pub enum PipelineId {
 pub struct PipelineResources {
     pub surface_format: wgpu::TextureFormat,
     pub global_bind_group_layout: wgpu::BindGroupLayout,
+    pub water_bind_group_layout: wgpu::BindGroupLayout,
     pub shadow_bind_group_layout: wgpu::BindGroupLayout,
     #[allow(dead_code)] // reserved; post-process currently runs via PostProcessPass
     pub post_process_bind_group_layout: wgpu::BindGroupLayout,
@@ -646,6 +629,7 @@ struct PipelineEntry {
 pub struct PipelineRegistry {
     entries: HashMap<String, PipelineEntry>,
     pub terrain_pipeline: wgpu::RenderPipeline,
+    pub terrain_reflection_pipeline: wgpu::RenderPipeline,
     pub terrain_wireframe_pipeline: wgpu::RenderPipeline,
     pub shadow_pipeline: wgpu::RenderPipeline,
     pub detail_paint_pipeline: wgpu::RenderPipeline,
@@ -675,7 +659,11 @@ impl PipelineRegistry {
 
         let terrain_pipeline = create_terrain_pipeline(
             &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
-            &terrain_source,
+            &terrain_source, Some(wgpu::Face::Back),
+        );
+        let terrain_reflection_pipeline = create_terrain_pipeline(
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
+            &terrain_source, None,
         );
         let terrain_wireframe_pipeline = create_terrain_wireframe_pipeline(
             &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
@@ -694,7 +682,8 @@ impl PipelineRegistry {
             &scatter_source,
         );
         let water_pipeline = create_water_pipeline(
-            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
+            &ctx.device, resources.surface_format,
+            &resources.global_bind_group_layout, &resources.water_bind_group_layout,
             &water_source,
         );
 
@@ -723,6 +712,7 @@ impl PipelineRegistry {
         Self {
             entries,
             terrain_pipeline,
+            terrain_reflection_pipeline,
             terrain_wireframe_pipeline,
             shadow_pipeline,
             detail_paint_pipeline,
@@ -763,14 +753,17 @@ impl PipelineRegistry {
             PipelineId::Terrain => {
                 let p = create_terrain_pipeline(
                     &ctx.device, resources.surface_format,
-                    &resources.global_bind_group_layout, &source,
+                    &resources.global_bind_group_layout, &source, Some(wgpu::Face::Back),
                 );
-                // Also rebuild wireframe variant
                 let wf = create_terrain_wireframe_pipeline(
                     &ctx.device, resources.surface_format,
                     &resources.global_bind_group_layout, &source,
                 );
                 self.terrain_wireframe_pipeline = wf;
+                self.terrain_reflection_pipeline = create_terrain_pipeline(
+                    &ctx.device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source, None,
+                );
                 Some(p)
             }
             PipelineId::Shadow => {
@@ -796,7 +789,8 @@ impl PipelineRegistry {
             PipelineId::Water => {
                 let p = create_water_pipeline(
                     &ctx.device, resources.surface_format,
-                    &resources.global_bind_group_layout, &source,
+                    &resources.global_bind_group_layout, &resources.water_bind_group_layout,
+                    &source,
                 );
                 Some(p)
             }

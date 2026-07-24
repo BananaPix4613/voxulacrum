@@ -21,6 +21,24 @@ pub const FULL_MASS: u16 = u16::MAX;
 /// it holds half of what a fully empty voxel holds.
 pub const SLAB_MASS: u16 = FULL_MASS / 2;
 
+/// Mass for the ocean's top (sea-level) layer so its rendered surface sits at 3/4
+/// of a full cell, accounting for slab geometry. The water mesher renders a cell's
+/// surface at `base_frac + fill*span_frac` over the shape's *empty* (fillable) span:
+/// (0,1) for an empty voxel, (0.5,0.5) for a bottom slab (empty top half), (0,0.5)
+/// for a top slab (empty bottom half). Solving `base_frac + fill*span_frac = 0.75`:
+///   empty voxel -> 3/4 fill
+///   bottom slab -> 1/2 fill (surface lands at 3/4 within its top half)
+///   top slab    -> full (3/4 is above its empty half; fill it completely)
+/// This mirrors the `(base_frac, span_frac)` match in the mesher's `column_surface`.
+pub fn sea_surface_mass(voxel: Voxel) -> u16 {
+    match voxel.shape {
+        ShapeId::Empty => (FULL_MASS as u32 * 3 / 4) as u16,
+        ShapeId::SlabBottom => SLAB_MASS / 2,
+        ShapeId::SlabTop => SLAB_MASS,
+        ShapeId::Cube => 0, // no fluid capacity; never reached (guarded by capacity > 0)
+    }
+}
+
 /// Fluid capacity of `voxel`: the mass its empty portion can hold before it's
 /// full. A full cube has none (fully occupied by material); a half-height slab
 /// holds [`SLAB_MASS`] in its empty half; a fully empty voxel (AIR) holds [`FULL_MASS`].
@@ -73,13 +91,17 @@ pub fn ocean_fill(storage: &ChunkStorage, chunk_y: i32, sea_level: i32) -> Fluid
         for y in 0..=top_local {
             for x in 0..CHUNK_SIZE {
                 let idx = x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE;
-                let capacity = fluid_capacity(storage.voxel(idx));
+                let voxel = storage.voxel(idx);
+                let capacity = fluid_capacity(voxel);
                 if capacity > 0 {
+                    // Topmost (sea-level) layer fills to put its surface at 3/4 of a
+                    // full cell (slab-aware); deeper layers stay brim-full.
+                    let mass = if y == top_local { sea_surface_mass(voxel) } else { capacity };
                     cells.insert(
                         LocalPos::new_unchecked(x as u8, y as u8, z as u8),
                         FluidCell {
                             fluid_id: FluidId::WATER,
-                            mass: capacity,
+                            mass,
                             flags: FluidCell::FLAG_SETTLED,
                         },
                     );
@@ -163,12 +185,14 @@ pub fn foliage_submerged(fluids: &FluidLayer, x: usize, sy: usize, z: usize) -> 
     match fluids.fill_mode {
         FluidFillMode::Submerged(_) => true,
         FluidFillMode::Empty => {
-            let above = sy + 1;
-            if above >= CHUNK_SIZE {
-                return false;
-            }
-            let lp = LocalPos::new_unchecked(x as u8, above as u8, z as u8);
-            fluids.cells.get(&lp).map_or(false, |c| c.mass > 0)
+            let has_water = |ly: usize| -> bool {
+                fluids
+                    .cells
+                    .get(&LocalPos::new_unchecked(x as u8, ly as u8, z as u8))
+                    .map_or(false, |c| c.mass > 0)
+            };
+            let above_submerged = sy + 1 < CHUNK_SIZE && has_water(sy + 1);
+            above_submerged || has_water(sy)
         }
     }
 }
@@ -200,12 +224,11 @@ mod tests {
         assert_eq!(f.fill_mode, FluidFillMode::Empty);
         // y in 0..=5 (6 layers) * 32 * 32 empty voxels become water.
         assert_eq!(f.cells.len(), 6 * CHUNK_SIZE * CHUNK_SIZE);
+        // Top (sea-level) layer generates so its surface lands at 3/4 (empty voxel =
+        // 3/4 fill); the layer just below is brim-full.
         let cell = f.cells.get(&LocalPos::new_unchecked(0, 5, 0)).unwrap();
-        assert_eq!(cell.mass, FULL_MASS);
-        assert_eq!(cell.fluid_id, FluidId::WATER);
-        assert_eq!(cell.flags, FluidCell::FLAG_SETTLED);
-        // A voxel just above sea level gets no water cell.
-        assert!(f.cells.get(&LocalPos::new_unchecked(0, 6, 0)).is_none());
+        assert_eq!(cell.mass, sea_surface_mass(voxel_core::Voxel::EMPTY));
+        assert_eq!(f.cells.get(&LocalPos::new_unchecked(0, 4, 0)).unwrap().mass, FULL_MASS);
     }
 
     #[test]

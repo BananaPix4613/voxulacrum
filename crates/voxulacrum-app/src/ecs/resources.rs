@@ -63,12 +63,40 @@ impl DerefMut for ShadowUniformBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
+/// Second global uniform buffer holding the *mirrored* view-projection for the
+/// planar water reflection pass. Same `GlobalUniforms` layout as the primary; only
+/// `view_proj` differs (reflected across the reference water plane).
+#[derive(Resource)]
+pub struct ReflectionUniformBuffer(pub wgpu::Buffer);
+
+impl Deref for ReflectionUniformBuffer {
+    type Target = wgpu::Buffer;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl DerefMut for ReflectionUniformBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+
 // ---------------------------------------------------------------------------
 // GPU bind groups
 // ---------------------------------------------------------------------------
 
 #[derive(Resource)]
 pub struct GlobalUniformBindGroup(pub wgpu::BindGroup);
+
+/// Global bind group for the reflection pass: identical textures to the primary
+/// [`GlobalUniformBindGroup`], bound to [`ReflectionUniformBuffer`] so the
+/// re-rendered scene uses the mirrored view-projection.
+#[derive(Resource)]
+pub struct ReflectionUniformBindGroup(pub wgpu::BindGroup);
+
+impl Deref for ReflectionUniformBindGroup {
+    type Target = wgpu::BindGroup;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl DerefMut for ReflectionUniformBindGroup {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
 
 impl Deref for GlobalUniformBindGroup {
     type Target = wgpu::BindGroup;

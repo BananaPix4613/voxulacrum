@@ -5,7 +5,6 @@ use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, Resou
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::water_pass::WaterPass;
 use crate::world::chunk::LoadedChunk;
 
 /// Configuration for cross-section cap rendering within the main scene pass.
@@ -32,11 +31,8 @@ pub struct MainScenePassNode<'a> {
     pub detail_paint_pipeline: &'a wgpu::RenderPipeline,
     pub scatter_pass: &'a ScatterPass,
     pub scatter_pipeline: &'a wgpu::RenderPipeline,
-    pub water_pass: &'a WaterPass,
-    pub water_pipeline: &'a wgpu::RenderPipeline,
     pub debug_line_pass: &'a DebugLinePass,
     pub show_debug_lines: bool,
-    pub hide_water: bool,
     pub hide_foliage: bool,
     pub player_pass: &'a PlayerPass,
 }
@@ -190,22 +186,6 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
             pass.set_vertex_buffer(0, self.player_pass.vertex_buffer.slice(..));
             pass.set_index_buffer(self.player_pass.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.player_pass.index_count, 0, 0..1);
-        }
-
-        // Water - per-chunk indexed draws with frustum culling
-        if !self.hide_water && !self.water_pass.chunk_meshes.is_empty() {
-            pass.set_pipeline(self.water_pipeline);
-            pass.set_bind_group(0, self.uniform_bind_group, &[]);
-            for (&chunk_pos, water_mesh) in &self.water_pass.chunk_meshes {
-                if self.frustum.is_chunk_visible(chunk_pos) {
-                    pass.set_vertex_buffer(0, water_mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(
-                        water_mesh.index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(0..water_mesh.index_count, 0, 0..1);
-                }
-            }
         }
 
         // Debug lines
