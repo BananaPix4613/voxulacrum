@@ -215,12 +215,50 @@ pub fn draw_graph_editor_panel(ctx: &egui::Context, hierarchy: &mut HierarchyEdi
                 {
                     editor.redo();
                 }
-                if editor.is_modified() {
+
+                ui.separator();
+
+                let modified = hierarchy.is_modified();
+                if ui
+                    .add_enabled(modified, egui::Button::new("Save"))
+                    .on_hover_text("Write this graph to its .json file")
+                    .clicked()
+                {
+                    hierarchy.save_active();
+                }
+                if modified {
                     ui.colored_label(egui::Color32::YELLOW, "● modified");
                 }
             });
+
+            // Create / delete row.
+            ui.horizontal(|ui| {
+                ui.label("New biome:");
+                ui.add(
+                    egui::TextEdit::singleline(hierarchy.new_name_mut())
+                        .desired_width(120.0)
+                        .hint_text("name"),
+                );
+                if ui.button("＋ Create").clicked() {
+                    let name = hierarchy.new_name_mut().clone();
+                    hierarchy.create_biome(&name);
+                    hierarchy.new_name_mut().clear();
+                }
+                let deletable = hierarchy.active_is_deletable_biome();
+                if ui
+                    .add_enabled(deletable, egui::Button::new("Delete"))
+                    .on_hover_text("Delete the selected biome graph and its manifest entry")
+                    .clicked()
+                {
+                    hierarchy.delete_active();
+                }
+            });
+
+            if let Some(status) = hierarchy.take_status() {
+                ui.colored_label(egui::Color32::LIGHT_BLUE, status);
+            }
+
             ui.separator();
-            // Graph selector dropdown + the selected graph's canvas.
             hierarchy.show(ui);
         });
 }

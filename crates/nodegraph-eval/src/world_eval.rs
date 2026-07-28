@@ -687,7 +687,7 @@ mod tests {
     fn zone_split() -> Graph {
         let mut g = Graph::of_kind(GraphKind::Zone);
         let noise = g.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
-        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0] }));
+        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0], ..Default::default() }));
         g.connect(PinRef::new(noise, 0), PinRef::new(out, 0)).unwrap();
         g
     }
@@ -837,7 +837,7 @@ mod tests {
             target: GraphRefTarget::World,
             ..Default::default()
         }));
-        let zo = zone.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0] }));
+        let zo = zone.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0], ..Default::default() }));
         let wb = world.boundary.clone();
         zone.resolve_graph_refs(|t| (t == GraphRefTarget::World).then(|| wb.clone()));
         zone.connect(PinRef::new(gr, 0), PinRef::new(zo, 0)).unwrap();

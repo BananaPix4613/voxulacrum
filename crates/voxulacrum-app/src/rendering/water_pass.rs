@@ -237,15 +237,9 @@ fn column_surface(world: &World, base: IVec3, gx: i32, gz: i32) -> Option<Col> {
         if m == 0 {
             continue;
         }
-        let above_open = if y + 1 >= CHUNK_SIZE {
-            !submerged
-        } else {
-            mass_at(y + 1) == 0
-                && !storage
-                    .voxel(LocalPos::new_unchecked(lx as u8, (y + 1) as u8, lz as u8).to_index())
-                    .is_solid()
-        };
-        if !above_open {
+        // Water directly above means the column continues up - not the surface here.
+        let water_above = if y + 1 >= CHUNK_SIZE { submerged } else { mass_at(y + 1) > 0 };
+        if water_above {
             continue;
         }
 
@@ -259,6 +253,14 @@ fn column_surface(world: &World, base: IVec3, gx: i32, gz: i32) -> Option<Col> {
             _ => (0.0, 1.0, FULL_MASS),
         };
         let fill = m as f32 / capacity as f32;
+        
+        let above_solid = y + 1 < CHUNK_SIZE
+            && storage
+            .voxel(LocalPos::new_unchecked(lx as u8, (y + 1) as u8, lz as u8).to_index())
+            .is_solid();
+        if fill >= 0.999 && above_solid {
+            continue;
+        }
         let world_y = ((base.y * dim + y as i32) as f32 + base_frac + fill * span_frac) * VOXEL_SCALE;
 
         let mut depth = 0u32;

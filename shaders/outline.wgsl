@@ -114,7 +114,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dd_l = select(0.0, abs(d_c - d_l), d_c < d_l);
     let dd_r = select(0.0, abs(d_c - d_r), d_c < d_r);
     let max_depth_diff = max(max(dd_u, dd_d), max(dd_l, dd_r));
-    let depth_edge = step(params.depth_threshold, max_depth_diff);
+    // Only a top-facing surface owns the dark depth silhouette, so the outline lands on
+    // a top face's far edge where it drops off and never darkens vertical side faces.
+    let top_c = step(0.5, n_c.y);
+    let depth_edge = step(params.depth_threshold, max_depth_diff) * top_c;
 
     // ================================================================
     // NORMAL EDGE (convex ridges) — ownership via world-up Y-component.

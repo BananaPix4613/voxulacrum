@@ -458,9 +458,13 @@ pub struct GraphOutputParams {
 /// column value meets or exceeds. Empty bands => zone 0 everywhere (single zone).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct WorldOutputParams {
-    /// Ascending climate thresholds. A column whose climate value is `>= k`
-    /// of these bands is assigned zone `k`.
+    /// Ascending climate thresholds partitioning columns into bands. N thresholds
+    /// => N+1 band regions; region k = how many thresholds a column's value meets.
     pub zone_bands: Vec<f32>,
+    /// Zone id assigned to each band region (index 0..=zone_bands.len()). A missing
+    /// entry defaults to the region index, so graphs without it load unchanged.
+    #[serde(default)]
+    pub zone_ids: Vec<u16>,
 }
 
 /// Parameters for [`NodeKind::ZoneOutput`]: the ZoneGraph's terminal. Maps a
@@ -469,9 +473,15 @@ pub struct WorldOutputParams {
 /// each column value meets or exceeds. Empty bands => biome 0 everywhere.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
 pub struct ZoneOutputParams {
-    /// Ascending climate thresholds. A column whose climate value is `>= k`
-    /// of these bands is assigned biome `k`.
+    /// Ascending climate thresholds partitioning columns into bands. N thresholds
+    /// => N+1 band regions; region k = how many thresholds a column's value meets.
     pub biome_bands: Vec<f32>,
+    /// Biome id assigned to each band region (index 0..=biome_bands.len()). A
+    /// missing entry defaults to the region index (legacy behavior), so graphs
+    /// authored before explicit assignment load unchanged. Because the artist
+    /// picks the biome per region, ids need not follow band order.
+    #[serde(default)]
+    pub biome_ids: Vec<u16>,
 }
 
 /// Parameters for [`NodeKind::YBand`]: a vertical density gate. Emits `1.0`

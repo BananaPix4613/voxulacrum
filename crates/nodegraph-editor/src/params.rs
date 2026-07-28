@@ -37,7 +37,7 @@ fn row2(
 
 /// Draw the body of a node - its parameters. Returns `true` if anything
 /// was edited this frame.
-pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
+pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, biomes: &[(u16, String)]) -> bool {
     match kind {
         NodeKind::Constant(p) => row(ui, "value", |ui| {
             ui.add(egui::DragValue::new(&mut p.value).speed(0.05))
@@ -133,7 +133,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind) -> bool {
         }
         NodeKind::SurfaceNoise(p) => noise_params_ui(ui, p),
         NodeKind::WorldOutput(p) => band_list_ui(ui, "zone bands (ascending)", &mut p.zone_bands),
-        NodeKind::ZoneOutput(p) => band_list_ui(ui, "biome bands (ascending)", &mut p.biome_bands),
+        NodeKind::ZoneOutput(p) => zone_bands_ui(ui, p, biomes),
         NodeKind::YBand(p) => row2(
             ui,
             "min y", |ui| ui.add(egui::DragValue::new(&mut p.min).speed(0.5)),
@@ -240,7 +240,7 @@ fn band_list_ui(ui: &mut Ui, label: &str, bands: &mut Vec<f32>) -> bool {
             if ui.add(egui::DragValue::new(b).speed(0.01)).changed() {
                 changed = true;
             }
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("×").clicked() {
                 remove = Some(i);
             }
         });
@@ -295,7 +295,7 @@ fn material_list_ui(ui: &mut Ui, mats: &mut Vec<MaterialId>) -> bool {
         ui.horizontal(|ui| {
             ui.label("mat");
             changed |= ui.add(egui::DragValue::new(&mut m.0)).changed();
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("×").clicked() {
                 remove = Some(i);
             }
         });
@@ -313,7 +313,7 @@ fn material_list_ui(ui: &mut Ui, mats: &mut Vec<MaterialId>) -> bool {
 
 fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {
     let mut changed = false;
-    ui.label("Bands (top → down):");
+    ui.label("Bands (top to down):");
     let mut remove: Option<usize> = None;
     for (i, (mat, thickness)) in p.bands.iter_mut().enumerate() {
         ui.horizontal(|ui| {
@@ -323,7 +323,7 @@ fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {
             changed |= ui
                 .add(egui::DragValue::new(thickness).range(1u32..=64))
                 .changed();
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("×").clicked() {
                 remove = Some(i);
             }
         });
@@ -350,7 +350,7 @@ fn curve_stops_ui(ui: &mut Ui, stops: &mut Vec<(f32, f32)>) -> bool {
             changed |= ui.add(egui::DragValue::new(x).speed(0.02)).changed();
             ui.label("y");
             changed |= ui.add(egui::DragValue::new(y).speed(0.02)).changed();
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("×").clicked() {
                 remove = Some(i);
             }
         });
@@ -364,5 +364,81 @@ fn curve_stops_ui(ui: &mut Ui, stops: &mut Vec<(f32, f32)>) -> bool {
         stops.push((last.0 + 0.1, last.1));
         changed = true;
     }
+    changed
+}
+
+/// Editor for a ZoneOutput's climate→biome assignment: a biome picker per band
+/// region, interleaved with the climate thresholds that separate them. Region k's
+/// biome is `biome_ids[k]`, kept sized to `biome_bands.len() + 1`. Artists pick the
+/// biome by name, so ids need not follow band order.
+fn zone_bands_ui(
+    ui: &mut Ui,
+    p: &mut nodegraph_ir::ZoneOutputParams,
+    biomes: &[(u16, String)],
+) -> bool {
+    let mut changed = false;
+    // Keep one editable biome slot per region. Growing to fit isn't a user edit,
+    // so it doesn't set `changed`; it stabilizes after the first frame.
+    let regions = p.biome_bands.len() + 1;
+    while p.biome_ids.len() < regions {
+        p.biome_ids.push(p.biome_ids.len() as u16);
+    }
+    p.biome_ids.truncate(regions);
+
+    ui.weak("Climate bands (low to high):");
+    let mut remove: Option<usize> = None;
+    for region in 0..regions {
+        ui.horizontal(|ui| {
+            ui.label(format!("band {region}:"));
+            changed |= biome_combo(ui, region, &mut p.biome_ids[region], biomes);
+        });
+        if region < p.biome_bands.len() {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(">=");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut p.biome_bands[region]).speed(0.01))
+                    .changed();
+                if ui.small_button("×").on_hover_text("Remove threshold").clicked() {
+                    remove = Some(region);
+                }
+            });
+        }
+    }
+    if let Some(i) = remove {
+        p.biome_bands.remove(i);
+        if i + 1 < p.biome_ids.len() {
+            p.biome_ids.remove(i + 1); // drop the region that merged away
+        }
+        changed = true;
+    }
+    if ui.button("+ threshold").clicked() {
+        let last = p.biome_bands.last().copied().unwrap_or(0.0);
+        p.biome_bands.push(last + 0.1);
+        p.biome_ids.push(p.biome_ids.last().copied().unwrap_or(0));
+        changed = true;
+    }
+    changed
+}
+
+/// A biome picker combo showing biome names, storing the chosen id. Shows a raw
+/// "biome N" fallback for an id not in the current world's set.
+fn biome_combo(ui: &mut Ui, salt: usize, id: &mut u16, biomes: &[(u16, String)]) -> bool {
+    let mut changed = false;
+    let selected = biomes
+        .iter()
+        .find(|(bid, _)| *bid == *id)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| format!("biome {id}"));
+    egui::ComboBox::from_id_salt(("zone_biome", salt))
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for (bid, name) in biomes {
+                if ui.selectable_label(*bid == *id, name).clicked() && *id != *bid {
+                    *id = *bid;
+                    changed = true;
+                }
+            }
+        });
     changed
 }

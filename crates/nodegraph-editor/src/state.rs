@@ -36,6 +36,12 @@ pub struct EditorState {
     /// First node currently selected on the canvas, captured during `show`.
     /// `None` when nothing is selected.
     selected_node: Option<SnarlNodeId>,
+    /// Pre-edit graph snapshot captured at the first change of a parameter
+    /// interaction (drag or text entry). Committed as one undo entry when the
+    /// interaction ends, so a whole drag coalesces into a single undo.
+    param_baseline: Option<Graph>,
+    /// Label for the pending param undo entry (e.g. "Edit Layer").
+    param_edit_label: Option<String>,
 }
 
 impl EditorState {
@@ -50,6 +56,8 @@ impl EditorState {
             toast: None,
             revision: 0,
             selected_node: None,
+            param_baseline: None,
+            param_edit_label: None,
         }
     }
 
@@ -83,23 +91,24 @@ impl EditorState {
     }
 
     /// Render the editor canvas into `ui`, folding this frame's structural
-    /// edits into a single undo entry (param drags coalesce via the dirty
-    /// flag). This is the embedding shown in the crate-level docs; call
-    /// [`Self::consume_dirty`] afterwards to react to changes.
-    pub fn show(&mut self, ui: &mut egui::Ui) {
-        // Snapshot the pre-mutation graph (for undo) plus the id-map and
-        // diagnostics the viewer needs this frame.
+    /// edits into a single undo entry. Parameter drags/entries coalesce into
+    /// one undo entry per interaction (captured on first change, committed when
+    /// the pointer is released and no widget holds focus).
+    pub fn show(&mut self, ui: &mut egui::Ui, biomes: &[(u16, String)]) {
         let (pre_graph, id_map) = snarl_to_graph(&self.snarl);
         let diagnostics = DiagnosticIndex::from_diagnostics(&pre_graph.validate());
         
         let mut actions: Vec<UndoLabel> = Vec::new();
         let mut dirty_param = false;
+        let mut param_label: Option<String> = None;
         let mut clicked: Option<SnarlNodeId> = None;
         let mut viewer = GraphViewer {
             id_map: &id_map,
             diagnostics: &diagnostics,
             actions: &mut actions,
             dirty_param: &mut dirty_param,
+            param_label: &mut param_label,
+            biomes,
             selected: self.selected_node,
             clicked: &mut clicked,
         };
@@ -111,18 +120,29 @@ impl EditorState {
         );
         
         if !actions.is_empty() {
-            // Coalesce this frame's structural actions into one undo entry.
+            // A structural edit landed this frame. Commit any param edit that was
+            // in flight first, then fold the structural actions into one entry.
+            self.commit_param_edit();
             let label = actions.join(", ");
             self.push_undo(label, pre_graph);
         } else if dirty_param {
-            self.mark_dirty();
+            // First change of an interaction: capture the pre-edit baseline.
+            if self.param_baseline.is_none() {
+                self.param_baseline = Some(pre_graph);
+                self.param_edit_label = param_label.map(|n| format!("Edit {n}"));
+            }
+            self.mark_dirty(); // live re-eval while the value is being dragged
+        } else {
+            // No change this frame. Commit the coalesced param edit once the
+            // interaction is truly over (pointer released, nothing focused), so a
+            // paused mid-drag doesn't fragment one drag into several undo entries.
+            let interacting = ui.ctx().is_using_pointer()
+                || ui.ctx().memory(|m| m.focused().is_some());
+            if !interacting {
+                self.commit_param_edit();
+            }
         }
 
-        // Selection is author-driven: left-clicking a node's header records it
-        // as the inspected node. egui-snarl's built-in selection only fires on
-        // shift/ctrl-click, which isn't the gesture we want here, so the viewer
-        // reports plain clicks via `clicked` instead. Sticky: the selection
-        // only changes when a different node is clicked.
         if let Some(node) = clicked {
             if Some(node) != self.selected_node {
                 self.selected_node = Some(node);
@@ -130,7 +150,19 @@ impl EditorState {
             }
         }
     }
-    
+
+    /// Flush any pending parameter-edit baseline into a single undo entry.
+    /// No-op when no param interaction is in flight.
+    fn commit_param_edit(&mut self) {
+        if let Some(base) = self.param_baseline.take() {
+            let label = self
+                .param_edit_label
+                .take()
+                .unwrap_or_else(|| "Edit parameter".to_string());
+            self.push_undo(label, base);
+        }
+    }
+
     /// Push a labeled undo entry whose `pre_snapshot` is the graph state
     /// *before* the user action took place. Clears the redo stack. Also
     /// marks the editor dirty + modified, so the host can pick up the new
@@ -175,6 +207,8 @@ impl EditorState {
         let current = self.build_graph();
         self.redo.push(UndoEntry { label: entry.label.clone(), snapshot: current });
         self.snarl = graph_to_snarl(&entry.snapshot);
+        self.param_baseline = None;
+        self.param_edit_label = None;
         self.dirty = true;
         self.modified = true;
         self.revision = self.revision.wrapping_add(1);
@@ -187,6 +221,8 @@ impl EditorState {
         let current = self.build_graph();
         self.undo.push(UndoEntry { label: entry.label.clone(), snapshot: current });
         self.snarl = graph_to_snarl(&entry.snapshot);
+        self.param_baseline = None;
+        self.param_edit_label = None;
         self.dirty = true;
         self.modified = true;
         self.revision = self.revision.wrapping_add(1);

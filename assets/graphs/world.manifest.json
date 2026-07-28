@@ -3,7 +3,27 @@
   "sea_level": 24,
   "zone": "zone.graph.json",
   "biomes": [
-    { "id": 0, "graph": "biome_meadow.graph.json", "detail": "biome_meadow.detail.json", "params": { "traversal_smoothing_distance": 1.0 } },
-    { "id": 1, "graph": "biome_rocky.graph.json", "params": { "traversal_smoothing_distance": 0.0 } }
+    {
+      "id": 0,
+      "graph": "biome_meadow.graph.json",
+      "detail": "biome_meadow.detail.json",
+      "params": {
+        "traversal_smoothing_distance": 1.0
+      }
+    },
+    {
+      "id": 1,
+      "graph": "biome_rocky.graph.json",
+      "detail": null,
+      "params": {
+        "traversal_smoothing_distance": 0.0
+      }
+    },
+    {
+      "id": 2,
+      "graph": "biome_test.graph.json",
+      "detail": null,
+      "params": {}
+    }
   ]
 }

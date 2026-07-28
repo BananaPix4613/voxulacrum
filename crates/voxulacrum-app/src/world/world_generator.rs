@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use glam::IVec3;
 use nodegraph_eval::{BiomeParams, ChunkEvaluation, EvalContext, PaintLayer, ScatterBucket, WorldEvaluator};
-use nodegraph_ir::{Graph, NodeKind};
-use serde::Deserialize;
+use nodegraph_ir::{Graph, NodeKind, SubtractParams};
+use serde::{Serialize, Deserialize};
 use smallvec::SmallVec;
+use nodegraph_ir::PinType::Density;
 use voxel_core::LocalPos;
 
 use crate::params::TerrainGenParams;
@@ -416,7 +417,7 @@ pub enum GraphSlot {
 
 /// On-disk manifest describing a world's graph hierarchy. Paths are relative to
 /// the manifest file's directory.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldManifest {
     /// World graph file (climate + zone assignment).
     pub world: String,
@@ -431,7 +432,7 @@ pub struct WorldManifest {
 }
 
 /// One biome entry in a [`WorldManifest`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiomeManifestEntry {
     /// Biome id this graph renders (matches the Zone graph's assignment).
     pub id: u16,
@@ -493,12 +494,11 @@ fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, St
     Ok(LoadedHierarchy { world, zone, biomes, details, biome_params, sea_level: manifest.sea_level })
 }
 
-/// Load every editable graph in a world manifest, each with its hierarchy
-/// [`GraphSlot`] and a display label (World, Zone, then biomes by id). Used by
-/// the editor's graph selector.
+/// Load every editable graph in a world manifest: its slot, display label,
+/// on-disk path, and parsed graph. Paths let the editor save each graph back.
 pub fn load_world_graphs(
     manifest_path: &std::path::Path,
-) -> Result<Vec<(GraphSlot, String, Graph)>, String> {
+) -> Result<Vec<(GraphSlot, String, std::path::PathBuf, Graph)>, String> {
     let text = std::fs::read_to_string(manifest_path)
         .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
     let manifest: WorldManifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -506,22 +506,23 @@ pub fn load_world_graphs(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     let mut out = vec![
-        (GraphSlot::World, "World".to_string(), read_graph(&dir.join(&manifest.world))?),
-        (GraphSlot::Zone, "Zone".to_string(), read_graph(&dir.join(&manifest.zone))?),
+        (GraphSlot::World, "World".to_string(), dir.join(&manifest.world),
+            read_graph(&dir.join(&manifest.world))?),
+        (GraphSlot::Zone, "Zone".to_string(), dir.join(&manifest.zone),
+            read_graph(&dir.join(&manifest.zone))?),
     ];
     for entry in &manifest.biomes {
         out.push((
             GraphSlot::Biome(entry.id),
             biome_label(&entry.graph, entry.id),
+            dir.join(&entry.graph),
             read_graph(&dir.join(&entry.graph))?,
         ));
     }
-    // Resolve cross-graph pins so the editor renders GraphRef pins correctly:
-    // derive World's boundary (out[0]) and resolve the Zone graph's GraphRefs
-    // (out[1]) against it. Runtime regeneration re-resolves via from_hierarchy.
-    out[0].2.derive_output_boundary();
-    let world_boundary = out[0].2.boundary.clone();
-    out[1].2.resolve_graph_refs(|t| match t {
+    // Resolve cross-graph pins so GraphRef pins render correctly.
+    out[0].3.derive_output_boundary();
+    let world_boundary = out[0].3.boundary.clone();
+    out[1].3.resolve_graph_refs(|t| match t {
         nodegraph_ir::GraphRefTarget::World => Some(world_boundary.clone()),
         _ => None,
     });
@@ -565,6 +566,78 @@ fn graphs_dir() -> std::path::PathBuf {
 /// means a regeneration picks up an edited `biome_meadow.graph.json`.
 pub fn load_default(params: &TerrainGenParams) -> Result<Arc<WorldGenerator>, String> {
     WorldGenerator::from_manifest(&world_manifest_path(), params.seed as u64).map(Arc::new)
+}
+
+/// Rewrite `manifest_path`, adding a biome entry `(id, graph_file)`. `graph_file`
+/// is stored relative to the manifest directory. Overwrites an existing entry
+/// with the same id.
+pub fn add_biome_entry(
+    manifest_path: &std::path::Path,
+    id: u16,
+    graph_file: &str,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
+    let mut manifest: WorldManifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    match manifest.biomes.iter_mut().find(|b| b.id == id) {
+        Some(entry) => entry.graph = graph_file.to_string(),
+        None => manifest.biomes.push(BiomeManifestEntry {
+            id,
+            graph: graph_file.to_string(),
+            detail: None,
+            params: HashMap::new(),
+        }),
+    }
+    let out = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    std::fs::write(manifest_path, out).map_err(|e| e.to_string())
+}
+
+/// Rewrite `manifest_path`, removing the biome entry with the given id.
+pub fn remove_biome_entry(
+    manifest_path: &std::path::Path,
+    id: u16,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
+    let mut manifest: WorldManifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    manifest.biomes.retain(|b| b.id != id);
+    let out = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    std::fs::write(manifest_path, out).map_err(|e| e.to_string())
+}
+
+/// The graphs directory (public so the editor can place new graph files there).
+pub fn graphs_dir_public() -> std::path::PathBuf {
+    graphs_dir()
+}
+
+/// A minimal, valid, renderable Biome graph: a Simplex height field remapped to
+/// a Y range, turned into density by subtracting world-Y, materialized by a
+/// Layer, and terminated at a DensityOutput. A same starting point for a new
+/// biome the author then edits.
+pub fn new_biome_graph() -> Graph {
+    use glam::Vec2;
+    use nodegraph_ir::*;
+
+    let mut g = Graph::of_kind(GraphKind::Biome);
+    let noise = NoiseParams { frequency: 0.005, ..NoiseParams::default() };
+    let height = g.add_node_at(NodeKind::Simplex2D(noise), Vec2::new(0.0, 0.0));
+    let remap = g.add_node_at(
+        NodeKind::Remap(RemapParams { src_lo: -1.0, src_hi: 1.0, dst_lo: 24.0, dst_hi: 56.0 }),
+        Vec2::new(240.0, 0.0),
+    );
+    let y = g.add_node_at(
+        NodeKind::WorldAxis(WorldAxisParams { axis: Axis::Y }),
+        Vec2::new(240.0, 160.0),
+    );
+    let density = g.add_node_at(NodeKind::Subtract(SubtractParams::default()), Vec2::new(480.0, 60.0));
+    let layer = g.add_node_at(NodeKind::Layer(LayerParams::default()), Vec2::new(720.0, 180.0));
+    let out = g.add_node_at(NodeKind::DensityOutput(DensityOutputParams::default()), Vec2::new(960.0, 60.0));
+
+    let _ = g.connect(PinRef::new(height, 0), PinRef::new(remap, 0));
+    let _ = g.connect(PinRef::new(remap, 0), PinRef::new(density, 0)); // a = height
+    let _ = g.connect(PinRef::new(y, 0), PinRef::new(density, 1));     // b = world Y
+    let _ = g.connect(PinRef::new(density, 0), PinRef::new(layer, 0)); // density → material
+    let _ = g.connect(PinRef::new(density, 0), PinRef::new(out, 0));   // density terminal
+    let _ = g.connect(PinRef::new(layer, 0), PinRef::new(out, 1));     // material terminal
+    g
 }
 
 #[cfg(test)]

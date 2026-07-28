@@ -15,7 +15,7 @@ use crate::state::UndoLabel;
 /// Maximum width of a node's body (parameter area), in egui points. Caps
 /// node width so long labels/widgets wrap instead of stretching the node.
 /// Points scale with DPI, so this stays correct across displays.
-const BODY_MAX_WIDTH: f32 = 220.0;
+const BODY_MAX_WIDTH: f32 = 260.0;
 
 /// Clearance, in egui points, inserted between an output label and its pin
 /// marker. Output rows lay out right-to-left, so snarl reserves only a tight
@@ -85,6 +85,15 @@ pub fn severity_color(s: Severity) -> egui::Color32 {
     }
 }
 
+/// Short label for a wire action between two nodes (by display name).
+fn wire_label(verb: &str, from: &NodeKind, to: &NodeKind) -> String {
+    format!(
+        "{verb} {} -> {}",
+        from.descriptor().display_name,
+        to.descriptor().display_name,
+    )
+}
+
 /// One frame's diagnostics, grouped by node for fast lookup in the viewer.
 pub struct DiagnosticIndex {
     /// Strongest severity per IR node id.
@@ -122,6 +131,12 @@ pub struct GraphViewer<'a> {
     /// Set whenever a parameter changed this frame (no undo entry, but
     /// triggers a re-eval).
     pub dirty_param: &'a mut bool,
+    /// Display name of the node whose parameter changed this frame, if any.
+    /// Used to label the coalesced param-edit undo entry.
+    pub param_label: &'a mut Option<String>,
+    /// (id, display name) of every biome in the world, for ZoneOutput's biome
+    /// picker. Empty for graphs edited outside a world context.
+    pub biomes: &'a [(u16, String)],
     /// The node currently selected for inspection, used for highlighting.
     pub selected: Option<NodeId>,
     /// Out-param: the node whose header was left-clicked this frame, if any.
@@ -177,18 +192,24 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         let text = egui::RichText::new(desc.display_name)
             .color(header_text_color(desc.category))
             .strong();
-        // The title text plus a transparent strip spanning the rest of the
-        // header width together make the whole colored band a click target.
-        // The collapse arrow is allocated by snarl *before* this content and
-        // has its own click handler, so it keeps priority - this strip never
-        // overlaps it. `Sense::click` (not drag) means dragging the header
-        // still moves the node.
-        let title = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+        // Title glyphs plus a transparent strip across the rest of the header
+        // make the whole colored band a target. `selectable(false)` stops the
+        // label from eating clicks as text selection; `Sense::click` leaves the
+        // drag-to-move gesture with snarl. Selecting on *press* (not just a
+        // clean click) means a click that nudges into a drag still selects.
+        let title = ui.add(
+            egui::Label::new(text)
+                .selectable(false)
+                .sense(egui::Sense::click()));
         let strip_w = ui.available_width();
         let strip_h = title.rect.height();
-        let (_strip_rect, strip) =
+        let (_r, strip) =
             ui.allocate_exact_size(egui::vec2(strip_w, strip_h), egui::Sense::click());
-        if title.clicked() || strip.clicked() {
+        if title.is_pointer_button_down_on()
+            || strip.is_pointer_button_down_on()
+            || title.clicked()
+            || strip.clicked()
+        {
             *self.clicked = Some(node_id);
         }
     }
@@ -258,9 +279,11 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
                     ui.add_space(2.0);
                 }
             }
+            let name = snarl[node_id].descriptor().display_name;
             let node = &mut snarl[node_id];
-            if params_ui(ui, node) {
+            if params_ui(ui, node, self.biomes) {
                 *self.dirty_param = true;
+                *self.param_label = Some(name.to_string());
             }
         });
     }
@@ -333,6 +356,36 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
             snarl.disconnect(existing, to.id);
         }
         snarl.connect(from.id, to.id);
+        self.actions.push(label);
+    }
+
+    fn disconnect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<NodeKind>) {
+        let label = wire_label("Disconnect", &snarl[from.id.node], &snarl[to.id.node]);
+        snarl.disconnect(from.id, to.id);
+        self.actions.push(label);
+    }
+    
+    fn drop_outputs(&mut self, pin: &OutPin, snarl: &mut Snarl<NodeKind>) {
+        if pin.remotes.is_empty() {
+            return; // nothing removed -> no undo entry
+        }
+        let label = format!(
+            "Disconnect {} outputs",
+            snarl[pin.id.node].descriptor().display_name
+        );
+        snarl.drop_outputs(pin.id);
+        self.actions.push(label);
+    }
+    
+    fn drop_inputs(&mut self, pin: &InPin, snarl: &mut Snarl<NodeKind>) {
+        if pin.remotes.is_empty() {
+            return;
+        }
+        let label = format!(
+            "Disconnect {} input",
+            snarl[pin.id.node].descriptor().display_name
+        );
+        snarl.drop_inputs(pin.id);
         self.actions.push(label);
     }
 }

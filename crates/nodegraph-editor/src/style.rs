@@ -3,13 +3,19 @@
 //! holds only the global baseline shared by every node and wire.
 
 use egui::{Color32, Frame, Stroke, vec2};
-use egui_snarl::ui::{BackgroundPattern, Grid, SnarlStyle};
+use egui_snarl::ui::{BackgroundPattern, Grid, NodeLayout, SnarlStyle};
 
 /// The editor's canvas style. Cheap to build, so constructed fresh each
 /// frame from snarl's all-`None` baseline ([`SnarlStyle::new`]) with only
 /// the fields we customize set.
 pub fn editor_snarl_style() -> SnarlStyle {
     SnarlStyle {
+        // Header -> inputs -> params (full width) -> outputs, stacked vertically.
+        // Frees the parameter body from being squeezed between the pin columns
+        // (snarl's default Coil), so band lists and multi-field rows get the
+        // node's full width. `min_pin_row_height` keeps pin rows from collapsing
+        // tighter than the pin marker.
+        node_layout: Some(NodeLayout::sandwich().with_min_pin_row_height(18.0)),
         // Thin dark rim around every pin marker (overridable per-pin, but no
         // pin overrides it today) so bright type colors stay legible against
         // node bodies and wires.

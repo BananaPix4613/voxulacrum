@@ -103,11 +103,11 @@ impl<'g> ColumnEvaluator<'g> {
             }
             NodeKind::WorldOutput(p) => {
                 let field = self.input_surface(id, 0)?;
-                ColumnOutput::Id(Arc::new(quantize_bands(&field, &p.zone_bands)))
+                ColumnOutput::Id(Arc::new(quantize_bands(&field, &p.zone_bands, &p.zone_ids)))
             }
             NodeKind::ZoneOutput(p) => {
                 let field = self.input_surface(id, 0)?;
-                ColumnOutput::Id(Arc::new(quantize_bands(&field, &p.biome_bands)))
+                ColumnOutput::Id(Arc::new(quantize_bands(&field, &p.biome_bands, &p.biome_ids)))
             }
             // GraphOutput marks its input value as a named boundary output; the
             // value passes through so a cross-graph reader can sample it by node.
@@ -185,11 +185,11 @@ impl<'g> ColumnEvaluator<'g> {
             }
             NodeKind::WorldOutput(p) => {
                 let v = self.sample_input_surface(id, 0, world_x, world_z)?;
-                ColumnSample::Id(quantize_one(v, &p.zone_bands))
+                ColumnSample::Id(band_id(quantize_one(v, &p.zone_bands), &p.zone_ids))
             }
             NodeKind::ZoneOutput(p) => {
                 let v = self.sample_input_surface(id, 0, world_x, world_z)?;
-                ColumnSample::Id(quantize_one(v, &p.biome_bands))
+                ColumnSample::Id(band_id(quantize_one(v, &p.biome_bands), &p.biome_ids))
             }
             NodeKind::GraphOutput(_) => {
                 ColumnSample::Surface(self.sample_input_surface(id, 0, world_x, world_z)?)
@@ -338,17 +338,25 @@ fn quantize_one(value: f32, bands: &[f32]) -> u16 {
     bands.iter().filter(|&&b| value >= b).count() as u16
 }
 
-/// Quantize a per-column surface field into a discrete id column, applying
-/// [`quantize_one`] per column. Shared by the World (zone) and Zone (biome)
-/// terminals so the selection logic lives in one place.
-fn quantize_bands(field: &ColumnField, bands: &[f32]) -> IdColumn {
-    let mut ids = IdColumn::zeroed();
+/// Map a band region index to its assigned id: explicit `ids[k]` when present,
+/// else the region index itself (legacy behavior - graphs without an id map are
+/// unchanged).
+fn band_id(k: u16, ids: &[u16]) -> u16 {
+    ids.get(k as usize).copied().unwrap_or(k)
+}
+
+/// Quantize a per-column surface field into a discrete id column: band-index per
+/// column via [`quantize_one`], then [`band_id`] to the assigned id. Shared by the
+/// World (zone) and Zone (biome) terminals.
+fn quantize_bands(field: &ColumnField, bands: &[f32], ids: &[u16]) -> IdColumn {
+    let mut out = IdColumn::zeroed();
     for z in 0..CHUNK_DIM {
         for x in 0..CHUNK_DIM {
-            ids.set(x, z, quantize_one(field.get(x, z), bands));
+            let k = quantize_one(field.get(x, z), bands);
+            out.set(x, z, band_id(k, ids));
         }
     }
-    ids
+    out
 }
 
 #[cfg(test)]
@@ -371,7 +379,7 @@ mod tests {
     fn zone_graph(biome_bands: Vec<f32>) -> Graph {
         let mut g = Graph::new();
         let noise = g.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
-        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands }));
+        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands, ..Default::default() }));
         g.connect(PinRef::new(noise, 0), PinRef::new(out, 0)).unwrap();
         g
     }
@@ -546,7 +554,7 @@ mod tests {
             target: GraphRefTarget::World,
             ..Default::default()
         }));
-        let zo = zone.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0] }));
+        let zo = zone.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0], ..Default::default() }));
         let world_boundary = world.boundary.clone();
         zone.resolve_graph_refs(|t| (t == GraphRefTarget::World).then(|| world_boundary.clone()));
         zone.connect(PinRef::new(gr, 0), PinRef::new(zo, 0)).unwrap();

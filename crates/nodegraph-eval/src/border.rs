@@ -137,7 +137,7 @@ mod tests {
     fn zone_graph(biome_bands: Vec<f32>) -> (Graph, NodeId) {
         let mut g = Graph::new();
         let noise = g.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
-        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands }));
+        let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands, ..Default::default() }));
         g.connect(PinRef::new(noise, 0), PinRef::new(out, 0)).unwrap();
         (g, out)
     }

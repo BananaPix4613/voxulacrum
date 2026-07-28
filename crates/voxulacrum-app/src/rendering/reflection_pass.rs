@@ -113,12 +113,12 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
         }
 
         // Player avatar (cull-None pipeline, reused as-is).
-        if self.player_pass.visible && self.player_pass.index_count > 0 {
+        if self.player_pass.visible && self.player_pass.body_index_count > 0 {
             pass.set_pipeline(&self.player_pass.pipeline);
             pass.set_bind_group(0, self.reflection_bind_group, &[]);
             pass.set_vertex_buffer(0, self.player_pass.vertex_buffer.slice(..));
             pass.set_index_buffer(self.player_pass.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.player_pass.index_count, 0, 0..1);
+            pass.draw_indexed(0..self.player_pass.body_index_count, 0, 0..1);
         }
     }
 }

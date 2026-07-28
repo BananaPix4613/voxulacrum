@@ -78,7 +78,7 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     let n = normalize(in.normal);
     let ndl = max(dot(n, normalize(globals.sun_direction)), 0.0);
     let lit = in.color * (globals.sun_color * ndl * 0.7 + globals.ambient_color * 0.6);
-    return FragmentOutput(vec4<f32>(lit, 1.0), vec4<f32>(n, 1.0));
+    return FragmentOutput(vec4<f32>(lit, 1.0), vec4<f32>(n, 0.5));
 }
 
 const SILHOUETTE_COLOR: vec3<f32> = vec3<f32>(0.5, 0.78, 1.0); // seen-through-terrain tint

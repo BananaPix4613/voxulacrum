@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.5
+**Status:** Baseline reference, v1.8
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -11,6 +11,9 @@
 - v1.3 — Documented settled architectural additions from Phases 2 through 7: cross-graph dataflow (`GraphRef` + `GraphOutput`), named boundary pins for libraries, per-biome parameter sidecar, standard libraries as authored assets with `LibraryKernel` backing, and the manifest-driven world structure. Reframed traversal smoothing distance in §5 to reflect the coupled tensions Phase 6 surfaced (multi-distance smoothing requires terrain modification, foliage reordering, and cross-chunk generation infrastructure). Revised LOD strategy in §11 for the orthographic isometric camera model. Renamed the pin type `ScatterPoints` → `Positions` to match the general-mechanism naming pattern used throughout. Renamed `FluidProvider` → `FluidOutput` to match code. Added explicit interim-vs-target notes for three items where current implementation is scheduled to migrate: the mesh vertex format (current `TerrainVertex` → target `FaceVertex`), save format versioning (current wipe-on-bump → target per-layer versioning), and fluid persistence (current full-snapshot → target diff-with-tombstones).
 - v1.4 — Clarified §9 to document the content-authoring-vs-play mode model the engine implements. Added an explicit "Modes: content authoring vs. play" subsection to §9 stating that authoring and play do not coexist: authoring-mode regeneration is authoritative and wipes overrides by design; play-mode graphs are read-only. Removed the "worldgen edits don't destroy player work" property from §9's rationale, which described a coexistence case that is not a design goal. Updated the Stable Instance IDs paragraph to distinguish play-mode chunk reload (applies tombstones and additions) from authoring-mode regeneration (wipes). Removed property #3 from the fluid persistence interim justification since it described the same coexistence case. Introduced the mutation command API as the enforcement mechanism for the mode separation; the API becomes real in Phase 8.
 - v1.5 — Expanded §12 Networking with the settled decisions from the companion `networking-architecture-proposal.md`: authoritative-state model over lockstep, determinism-in-generation as the bandwidth story, per-chunk base-content hash for self-healing terrain divergence, single mutation door as the sole write entry point, server-only fluid simulation, fixed-timestep player sim as a shared pure function, snapshot interpolation for other entities, per-observer streaming generalizing from the current camera-driven model. Documented the phase sequencing that follows Phase 8: player character (networking-aware but standalone) → server-core crate extraction → observer-set streaming → loopback milestone → LAN and internet transport. The proposal itself remains a companion document labeled PROPOSAL until the networking arc completes.
+- v1.6 — Reconciled §5 with Phase 9's settled outcome: the walkability mask no longer exists as a resident runtime artifact. Walkability is computed transiently inside worldgen for slab smoothing; runtime movement, collision, and room detection query geometry directly (`WorldView::solid_interval`); future AI pathfinding consumes the same geometric queries. Documented the cross-chunk seam finalization pass (`world::seam`, persisted `seam_finalized`) as part of slab smoothing. Promoted the underground visibility system (`underground-visibility-design.md`: air-side face rule, cost-priority march, clarity radius) to settled status in §11 camera occlusion. Added §12 subsections for engine versioning & release policy and performance budgets, both anchored by the companion `roadmap.md`, which is authoritative for version sequencing and compatibility boundaries. Named `roadmap.md` a companion document.
+- v1.7 — Added §12 subsections establishing three previously-undocumented foundational commitments: **developer and authoring tooling as a first-class engine surface** (every authorable content type in-engine, previewable, hot-reloadable; maturity model and per-version targets in `roadmap.md` §4), **the game-facing API surface** (the boundary between engine capability and game rules, enumerated in `roadmap.md` §6), and **particles/VFX and non-player entity visuals** as acknowledged architectural gaps that must be designed before they are built. Corrected the performance-budget cross-reference to `roadmap.md` §7.3 following that document's renumbering, and restated 1.0 readiness as the roadmap's rubric rather than a single shipped title.
+- v1.8 — Incorporated the settled conclusions of an external architecture review (`engine-architecture-reference.md`; full disposition in `roadmap.md` §21). Added two foundational principles to §1: **visibility is queryable world state, not a rendering effect** (occlusion decisions must live where the renderer, the interaction system, and the simulation all read the same classification), and **one scheduler, one clock family** (all deferred work on a single job system; all periodic simulation on one tick framework). Added §12 subsections for the **region graph** (enclosure/connectivity promoted from a per-frame rendering computation to persistent multi-consumer world state), the **gameplay/render lighting split** with render light sampled from a per-chunk 3D texture rather than baked into vertex attributes, the **tick and scheduling framework**, **registry identity and save-embedded name mapping** (recording a latent correctness defect in the current numeric-ID persistence), and **per-region generation parameters** as the storage precondition for world-scale change. Noted §10's `light_level_index` as an interim shape pending that lighting decision. Recorded the open architectural decisions the review surfaced — octant shape encoding, grid-handle abstraction, 4-way camera rotation, colored light — as dated decisions in `roadmap.md` §8 rather than settling them here.
 
 ---
 
@@ -62,6 +65,8 @@ Gradual inclines are produced not by per-voxel diagonal geometry but by **distri
 - **Determinism is mandatory.** Same seed + same graph + same coordinates → bit-identical output. All randomness derives from explicit seeded RNGs.
 - **The engine is the host.** The editor is a panel inside the engine, not a separate application. There is one `main` function, one renderer, one chunk store.
 - **The graph is the world generator.** Editing the active graph edits the live world.
+- **Visibility is queryable world state, not a rendering effect** (added v1.8). Whenever the engine hides geometry — underground visibility, occlusion fades, any future slice mode — the decision lives in world state that the renderer, the interaction system, collision, and audio all read from the same place. If the renderer hides a ceiling but the raycaster still collides with it, players target blocks they cannot see and the game feels broken in ways they cannot articulate. This rules out occlusion implemented purely in shaders: a shader may *consume* the classification but may not *be* it.
+- **One scheduler, one clock family** (added v1.8). All deferred and background work — generation, meshing, lighting, region detection, pathfinding, structures, chunk I/O, simulation — runs on a single job system with declared dependencies and priorities. All periodic simulation derives from one tick framework rather than per-system ad-hoc clocks. Two schedulers means two tuning surfaces that must agree by hand and never do.
 
 ---
 
@@ -95,7 +100,7 @@ A full-height surface that mixes two materials at a half-cube boundary is repres
 ### Critical constraints
 
 - **Voxels are pure geometry.** No foliage data, no fluid data, no decals.
-- **Slabs are produced by the smoothing pass, not authored by players directly.** During worldgen, the slab smoothing pass converts cube-step boundaries into slab transitions where the walkability mask permits. Player tools place full cubes; designers can author slabs in prefabs explicitly.
+- **Slabs are produced by the smoothing pass, not authored by players directly.** During worldgen, the slab smoothing pass converts cube-step boundaries into slab transitions where the walkability computation (§5) permits. Player tools place full cubes; designers can author slabs in prefabs explicitly.
 - **There is no rotation field.** All shapes are rotation-invariant under the cardinal grid. Top and bottom slabs are distinct shapes rather than a rotated single shape because their face attribution differs (a `SlabTop`'s top face is at the cell's top; a `SlabBottom`'s top face is at the cell's midline).
 - **No diagonal faces ever exist.** The mesher will not produce them. The shader does not branch on them. The face_axis attribute (§10) has exactly 6 valid values, one per cardinal direction.
 
@@ -350,17 +355,23 @@ Chunk generation runs in **strict pipeline order**. Each stage reads from previo
 5. BiomeGraph material
    - Per-voxel: material assignment based on density, depth, surface proximity
 
-6. Walkability mask computation (engine pass)
+6. Walkability computation (engine pass, transient)
    - Per-voxel boolean: "the player can stand on top of this voxel"
    - A voxel is walkable if it is solid, the voxel above it is empty, and the voxel two above is empty (headroom).
-   - Produces a sparse per-chunk artifact consumed by Stage 7 and reused by AI pathfinding and player movement at runtime.
+   - Computed transiently as an input to Stage 7 and discarded. It is NOT a resident
+     runtime artifact (revised v1.6; see "Walkability" below).
 
 7. Slab smoothing (engine pass, not graph-driven)
-   - Reads walkability mask from Stage 6.
+   - Reads the transient walkability computation from Stage 6.
    - For each walkable voxel adjacent to a walkable neighbor at a different height, inserts slab steps to halve the height transition.
    - Cliff faces and non-walkable surfaces are not smoothed; they remain sharp cube-stepped.
    - Smoothing distance is a per-biome parameter (see "Traversal smoothing distance" below).
    - Authored slabs in prefabs are respected and treated as fixed.
+   - Chunk-boundary transitions are resolved by a cross-chunk **seam finalization pass**
+     (`world::seam`): demotions at chunk borders are finalized once neighbor data exists,
+     recorded through the override/diff mechanism, and marked by a persisted
+     `seam_finalized` flag so reloads neither re-derive nor revert them (this is also
+     what protects player edits near borders from being overwritten by seam re-derivation).
 
 8. ZoneGraph structures
    - Deferred placement; may straddle chunks
@@ -422,16 +433,9 @@ This keeps biomes self-contained, supports floating-island and arch biomes witho
 - **Material selection**: smooth threshold (max/min composite) between biome materials.
 - **RNG derivation at fade boundaries**: seeded from `(world_seed, biome_id, x, z, purpose)` only. Never from chunk coordinates alone. This guarantees two chunks sharing a fade boundary blend identically regardless of generation order.
 
-### Walkability mask
+### Walkability (revised v1.6)
 
-A derived per-chunk artifact computed after voxel and material generation, before slab smoothing:
-
-```rust
-pub struct WalkabilityMask {
-    // One bit per voxel position; sparse storage for non-walkable chunks
-    bits: BitArray<{ CHUNK_VOLUME }>,
-}
-```
+Walkability — "the player can stand on top of this voxel" — is a **worldgen-internal, transient computation**, not a resident per-chunk artifact. Earlier revisions specified a persistent `WalkabilityMask` shared by slab smoothing, AI pathfinding, and player movement. Phase 9 implemented that shape and then removed it: the resident mask produced a chunk-Y seam defect, a streaming performance regression, and a poor fit for continuous collision (tunneling at speed, drift). The settled model:
 
 A voxel is walkable if:
 - It is solid (Cube, SlabBottom, or SlabTop).
@@ -439,12 +443,11 @@ A voxel is walkable if:
 - The voxel two above is empty (headroom for the player).
 - Its top surface is horizontal (Cube top face or SlabBottom top face at the midline). SlabTop voxels are not walkable on their top face because their "top" is at the cell ceiling with no headroom; they are walkable from beneath when used as overhang flooring.
 
-The mask is computed once and reused by three consumers:
-- **Slab smoothing (Stage 7)** — decides which voxel boundaries to smooth.
-- **AI pathfinding** — operates on the walkability mask rather than re-deriving it.
-- **Player movement** — collision and auto-step logic queries the mask for step-up validity.
-
-Computing it once, in worldgen, before meshing, is what makes pathfinding and movement cheap at runtime.
+Consumers divide by when they run:
+- **Slab smoothing (Stage 7)** — computes walkability transiently during generation, uses it to decide which boundaries to smooth, and discards it.
+- **Player movement and collision** — query geometry directly at runtime via `WorldView::solid_interval` (slab-aware solid-interval queries). Auto-step validity derives from the same queries.
+- **Room detection / underground visibility** — the same direct geometric queries.
+- **AI pathfinding (future)** — consumes the geometric query layer. If profiling ever justifies a cached navigation artifact, it will be a purpose-built nav structure designed then — not a revival of the generation-time mask, whose invalidation-on-edit and residency costs were the reason it was removed.
 
 ### Traversal smoothing distance
 
@@ -707,7 +710,8 @@ pub struct FaceVertex {
     pub occlusion_class: u8,        // 1 byte — palette ramp selector
     pub biome_tint_index: u8,       // 1 byte
     pub variant_index: u8,          // 1 byte — selects among hand-authored variants
-    pub light_level_index: u8,      // 1 byte — quantized to discrete steps
+    pub light_level_index: u8,      // 1 byte — quantized; INTERIM, superseded by
+                                    //   3D-texture light sampling (§12 lighting split, v1.8)
     pub enclosure_factor: u8,       // 1 byte — for fog and audio occlusion
     pub edge_flag: u8,              // 1 byte — material boundary for outline shader
     pub sway_weight: u8,            // 1 byte — wind animation (0 for terrain)
@@ -817,13 +821,15 @@ Both contribute to the final outline pass.
 
 ### Camera occlusion (cutaway / fade)
 
-The biggest UX problem in isometric voxel games is camera occluding the player. Solution combines:
+The biggest UX problem in isometric voxel games is camera occluding the player. The settled solution (v1.6; implemented in Phase 9, designed in the companion `underground-visibility-design.md`, which is authoritative for the details) is structural rather than heuristic:
 
-- **Per-face `is_player_facing` flag** computed at runtime: faces between camera and player participate in cutaway/fade.
-- **Smooth fade-out** of player-facing walls.
-- **Room detection** (flood-fill at runtime): when player is in an enclosed space, hide ceilings.
+- **Air-side face rule**: every terrain face fronts a well-defined air cell; a face renders only if the player has flood-reached that air. "No surface leakage" is a property of the classification, not a rule to remember.
+- **Cost-priority march**: the visibility flood stores flood-cost per cell; a face discards if reached air closer to the player sits behind it along the view direction — culling nearer chambers that would otherwise obscure the player's space.
+- **Clarity radius**: bounds what renders in full color versus what the flood merely knows about, with screen-space exclusion circles for the void presentation.
+- **Room detection** via bounded 6-connected flood yielding a continuous undergroundness `u ∈ [0,1]` (threshold-based, not binary — binary flood-escape rejects any room with a doorway).
+- **Above-ground occlusion** uses a two-pass player stencil (pre-foliage mark, post-foliage composite) against the `Depth24PlusStencil8` scene target.
 
-Mesh-level cost: a runtime-computed flag, not a baked attribute. No mesh storage change.
+Mesh-level cost: runtime-computed classification, not a baked attribute. No mesh storage change. Deferred polish (fringe/dim clarity state, cave-mouth `u`-blending) is scheduled in `roadmap.md`.
 
 ### Atmospheric layering
 
@@ -910,6 +916,7 @@ Streaming is foundational: every subsystem must tolerate chunks appearing and di
 
 Mandatory across all systems. Specific rules:
 
+- Determinism is stated over the full generation input set: same seed + same graphs + **same per-region parameters** + same coordinates → bit-identical output (revised v1.8; see "Per-region generation parameters" below).
 - All RNG seeded from explicit context: `hash(world_seed, layer, node_id, world_pos, purpose)`.
 - No use of chunk coordinates alone for RNG (breaks at fade boundaries).
 - No f32 in persistent state where ordering matters (fluid mass is u16).
@@ -945,6 +952,95 @@ A detailed networking architecture proposal exists as a companion document (`net
 5. LAN transport, artificial latency/loss testing, internet exposure.
 
 Legacy summary retained for cross-reference: server is authoritative for generation, fluid simulation, and override application; clients receive chunk deltas, not full chunks; determinism guarantees enable client-side terrain generation. See the companion proposal for wire model, desync taxonomy, and channel/transport recommendations.
+
+### Engine versioning and release policy (added v1.6)
+
+The companion `roadmap.md` is authoritative for version sequencing, per-version feature gates, and compatibility boundaries. The architectural commitments:
+
+- **Pre-1.0 scheme**: `0.MINOR.PATCH`. A minor version is a completed arc with exit gates and explicit non-goals; patches are fixes only. Post-1.0, a major version is a breaking change to save compatibility, asset formats, or network protocol that migrations cannot bridge.
+- **Save compatibility boundary**: wipe-on-bump (§3 interim) is permitted through 0.5.x. Per-layer versioning lands at 0.6.0 as the final planned blob-format redesign. From 0.10.0, saves migrate forward; at 1.0, save compatibility is a user-facing promise.
+- **Protocol version = build version** (from 0.7.0): mismatched clients are refused, never partially accommodated.
+- **1.0 is a readiness bar, not a shipped title.** `roadmap.md` §5 defines it as a ten-domain rubric (world authoring, tooling maturity, runtime capability, game-facing API, multiplayer, performance, data durability, extensibility, documentation, distribution). A demonstration title is evidence that the rubric passes, never a substitute for it.
+- **A release is not done without**: workspace version bump, changelog entry, close-of-version audit, design-doc revision for newly-settled architecture, green determinism suite, and recorded perf baselines. Version drift between `Cargo.toml`, the changelog, and announcements is a release-process bug.
+
+### Performance budgets (added v1.6)
+
+Performance is budgeted, not aspirational. Budgets are tracked from 0.3.0 (via per-`FrameStage` timing instrumentation surfaced in the engine's Performance panel) and gate releases from 0.5.0. Current budget values and their measurement procedure live in `roadmap.md` §7.3; the architectural commitment here is that every subsystem is attributable — a recurring frame hitch without an identified owner is a release blocker — and that streaming throughput scales with the observed area (streamed radius, zoom) rather than being fixed constants.
+
+### The region graph (added v1.8)
+
+Enclosure and connectivity are **persistent world state with many consumers**, not a rendering byproduct. A parallel field over air voxels assigns each air cell to a connected region; per-chunk connectivity summaries record which boundary faces link which internal regions and are joined across chunk borders. Updates are incremental — never global refills. Regions carry derived state: enclosed or sky-connected, revealed, volume, boundary faces.
+
+It is built properly rather than opportunistically because it has at least eight consumers: occlusion (per the visibility principle in §1), creature spawn shelter checks, interior/exterior determination for weather and temperature, audio occlusion and reverb, hierarchical pathfinding (coarse routing over regions, fine path within), abstract creature movement between regions, interior fill light for revealed regions (see below), and camera Y anchoring to a region floor.
+
+It runs at **voxel resolution using face coverage masks**. A system with eight consumers cannot afford a finer subdivision's cost multiplier. It degrades on large irregular caves, overhangs, and half-built structures, which is why occlusion remains a hybrid of region state and the air-side face rule (§11) rather than relying on regions alone.
+
+The engine currently computes a bounded visibility flood and room detection per frame and discards the result. Promoting that computation to persistent shared state is scheduled in `roadmap.md`.
+
+### Lighting: gameplay field vs. render field (added v1.8)
+
+The voxel light field exists regardless of how the renderer works, because an authoritative server must answer questions no GPU shadow map can: can a creature spawn here, does this crop grow, is snow melting, is the player in darkness. The two are therefore **named separately** — `GameplayLight` and `RenderLight`. Conflating them is how a server ends up disagreeing with what players see.
+
+- **Gameplay light** is quantized sky and block channels at voxel resolution, updated over several ticks, exposed as a world query. Because the renderer need not consume it directly, it can be comparatively cheap.
+- **Render light is sampled from a per-chunk 3D texture, not baked into vertex attributes.** With vertex-baked light, placing a torch is a re-mesh event; with a 3D texture (one-voxel border for correct interpolation, roughly 4–6 KB per chunk) light changes stop touching meshes at all, interpolation is smooth rather than banded, the baked field survives as a low-spec quality setting, and any later real-time sun-shadow term is additive rather than a pipeline rewrite.
+- **Interior fill light** resolves the conflict between cutaway occlusion and directional lighting. A hidden ceiling that still casts shadow leaves the revealed room a black hole; one excluded from casting floods it with sunlight. Neither is acceptable. A per-region `revealed` flag driving an ambient boost reads as "the camera is showing you inside," and is tunable per biome or structure.
+
+**Interim shape:** §10's `FaceVertex` carries `light_level_index` as a per-vertex byte, which is the vertex-baked model. The target above supersedes it. The decision and the migration are dated in `roadmap.md` §8 (D2) and land before the lighting bake is built — building the bake first would mean building it twice. Whether block light is single-channel or RGB is a separate dated decision (D6) because it is a data-layout choice, not a later feature.
+
+### Tick and scheduling framework (added v1.8)
+
+One tick framework, per the scheduling principle in §1. It supersedes the current ad-hoc per-system clocks (`PlayerClock`, `FluidClock`, `ClimateClock`) and provides what simulation systems need beyond a fixed step: scheduled block updates, random ticks over resident regions with a defined distribution, sub-rate clocks derived from the primary tick rather than free-running, and a coarse region tick for distant simulation. It is replicated-clock-aware from the start so server and client agree on tick identity.
+
+### Registry identity and save-embedded mapping (added v1.8)
+
+`MaterialId` and every other registry ID are **runtime interning details**. The authoring *and persistence* identity is a stable namespaced string (`voxulacrum:oak_slab`), and **every save embeds its own name↔ID mapping** so that a registry reorder, insertion, or mod-added entry cannot silently reinterpret existing worlds.
+
+This revises the v1.0 statement that "stable IDs are the wire format." Numeric IDs remain the in-memory and on-wire encoding *within a session or a version-locked connection*; what changes is that a persisted or transmitted payload always travels with the mapping needed to interpret it.
+
+**This records a live defect.** The current implementation persists bare numeric IDs with no mapping. Nothing breaks today because the registry has not been reordered, and nothing will break until it is — at which point every existing save silently reinterprets. The fix is scheduled with the format redesign; it is cheap now and data-corrupting later.
+
+### Per-region generation parameters (added v1.8)
+
+Generation is currently a pure function of `(seed, graphs, coords)`. That is sufficient for a world whose rules never change, and insufficient for one that can be reshaped after it has been generated and edited — a region-scale transformation in the Terraria-hardmode sense. The generalization:
+
+```
+stored_chunk = (region_parameters, edit_delta)
+resolved     = generate(seed, coords, region_parameters) ⊕ edit_delta
+```
+
+Generation becomes a function of **persistent, mutable per-region parameters** stored alongside the existing edit delta. A regional transformation is then *change the parameters, regenerate the base, reapply the delta* — rather than loading and rewriting every affected chunk's absolute contents. This keeps retroactive change affordable, keeps saves small, reduces replication of a world-scale event to a parameter change plus a progress front, and makes transformations re-runnable and revertible because parameters are data rather than baked results. The costs — generation must stay deterministic and versioned, and seed and parameters can never be discarded — are properties the engine already commits to (§1, §12).
+
+The generated/authored split (§9) already provides the delta half. **The missing half is the persistent per-region parameter store, and adding it after the save format freezes is a format redesign.** It is therefore scheduled at the last planned format change even though the feature that consumes it ships later. Determinism (§12) is restated accordingly: same seed + same graphs + **same region parameters** + same coordinates → bit-identical output.
+
+### Tooling as a first-class engine surface (added v1.7)
+
+Authoring and diagnostic tooling is foundational architecture, not convenience work. The commitment:
+
+- **Every authorable content type is authored in-engine.** Terrain graphs, biomes and zones, materials, palettes, blueprints and structures, foliage, input maps, entity definitions, and audio sets are all edited through engine panels, hot-reload without restart, and surface errors as messages rather than misbehavior. Requiring an author to hand-edit an asset file outside the engine is a defect in that content type's tooling.
+- **Every authorable change is previewable before it reaches the world.** The author must be able to see the result and inspect why it looks the way it does — field probes, column inspection, biome mapping, isolated preview scenes, parameter scrubbing, and regeneration diffs are the general mechanisms. This is what makes the graph-as-world-generator model (§4) tractable at content scale rather than merely correct.
+- **Every subsystem on the critical path explains itself at runtime.** Streaming, meshing, persistence, determinism, mutation, and networking each expose live state, timings, and validation sufficient to get from symptom to cause without writing new code.
+- **Tooling ships with the feature it serves.** A subsystem is not complete when its runtime behavior is correct; it is complete when the content it consumes can be authored, previewed, and diagnosed.
+
+The maturity model (T0 raw → T3 diagnosable), per-tool inventory, and per-version targets live in `roadmap.md` §4.
+
+### The game-facing API surface (added v1.7)
+
+The engine's purpose is to host titles, so every engine capability must be callable by game code without reaching into engine internals. The boundary:
+
+- **Engine-side**: world query and mutation, entity and actor framework, character control and physics, interaction and targeting, blueprints, events, registries and configuration, navigation primitives, camera, UI framework, input, audio, VFX, world time and weather, game-state persistence, replication patterns, inventory mechanism, and the developer surface (console, inspectors) that game code registers into.
+- **Game-side, permanently**: progression, crafting recipes, combat rules, specific creature behaviors, narrative, and the art direction of a particular title.
+- **A capability the engine "has" but that a game feature cannot call is not delivered.** Each surface is documented and, from 0.9.0, covered by a deprecation policy. Conformance is proven empirically by a fixed set of small game features built without modifying engine crates (`roadmap.md` §6.30) and kept building in CI.
+
+Full per-capability detail, current state, and version assignment live in `roadmap.md` §6.
+
+### Acknowledged gaps: particles/VFX and entity visuals (added v1.7)
+
+Two systems that a shipping title requires are absent from every section of this document and are recorded here so they are designed rather than improvised:
+
+- **Particles and VFX.** Block-break debris, fluid splashes, dust, footstep puffs, ambient motes, and weather precipitation. The constraint from §11 applies without exception: particles are quantized and palette-driven, with no smooth gradients or sub-pixel motion that would break the pixel-art downscale. Emitters attach to entities, voxel positions, and events; they are pooled and budgeted; and they replicate as events rather than per-particle state.
+- **Non-player entity visuals.** The player is a capsule rendered by a bespoke pass. Any entity beyond it needs a decided representation — voxel models, billboarded sprites, or a hybrid — plus animation, and the same tri-tonal/face-axis discipline (§11) that terrain obeys, so entities read as part of the same world rather than as overlaid art.
+
+Both are scheduled in `roadmap.md` (VFX at 0.5.0; entity visuals at 0.9.0) and both require a design pass that extends this document before implementation begins.
 
 ### Hot reload
 
@@ -1019,7 +1115,8 @@ These are toggleable in the engine's debug UI.
 - **Streaming**: load/evict policy keeping only chunks within observer radius resident. Background workers handle generation and meshing.
 - **Sub-voxel offset**: fractional position within an anchor voxel, packed as signed bytes.
 - **Traversal smoothing distance**: per-biome worldgen parameter controlling how aggressively slab smoothing distributes steps across distance. Produces emergent gradual slopes without diagonal geometry.
-- **Walkability mask**: per-chunk derived artifact identifying voxels the player can stand on. Computed once during worldgen; reused by slab smoothing, AI pathfinding, and player movement.
+- **Seam finalization**: cross-chunk pass (`world::seam`) resolving slab-smoothing demotions at chunk borders once neighbor data exists; recorded through the override/diff mechanism and marked by a persisted `seam_finalized` flag.
+- **Walkability**: transient worldgen computation identifying voxels the player can stand on; input to slab smoothing, then discarded. Runtime movement, collision, and room detection use direct geometric queries (`WorldView::solid_interval`) instead of a resident mask (revised v1.6).
 - **WorldGraph**: top-level singleton graph defining climate, zone selection, and global constants.
 - **ZoneGraph**: graph type defining biome distribution, cave rules, structures, and rivers within a Zone.
 

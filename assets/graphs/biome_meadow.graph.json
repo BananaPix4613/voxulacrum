@@ -1,89 +1,393 @@
 {
   "nodes": [
-    { "value": null, "version": 0 },
-    { "value": { "kind": { "type": "Simplex2D", "seed": 1, "frequency": 0.0025, "octaves": 5, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [0.0, 0.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": -1.0, "src_hi": 1.0, "dst_lo": 12.0, "dst_hi": 52.0 }, "position": [220.0, 0.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Simplex2D", "seed": 2, "frequency": 0.01, "octaves": 3, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "Ridged" }, "position": [0.0, 160.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": -1.0, "src_hi": 1.0, "dst_lo": -8.0, "dst_hi": 8.0 }, "position": [220.0, 160.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Add" }, "position": [660.0, 80.0] }, "version": 1 },
-    { "value": { "kind": { "type": "WorldAxis", "axis": "Y" }, "position": [660.0, 240.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Subtract" }, "position": [880.0, 120.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Layer", "bands": [[6, 1], [3, 3], [1, 8]], "fill": 2 }, "position": [1100.0, 240.0] }, "version": 1 },
-    { "value": { "kind": { "type": "DensityOutput" }, "position": [1520.0, 120.0] }, "version": 1 },
-    { "value": null, "version": 2 },
-    { "value": null, "version": 2 },
-    { "value": { "kind": { "type": "Min" }, "position": [1300.0, 60.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Simplex3D", "seed": 101, "frequency": 0.007, "frequency_y": 0.014, "octaves": 1, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [220.0, 480.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Simplex3D", "seed": 202, "frequency": 0.007, "frequency_y": 0.014, "octaves": 1, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [220.0, 620.0] }, "version": 1 },
-    { "value": { "kind": { "type": "DomainWarp", "seed": 500, "frequency": 0.02, "amplitude": 12.0, "warp_type": "Simplex" }, "position": [0.0, 550.0] }, "version": 1 },
-    { "value": null, "version": 2 },
-    { "value": { "kind": { "type": "Multiply" }, "position": [440.0, 480.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Multiply" }, "position": [440.0, 620.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Add" }, "position": [640.0, 550.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": 0.0, "src_hi": 0.014, "dst_lo": -1.0, "dst_hi": 1.0, "clamp": true }, "position": [840.0, 550.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Simplex3D", "seed": 303, "frequency": 0.009, "frequency_y": 0.022, "octaves": 2, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [440.0, 760.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": 0.52, "src_hi": 0.78, "dst_lo": 1.0, "dst_hi": -1.0, "clamp": true }, "position": [640.0, 760.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Min" }, "position": [1040.0, 650.0] }, "version": 1 },
-    { "value": { "kind": { "type": "YBand", "min": -64.0, "max": 64.0, "fade": 8.0 }, "position": [640.0, 900.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Simplex2D", "seed": 403, "frequency": 0.0012, "octaves": 2, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [440.0, 1040.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": 0.05, "src_hi": 0.35, "dst_lo": 0.0, "dst_hi": 1.0, "clamp": true }, "position": [640.0, 1040.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Multiply" }, "position": [840.0, 970.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Constant", "value": 1.0 }, "position": [840.0, 840.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Lerp" }, "position": [1120.0, 860.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Simplex2D", "seed": 606, "frequency": 0.0008, "octaves": 2, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [0.0, 320.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": -0.2, "src_hi": 0.5, "dst_lo": 0.0, "dst_hi": 1.0, "clamp": true }, "position": [220.0, 320.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Multiply" }, "position": [440.0, 240.0] }, "version": 1 },
-    { "value": { "kind": { "type": "WorldPos" }, "position": [-200.0, 550.0] }, "version": 1 },
-    { "value": { "kind": { "type": "YBand", "min": -48.0, "max": 14.0, "fade": 4.0 }, "position": [640.0, 1180.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Multiply" }, "position": [840.0, 1180.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Lerp" }, "position": [1120.0, 1100.0] }, "version": 1 }
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Simplex2D",
+          "seed": 1,
+          "frequency": 0.0025,
+          "octaves": 5,
+          "lacunarity": 2.0,
+          "gain": 0.5,
+          "fractal_type": "FBm"
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Remap",
+          "src_lo": -1.0,
+          "src_hi": 1.0,
+          "dst_lo": 12.0,
+          "dst_hi": 52.0
+        },
+        "position": [
+          220.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Simplex2D",
+          "seed": 2,
+          "frequency": 0.01,
+          "octaves": 3,
+          "lacunarity": 2.0,
+          "gain": 0.5,
+          "fractal_type": "Ridged"
+        },
+        "position": [
+          0.0,
+          160.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Remap",
+          "src_lo": -1.0,
+          "src_hi": 1.0,
+          "dst_lo": -8.0,
+          "dst_hi": 8.0
+        },
+        "position": [
+          220.0,
+          160.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Add"
+        },
+        "position": [
+          660.0,
+          80.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "WorldAxis",
+          "axis": "Y"
+        },
+        "position": [
+          660.0,
+          240.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Subtract"
+        },
+        "position": [
+          880.0,
+          120.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Layer",
+          "bands": [
+            [
+              6,
+              1
+            ],
+            [
+              3,
+              3
+            ],
+            [
+              1,
+              8
+            ]
+          ],
+          "fill": 2
+        },
+        "position": [
+          1100.0,
+          240.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "DensityOutput"
+        },
+        "position": [
+          1520.0,
+          120.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Simplex2D",
+          "seed": 606,
+          "frequency": 0.0008,
+          "octaves": 2,
+          "lacunarity": 2.0,
+          "gain": 0.5,
+          "fractal_type": "FBm"
+        },
+        "position": [
+          0.0,
+          320.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Remap",
+          "src_lo": -0.2,
+          "src_hi": 0.5,
+          "dst_lo": 0.0,
+          "dst_hi": 1.0,
+          "clamp": true
+        },
+        "position": [
+          220.0,
+          320.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Multiply"
+        },
+        "position": [
+          440.0,
+          240.0
+        ]
+      },
+      "version": 1
+    }
   ],
   "edges": [
-    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 2, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 3, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 4, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 2, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 0 } },
-
-    { "from": { "node": { "idx": 30, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 31, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 4, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 32, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 31, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 32, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 32, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 1 } },
-
-    { "from": { "node": { "idx": 5, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 7, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 6, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 7, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 7, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 8, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 8, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 9, "version": 1 }, "pin": 1 } },
-
-    { "from": { "node": { "idx": 33, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 15, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 15, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 13, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 15, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 14, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 13, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 17, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 13, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 17, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 14, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 18, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 14, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 18, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 17, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 19, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 18, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 19, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 19, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 20, "version": 1 }, "pin": 0 } },
-
-    { "from": { "node": { "idx": 21, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 22, "version": 1 }, "pin": 0 } },
-
-    { "from": { "node": { "idx": 20, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 29, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 22, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 36, "version": 1 }, "pin": 1 } },
-
-    { "from": { "node": { "idx": 25, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 26, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 24, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 27, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 26, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 27, "version": 1 }, "pin": 1 } },
-
-    { "from": { "node": { "idx": 28, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 29, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 27, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 29, "version": 1 }, "pin": 2 } },
-    { "from": { "node": { "idx": 34, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 35, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 26, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 35, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 28, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 36, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 35, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 36, "version": 1 }, "pin": 2 } },
-    { "from": { "node": { "idx": 29, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 23, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 36, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 23, "version": 1 }, "pin": 1 } },
-
-    { "from": { "node": { "idx": 7, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 12, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 23, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 12, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 12, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 9, "version": 1 }, "pin": 0 } }
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 10,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 11,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 12,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 11,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 12,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 12,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 6,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 9,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 9,
+          "version": 1
+        },
+        "pin": 0
+      }
+    }
   ]
 }

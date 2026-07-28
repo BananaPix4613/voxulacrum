@@ -278,7 +278,7 @@ pub struct PostProcessParams {
 impl Default for PostProcessParams {
     fn default() -> Self {
         Self {
-            vignette_strength: 0.35,
+            vignette_strength: 0.0,
             exposure: 1.1,
             overcast_desaturation_factor: 0.3,
         }
@@ -333,7 +333,7 @@ impl Default for OutlineParams {
     fn default() -> Self {
         Self {
             enabled: true,
-            depth_threshold: 0.005,
+            depth_threshold: 0.0005,
             depth_strength: 1.0,
             normal_threshold: 0.3,
             normal_strength: 0.8,

@@ -285,13 +285,12 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
     let spec = pow(max(dot(reflect(-sun, in.normal), view), 0.0), 200.0);
     let crest = sin(dot(wp2, vec2<f32>(1.7, 1.3)) + t * 2.0)
               * sin(dot(wp2, vec2<f32>(-1.1, 2.1)) - t * 1.5);
-    let sparkle = step(0.75, spec * step(0.2, crest));
+    let sparkle = step(1.0, spec * step(0.2, crest));
     col += globals.sun_color * sparkle * shadow * cloud_factor * 0.4;
 
     // Reflection composited over the lit water
     col = mix(col, refl_color, reflectivity);
 
     // Opaque output:
-    return FragmentOutput(vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0), vec4<f32>(n, 1.0));
-    //return FragmentOutput(vec4<f32>(vec3<f32>(depth_v / 10.0), 1.0), vec4<f32>(n, 1.0));
+    return FragmentOutput(vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0), vec4<f32>(n, 0.25));
 }
