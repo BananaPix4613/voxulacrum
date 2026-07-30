@@ -1,0 +1,158 @@
+name: Release
+
+# Tag-driven: pushing v0.4.0 builds and publishes it. `workflow_dispatch` is
+# here so the Linux build can be exercised without minting a tag - see the
+# note in the linux job.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create a GitHub Release (off = build and keep artifacts only)"
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    strategy:
+      fail-fast: false # a Linux failure should not discard a good Windows build
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            archive: zip
+          - os: ubuntu-latest
+            label: linux-x64
+            archive: tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.label }}
+
+      # winit needs X11/Wayland development headers, wgpu wants the Vulkan
+      # loader, and fastnoise2 builds a C++ library through CMake. Windows
+      # runners have equivalents preinstalled; Linux does not.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols \
+            libvulkan-dev
+
+      - name: Build
+        run: cargo build --release -p voxulacrum --bin voxulacrum-app
+
+      # The version in the archive name comes from Cargo.toml, not the tag, so a
+      # workflow_dispatch build is named correctly too. §7.4 requires the two to
+      # agree; the guard below enforces that on tagged runs.
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Cargo.toml version: $v"
+
+      - name: Tag must match Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          cargo="${{ steps.version.outputs.version }}"
+          if [ "$tag" != "$cargo" ]; then
+            echo "::error::Tag v$tag does not match Cargo.toml version $cargo."
+            exit 1
+          fi
+
+      # Layout is dictated by paths::asset_root(), which uses the presence of a
+      # `shaders/` directory beside the executable as its sentinel for "this is a
+      # distribution". If shaders/ is missing, the app silently falls back to a
+      # compile-time path from THIS runner and fails confusingly on a user's
+      # machine. The verify step below exists to make that impossible to ship.
+      # saves/ and cache/ are intentionally absent - both are created at runtime.
+      - name: Stage package
+        shell: bash
+        run: |
+          name="voxulacrum-${{ steps.version.outputs.version }}-${{ matrix.label }}"
+          echo "PKG_NAME=$name" >> "$GITHUB_ENV"
+          mkdir -p "dist/$name"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/release/voxulacrum-app.exe "dist/$name/"
+          else
+            cp target/release/voxulacrum-app "dist/$name/"
+          fi
+          cp -r shaders assets palettes "dist/$name/"
+          cp CHANGELOG.md "dist/$name/"
+
+      - name: Verify package layout
+        shell: bash
+        run: |
+          d="dist/$PKG_NAME"
+          fail=0
+          for p in shaders assets/graphs assets/libraries palettes \
+                   assets/materials.ron assets/prefabs.ron assets/input.ron; do
+            if [ ! -e "$d/$p" ]; then echo "::error::missing $p"; fail=1; fi
+          done
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            [ -f "$d/voxulacrum-app.exe" ] || { echo "::error::missing exe"; fail=1; }
+          else
+            [ -x "$d/voxulacrum-app" ] || { echo "::error::missing or non-executable binary"; fail=1; }
+          fi
+          exit $fail
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/$env:PKG_NAME" -DestinationPath "dist/$env:PKG_NAME.zip"
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: tar -czf "dist/$PKG_NAME.tar.gz" -C dist "$PKG_NAME"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}
+          path: dist/*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    permissions:
+      contents: write # required to create the release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # On a tag push this is redundant; on workflow_dispatch it is essential -
+      # github.ref is a branch there, and the action would otherwise have no tag
+      # to attach to. Deriving it from Cargo.toml means a dispatch run targets
+      # the same tag a push would have.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          files: dist/*
+          draft: true # review before it goes public; publish from the Releases page
+          generate_release_notes: true

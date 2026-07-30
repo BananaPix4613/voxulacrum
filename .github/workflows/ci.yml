@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # No branch filter: under the §7.5 one-branch-per-version policy the branch
+  # name changes every version, so naming them here guarantees the list goes
+  # stale (it already had, pointing at the deleted mc-revision).
   push:
-    branches: [master, mc-revision]
   pull_request:
   workflow_dispatch:
 
