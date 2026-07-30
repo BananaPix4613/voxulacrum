@@ -4,22 +4,25 @@
 //! `Arc<Graph>` and produces a `ChunkStorage` per chunk by running the
 //! nodegraph evaluator and harvesting the `TerrainOutput` node.
 //!
-//! The evaluator yields a `ChunkBuffer<Voxel, 32>` (the evaluation-domain
-//! container); the engine stores `ChunkStorage` (the storage-domain container).
-//! Crossing between them is the job of [`StorageBoundary`] (see
-//! `storage_boundary.rs`) — a deliberate, permanent architectural seam, not a
-//! temporary copy. The two containers are kept distinct on purpose so each can
-//! be tuned for its side of the boundary.
+//! The evaluator and the engine use different containers on each side of every
+//! generated layer - terrain, fluid, and foliage. Crossing between them is the
+//! job of [`StorageBoundary`] (see `storage_boundary.rs`) - a deliberate,
+//! permanent architectural seam, not a temporary copy. The containers are kept
+//! distinct on purpose so each can be tuned for its side of the boundary.
+//!
+//! The foliage translators (`paint_to_detail_layers`, `scatter_to_store`) live
+//! here, beside the generation stage that produces their inputs, but they are
+//! reached only through `StorageBoundary::materialize_foliage` - the boundary
+//! names the crossing, this module implements the translation.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::IVec3;
 use nodegraph_eval::{BiomeParams, ChunkEvaluation, EvalContext, PaintLayer, ScatterBucket, WorldEvaluator};
-use nodegraph_ir::{Graph, NodeKind, SubtractParams};
+use nodegraph_ir::{Graph, NodeKind};
 use serde::{Serialize, Deserialize};
 use smallvec::SmallVec;
-use nodegraph_ir::PinType::Density;
 use voxel_core::LocalPos;
 
 use crate::params::TerrainGenParams;
@@ -43,11 +46,8 @@ pub struct WorldGenerator {
     /// World/Zone graphs are empty and the Biome graph produces the terrain.
     world_eval: WorldEvaluator,
     world_seed: u64,
-    /// Global ocean surface (world-Y): empty voxels at or below this fill with
-    /// water at generation time (design doc §7). Sourced from the manifest.
-    sea_level: i32,
-    /// The evaluation -> storage domain boundary used to materialize each
-    /// evaluated chunk buffer into engine storage form.
+    /// The evaluation -> storage domain boundary every generated layer crosses.
+    /// Owns the world's sea level, which the fluid crossing needs.
     storage_boundary: StorageBoundary,
 }
 
@@ -73,8 +73,8 @@ impl WorldGenerator {
         Ok(Self {
             world_eval,
             world_seed,
-            sea_level: 0,
-            storage_boundary: StorageBoundary::new(),
+            // Single-graph ctor (tests / tooling): no manifest, so no sea level.
+            storage_boundary: StorageBoundary::new(0),
         })
     }
     
@@ -96,30 +96,6 @@ impl WorldGenerator {
         Ok(Self::from_hierarchy(hierarchy, world_seed))
     }
 
-    /// Like [`WorldGenerator::from_manifest`], but substitutes `graph` for the
-    /// hierarchy graph named by `slot`. Used when the editor edits one graph: the
-    /// rest of the hierarchy is reloaded from the manifest and preserved. A biome
-    /// id with no manifest entry is appended.
-    pub fn from_manifest_with_override(
-        manifest_path: &std::path::Path,
-        world_seed: u64,
-        slot: GraphSlot,
-        graph: Graph,
-    ) -> Result<Self, String> {
-        let mut hierarchy = load_hierarchy(manifest_path)?;
-        match slot {
-            GraphSlot::World => hierarchy.world = graph,
-            GraphSlot::Zone => hierarchy.zone = graph,
-            GraphSlot::Biome(id) => {
-                match hierarchy.biomes.iter_mut().find(|(bid, _)| *bid == id) {
-                    Some(entry) => entry.1 = graph,
-                    None => hierarchy.biomes.push((id, graph)),
-                }
-            }
-        }
-        Ok(Self::from_hierarchy(hierarchy, world_seed))
-    }
-
     /// Assemble a generator from an already-loaded hierarchy.
     fn from_hierarchy(hierarchy: LoadedHierarchy, world_seed: u64) -> Self {
         // The primary biome anchors `WorldEvaluator::new`; `with_biomes` then
@@ -135,8 +111,7 @@ impl WorldGenerator {
         Self {
             world_eval,
             world_seed,
-            sea_level: hierarchy.sea_level,
-            storage_boundary: StorageBoundary::new(),
+            storage_boundary: StorageBoundary::new(hierarchy.sea_level),
         }
     }
     
@@ -158,7 +133,7 @@ impl WorldGenerator {
     /// (the seam pass) can apply the same ocean rule to voxels they mutate after
     /// initial generation.
     pub fn sea_level(&self) -> i32 {
-        self.sea_level
+        self.storage_boundary.sea_level()
     }
 
     /// Biome id at a world XZ position, resolved straight from generation via
@@ -236,21 +211,21 @@ impl WorldGenerator {
         
         let tags = self.derive_tags(&eval);
 
-        // Worldgen stage 9: ocean fill from the global sea level, then layer any
-        // biome-authored ponds on top (design doc §7). Fluids initializes before
-        // foliage so stage 10 can respect submersion.
-        let mut fluids = super::fluid_gen::ocean_fill(&storage, position.y, self.sea_level);
-        if let Some(levels) = &eval.fluid_levels {
-            super::fluid_gen::apply_biome_ponds(
-                &mut fluids, &storage, position.y, self.sea_level, levels,
-            )
-        }
-
-        // Worldgen stage 10: translate foliage into storage form, dropping any
-        // paint/scatter whose surface the fluid field submerges (design doc §5
-        // stage 9 -> 10; drift-review 1.4).
-        let detail_layers = paint_to_detail_layers(&eval.foliage.paint, &storage, &fluids);
-        let scatter = scatter_to_store(&eval.foliage.scatter, &fluids);
+        // Worldgen stage 9 and 10 both cross the eval -> storage boundary
+        // (drift-review 2.3). Fluid crosses first so the foliage crossing can be
+        // handed the finished field and drop anything it submerges (design §5
+        // stage 9 before stage 10; drift-review 1.4).
+        let fluids = self.storage_boundary.materialize_fluid(
+            &storage,
+            position.y,
+            eval.fluid_levels.as_deref(),
+        );
+        let (detail_layers, scatter) = self.storage_boundary.materialize_foliage(
+            &eval.foliage.paint,
+            &eval.foliage.scatter,
+            &storage,
+            &fluids,
+        );
 
         GeneratedChunk { storage, tags, detail_layers, scatter, fluids, smoothing_distances }
     }
@@ -297,7 +272,7 @@ fn distinct_sorted(ids: &[u16]) -> Vec<u16> {
 /// `DetailLayers` (storage domain). A painted column whose surface the fluid field
 /// submerges is dropped (left default), so grass never paints underwater (design
 /// §5 stage 9 before stage 10; drift-review 1.4).
-fn paint_to_detail_layers(
+pub(super) fn paint_to_detail_layers(
     paint: &[PaintLayer],
     storage: &ChunkStorage,
     fluids: &FluidLayer,
@@ -348,7 +323,7 @@ fn column_surface(storage: &ChunkStorage, x: usize, z: usize) -> Option<usize> {
 /// `stable_id`. Instances whose anchor surface the fluid field submerges are
 /// dropped, so props never scatter underwater (design §5 stage 9 before stage 10;
 /// drift-review 1.4).
-fn scatter_to_store(scatter: &[ScatterBucket], fluids: &FluidLayer) -> ScatterStore {
+pub(super) fn scatter_to_store(scatter: &[ScatterBucket], fluids: &FluidLayer) -> ScatterStore {
     let dry = matches!(fluids.fill_mode, FluidFillMode::Empty) && fluids.cells.is_empty();
 
     let mut by_type: HashMap<ScatterTypeId, Vec<ScatterInstance>> = HashMap::new();
@@ -529,6 +504,42 @@ pub fn load_world_graphs(
     Ok(out)
 }
 
+/// Which hierarchy slot a graph file belongs to, resolved through the manifest.
+///
+/// The manifest is the resolution root (P2), so it - not the editor's in-memory
+/// state - is what answers "what did this file change?". Detail graphs map to
+/// their biome, since a detail edit invalidates that biome's chunks.
+pub fn slot_for_graph_file(
+    manifest_path: &std::path::Path,
+    changed: &std::path::Path,
+) -> Option<GraphSlot> {
+    let changed = changed.canonicalize().ok()?;
+    let text = std::fs::read_to_string(manifest_path).ok()?;
+    let manifest: WorldManifest = serde_json::from_str(&text).ok()?;
+    let dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let same = |rel: &str| {
+        dir.join(rel)
+            .canonicalize()
+            .map(|p| p == changed)
+            .unwrap_or(false)
+    };
+
+    if same(&manifest.world) {
+        return Some(GraphSlot::World);
+    }
+    if same(&manifest.zone) {
+        return Some(GraphSlot::Zone);
+    }
+    for entry in &manifest.biomes {
+        if same(&entry.graph) || entry.detail.as_deref().is_some_and(same) {
+            return Some(GraphSlot::Biome(entry.id));
+        }
+    }
+    None
+}
+
 /// A display label for a biome from its file name (e.g.
 /// "biome_meadow.graph.json" -> "Meadow"), falling back to the id.
 fn biome_label(file: &str, id: u16) -> String {
@@ -676,6 +687,69 @@ mod tests {
             .filter(|&i| a.storage.voxel(i) != b.storage.voxel(i))
             .count();
         assert_eq!(diffs, 0, "generate_chunk non-deterministic: {diffs} voxels differ");
+    }
+
+    #[test]
+    fn generate_chunk_is_deterministic_over_slabs() {
+        use crate::world::chunk::CHUNK_VOLUME;
+        use voxel_core::ShapeId;
+
+        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 7)
+            .expect("world manifest must load");
+
+        let slab_count = |g: &GeneratedChunk| {
+            (0..CHUNK_VOLUME)
+                .filter(|&i| {
+                    matches!(
+                        g.storage.voxel(i).shape,
+                        ShapeId::SlabBottom | ShapeId::SlabTop
+                    )
+                })
+                .count()
+        };
+
+        // Guard against a vacuous test. `generate_chunk_is_deterministic` above
+        // uses chunk (1,0,2) and asserts nothing about its contents, so if that
+        // chunk happens to hold no slabs it proves nothing about slab smoothing
+        // (stage 7) - the exact concern raised in `cowork-handoff.md` Part 1.
+        // Search for a chunk that demonstrably has slabs, and fail with a
+        // diagnostic if the shipped world has none anywhere near the origin.
+        let mut found = None;
+        'search: for cz in -1..=1 {
+            for cx in -1..=1 {
+                let pos = IVec3::new(cx, 0, cz);
+                let g = generator.generate_chunk(pos);
+                let n = slab_count(&g);
+                if n > 0 {
+                    found = Some((pos, g, n));
+                    break 'search;
+                }
+            }
+        }
+
+        let (pos, first, slabs) = found.expect(
+            "no slab-bearing chunk in the 3x3 around the origin - slab smoothing \
+            (stage 7) is not producing slabs, so any determinism test here would \
+            be vacuous. Check traversal_smoothing_distance and smooth_slabs.",
+        );
+
+        // Now the real assertion: regenerating that chunk is bit-identical,
+        // shape included, so slab smoothing is deterministic and not merely
+        // untested.
+        let second = generator.generate_chunk(pos);
+        assert_eq!(
+            slabs,
+            slab_count(&second),
+            "slab count differs between two generations of {pos:?}",
+        );
+        let diffs = (0..CHUNK_VOLUME)
+            .filter(|&i| first.storage.voxel(i) != second.storage.voxel(i))
+            .count();
+        assert_eq!(
+            diffs, 0,
+            "slab-bearing chunk {pos:?} ({slabs} slabs) non-deterministic: \
+             {diffs} voxels differ",
+        );
     }
 
     #[test]

@@ -24,6 +24,22 @@ pub struct UiState {
     pub selected_keyframe: usize,
     pub fps: f32,
     pub frame_time_ms: f32,
+    /// Frames whose CPU work exceeded the budget in the last completed second.
+    pub over_budget_frames: u32,
+    /// Longest wall-clock inter-frame time in the last completed second, in ms.
+    pub worst_frame_ms: f32,
+    /// Worst CPU work (frame minus present block) last second, in ms.
+    pub cpu_max_ms: f32,
+    /// Mean time blocked on swapchain acquire + present last second, in ms.
+    pub present_mean_ms: f32,
+    /// Per-`FrameStage` CPU mean/max last second, in ms.
+    pub stage_mean_ms: [f32; crate::diagnostics::STAGE_COUNT],
+    pub stage_max_ms: [f32; crate::diagnostics::STAGE_COUNT],
+    /// Scheduler load per job kind (roadmap §4.4 job system inspector).
+    pub job_stats: [crate::jobs::JobKindStats; crate::jobs::JobKind::COUNT],
+    /// Jobs executing across all kinds, and the global limit.
+    pub job_running_total: usize,
+    pub job_max_running: usize,
     #[allow(dead_code)] // HUD stat; retained for the vertex-count readout
     pub total_vertices: u64,
     pub total_triangles: u64,
@@ -33,10 +49,13 @@ pub struct UiState {
     pub meshing_stats: MeshingStats,
     pub clear_cache_requested: bool,
     pub regenerate_requested: bool,
-    /// Latest graph from the embedded editor awaiting regeneration. Set by the
-    /// render system whenever the editor reports a dirty edit; drained by
-    /// `WorldRegenCoordinator::tick`, which rebuilds the generator from it.
-    pub pending_graph: Option<(crate::world::world_generator::GraphSlot, nodegraph_ir::Graph)>,
+    /// Hierarchy slots whose graph file changed on disk, awaiting regeneration.
+    ///
+    /// Carries *slots*, not graphs: regeneration always reloads the whole
+    /// hierarchy from disk, so there is no in-memory graph to hand across and no
+    /// way to end up with a hybrid of edited and on-disk state. The slots are
+    /// kept only to narrow invalidation (§4's table, P3).
+    pub pending_graph_reload: Vec<crate::world::world_generator::GraphSlot>,
     pub remesh_requested: bool,
     pub mesh_params_pending: bool,
     pub regenerating: bool,
@@ -45,8 +64,18 @@ pub struct UiState {
     pub palette_list: Vec<String>,
     pub palette_load_requested: bool,
     pub loaded_palette_preview: Vec<[f32; 3]>,
-    pub streaming_loaded: u32,
-    pub streaming_pending: u32,
+    /// Streaming load + the §7.3 fill-time metric.
+    pub streaming: crate::world::streaming::StreamingStats,
+    /// Resident memory by layer (roadmap §4.4 memory/residency panel).
+    pub residency: crate::diagnostics::ResidencyStats,
+    /// Frames until the next residency sample. Sampling walks every resident
+    /// chunk, so it runs on a throttle rather than per frame.
+    pub residency_countdown: u32,
+    /// Every command through the mutation door (roadmap §4.4).
+    pub mutation_log: crate::world::mutation::MutationLog,
+    /// Operator pressed "Verify determinism".
+    pub determinism_check_requested: bool,
+    pub determinism: crate::world::DeterminismReport,
 }
 
 impl UiState {
@@ -64,6 +93,15 @@ impl UiState {
             selected_keyframe: 0,
             fps: 0.0,
             frame_time_ms: 0.0,
+            over_budget_frames: 0,
+            worst_frame_ms: 0.0,
+            cpu_max_ms: 0.0,
+            present_mean_ms: 0.0,
+            stage_mean_ms: [0.0; crate::diagnostics::STAGE_COUNT],
+            stage_max_ms: [0.0; crate::diagnostics::STAGE_COUNT],
+            job_stats: [crate::jobs::JobKindStats::default(); crate::jobs::JobKind::COUNT],
+            job_running_total: 0,
+            job_max_running: 0,
             total_vertices: 0,
             total_triangles: 0,
             chunks_visible: 0,
@@ -72,7 +110,7 @@ impl UiState {
             meshing_stats: MeshingStats::default(),
             clear_cache_requested: false,
             regenerate_requested: false,
-            pending_graph: None,
+            pending_graph_reload: Vec::new(),
             remesh_requested: false,
             mesh_params_pending: false,
             regenerating: false,
@@ -81,8 +119,12 @@ impl UiState {
             palette_list: crate::palette::list_palettes(&crate::paths::asset_root().join("palettes")),
             palette_load_requested: false,
             loaded_palette_preview: Vec::new(),
-            streaming_loaded: 0,
-            streaming_pending: 0,
+            streaming: Default::default(),
+            residency: Default::default(),
+            residency_countdown: 0,
+            mutation_log: Default::default(),
+            determinism_check_requested: false,
+            determinism: Default::default(),
         }
     }
 
@@ -777,6 +819,15 @@ fn draw_meshing_section(
                 format!("Errors: {}", stats.cache_errors),
             );
         }
+        let looked_up = stats.cache_hits + stats.cache_misses;
+        if looked_up > 0 {
+            ui.label(format!(
+                "Hit rate: {:.0}%   misses: {} cold, {} stale",
+                stats.cache_hits as f64 / looked_up as f64 * 100.0,
+                format_number(stats.cache_misses_cold),
+                format_number(stats.cache_misses_stale),
+            ));
+        }
         ui.label(format!(
             "On disk: {} files ({:.1} MB)",
             stats.cache_files,
@@ -788,18 +839,198 @@ fn draw_meshing_section(
     });
 }
 
-fn draw_performance(ui: &mut egui::Ui, state: &UiState) {
+fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
     if !state.params.debug.show_performance { return; }
     ui.collapsing("Performance", |ui| {
         ui.label(format!("FPS: {:.0}", state.fps));
-        ui.label(format!("Frame: {:.1}ms", state.frame_time_ms));
+        ui.label(format!(
+            "CPU worst: {:.1}ms / {:.1} budget — {} frames over",
+            state.cpu_max_ms,
+            crate::diagnostics::FRAME_BUDGET_MS,
+            state.over_budget_frames,
+        ));
+        ui.label(format!(
+            "Present mean: {:.1}ms    Wall worst: {:.1}ms",
+            state.present_mean_ms, state.worst_frame_ms,
+        ));
+        ui.separator();
+        ui.label("Stage CPU mean / max (ms)");
+        for (i, name) in crate::diagnostics::STAGE_NAMES.iter().enumerate() {
+            ui.label(format!(
+                "  {:<8}{:>6.2} /{:>6.2}",
+                name, state.stage_mean_ms[i], state.stage_max_ms[i],
+            ));
+        }
+        ui.separator();
+        ui.label(format!(
+            "Jobs — {}/{} threads busy      queued  running  limit  mean/max ms  done",
+            state.job_running_total, state.job_max_running,
+        ));
+        for kind in crate::jobs::JobKind::ALL {
+            let s = &state.job_stats[kind.index()];
+            ui.label(format!(
+                "  {:<9}{:>4}{:>7}/{:<3}{:>6.1}/{:<6.1}{:>8}",
+                kind.name(),
+                s.queued,
+                s.in_flight,
+                s.cap,
+                s.mean_ms,
+                s.max_ms,
+                format_number(s.completed),
+            ));
+        }
+        ui.separator();
         ui.label(format!("Triangles: {}", format_number(state.total_triangles)));
         ui.label(format!("Chunks: {}/{}", state.chunks_visible, state.chunks_total));
         if state.chunks_total > 0 {
             let cull_pct = (1.0 - state.chunks_visible as f64 / state.chunks_total as f64) * 100.0;
             ui.label(format!("Culled: {:.0}%", cull_pct));
         }
-        ui.label(format!("Streaming: {} loaded, {} pending", state.streaming_loaded, state.streaming_pending));
+        ui.separator();
+        let log = &state.mutation_log;
+        let rejected = log.rejected_wrong_mode + log.rejected_system_origin;
+        // Zero is the invariant, not merely the expected value: a rejection means
+        // a call site built a command the door refuses, and P5 says a write path
+        // that bypasses the door is a bug by definition.
+        if rejected == 0 {
+            ui.label("Mutations — 0 rejected");
+        } else {
+            ui.label(format!(
+                "Mutations — {} REJECTED ({} wrong-mode, {} system-origin)",
+                rejected, log.rejected_wrong_mode, log.rejected_system_origin,
+            ));
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("mutation_log")
+            .max_height(150.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (i, name) in crate::world::mutation::INTENT_NAMES.iter().enumerate() {
+                    let row = log.counts[i];
+                    if row.iter().all(|c| *c == 0) {
+                        continue;
+                    }
+                    let mut cells = String::new();
+                    for origin in [
+                        crate::world::mutation::MutationOrigin::Authoring,
+                        crate::world::mutation::MutationOrigin::PlayTime,
+                        crate::world::mutation::MutationOrigin::System,
+                    ] {
+                        let n = row[origin.index()];
+                        if n > 0 {
+                            cells.push_str(&format!("  {} {}", origin.label(), format_number(n)));
+                        }
+                    }
+                    ui.label(format!("  {:<22}{}", name, cells));
+                }
+
+                let mut any_recent = false;
+                for r in log.recent_newest_first() {
+                    if !any_recent {
+                        ui.label("Recent actor commands (newest first)");
+                        any_recent = true;
+                    }
+                    ui.label(format!(
+                        "  {:<18}{:<6}{:<10}mesh {}  scatter {}  water {}",
+                        r.intent,
+                        r.origin.label(),
+                        format!("{:?}", r.mode).to_lowercase(),
+                        r.mesh_invalidated,
+                        r.scatter_rebuild,
+                        r.water_rebuild,
+                    ));
+                }
+            });
+        ui.separator();
+        let s = &state.streaming;
+        ui.label(format!(
+            "Streaming — resident {}   wanted {}   missing {}   in-flight {}",
+            s.resident, s.wanted, s.missing, s.in_flight,
+        ));
+        // The §7.3 budget: visible area fully populated within 2 s of camera
+        // rest, at any supported zoom. Flagged rather than merely displayed,
+        // because a budget nobody can see the violation of is not a budget.
+        const FILL_BUDGET_MS: f32 = 2000.0;
+        let fill = if s.filling {
+            format!("filling… ({} to go)", s.missing)
+        } else if s.fill_chunks == 0 {
+            "fill — (no settle measured yet)".to_string()
+        } else if s.fill_ms > FILL_BUDGET_MS {
+            format!(
+                "fill {:.0}ms for {} chunks  OVER BUDGET ({:.0}ms)",
+                s.fill_ms, s.fill_chunks, FILL_BUDGET_MS,
+            )
+        } else {
+            format!(
+                "fill {:.0}ms for {} chunks / {:.0}ms budget",
+                s.fill_ms, s.fill_chunks, FILL_BUDGET_MS,
+            )
+        };
+        ui.label(format!(
+            "  radius {} chunks   evicted {}   {}",
+            s.load_radius,
+            format_number(s.evicted_total),
+            fill,
+        ));
+
+        ui.separator();
+        let r = &state.residency;
+        let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+        ui.label(format!(
+            "Memory — {:.1} MB CPU + {:.1} MB GPU   ({} chunks, {} uniform)",
+            mb(r.cpu_bytes()),
+            mb(r.gpu_mesh_bytes),
+            r.chunks,
+            r.uniform_chunks,
+        ));
+        ui.label(format!(
+            "  voxel {:.1}   detail {:.1}   scatter {:.1}   fluid {:.1}   overrides {:.2}  [MB]",
+            mb(r.voxel_bytes),
+            mb(r.detail_bytes),
+            mb(r.scatter_bytes),
+            mb(r.fluid_bytes),
+            mb(r.override_bytes),
+        ));
+        // §7.3: "session growth flat after warm-up". A peak that keeps rising
+        // while you revisit the same ground is the leak signal.
+        ui.label(format!(
+            "  session peak {:.1} MB CPU / {:.1} MB GPU",
+            mb(r.peak_cpu_bytes),
+            mb(r.peak_gpu_bytes),
+        ));
+
+        ui.separator();
+        if ui.button("Verify determinism (32 chunks)").clicked() {
+            state.determinism_check_requested = true;
+        }
+        let d = state.determinism;
+        if d.ran {
+            if d.divergent > 0 {
+                ui.label(format!(
+                    "DETERMINISM FAILED — {}/{} chunks diverged",
+                    d.divergent, d.checked,
+                ));
+                if let Some(f) = d.first {
+                    ui.label(format!(
+                        "  first: chunk {:?} local ({}, {}, {})",
+                        f.chunk, f.local.x, f.local.y, f.local.z,
+                    ));
+                    ui.label(format!("  resident  {:?}", f.resident));
+                    ui.label(format!("  regen     {:?}", f.regenerated));
+                }
+            } else if d.checked == 0 {
+                // Distinguish "verified" from "had nothing to verify".
+                ui.label(format!(
+                    "Determinism: nothing comparable ({} skipped — all carry overrides)",
+                    d.skipped,
+                ));
+            } else {
+                ui.label(format!(
+                    "Determinism OK — {} chunks identical, {} skipped",
+                    d.checked, d.skipped,
+                ));
+            }
+        }
     });
 }
 

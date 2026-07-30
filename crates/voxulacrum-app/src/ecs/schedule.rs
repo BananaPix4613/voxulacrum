@@ -33,6 +33,28 @@ pub fn build_frame_schedule() -> Schedule {
         FrameStage::PostFrame.after(FrameStage::Render),
     ));
 
+    // Frame timing boundaries (diagnostics A1). These belong to no set and are
+    // ordered against the sets, so each lands exactly between two stages.
+    schedule.add_systems((
+        systems::frame_timings_begin.before(FrameStage::Input),
+        systems::frame_timings_end_input
+            .after(FrameStage::Input)
+            .before(FrameStage::Simulation),
+        systems::frame_timings_end_simulation
+            .after(FrameStage::Simulation)
+            .before(FrameStage::Meshing),
+        systems::frame_timings_end_meshing
+            .after(FrameStage::Meshing)
+            .before(FrameStage::UniformWrite),
+        systems::frame_timings_end_uniform
+            .after(FrameStage::UniformWrite)
+            .before(FrameStage::Render),
+        systems::frame_timings_end_render
+            .after(FrameStage::Render)
+            .before(FrameStage::PostFrame),
+        systems::frame_timings_frame_end.after(FrameStage::PostFrame),
+    ));
+
     // Input
     schedule.add_systems((
         input::process_input_system.in_set(FrameStage::Input),
@@ -92,6 +114,9 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::Meshing)
             .after(systems::streaming_tick_system)
             .before(systems::meshing_tick_system),
+        systems::job_pump_system
+            .in_set(FrameStage::Meshing)
+            .after(systems::streaming_tick_system),
         systems::meshing_tick_system.in_set(FrameStage::Meshing),
     ));
     // Field probe (debug): poll/dispatch graph-node inspection eval.

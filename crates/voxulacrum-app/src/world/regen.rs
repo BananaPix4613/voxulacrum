@@ -139,30 +139,29 @@ impl WorldRegenCoordinator {
         // (latest wins) and fire on the next tick after completion, so the
         // final edit is never lost. If reassembling from the manifest fails
         // (e.g. a missing file), we log and keep the old world.
-        if !self.manager.is_regenerating() {
-            if let Some((slot, graph)) = ui_state.pending_graph.take() {
-                // Tag-driven invalidation: classify the edit by its hierarchy
-                // slot, then regenerate only the chunks whose tags match (§4).
-                let target = classify_edit(slot);
-                let seed = ui_state.params.terrain_gen.seed as u64;
-                // Reassemble the full hierarchy from the manifest, swapping in the
-                // edited graph for its slot so the rest of the hierarchy persists.
-                match crate::world::world_generator::WorldGenerator::from_manifest_with_override(
-                    &crate::world::world_generator::world_manifest_path(),
-                    seed,
-                    slot,
-                    graph,
-                ) {
-                    Ok(gen) => {
-                        let positions = select_invalidated(world, &target);
-                        self.manager.start_regeneration(
-                            &ui_state.params.terrain_gen,
-                            std::sync::Arc::new(gen),
-                            positions,
-                        );
-                    }
-                    Err(e) => log::error!("Graph-edit regen: invalid graph: {e}"),
+        if !self.manager.is_regenerating() && !ui_state.pending_graph_reload.is_empty() {
+            let slots = std::mem::take(&mut ui_state.pending_graph_reload);
+            let seed = ui_state.params.terrain_gen.seed as u64;
+            // The whole hierarchy reloads from disk. There is no edited-graph
+            // override, so a mix of in-editor and on-disk state cannot occur.
+            match crate::world::world_generator::WorldGenerator::from_manifest(
+                &crate::world::world_generator::world_manifest_path(),
+                seed,
+            ) {
+                Ok(gen) => {
+                    let positions = select_invalidated(world, &slots);
+                    log::info!(
+                        "regenerating {} chunks for {:?}",
+                        positions.len(),
+                        slots,
+                    );
+                    self.manager.start_regeneration(
+                        &ui_state.params.terrain_gen,
+                        std::sync::Arc::new(gen),
+                        positions,
+                    );
                 }
+                Err(e) => log::error!("graph reload: invalid graph set: {e}"),
             }
         }
     }
@@ -174,6 +173,13 @@ enum InvalidationTarget {
     /// Every loaded chunk (a WorldGraph edit, or a conservative fallback).
     AllChunks,
     /// Chunks tagged with a specific zone.
+    ///
+    /// Unreachable today: with one Zone graph governing the whole world, a Zone
+    /// edit can move any column's biome, so `classify_edit` returns `AllChunks`.
+    /// This becomes correct - and is design §4's intended shape - once multiple
+    /// Zone graphs exist and a zone assignment is stable across a Zone-graph
+    /// edit, since then only the edited zone's chunks are affected.
+    #[allow(dead_code)]
     Zone(ZoneId),
     /// Chunks tagged with a specific biome.
     Biome(BiomeId),
@@ -190,23 +196,38 @@ impl InvalidationTarget {
     }
 }
 
-/// Classify which chunks an edit to a graph of `kind` invalidates: a World
-/// edit touches every chunk, a Zone edit its zone (single zone for now), a Biome
-/// edit only chunks tagged with that biome id.
+/// Which chunks an edit to `slot` invalidates (design §4's invalidation table).
+///
+/// **Tag matching is backward-looking**, and that governs this mapping. Tags
+/// describe the *previous* generation, so matching on them is only sound when
+/// the edit cannot change what the tags would become:
+///
+/// - A **Biome** (or Detail) edit changes how an already-assigned biome looks. A
+///   chunk tagged with that biome still will be, so narrow matching is correct.
+/// - A **Zone** edit changes which biome each column *is assigned*. The chunks
+///   that need regenerating are exactly those whose assignment changes — and
+///   their current tags describe the assignment being replaced. Matching
+///   `tags.zone` silently skips every chunk crossing a moved band boundary,
+///   which is why moving a biome threshold left the old terrain in place until a
+///   full "Regenerate World".
+/// - A **World** edit changes climate, hence zone assignment, hence everything.
 fn classify_edit(slot: GraphSlot) -> InvalidationTarget {
     match slot {
         GraphSlot::World => InvalidationTarget::AllChunks,
-        GraphSlot::Zone => InvalidationTarget::Zone(ZoneId(0)),
+        GraphSlot::Zone => InvalidationTarget::AllChunks,
         GraphSlot::Biome(id) => InvalidationTarget::Biome(BiomeId(id)),
     }
 }
 
-/// Loaded chunk positions invalidated by an edit, found by tag-set lookup.
-fn select_invalidated(world: &World, target: &InvalidationTarget) -> Vec<IVec3> {
+/// Loaded chunk positions invalidated by changes to `slots`, by tag-set lookup
+/// (§4's invalidation table). A chunk regenerates if *any* changed slot claims
+/// it, so several files saved at once union rather than the last one winning.
+fn select_invalidated(world: &World, slots: &[GraphSlot]) -> Vec<IVec3> {
+    let targets: Vec<InvalidationTarget> = slots.iter().copied().map(classify_edit).collect();
     world
         .chunks
         .iter()
-        .filter(|(_, chunk)| target.matches(&chunk.data.tags))
+        .filter(|(_, chunk)| targets.iter().any(|t| t.matches(&chunk.data.tags)))
         .map(|(&coord, _)| IVec3::from(coord))
         .collect()
 }
@@ -247,7 +268,7 @@ mod tests {
     #[test]
     fn edits_classify_by_graph_kind() {
         assert!(matches!(classify_edit(GraphSlot::World), InvalidationTarget::AllChunks));
-        assert!(matches!(classify_edit(GraphSlot::Zone), InvalidationTarget::Zone(_)));
+        assert!(matches!(classify_edit(GraphSlot::Zone), InvalidationTarget::AllChunks));
         assert!(matches!(
             classify_edit(GraphSlot::Biome(1)),
             InvalidationTarget::Biome(BiomeId(1))

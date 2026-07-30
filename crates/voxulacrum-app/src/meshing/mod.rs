@@ -12,6 +12,7 @@ use std::time::Instant;
 use bevy_ecs::prelude::Resource;
 
 use crate::core_budget::CoreBudget;
+use crate::jobs::{JobKind, JobSystem, Priority};
 use crate::rendering::pipelines::FaceVertex;
 use crate::world::chunk::ChunkSnapshot;
 use cache::AtomicCacheStats;
@@ -48,6 +49,8 @@ pub struct MeshingStats {
     // Cache stats
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub cache_misses_cold: u64,
+    pub cache_misses_stale: u64,
     pub cache_errors: u64,
     pub cache_files: u64,
     pub cache_bytes: u64,
@@ -72,18 +75,12 @@ struct CacheConfig {
 
 #[derive(Resource)]
 pub struct MeshingPipeline {
-    /// Shared generation+meshing pool (Phase-2 unified worker model). Mesh work is
-    /// fire-and-forget `spawn`ed here, not run on dedicated threads.
-    pool: Arc<rayon::ThreadPool>,
-    /// Cloned into each spawned mesh task to return its result. Behind a `Mutex`
+    /// Cloned into each submitted mesh task to return its result. Behind a `Mutex`
     /// so the pipeline stays `Sync` (`mpsc::Sender` is not).
     result_tx: Mutex<Sender<MeshResult>>,
     result_rx: Mutex<Receiver<MeshResult>>,
-    /// Shared cache config handed to each spawned task.
+    /// Shared cache config handed to each submitted job.
     cache_config: Arc<CacheConfig>,
-    /// Max concurrent in-flight mesh tasks (meshing's share of the pool budget),
-    /// so meshing can't starve generation on the shared pool.
-    max_in_flight: usize,
 
     chunk_states: HashMap<IVec3, ChunkMeshState>,
 
@@ -99,12 +96,7 @@ pub struct MeshingPipeline {
 }
 
 impl MeshingPipeline {
-    pub fn new(
-        pool: Arc<rayon::ThreadPool>,
-        mesh_cache: &crate::params::MeshCacheParams,
-    ) -> Self {
-        let budget = CoreBudget::detect();
-
+    pub fn new(mesh_cache: &crate::params::MeshCacheParams) -> Self {
         let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
         if let Err(e) = std::fs::create_dir_all(&cache_dir) {
             log::warn!("Failed to create cache directory: {}", e);
@@ -126,18 +118,15 @@ impl MeshingPipeline {
 
         let (res_tx, res_rx) = mpsc::channel::<MeshResult>();
 
-        let worker_count = pool.current_num_threads();
-        log::info!(
-            "MeshingPipeline: meshing on shared gen_pool ({} threads, {} in-flight cap), cache at {:?}",
-            worker_count, budget.mesh_in_flight, cache_dir
-        );
+        // Concurrency is the scheduler's to decide now; this is only the stat the
+        // Performance panel shows.
+        let worker_count = CoreBudget::detect().pool_threads;
+        log::info!("MeshingPipeline: scheduler-backed meshing, cache at {cache_dir:?}");
 
         Self {
-            pool,
             result_tx: Mutex::new(res_tx),
             result_rx: Mutex::new(res_rx),
             cache_config,
-            max_in_flight: budget.mesh_in_flight,
             chunk_states: HashMap::new(),
             stats: MeshingStats { worker_count, ..Default::default() },
             batch_start: None,
@@ -170,14 +159,31 @@ impl MeshingPipeline {
         }
     }
 
-    pub fn drain_pending_submissions(&mut self, world: &crate::world::World) {
-        const MAX_SNAPSHOTS_PER_FRAME: usize = 32;
+    pub fn drain_pending_submissions(
+        &mut self,
+        world: &crate::world::World,
+        jobs: &mut JobSystem,
+        camera_chunk: IVec3,
+        max_snapshots: usize,
+    ) {
+        // Main-thread budget: each submission extracts a 34^3 snapshot, which is a
+        // real per-frame cost independent of how many jobs may run concurrently.
+        // Operator-tunable via `StreamingParams::max_mesh_per_frame`.
         let mut submitted = 0;
         let mut i = 0;
 
-        // Cap concurrent mesh tasks so meshing doesn't starve generation on the
-        // shared pool: count what's already in flight, then stop draining when the
-        // budget is full (remaining pending chunks wait for the next frame).
+        // Nearest-first: sort the pending set by distance to the camera so the
+        // scan visits chunks in the order the player will see them. Without this,
+        // `submit_all_dirty` fills the vec in `HashMap` order and `swap_remove`
+        // scrambles it further, so which chunks got deferred by the face-neighbor
+        // check below was effectively random - the scattered late-meshing chunks.
+        self.pending_submissions.sort_unstable_by_key(|p| {
+            let dx = p.x - camera_chunk.x;
+            let dz = p.z - camera_chunk.z;
+            std::cmp::Reverse(dx * dx + dz * dz)
+        });
+        
+        let cap = jobs.submission_limit(JobKind::Mesh);
         let mut in_flight = self
             .chunk_states
             .values()
@@ -185,8 +191,8 @@ impl MeshingPipeline {
             .count();
 
         while i < self.pending_submissions.len()
-            && submitted < MAX_SNAPSHOTS_PER_FRAME
-            && in_flight < self.max_in_flight
+            && submitted < max_snapshots
+            && in_flight < cap
         {
             let pos = self.pending_submissions[i];
 
@@ -220,11 +226,22 @@ impl MeshingPipeline {
             );
             let mesh_seq = chunk.mesh_seq;
 
-            // Fire-and-forget onto the shared pool; the task returns over the result
-            // channel, which `poll` drains.
+            // Submit to the scheduler; the job returns over the result channel,
+            // which `poll` drains. An edit-dirtied chunk (the only thing that sets
+            // `mesh_debounce`) rides the interactive class so a placed block
+            // re-meshes ahead of bulk streaming.
+            let dx = pos.x - camera_chunk.x;
+            let dz = pos.z - camera_chunk.z;
+            let distance = (dx * dx + dz * dz).max(0) as u32;
+            let priority = if chunk.mesh_debounce.is_some() {
+                Priority::interactive(distance)
+            } else {
+                Priority::streaming(distance)
+            };
+            
             let res_tx = self.result_tx.lock().unwrap().clone();
             let cache_config = self.cache_config.clone();
-            self.pool.spawn(move || {
+            jobs.submit(JobKind::Mesh, pos, priority, move || {
                 mesh_chunk_task(pos, snapshot, mesh_seq, res_tx, cache_config);
             });
             self.chunk_states.insert(pos, ChunkMeshState::InProgress);
@@ -252,6 +269,8 @@ impl MeshingPipeline {
 
         self.stats.cache_hits = self.cache_stats.hits.load(Ordering::Relaxed);
         self.stats.cache_misses = self.cache_stats.misses.load(Ordering::Relaxed);
+        self.stats.cache_misses_cold = self.cache_stats.misses_cold.load(Ordering::Relaxed);
+        self.stats.cache_misses_stale = self.cache_stats.misses_stale.load(Ordering::Relaxed);
         self.stats.cache_errors = self.cache_stats.errors.load(Ordering::Relaxed);
         self.stats.cache_bytes = self.cache_stats.total_bytes.load(Ordering::Relaxed);
         self.stats.cache_files = self.cache_lru.lock().unwrap().entry_count() as u64;
@@ -357,6 +376,19 @@ fn mesh_chunk_task(
     }
 
     cache_config.stats.misses.fetch_add(1, Ordering::Relaxed);
+    // Attribute the miss: a position the LRU already knows means the content
+    // changed and this is a re-key (drift observation 5.1's churn), not a first
+    // visit. One map lookup, on a path that already takes this lock on hits.
+    let had_entry = cache_config
+        .lru
+        .lock()
+        .map(|lru| lru.contains(snapshot.position))
+        .unwrap_or(false);
+    if had_entry {
+        cache_config.stats.misses_stale.fetch_add(1, Ordering::Relaxed);
+    } else {
+        cache_config.stats.misses_cold.fetch_add(1, Ordering::Relaxed);
+    }
     let (vertices, indices) = generate_chunk_mesh(&snapshot);
 
     match cache::save_cached_mesh(

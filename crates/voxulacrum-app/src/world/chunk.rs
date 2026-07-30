@@ -26,6 +26,10 @@ pub struct ChunkMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
+    /// Vertex + index buffer bytes. Recorded at upload rather than inferred from
+    /// `index_count` and quad topology, so the residency panel reports the real
+    /// GPU footprint instead of an estimate.
+    pub gpu_bytes: u64,
 }
 
 /// Serializable chunk content: voxels plus the sidecar layers. This is the

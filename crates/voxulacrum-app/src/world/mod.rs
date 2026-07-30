@@ -27,10 +27,11 @@ use glam::IVec3;
 
 use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_SIZE, CHUNK_VOLUME, DELTA_THRESHOLD};
 use overrides::ChunkOverrides;
-use layers::{PrefabId, ScatterFlags, ScatterInstance, StableInstanceId};
+use layers::{DetailTexel, PrefabId, ScatterFlags, ScatterInstance, StableInstanceId};
 use world_generator::WorldGenerator;
 use mutation::{
-    EngineMode, MutationCommand, MutationError, MutationOutcome, WorldMutation,
+    EngineMode, MutationCommand, MutationError, MutationLog, MutationOutcome,
+    WorldMutation,
 };
 
 pub struct World {
@@ -42,6 +43,9 @@ pub struct World {
     /// always `Authoring`; every mutation flows through [`World::execute`] and is
     /// origin-checked against this. `Play` lands in Phase 9.
     pub mode: EngineMode,
+    /// Every command through the door, counted; recent actor commands kept
+    /// (roadmap §4.4). Private so `execute` is the only writer.
+    mutation_log: MutationLog,
 }
 
 use crate::params::TerrainGenParams;
@@ -56,7 +60,8 @@ impl World {
         generator: Arc<WorldGenerator>,
         pool: &rayon::ThreadPool,
         min_y: i32,
-        max_y: i32
+        max_y: i32,
+        persistence: &persistence::WorldPersistence,
     ) -> Self {
         use rayon::prelude::*;
 
@@ -72,12 +77,23 @@ impl World {
             }
         }
 
+        // The startup fill overlays persisted edits through the same path
+        // streaming uses (`persistence::apply_persisted_record`). It did not
+        // before, so chunks still resident from boot came back generated-fresh
+        // and the next edit in one of them overwrote its saved record.
+        // `WorldDatabase` holds its connection behind a mutex, so the read
+        // serializes while generation - the expensive half - stays parallel.
+        let db = persistence.db();
         let chunks: HashMap<ChunkCoord, LoadedChunk> = pool.install(|| {
             positions
                 .par_iter()
                 .map(|&pos| {
                     let generated = generator.generate_chunk(pos);
-                    (ChunkCoord::from(pos), LoadedChunk::from_generated(pos, generated))
+                    let mut chunk = LoadedChunk::from_generated(pos, generated);
+                    if let Some(db) = db {
+                        persistence::apply_persisted_record(&mut chunk, db);
+                    }
+                    (ChunkCoord::from(pos), chunk)
                 })
                 .collect()
         });
@@ -88,6 +104,7 @@ impl World {
             min_chunk_y: min_y,
             max_chunk_y: max_y,
             mode: EngineMode::Authoring,
+            mutation_log: MutationLog::default(),
         }
     }
 
@@ -145,6 +162,7 @@ impl World {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
+            gpu_bytes: (size_of_val(vertices) + size_of_val(indices)) as u64,
         });
         if chunk.mesh_seq == mesh_seq {
             chunk.mesh_dirty = false;
@@ -172,20 +190,29 @@ impl World {
     /// the caller constructs a [`MutationCommand`] and services the returned
     /// [`MutationOutcome`]'s GPU-side rebuilds. A command whose origin does not
     /// match the current mode is rejected without touching the world.
-    #[allow(dead_code)] // reachable once live call sites migrate (Substeps 1b/1c)
     pub fn execute(
         &mut self,
         command: MutationCommand,
     ) -> Result<MutationOutcome, MutationError> {
-        // Actor edits (Authoring/PlayTime) are gated against coexistence; System
-        // mutations 9streaming, sim bookkeeping) run in any mode.
-        if command.origin != MutationOrigin::System
-            && self.mode.required_origin() != command.origin
-        {
-            return Err(MutationError::WrongMode {
-                mode: self.mode,
-                origin: command.origin,
-            });
+        // Captured before dispatch consumes the intent.
+        let intent_index = command.mutation.index();
+        let intent_name = command.mutation.name();
+        let origin = command.origin;
+        let mode = self.mode;
+
+        match origin {
+            MutationOrigin::System => {
+                if !command.mutation.allows_system_origin() {
+                    self.mutation_log.rejected_system_origin += 1;
+                    return Err(MutationError::SystemOriginNotAllowed { intent: intent_name });
+                }
+            }
+            origin => {
+                if self.mode.required_origin() != origin {
+                    self.mutation_log.rejected_wrong_mode += 1;
+                    return Err(MutationError::WrongMode { mode: self.mode, origin });
+                }
+            }
         }
         let outcome = match command.mutation {
             WorldMutation::EditVoxel { chunk, index, voxel } => {
@@ -201,12 +228,18 @@ impl World {
                 self.handle_place_scatter(chunk, anchor, world_voxel)
             }
             WorldMutation::PourFluidColumn { anchor } => self.handle_pour_fluid_column(anchor),
-            WorldMutation::MarkFluidDirty { chunks } => self.handle_mark_fluid_dirty(chunks),
+            WorldMutation::CommitFluidPlans { plans } => self.handle_commit_fluid_plans(plans),
             WorldMutation::InsertLoadedChunk { chunk } => self.handle_insert_loaded_chunk(chunk),
+            WorldMutation::EvictChunk { chunk } => self.handle_evict_chunk(chunk),
+            WorldMutation::FinalizeSeam { chunk, demotions } => {
+                self.handle_finalize_seam(chunk, demotions)
+            }
             WorldMutation::SwapRegeneratedChunks { chunks, generator } => {
                 self.handle_swap_regenerated_chunks(chunks, generator)
             }
         };
+        self.mutation_log
+            .record(intent_index, intent_name, origin, mode, &outcome);
         Ok(outcome)
     }
 
@@ -332,7 +365,7 @@ impl World {
             }
             let cell = FluidCell {
                 fluid_id: FluidId::WATER,
-                mass: crate::world::fluid_gen::FULL_MASS,
+                mass: fluid_gen::FULL_MASS,
                 flags: 0,
             };
             chunk.data.fluids.cells.insert(lp, cell);
@@ -353,21 +386,55 @@ impl World {
         outcome
     }
 
-    /// Handler for [`WorldMutation::MarkFluidDirty`]. Marks each fluid-changed
-    /// chunk persist-dirty and ensures it carries an override bucket, which routes
-    /// it through the delta (not full-storage) save path so `build_chunk_edits`
-    /// snapshots the fluid field. The sim mutates cells directly (physics, outside
-    /// the command path); this centralizes the resulting persistence bookkeeping.
-    fn handle_mark_fluid_dirty(&mut self, chunks: Vec<IVec3>) -> MutationOutcome {
-        for pos in chunks {
-            if let Some(c) = self.chunks.get_mut(&ChunkCoord::from(pos)) {
-                c.persist_dirty = true;
-                c.data
-                    .overrides
-                    .get_or_insert_with(ChunkOverrides::default);
+    /// Handler for [`WorldMutation::CommitFluidPlans`]. The write half of one
+    /// fluid tick: commit, wake, persist.
+    /// 
+    /// Waking only *changed* edge cells is deliberate - waking every boundary
+    /// cell keeps a settled shoreline churning forever.
+    fn handle_commit_fluid_plans(
+        &mut self,
+        plans: Vec<(ChunkCoord, fluid_sim::ChunkPlan)>,
+    ) -> MutationOutcome {
+        let mut outcome = MutationOutcome::default();
+        let mut wakes: Vec<(ChunkCoord, LocalPos)> = Vec::new();
+        let mut changed: Vec<IVec3> = Vec::new();
+        
+        // Commit each plan, recording which changed edge cells should wake their
+        // neighbor's mirror so flow keeps crossing the seam.
+        for (coord, plan) in plans {
+            for &(pos, _) in plan.changed_cells() {
+                fluid_edge_mirrors(coord, pos, &mut wakes);
+            }
+            if let Some(chunk) = self.chunks.get_mut(&coord) {
+                if fluid_sim::commit_chunk(&mut chunk.data.fluids, plan) {
+                    let pos = IVec3::from(coord);
+                    if !changed.contains(&pos) {
+                        changed.push(pos);
+                    }
+                }
             }
         }
-        MutationOutcome::default()
+        
+        // Wake neighbor edge cells so they participate next tick.
+        for (ncoord, mirror) in wakes {
+            if let Some(chunk) = self.chunks.get_mut(&ncoord) {
+                chunk.data.fluids.activate(mirror);
+            }
+        }
+        
+        // Every chunk whose field changed must persist it, and must carry an
+        // override bucket so `build_chunk_edits` routes it through the delta save
+        // path instead of returning `None` for an empty bucket (drift-review 1.2 -
+        // the bug that made water flowing into an unedited chunk vanish on unload).
+        for pos in changed {
+            if let Some(c) = self.chunks.get_mut(&ChunkCoord::from(pos)) {
+                c.persist_dirty = true;
+                c.data.overrides.get_or_insert_with(ChunkOverrides::default);
+            }
+            outcome.water_rebuild.push(pos);
+        }
+        
+        outcome
     }
 
     /// Handler for [`WorldMutation::InsertLoadedChunk`]. Inserts the chunk and
@@ -392,6 +459,147 @@ impl World {
                 outcome.mesh_invalidated.push(npos);
             }
         }
+        outcome
+    }
+
+    /// Handler for [`WorldMutation::EvictChunk`]. Drops the chunk from the
+    /// resident set. The caller saves it first if dirty - persistence lives
+    /// outside `World` - so this is only the residency change.
+    fn handle_evict_chunk(&mut self, chunk_pos: IVec3) -> MutationOutcome {
+        self.remove_chunk(chunk_pos);
+        MutationOutcome::default()
+    }
+
+    /// Handler for [`WorldMutation::FinalizeSeam`]. Applies cross-chunk slab
+    /// demotions to a generated chunk and marks it seam-finalized.
+    ///
+    /// Water refresh is deliberately *not* reported in the outcome: a demotion
+    /// always marks the chunk mesh-dirty, and `meshing_tick_system` rebuilds
+    /// water for every newly-meshed chunk plus its neighbors, so the seam's new
+    /// cells are picked up on that path. Reporting it here too would rebuild
+    /// twice.
+    fn handle_finalize_seam(
+        &mut self,
+        chunk_pos: IVec3,
+        demotions: Vec<(usize, Voxel)>,
+    ) -> MutationOutcome {
+        use layers::{FluidCell, FluidFillMode, FluidId};
+
+        let mut outcome = MutationOutcome::default();
+        let sea_level = self.generator.sea_level();
+
+        if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
+            // Never let a worldgen-derived demotion overwrite a player-placed
+            // voxel: demotions are recomputed from current (already
+            // edit-overlaid) storage, so without this guard a border edit could
+            // be reverted.
+            let applied: Vec<(usize, Voxel)> = demotions
+                .iter()
+                .filter(|(index, _)| {
+                    !chunk.data.overrides.as_ref().is_some_and(|ovr| {
+                        ovr.voxel_diffs.contains_key(&LocalPos::from_index(*index))
+                    })
+                })
+                .copied()
+                .collect();
+
+            if !applied.is_empty() {
+                let mut storage = (*chunk.data.voxels).clone();
+                for (index, voxel) in &applied {
+                    storage.set_voxel(*index, *voxel);
+                }
+                chunk.data.voxels = Arc::new(storage);
+                chunk.mark_mesh_dirty();
+                outcome.mesh_invalidated.push(chunk_pos);
+
+                // A seam demotion only ever turns a Cube (fluid capacity 0, so
+                // ocean_fill correctly placed no water) into a SlabBottom
+                // (capacity SLAB_MASS). ocean_fill already ran before this
+                // chunk's neighbors were resident, so it never saw the new empty
+                // half - without this, a seam-demoted slab stays permanently dry
+                // even sitting at/below sea level right beside water-bearing
+                // cells the isolated pass got right. Submerged fast-path chunks
+                // don't need it: their capacity reads live off current storage.
+                // Pond water is not covered - the per-column pond level isn't
+                // retained after generation, so a seam-demoted slab on a pond
+                // shoreline (above sea level) can still come up dry.
+                if !matches!(chunk.data.fluids.fill_mode, FluidFillMode::Submerged(_)) {
+                    for (index, voxel) in &applied {
+                        let lp = LocalPos::from_index(*index);
+                        let world_y = chunk_pos.y * CHUNK_SIZE as i32 + lp.y as i32;
+                        if world_y > sea_level {
+                            continue;
+                        }
+                        let capacity = fluid_gen::fluid_capacity(*voxel);
+                        if capacity > 0 {
+                            // Sea-level layer fills to the 3/4 waterline
+                            // (slab-aware), matching ocean_fill so the seam slab
+                            // lines up with the surrounding sea instead of
+                            // bumping up to a full cell.
+                            let mass = if world_y == sea_level {
+                                fluid_gen::sea_surface_mass(*voxel)
+                            } else {
+                                capacity
+                            };
+                            chunk.data.fluids.cells.insert(
+                                lp,
+                                FluidCell {
+                                    fluid_id: FluidId::WATER,
+                                    mass,
+                                    flags: FluidCell::FLAG_SETTLED,
+                                },
+                            );
+                            // The demoted cube-turned-slab is now a submerged
+                            // surface, so foliage generated on its (then-dry)
+                            // cube top is underwater. Same submersion cull.
+                            remove_submerged_column_foliage(
+                                &mut chunk.data,
+                                lp.x as usize,
+                                lp.z as usize,
+                                lp.y,
+                            );
+                        }
+                    }
+                }
+
+                // Persist the decision through the same diff mechanism player
+                // edits use, so `seam_finalized` can be persisted without the
+                // demotion reverting to a sharp cube on the next load. These are
+                // worldgen-finalization entries, not player edits, but the
+                // override guard above treats "present in voxel_diffs" as
+                // "already decided" either way, so sharing the bucket is safe.
+                let ovr = chunk
+                    .data
+                    .overrides
+                    .get_or_insert_with(ChunkOverrides::default);
+                for (index, voxel) in &applied {
+                    ovr.set_voxel(*index, *voxel);
+                }
+                chunk.persist_dirty = true;
+            }
+            chunk.seam_finalized = true;
+        }
+
+        // Boundary demotions change face culling for the six neighbors: re-mesh
+        // them. Fires on any derived demotion, including ones the override guard
+        // declined to re-apply - the geometry is there either way.
+        if !demotions.is_empty() {
+            for offset in [
+                IVec3::new(1, 0, 0),
+                IVec3::new(-1, 0, 0),
+                IVec3::new(0, 1, 0),
+                IVec3::new(0, -1, 0),
+                IVec3::new(0, 0, 1),
+                IVec3::new(0, 0, -1),
+            ] {
+                let npos = chunk_pos + offset;
+                if let Some(n) = self.chunks.get_mut(&ChunkCoord::from(npos)) {
+                    n.mark_mesh_dirty();
+                    outcome.mesh_invalidated.push(npos);
+                }
+            }
+        }
+
         outcome
     }
 
@@ -425,6 +633,11 @@ impl World {
         }));
     }
 
+    /// Snapshot of the mutation log, for the panel.
+    pub fn mutation_log(&self) -> MutationLog {
+        self.mutation_log
+    }
+
     /// Get a chunk by its chunk-space IVec3 position.
     pub fn get_chunk(&self, pos: IVec3) -> Option<&LoadedChunk> {
         self.chunks.get(&ChunkCoord::from(pos))
@@ -440,8 +653,9 @@ impl World {
         self.chunks.insert(chunk.data.coord, chunk);
     }
 
-    /// Remove a chunk. GPU buffers freed on drop.
-    pub fn remove_chunk(&mut self, pos: IVec3) -> Option<LoadedChunk> {
+    /// Remove a chunk. GPU buffers freed on drop. Private: eviction is reached
+    /// through [`WorldMutation::EvictChunk`], never directly.
+    fn remove_chunk(&mut self, pos: IVec3) -> Option<LoadedChunk> {
         self.chunks.remove(&ChunkCoord::from(pos))
     }
 
@@ -509,6 +723,189 @@ impl World {
         );
         log::info!("==============================")
     }
+
+    /// Sample resident memory by layer. **Not cheap** - one pass over every
+    /// resident chunk - so it is called on a throttle, never per frame. The
+    /// per-frame full-set scans this would join are exactly what
+    /// `pre-phase-10-audit.md` §4.9 flags as the secondary cost at high zoom.
+    ///
+    /// `previous` carries the session peaks forward, since a peak is meaningless
+    /// if each sample starts from zero.
+    pub fn sample_residency(
+        &self,
+        previous: crate::diagnostics::ResidencyStats,
+    ) -> crate::diagnostics::ResidencyStats {
+        use crate::diagnostics::ResidencyStats;
+        use layers::{DetailTexel, FluidCell, ScatterInstance};
+        use std::mem::size_of;
+
+        let mut s = ResidencyStats {
+            chunks: self.chunks.len(),
+            peak_cpu_bytes: previous.peak_cpu_bytes,
+            peak_gpu_bytes: previous.peak_gpu_bytes,
+            ..Default::default()
+        };
+
+        for chunk in self.chunks.values() {
+            if chunk.data.voxels.is_uniform() {
+                s.uniform_chunks += 1;
+            }
+            s.voxel_bytes += chunk.data.voxels.memory_bytes() as u64;
+
+            // Tier-1 paint: one boxed texel map per active layer.
+            s.detail_bytes += (chunk.data.detail_layers.layers.len()
+                * layers::CHUNK_AREA
+                * size_of::<DetailTexel>()) as u64;
+
+            // Tier-2/3 scatter: instances, plus the per-bucket Vec header.
+            for insts in chunk.data.scatter_instances.by_type.values() {
+                s.scatter_bytes +=
+                    (insts.len() * size_of::<ScatterInstance>() + size_of::<Vec<ScatterInstance>>())
+                    as u64;
+            }
+
+            // Fluid: explicit cells plus the two runtime-only sets. `Submerged`
+            // chunks hold no cells at all, which is the fast path working.
+            let f = &chunk.data.fluids;
+            s.fluid_bytes += (f.cells.len() * (size_of::<LocalPos>() + size_of::<FluidCell>())
+                + f.active.len() * size_of::<LocalPos>()
+                + f.stable_ticks.len() * (size_of::<LocalPos>() + size_of::<u16>()))
+                as u64;
+
+            if let Some(ovr) = &chunk.data.overrides {
+                s.override_bytes += (ovr.voxel_diffs.len()
+                    * (size_of::<LocalPos>() + size_of::<Voxel>())
+                    + ovr.fluid_diffs.len() * (size_of::<LocalPos>() + size_of::<FluidCell>())
+                    + ovr.scatter_added.len() * size_of::<ScatterInstance>()
+                    + ovr.scatter_removed.len() * size_of::<StableInstanceId>())
+                    as u64;
+            }
+
+            if let Some(mesh) = &chunk.mesh {
+                s.gpu_mesh_bytes += mesh.gpu_bytes;
+            }
+        }
+
+        s.peak_cpu_bytes = s.peak_cpu_bytes.max(s.cpu_bytes());
+        s.peak_gpu_bytes = s.peak_gpu_bytes.max(s.gpu_mesh_bytes);
+        s
+    }
+
+    /// Regenerate up to `max_chunks` resident chunks nearest `camera_chunk` and
+    /// diff them against what is loaded (roadmap §4.4 determinism checker).
+    ///
+    /// P1: same seed + graphs + coordinates -> bit-identical output, so a
+    /// resident chunk that no longer regenerates to itself means determinism is
+    /// broken. Only chunks with **no override bucket** are comparable - player
+    /// edits, seam demotions (recorded through the override mechanism) and fluid
+    /// marks all make resident content legitimately differ from fresh
+    /// generation. The rest count as `skipped`, which the caller must surface: a
+    /// pass over two chunks proves almost nothing.
+    ///
+    /// Voxels only. Fluids are mutated by the simulation and would diverge
+    /// legitimately; detail and scatter are only mutated on chunks that already
+    /// carry overrides, so they are in the skip set anyway.
+    ///
+    /// Runs on `pool` rather than inline: graph evaluation `debug_assert`s it is
+    /// not on the frame-schedule thread (`nodegraph_eval::guard`). The caller
+    /// blocks until it finishes, which is acceptable for an explicit operator
+    /// action and is why the regenerations are parallel - ~9 ms each, so 32 of
+    /// them is one brief stutter rather than a third of a second.
+    pub fn verify_determinism(
+        &self,
+        max_chunks: usize,
+        camera_chunk: IVec3,
+        pool: &rayon::ThreadPool,
+    ) -> DeterminismReport {
+        use rayon::prelude::*;
+
+        let mut report = DeterminismReport { ran: true, ..Default::default() };
+
+        let mut candidates: Vec<IVec3> = Vec::new();
+        for (coord, chunk) in &self.chunks {
+            let pos: IVec3 = (*coord).into();
+            if chunk.data.overrides.is_some() {
+                report.skipped += 1;
+                continue;
+            }
+            candidates.push(pos);
+        }
+        // Sorted by distance, then coordinate, so the sample and the reported
+        // first divergence are deterministic rather than dependent on HashMap
+        // iteration order.
+        candidates.sort_unstable_by_key(|p| {
+            let dx = p.x - camera_chunk.x;
+            let dz = p.z - camera_chunk.z;
+            (dx * dx + dz * dz, p.x, p.y, p.z)
+        });
+        candidates.truncate(max_chunks);
+
+        // `collect` preserves order, so `first` below is the nearest divergence.
+        let verdicts: Vec<Option<Divergence>> = pool.install(|| {
+            candidates
+                .par_iter()
+                .map(|&pos| {
+                    // Cannot be absent: candidates came from `self.chunks` and
+                    // `self` is borrowed for the whole call.
+                    let chunk = self.get_chunk(pos)?;
+                    let fresh = self.generator.generate_chunk(pos);
+                    (0..CHUNK_VOLUME).find_map(|i| {
+                        let resident = chunk.data.voxels.voxel(i);
+                        let regenerated = fresh.storage.voxel(i);
+                        // One divergent voxel per chunk is enough: `first` names
+                        // a concrete one, `divergent` counts affected chunks.
+                        (resident != regenerated).then_some(Divergence {
+                            chunk: pos,
+                            local: LocalPos::from_index(i),
+                            resident,
+                            regenerated,
+                        })
+                    })
+                })
+                .collect()
+        });
+
+        report.checked = verdicts.len();
+        report.divergent = verdicts.iter().filter(|v| v.is_some()).count();
+        report.first = verdicts.iter().flatten().next().copied();
+
+        if report.divergent > 0 {
+            log::error!(
+                "determinism check FAILED: {}/{} chunks diverged, first {:?}",
+                report.divergent, report.checked, report.first,
+            );
+        } else {
+            log::info!(
+                "determinism check: {} chunks identical, {} skipped (have overrides)",
+                report.checked, report.skipped,
+            );
+        }
+        report
+    }
+}
+
+/// One voxel where a resident chunk and a fresh regeneration disagree.
+#[derive(Clone, Copy, Debug)]
+pub struct Divergence {
+    pub chunk: IVec3,
+    pub local: LocalPos,
+    /// What the loaded world holds.
+    pub resident: Voxel,
+    /// What generation produces now. Authoritative under P1.
+    pub regenerated: Voxel,
+}
+
+/// Result of an in-place determinism check (roadmap §4.4).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeterminismReport {
+    pub checked: usize,
+    /// Chunks passed over because they carry an override bucket, so their
+    /// resident content is legitimately not what generation alone produces.
+    pub skipped: usize,
+    pub divergent: usize,
+    pub first: Option<Divergence>,
+    /// Whether a check has run at all this session.
+    pub ran: bool,
 }
 
 /// Manages background terrain regeneration.
@@ -671,6 +1068,55 @@ fn generate_world_background(
     chunks.into_iter().map(|c| (c.data.coord, c)).collect()
 }
 
+/// For each chunk face `pos` lies on, push the neighbor chunk plus the mirror
+/// cell on the far side of that face (a corner cell yields up to three). Pure
+/// geometry; lives here beside the fluid commit handler that consumes it.
+fn fluid_edge_mirrors(
+    coord: ChunkCoord,
+    pos: LocalPos,
+    out: &mut Vec<(ChunkCoord, LocalPos)>,
+) {
+    let d = CHUNK_SIZE as u8;
+    if pos.x == 0 {
+        out.push((ChunkCoord::new(coord.x - 1, coord.y, coord.z), LocalPos::new_unchecked(d - 1, pos.y, pos.z)));
+    }
+    if pos.x == d - 1 {
+        out.push((ChunkCoord::new(coord.x + 1, coord.y, coord.z), LocalPos::new_unchecked(0, pos.y, pos.z)));
+    }
+    if pos.y == 0 {
+        out.push((ChunkCoord::new(coord.x, coord.y - 1, coord.z), LocalPos::new_unchecked(pos.x, d - 1, pos.z)));
+    }
+    if pos.y == d - 1 {
+        out.push((ChunkCoord::new(coord.x, coord.y + 1, coord.z), LocalPos::new_unchecked(pos.x, 0, pos.z)));
+    }
+    if pos.z == 0 {
+        out.push((ChunkCoord::new(coord.x, coord.y, coord.z - 1), LocalPos::new_unchecked(pos.x, pos.y, d - 1)));
+    }
+    if pos.z == d - 1 {
+        out.push((ChunkCoord::new(coord.x, coord.y, coord.z + 1), LocalPos::new_unchecked(pos.x, pos.y, 0)));
+    }
+}
+
+/// Drop Tier-1 paint and Tier-2/3 scatter anchored to the surface voxel
+/// `(x, sy, z)`, for a column the seam pass has just put underwater. This is the
+/// same submersion cull `StorageBoundary::materialize_foliage` runs at
+/// generation time (design §5 stage 9 before stage 10) - the isolated per-chunk
+/// pass ran before this chunk's neighbors were resident, so it could not see
+/// seam-created water.
+fn remove_submerged_column_foliage(data: &mut chunk::Chunk, x: usize, z: usize, sy: u8) {
+    let col = x + z * CHUNK_SIZE;
+    // Tier-1 paint: zero the column's texel in every layer.
+    for layer in data.detail_layers.layers.iter_mut() {
+        layer.map[col] = DetailTexel::default();
+    }
+    // Tier-2/3 scatter: drop instances anchored to this column's surface voxel.
+    for insts in data.scatter_instances.by_type.values_mut() {
+        insts.retain(|inst| {
+            !(inst.anchor.x as usize == x && inst.anchor.z as usize == z && inst.anchor.y == sy)
+        });
+    }
+}
+
 /// Remove every effective scatter instance anchored at `anchor`: generated ones
 /// are recorded in `scatter_removed`, player-added ones are dropped.
 fn remove_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos) -> bool {
@@ -766,13 +1212,20 @@ mod mutation_tests {
 
     /// A minimal world holding a single air chunk at the origin, in `mode`.
     fn world_with_air_chunk(mode: EngineMode) -> World {
-        let generator = crate::world::world_generator::load_default(
-            &crate::params::TerrainGenParams::default(),
+        let generator = world_generator::load_default(
+            &TerrainGenParams::default(),
         )
         .expect("default generator loads");
         let mut chunks = HashMap::new();
         chunks.insert(ChunkCoord::from(IVec3::ZERO), LoadedChunk::new_air(IVec3::ZERO));
-        World { chunks, generator, min_chunk_y: 0, max_chunk_y: 4, mode }
+        World {
+            chunks,
+            generator,
+            min_chunk_y: 0,
+            max_chunk_y: 4,
+            mode,
+            mutation_log: MutationLog::default(),
+        }
     }
 
     #[test]
@@ -895,16 +1348,52 @@ mod mutation_tests {
     }
 
     #[test]
-    fn mark_fluid_dirty_sets_persist_and_bucket() {
+    fn commit_fluid_plans_applies_persists_and_reports_rebuild() {
+        use crate::world::fluid_sim::{plan_chunk, NeighborSample};
+        use crate::world::layers::{FluidCell, FluidId};
+
         let mut world = world_with_air_chunk(EngineMode::Authoring);
-        world
-            .execute(MutationCommand::authoring(WorldMutation::MarkFluidDirty {
-                chunks: vec![IVec3::ZERO],
+
+        // One suspended, active water cell in an all-air chunk: it must fall.
+        let cell = LocalPos::new_unchecked(4, 10, 4);
+        {
+            let chunk = world.get_chunk_mut(IVec3::ZERO).unwrap();
+            chunk.data.fluids.cells.insert(
+                cell,
+                FluidCell {
+                    fluid_id: FluidId::WATER,
+                    mass: fluid_gen::FULL_MASS,
+                    flags: 0,
+                },
+            );
+            chunk.data.fluids.activate(cell);
+            chunk.persist_dirty = false;
+        }
+
+        let plan = {
+            let chunk = world.get_chunk(IVec3::ZERO).unwrap();
+            let sample = NeighborSample::new(
+                &chunk.data.fluids,
+                chunk.data.voxels.as_ref(),
+                [None, None, None, None, None, None],
+            );
+            plan_chunk(&chunk.data.fluids, &sample)
+        };
+        assert!(!plan.is_empty(), "suspended water must plan a move");
+
+        let outcome = world
+            .execute(MutationCommand::system(WorldMutation::CommitFluidPlans {
+                plans: vec![(ChunkCoord::from(IVec3::ZERO), plan)],
             }))
-            .expect("authoring mark accepted");
+            .expect("system fluid commit accepted in any mode");
+
         let chunk = world.get_chunk(IVec3::ZERO).unwrap();
-        assert!(chunk.persist_dirty);
-        assert!(chunk.data.overrides.is_some(), "bucket ensured for snapshot");
+        assert!(chunk.persist_dirty, "a committed change marks the chunk for save");
+        assert!(
+            chunk.data.overrides.is_some(),
+            "bucket ensured so the delta save path snapshots the fluid field",
+        );
+        assert_eq!(outcome.water_rebuild.as_slice(), &[IVec3::ZERO]);
     }
 
     #[test]
@@ -1010,7 +1499,7 @@ mod mutation_tests {
     fn system_command_accepted_in_both_modes() {
         for mode in [EngineMode::Authoring, EngineMode::Play] {
             let mut world = world_with_air_chunk(mode);
-            let chunk = crate::world::chunk::LoadedChunk::new_air(IVec3::new(9, 0, 0));
+            let chunk = LoadedChunk::new_air(IVec3::new(9, 0, 0));
             world
                 .execute(MutationCommand::system(WorldMutation::InsertLoadedChunk { chunk }))
                 .expect("system command accepted regardless of mode");

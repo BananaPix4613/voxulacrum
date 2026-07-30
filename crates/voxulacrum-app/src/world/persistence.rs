@@ -2,7 +2,7 @@
 //! Only player-modified chunks are stored. Base terrain is regenerated from seed.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 
 use super::chunk::{LoadedChunk, DELTA_THRESHOLD};
 use super::layers::{
-    DecalEntry, DetailLayerId, DetailTexel, FluidCell, FluidId, PrefabId,
+    DecalEntry, DetailLayerId, DetailTexel, FluidCell, FluidLayer, FluidId, PrefabId,
     ScatterFlags, ScatterInstance, StableInstanceId,
 };
 use super::overrides::ChunkOverrides;
@@ -814,6 +814,12 @@ impl WorldPersistence {
         self.db.is_some()
     }
 
+    /// The open database, if any. Exposed so the startup fill can overlay
+    /// persisted edits through the same path streaming uses.
+    pub fn db(&self) -> Option<&WorldDatabase> {
+        self.db.as_ref()
+    }
+
     /// Clear all saved chunk data (called when terrain params change).
     pub fn clear_all_chunks(&self) -> Result<usize, PersistError> {
         if let Some(db) = &self.db {
@@ -871,6 +877,79 @@ impl WorldPersistence {
             db.save_chunk(chunk.data.coord.into(), &record)?;
         }
         Ok(())
+    }
+}
+
+// ============================================================================
+// The single override-application path
+// ============================================================================
+
+/// Overlay a chunk's persisted `fluid_diffs` onto its generated fluid layer as
+/// settled cells (design §7 / §9: player edits persist; the active set
+/// re-derives at runtime).
+fn apply_persisted_fluid(fluids: &mut FluidLayer, overrides: &Option<ChunkOverrides>) {
+    let Some(ovr) = overrides else { return };
+    for (&pos, &cell) in &ovr.fluid_diffs {
+        fluids.cells.insert(pos, cell);
+        // Cells mid-flow at save time resume flowing; settled cells stay put
+        // (the settled flag mirrors the active set - see FluidLayer::settle).
+        if cell.flags & FluidCell::FLAG_SETTLED == 0 {
+            fluids.activate(pos);
+        }
+    }
+}
+
+/// Apply a loaded [`ChunkRecord`] to a freshly generated chunk. Pure - no I/O -
+/// so the overlay logic is testable without a database.
+fn overlay_record(chunk: &mut LoadedChunk, record: ChunkRecord) {
+    let ChunkRecord { edits, tags, seam_finalized } = record;
+    match edits {
+        ChunkEdits::Delta(delta) => {
+            // Self-healing: drop overrides that already match base terrain
+            // (no-ops), so a generation change quietly reconciles instead of
+            // pinning stale edits forever.
+            let mut filtered = ChunkOverrides::default();
+            for (cell, voxel) in &delta.voxel_diffs {
+                if chunk.data.voxels.voxel(cell.to_index()) != *voxel {
+                    filtered.voxel_diffs.insert(*cell, *voxel);
+                }
+            }
+            if !filtered.voxel_diffs.is_empty() {
+                let updated = apply_overrides_to_storage(&chunk.data.voxels, &filtered);
+                chunk.data.voxels = Arc::new(updated);
+            }
+            // Scatter (Phase 5) and fluid (Phase 7) have runtime consumers, so
+            // their diffs carry forward. Detail and decal round-trip only.
+            filtered.scatter_removed = delta.scatter_removed;
+            filtered.scatter_added = delta.scatter_added;
+            filtered.fluid_diffs = delta.fluid_diffs;
+            chunk.data.overrides = if filtered.is_empty() { None } else { Some(filtered) };
+        }
+        ChunkEdits::Full(full) => {
+            // Full replacement: no individual edit tracking.
+            chunk.data.voxels = Arc::new(full);
+        }
+    }
+    chunk.data.tags = tags;
+    chunk.seam_finalized = seam_finalized;
+    apply_persisted_fluid(&mut chunk.data.fluids, &chunk.data.overrides);
+    chunk.persist_dirty = false;
+}
+
+/// Read `chunk`'s persisted record from `db` and overlay it onto the freshly
+/// generated content already in the chunk.
+/// 
+/// **This is the single override-application path.** Both the startup fill
+/// (`World::generate`) and streaming (`spawn_generation`) call it, so an overlay
+/// can never again exist on one loader and not the other - the divergence that
+/// made startup-radius chunks silently discard player edits across sessions,
+/// and then overwrite the saved record on the next edit made in them.
+pub fn apply_persisted_record(chunk: &mut LoadedChunk, db: &WorldDatabase) {
+    let pos: IVec3 = chunk.data.coord.into();
+    match db.load_chunk_record(pos) {
+        Ok(Some(record)) => overlay_record(chunk, record),
+        Ok(None) => {}
+        Err(e) => log::warn!("load record for {pos:?} failed: {e}"),
     }
 }
 
@@ -1134,5 +1213,30 @@ mod tests {
         chunk.data.overrides = Some(ChunkOverrides::default());
         chunk.persist_dirty = true;
         assert!(build_chunk_edits(&chunk).is_none());
+    }
+    
+    #[test]
+    fn overlay_record_reapplies_edits_to_a_generated_chunk() {
+        // The startup-fill regression: a chunk built by `World::generate` must
+        // come back carrying its persisted edits. Without this, the chunk looks
+        // freshly generated *and* its next save writes a bucket that has
+        // forgotten every earlier edit - loss on disk, not just on screen.
+        let mut chunk = LoadedChunk::new_air(IVec3::ZERO);
+        let mut delta = ChunkOverrides::default();
+        delta.voxel_diffs.insert(LocalPos::from_index(42), vox(9));
+        
+        overlay_record(
+            &mut chunk,
+            ChunkRecord {
+                edits: ChunkEdits::Delta(delta),
+                tags: ChunkTags::default(),
+                seam_finalized: true,
+            },
+        );
+        
+        assert_eq!(chunk.data.voxels.voxel(42), vox(9), "edit re-applied to storage");
+        assert!(chunk.data.overrides.is_some(), "diff retained so the next save keeps it");
+        assert!(chunk.seam_finalized, "seam flag restored, so the pass is not re-derived");
+        assert!(!chunk.persist_dirty, "a freshly loaded chunk is not dirty");
     }
 }

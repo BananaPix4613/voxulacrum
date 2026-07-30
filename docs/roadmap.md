@@ -10,7 +10,9 @@
 
 ## 1. How to use this document
 
-This document exists because the 0.2.0 sprint drifted: time went to side tangents (cloud hydrology, water reflections) while the release's stated core — infinite world **with biomes** and node-graph content authoring — shipped with the biome promise unmet (one meadow biome). The rules below are the countermeasure. They are process stakes, as binding as the technical ones.
+This document exists because the 0.2.0 sprint drifted. The release's stated core — infinite world with biomes and node-graph content authoring — did ship, and ship complete. What went wrong was everything around it. Time went to side tangents (cloud hydrology, water reflections) that were never in the version's scope. A feature nobody had scoped went in at the last minute: switching the biomes used for generation from inside the engine, by editing the Zone node, instead of editing files and restarting. It was written in a hurry and never properly exercised, and it shipped carrying an undiagnosed hot-reload and save defect that users hit and that stayed open until 0.3.0. And the release itself was not assembled: `Cargo.toml` still read 0.1.1, the changelog was frozen at Phase 0, and the repo had no tags.
+
+So the failure was not the content. It was that scope was never fixed, that a late unscoped addition bypassed any gate, and that "released" was declared without the release being built. The rules below are the countermeasure, one per failure: themes and explicit non-goals bound scope, exit gates catch the untested addition, and rule 6 makes the release artifacts part of being done. They are process stakes, as binding as the technical ones.
 
 1. **Every minor version has a theme, exit gates, and explicit non-goals.** Work that serves the theme proceeds. Work on a non-goal stops — write it in the version's parking lot and return to the theme. "It was interesting" is not a reason to ship it in this version.
 2. **Exit gates are checklists, not vibes.** A version releases when its gates pass. If a gate must be dropped, that is a scope decision recorded in the changelog, not a silent omission.
@@ -75,9 +77,9 @@ Voxel format (4 shapes, no rotation, packed u32); material registry (RON-driven,
 Five-graph hierarchy, manifest resolution, `GraphRef`/`GraphOutput`, library boundaries, per-biome parameter sidecar, invalidation table — settled and shipped. Slab smoothing plus cross-chunk seam finalization — settled through Phase 9.
 
 **Implementation divergences:**
-- Foliage evaluates before fluid and is blind to it (drift 1.4) — grass will paint underwater the moment a biome dips below sea level. Fix in **0.3.0**.
+- ~~Foliage evaluates before fluid and is blind to it (drift 1.4).~~ **Closed in 0.2.0** (Phase 8, `757d5b6`; verified against the tree in `pre-phase-10-audit.md` §5.2). Fluid initializes at stage 9 before foliage translation at stage 10, and a shared `fluid_gen::foliage_submerged` predicate drops submerged paint and scatter at the storage boundary. Note the shipped mechanism is a *downstream filter*, not a submersion input to `SurfaceFilter` — recorded with its migration trigger (aquatic species *selection*, as opposed to suppression, forces it into the graph layer). 0.3.0 verifies, it does not rebuild.
 - `StandardCaveNoise` kernel exists but `Evaluator::sample_density` errors on `LibraryRef` in a density chain — libraries are unusable for terrain. Fix in **0.4.0**.
-- `PoissonDisk` seeds RNG from chunk coordinates while every sibling derives world-absolute (drift 2.1) — violates P1, produces pattern seams, and silently relocates stable instance IDs if framing ever changes. Fix in **0.3.0** while save wipes are still free.
+- ~~`PoissonDisk` seeds RNG from chunk coordinates while every sibling derives world-absolute (drift 2.1).~~ **Closed in 0.2.0** (Phase 8, `757d5b6`). `EvalContext::chunk_world_seed` derives from the chunk's world-space base voxel and folds `chunk.y` (also closing observation 5.3). The one-time stable-ID relocation was taken then, while wipes were free. **The seed is world-absolute; the point set is still per-chunk** — Bridson is a single sequential walk per chunk, so margin-band points differ across a border. True seam continuity needs a world-tiled Bridson and is not scheduled.
 
 **Open:** multiple biomes/zones as shipped content, structures, rivers, cross-chunk generation infrastructure, authored library graph bodies — all **0.4.0**. Multi-distance smoothing stays reserved, post-1.0.
 
@@ -96,7 +98,7 @@ SQLite + zstd, overrides-only persistence, deterministic key-sorted encoders, cr
 Camera-driven radius streaming, LRU + hysteresis eviction, background generation workers — settled.
 
 - **Defect:** generation/meshing throughput is fixed while the streamed area scales with zoom — edges don't stay filled at zoom-out. Fix in **0.3.0**.
-- **Drift:** mesh workers are raw `std::thread`, bypassing the rayon-pool model, with hand-duplicated core-budget arithmetic (drift 2.2). Superseded by the unified job system (P14) in **0.3.0**.
+- ~~**Drift:** mesh workers are raw `std::thread`, bypassing the rayon-pool model, with hand-duplicated core-budget arithmetic (drift 2.2).~~ **Closed in 0.2.0** (Phase 8, `757d5b6`), both halves: mesh work is fire-and-forget `spawn`ed onto the shared `gen_pool`, and the core-budget split lives solely in `core_budget::CoreBudget::detect()`. What 0.3.0 still owes P14 is *scheduling semantics*, not a threading model — see §10.
 - **Open:** per-observer subscription sets — **0.6.0**.
 
 ### 3.5 Rendering — strong core, §11 feature surface half-built
@@ -205,21 +207,21 @@ The highest-leverage defense against the 0.2.0 failure mode.
 
 ### 4.4 Category C — Diagnostics & observability
 
-| Tool | Version |
-|---|---|
-| **`FrameTimings`** — per-`FrameStage` timing + live breakdown panel | **0.3.0** |
-| **Job system inspector** — queue depths, priorities, dependency stalls, per-job-kind time | **0.3.0** |
-| **Streaming visualizer** — resident set, in-flight generation, mesh queue, evictions, load-margin vs. throughput | **0.3.0** |
-| **Cache instrumentation** — mesh cache hit/miss with key attribution | **0.3.0** |
-| **Memory/residency panel** — per-layer chunk memory, GPU buffers, session growth | **0.3.0** |
-| **Determinism checker** — regenerate a resident chunk in place, diff, surface the first divergent voxel | **0.3.0** |
-| **Mutation & event log** — recent commands through the door with origin, mode, resulting invalidation, emitted events | **0.3.0** |
-| **In-engine console** — teleport, time set, chunk reload, force regen, spawn, toggle systems | **0.4.0** |
-| **Profiling capture export** + frame graph | **0.5.0** |
-| **Tick scheduler inspector** — scheduled/random/block tick load per region | **0.5.0** |
-| **Network panel** — bandwidth, delta queue depth, prediction corrections, interpolation health, per-chunk sequences | **0.7.0** |
-| **Entity inspector** — live components; realized/abstract tier state | **0.9.0** |
-| **Simulation heatmaps** — active-cell density, wake propagation, dirty-region churn | **0.10.0** |
+| Tool | Version | Status |
+|---|---|---|
+| **`FrameTimings`** — per-`FrameStage` timing + live breakdown panel | **0.3.0** | **shipped** — present block isolated from CPU work |
+| **Job system inspector** — queue depths, priorities, dependency stalls, per-job-kind time | **0.3.0** | **shipped**, less *dependency stalls* — no declared dependencies exist to stall on (§10 gate 3) |
+| **Streaming visualizer** — resident set, in-flight generation, mesh queue, evictions, load-margin vs. throughput | **0.3.0** | **shipped** |
+| **Cache instrumentation** — mesh cache hit/miss with key attribution | **0.3.0** | **shipped** — misses split cold vs. stale |
+| **Memory/residency panel** — per-layer chunk memory, GPU buffers, session growth | **0.3.0** | **shipped** |
+| **Determinism checker** — regenerate a resident chunk in place, diff, surface the first divergent voxel | **0.3.0** | **shipped** — reports skips explicitly; chunks carrying overrides are not comparable |
+| **Mutation & event log** — recent commands through the door with origin, mode, resulting invalidation, emitted events | **0.3.0** | **shipped**, less *emitted events* — the mutation event bus (§6.7) is unbuilt |
+| **In-engine console** — teleport, time set, chunk reload, force regen, spawn, toggle systems | **0.4.0** | |
+| **Profiling capture export** + frame graph | **0.5.0** | |
+| **Tick scheduler inspector** — scheduled/random/block tick load per region | **0.5.0** | |
+| **Network panel** — bandwidth, delta queue depth, prediction corrections, interpolation health, per-chunk sequences | **0.7.0** | |
+| **Entity inspector** — live components; realized/abstract tier state | **0.9.0** | |
+| **Simulation heatmaps** — active-cell density, wake propagation, dirty-region churn | **0.10.0** | |
 
 ### 4.5 Category D — Validation, CI, and pipeline
 
@@ -489,7 +491,17 @@ Pre-1.0: `0.MINOR.PATCH`. A minor version is a completed arc, shipped when its e
 
 ### 7.4 Release checklist (every minor)
 
-Workspace version bumped; CHANGELOG entry written; close-of-version audit committed; design-doc revision for newly-settled architecture; **any forcing-date decisions due this version recorded with reasons** (§8); determinism suite green; perf baselines recorded and compared; tooling-maturity table updated; open-defect list triaged with nothing silently dropped.
+Workspace version bumped; CHANGELOG entry written; close-of-version audit committed; design-doc revision for newly-settled architecture; **any forcing-date decisions due this version recorded with reasons** (§8); determinism suite green; perf baselines recorded and compared; tooling-maturity table updated; open-defect list triaged with nothing silently dropped; **version branch merged to `master` and an annotated tag pushed** (§7.5).
+
+### 7.5 Branch and tag discipline *(added 0.3.0)*
+
+**One branch per version, named for the version it serves.** It merges to `master` when the version's exit gates pass and §7.4 is complete — **the merge is the release, and §7.4 is its gate.** An annotated tag (`v0.4.0`) is created on the merge commit. This follows from §1 rule 7 (phases map to versions) rather than adding a new rule: it makes the checklist a thing that blocks something, instead of a document nobody re-reads.
+
+**Why this was added.** At 0.3.0 the working branch was `mc-revision` — named for a marching-cubes revision completed in May 2026 — and it had accumulated **nine phases** of unrelated work while `master` sat at an April WIP commit from the pre-reset single-crate layout. The two had diverged rather than simply lagged, so the "merge" was a supersession: the trees shared no file paths, and `master`'s param-based biome distribution had already been reimplemented as the five-graph hierarchy.
+
+**The repo also had zero tags**, so reconstructing which commits constituted 0.1.0, 0.1.1 and 0.2.0 required reading commit messages and audit dates. A CHANGELOG whose boundaries cannot be verified against the history is an assertion, not a record. Tags are what make §7.4's "perf baselines recorded and compared" and the CHANGELOG checkable at all.
+
+**Corollaries.** A branch whose name no longer describes its contents is drift of the same kind P7 covers for data shapes — rename it or merge it. Long-lived branches accumulating multiple versions are what this exists to prevent; if a version's work must pause, it pauses on its own branch rather than becoming a second trunk.
 
 ---
 
@@ -515,7 +527,7 @@ Architectural choices whose cost rises sharply at a named version. Each is decid
 | Version | Theme | Headline |
 |---|---|---|
 | 0.3.0 | Consolidation & observability | The foundation becomes true: drift paid down, one scheduler, every millisecond attributable |
-| 0.4.0 | Worldgen completeness & authoring | The 0.2.0 biome promise honored — and authorable in-engine, with previews |
+| 0.4.0 | Worldgen completeness & authoring | Biome breadth past the handful that exist — and authorable in-engine, with previews |
 | 0.5.0 | Presentation & world state | Light, atmosphere, audio, VFX — on a region graph and a tick framework that many systems share |
 | 0.6.0 | Server-core split & format endgame | Compiler-enforced boundary; the last format redesign, carrying five forcing-date decisions |
 | 0.7.0 | Loopback multiplayer | Two processes, one machine; 90% of protocol issues surfaced |
@@ -537,10 +549,8 @@ Architectural choices whose cost rises sharply at a named version. Each is decid
 
 **Observability (P10):** `FrameTimings` per-`FrameStage` panel; job system inspector; streaming visualizer; cache hit/miss with key attribution; memory/residency panel; mutation and event log; in-place determinism checker. Diagnose the ~28 ms hitch with them — fix it, or characterize it precisely if external. "Unknown" does not pass the gate. Record the first perf baseline.
 
-**Unified job system (P14):** one scheduler with declared dependencies and priorities, replacing the split rayon-pool / raw-`std::thread` model and its hand-duplicated core-budget arithmetic (drift 2.2). Consumers at this version: generation, meshing, chunk I/O. Priority derives from distance to the observed region. Later versions add lighting, region detection, pathfinding, structures, and transformation as consumers without a second scheduler ever existing.
-
-**Correctness & determinism (P1):** re-seed `PoissonDisk` world-absolute (drift 2.1) — free now, catastrophic after 0.11.0; reorder the pipeline so per-column fluid precedes foliage and submersion reaches `SurfaceFilter`/scatter (drift 1.4); extend determinism tests to a slab-bearing chunk and to Poisson continuity across borders.
-
+**Unified job system (P14):** the *threading* half of this landed in 0.2.0 (drift 2.2, above): there is already one shared `rayon` pool and one core-budget source. What remains is the *scheduling* half — today the pool has two fire-and-forget submitters with fixed in-flight caps, no declared dependencies, no global priority (streaming sorts only its own spawn queue; meshing's `swap_remove` drain actively scrambles order), and no introspection. 0.3.0 puts a real scheduler between the submitters and the pool: declared dependencies, a global priority derived from distance to the observed region, and jobs as objects with a kind and timings rather than closures. Consumers at this version: generation, meshing, and chunk I/O — the last of which moves the unload-time zstd + SQLite write off the main thread. **The job inspector depends on this**, not the reverse: closures cannot be inspected. Later versions add lighting, region detection, pathfinding, structures, and transformation as consumers without a second scheduler ever existing.
+**Correctness & determinism (P1):** drift 2.1 and 1.4 both closed in 0.2.0 (§3.2); 0.3.0 verifies them against the tree and records the shipped submersion mechanism in `engine-design.md` §5 rather than rebuilding it. The real work is test coverage: the existing determinism test may be **vacuous** — it uses chunk `(1,0,2)` with no assertion that the chunk contains any slabs — so it gains a slab-bearing guard. *Poisson continuity across borders is not testable and not scheduled*: `PoissonDisk`'s point set is per-chunk by construction (§3.2), and the shipped meadow content uses `PoissonDistribution`, a world-cell jittered grid that is already seam-continuous and already tested. Seam coverage extends to **the scatter path the shipped content actually uses**, which is worth more than a test of an unwired node.
 **Unification (P5, P7):** mutation-door audit — enumerate every world-write call site, route stragglers through the door, runtime-assert origin and mode. Fluid eval→storage moves behind `StorageBoundary` (drift 2.3).
 
 **Throughput:** generation and meshing throughput derive from the load-margin radius rather than fixed constants.
@@ -551,21 +561,23 @@ Architectural choices whose cost rises sharply at a named version. Each is decid
 New biomes, new nodes, rendering features, audio, entity work, networking beyond the mutation-door audit, cloud hydrology.
 
 ### Exit gates
-- [ ] Hitch diagnosed: fixed or root-caused with evidence
-- [ ] Drift findings 1.4, 2.1, 2.2, 2.3 closed and verified
-- [ ] One job system; no second threading model anywhere
-- [ ] Mutation-door audit: zero write paths outside the door
-- [ ] Streamed area fills within budget at all supported zooms
-- [ ] Determinism CI job green, including slab and Poisson coverage
-- [ ] All seven category-C diagnostics shipped and usable
-- [ ] Perf baseline committed
-- [ ] §7.4 checklist passes
+*Closed 2026-07-30. Verdicts and evidence in `post-phase-10-audit.md` §2. The gate text below is left as it was written — a gate edited to match what shipped is not a gate.*
+
+- [x] Hitch diagnosed: fixed or root-caused with evidence — **root-caused by disproving the premise**: a debug build measured with a metric that inverts under vsync. No hitch existed
+- [x] Drift finding 2.3 closed (fluid **and** foliage behind `StorageBoundary`); 1.4, 2.1, 2.2 verified closed against the tree with evidence recorded
+- [~] One scheduler: declared dependencies, distance-derived priority, generation + meshing + chunk I/O as consumers, jobs introspectable. (No second threading model — already true as of 0.2.0) — **partial, by decision.** Priority, introspection and the single threading model shipped. **Declared dependencies** were not built (no consumer until 0.4.0's staged cross-chunk pass) and **chunk I/O** has no submitter (writes measure ~0.1 ms and moving them raises a save/load ordering hazard best taken with per-layer versioning at 0.6.0). Both omissions carry triggers, recorded at `jobs.rs:10–15` and in the audit §2
+- [x] Mutation-door audit: zero write paths outside the door — every mutating call site enumerated and classified; audit §2 gate 4
+- [x] Streamed area fills within budget at all supported zooms — 177 ms / 111 chunks at r=15 against a 2 s budget
+- [x] Determinism CI job green, including slab and Poisson coverage — **the Poisson clause by conscious substitution**: seam continuity is untestable for `PoissonDisk` by construction, so coverage went to the scatter path shipped content actually uses. Audit §2 gate 6
+- [x] All seven category-C diagnostics shipped and usable
+- [x] Perf baseline committed — `perf-baseline.md`
+- [x] §7.4 checklist passes — pending only the merge and tag, which are the release itself (§7.5)
 
 ---
 
 ## 11. 0.4.0 — Worldgen completeness & authoring
 
-**Theme:** Honor the 0.2.0 promise, and make it authorable. Content breadth, the last missing generation infrastructure, and — equally weighted — the tools that make authoring a loop instead of a guess (P11).
+**Theme:** Take the generation machinery from working to broad, and make it authorable. Content breadth past the two biomes 0.2.0 shipped (three exist as of 0.3.0), the last missing generation infrastructure, and — equally weighted — the tools that make authoring a loop instead of a guess (P11).
 
 ### Deliverables
 

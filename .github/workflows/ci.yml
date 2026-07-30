@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master, mc-revision]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # windows-latest rather than ubuntu: winit needs X11/Wayland development
+    # headers to build on Linux, and this is a Windows-primary project, so
+    # matching the development platform avoids a system-dependency detour for a
+    # job whose purpose is determinism rather than portability. Revisit when the
+    # server-core split (0.6.0) produces a renderer-free crate that builds
+    # anywhere.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # rusqlite (bundled) and zstd compile C, so the cache is worth a lot here.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace
+
+      # Determinism coverage lives here: the slab-bearing generation test and the
+      # scatter seed-derivation tests added in Phase 10 Substep 4, plus every
+      # other workspace test.
+      - name: Test
+        run: cargo test --workspace
+
+      # P1 end-to-end: generate chunks twice through the full pipeline - graph
+      # eval, storage boundary, slab smoothing, fluid, foliage - and require
+      # bit-identical output. Runs in parallel on rayon's global pool, which is
+      # what actually exercises "no thread-order-dependent generation".
+      - name: Verify generation determinism
+        run: cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 64

@@ -9,10 +9,12 @@ use std::time::Instant;
 use crate::rendering::pipelines::FaceVertex;
 use crate::world::chunk::{ChunkSnapshot, CHUNK_WORLD_SIZE};
 
-/// Cache file format version. Bumped for the `FaceVertex` migration (v13) and
-/// again for decoupling color from the mesh: v14 keys on voxels alone (material
-/// colors no longer affect geometry - the shader composes color at draw time).
-const CACHE_VERSION: u32 = 14;
+/// Cache file format version. 15: cache key no longer hashes the snapshot's
+/// edge/corner border cells, which the mesher never reads (drift observation
+/// 5.1). Not strictly required - the new keys hash to different paths, so old
+/// files are simply never looked up — but bumping makes any that are read
+/// reject cleanly rather than relying on hash disjointness.
+const CACHE_VERSION: u32 = 15;
 
 /// Positions are quantized to this many steps per voxel. Shapes occupy
 /// half-cell vertical intervals (see `shape_y_interval`), so 2 steps/voxel
@@ -107,6 +109,17 @@ fn from_compact(c: &CompactVertex, chunk_origin: [f32; 3]) -> FaceVertex {
 pub struct AtomicCacheStats {
     pub hits: AtomicU64,
     pub misses: AtomicU64,
+    /// Misses where this chunk position had no cached mesh at all - a genuine
+    /// first visit.
+    pub misses_cold: AtomicU64,
+    /// Misses where a cached mesh existed for this position under a *different*
+    /// key, so the content changed and the entry was re-keyed.
+    ///
+    /// This is drift observation 5.1 made visible: the key hashes the full 34³
+    /// snapshot including the one-voxel neighbor border, so a chunk re-keys
+    /// whenever a neighbor's edge changes during streaming. A high stale rate
+    /// means the cache is rebuilding work it already had.
+    pub misses_stale: AtomicU64,
     pub errors: AtomicU64,
     pub total_bytes: AtomicU64,
     pub evictions: AtomicU64,
@@ -117,6 +130,8 @@ impl AtomicCacheStats {
         Self {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            misses_cold: AtomicU64::new(0),
+            misses_stale: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             total_bytes: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
@@ -136,16 +151,49 @@ impl AtomicCacheStats {
 // Cache key
 // ============================================================================
 
-/// Content hash keying a chunk's cached mesh. The cube mesher's output depends
-/// only on the chunk's voxels (color is composed in the shader from the material
-/// table, not baked), so the key hashes the packed voxels alone.
+/// Content key for a chunk's mesh: its interior plus the six face-adjacent
+/// border planes, and deliberately **not** the border's edges and corners.
+///
+/// Those 392 cells (12 edges × 32, plus 8 corners) are filled by
+/// `ChunkSnapshot::extract` from the diagonal neighbors, but meshing is gated
+/// only on the six *face* neighbors being resident and `cube_mesher` culls
+/// against the single face-adjacent voxel - it never reads a diagonal. So
+/// including them made the key depend on whether unrelated neighbors happened
+/// to be loaded at mesh time, which changes run to run.
+///
+/// Measured cost of that before this change (drift observation 5.1, priced for
+/// the first time in Substep 13a): on a warm second run over an identical path,
+/// 1,400 of 4,758 lookups re-keyed - each one a mesh rebuild plus a file delete
+/// plus a file write for a mesh already on disk. Hashing only the data meshing
+/// actually waits for makes the key load-order independent by construction.
+///
+/// This remains content-addressed rather than the input-addressed key design §10
+/// specifies (graph hash + mesher version + registry hash + seed). Content
+/// addressing is stronger for correctness - §10's stated failure mode cannot
+/// occur - and that divergence stays recorded rather than closed here.
 pub fn compute_cache_key(snapshot: &ChunkSnapshot) -> u64 {
+    use crate::world::chunk::{CHUNK_SIZE, SNAP_PAD, SNAP_SIZE};
     use seahash::SeaHasher;
     use std::hash::Hasher;
 
+    let interior = |v: usize| v >= SNAP_PAD && v < SNAP_PAD + CHUNK_SIZE;
+
     let mut hasher = SeaHasher::new();
-    for &m in snapshot.materials.iter() {
-        hasher.write_u32(m.pack());
+    for sz in 0..SNAP_SIZE {
+        for sy in 0..SNAP_SIZE {
+            for sx in 0..SNAP_SIZE {
+                // 0 axes outside = interior, 1 = a face plane, 2 = an edge,
+                // 3 = a corner. Skip edges and corners.
+                let outside = usize::from(!interior(sx))
+                    + usize::from(!interior(sy))
+                    + usize::from(!interior(sz));
+                if outside >= 2 {
+                    continue;
+                }
+                let v = snapshot.materials[ChunkSnapshot::snap_index(sx, sy, sz)];
+                hasher.write_u32(v.pack());
+            }
+        }
     }
     hasher.finish()
 }
@@ -376,6 +424,11 @@ impl MeshCacheLru {
 
     pub fn total_bytes(&self) -> u64 { self.total_bytes }
     pub fn entry_count(&self) -> usize { self.entries.len() }
+
+    /// Whether this chunk position has a cached mesh under *any* key. Since
+    /// `save_cached_mesh` removes stale siblings, there is at most one file per
+    /// position, so this distinguishes a first-visit miss from a re-key.
+    pub fn contains(&self, pos: IVec3) -> bool { self.entries.contains_key(&pos) }
 }
 
 #[cfg(test)]

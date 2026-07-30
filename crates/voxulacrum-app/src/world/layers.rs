@@ -28,7 +28,7 @@ use voxel_core::{FaceAxis, LocalPos};
 use super::chunk::{CHUNK_SIZE, CHUNK_VOLUME};
 
 /// Number of columns in a chunk's XZ footprint (one detail texel per column).
-const CHUNK_AREA: usize = CHUNK_SIZE * CHUNK_SIZE;
+pub(crate) const CHUNK_AREA: usize = CHUNK_SIZE * CHUNK_SIZE;
 
 // ============================================================================
 // Layer identifiers

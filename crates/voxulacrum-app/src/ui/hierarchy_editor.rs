@@ -1,6 +1,6 @@
 //! The embedded editor plus the multi-graph hierarchy it edits.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use nodegraph_editor::EditorState;
@@ -20,6 +20,8 @@ pub struct HierarchyEditor {
     selected: GraphSlot,
     /// In-memory graph per slot.
     set: HashMap<GraphSlot, Graph>,
+    /// Slots whose in-memory graph differs from its file.
+    dirty: HashSet<GraphSlot>,
     /// On-disk path per slot, for saving.
     paths: HashMap<GraphSlot, PathBuf>,
     /// The world manifest path, for adding/removing biome entries.
@@ -38,6 +40,7 @@ impl HierarchyEditor {
             slots: Vec::new(),
             selected: GraphSlot::Biome(0),
             set: HashMap::new(),
+            dirty: HashSet::new(),
             paths: HashMap::new(),
             manifest_path: None,
             new_name: String::new(),
@@ -62,6 +65,7 @@ impl HierarchyEditor {
             graphs.first().map(|(s, _, _, _)| *s).unwrap_or(default)
         };
         self.set = graphs.into_iter().map(|(s, _, _, g)| (s, g)).collect();
+        self.dirty.clear();
         if let Some(g) = self.set.get(&self.selected) {
             self.editor = EditorState::from_graph(g);
         }
@@ -73,20 +77,15 @@ impl HierarchyEditor {
         if slot == self.selected {
             return;
         }
+        // Record before the canvas is rebuilt - rebuilding clears the flag.
+        if self.editor.is_modified() {
+            self.dirty.insert(self.selected);
+        }
         self.set.insert(self.selected, self.editor.build_graph());
         if let Some(g) = self.set.get(&slot) {
             self.editor = EditorState::from_graph(g);
             self.selected = slot;
         }
-    }
-    
-    /// Update the stored graph for `slot` (e.g. from hot-reload). Refreshes the
-    /// canvas if that slot is currently shown.
-    pub fn refresh(&mut self, slot: GraphSlot, graph: Graph) {
-        if self.selected == slot {
-            self.editor = EditorState::from_graph(&graph);
-        }
-        self.set.insert(slot, graph);
     }
     
     /// Draw the selector dropdown above the canvas, then the canvas itself.
@@ -97,7 +96,15 @@ impl HierarchyEditor {
             .selected_text(current)
             .show_ui(ui, |ui| {
                 for (slot, label) in &self.slots {
-                    ui.selectable_value(&mut chosen, *slot, label);
+                    // Via slot_is_modified, not `dirty` directly: the selected
+                    // slot's unsaved state lives on the live canvas, and only
+                    // moves into `dirty` when you switch away from it.
+                    let marked = if self.slot_is_modified(*slot) {
+                        format!("● {label}")
+                    } else {
+                        label.clone()
+                    };
+                    ui.selectable_value(&mut chosen, *slot, marked);
                 }
             });
         if chosen != self.selected {
@@ -121,20 +128,20 @@ impl HierarchyEditor {
     pub fn selected(&self) -> GraphSlot {
         self.selected
     }
-    
-    /// If the active canvas changed this frame, the `(slot, graph)` to
-    /// regenerate from.
-    pub fn consume_dirty(&mut self) -> Option<(GraphSlot, Graph)> {
-        if self.editor.consume_dirty() {
-            Some((self.selected, self.editor.build_graph()))
-        } else {
-            None
-        }
-    }
-    
-    /// True if the active canvas has unsaved edits.
+
+    /// True if the active slot has unsaved edits - either on the live canvas or
+    /// carried over from before a slot switch.
     pub fn is_modified(&self) -> bool {
-        self.editor.is_modified()
+        self.editor.is_modified() || self.dirty.contains(&self.selected)
+    }
+
+    /// Whether `slot` has unsaved edits, for marking the selector.
+    pub fn slot_is_modified(&self, slot: GraphSlot) -> bool {
+        if slot == self.selected {
+            self.is_modified()
+        } else {
+            self.dirty.contains(&slot)
+        }
     }
 
     /// Write the active graph to its slot's file and clear the modified flag.
@@ -151,6 +158,7 @@ impl HierarchyEditor {
             Ok(()) => {
                 self.set.insert(slot, graph);
                 self.editor.mark_saved();
+                self.dirty.remove(&slot);
                 self.status = Some(format!("Saved {}", path.display()));
             }
             Err(e) => self.status = Some(format!("Save failed: {e}")),

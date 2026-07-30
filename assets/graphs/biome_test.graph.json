@@ -13,7 +13,7 @@
       "value": {
         "kind": {
           "type": "Simplex2D",
-          "seed": 1,
+          "seed": 2,
           "frequency": 0.005,
           "octaves": 4,
           "lacunarity": 2.0,
@@ -124,17 +124,17 @@
     {
       "from": {
         "node": {
-          "idx": 4,
+          "idx": 5,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 5,
+          "idx": 6,
           "version": 1
         },
-        "pin": 0
+        "pin": 1
       }
     },
     {
@@ -156,33 +156,17 @@
     {
       "from": {
         "node": {
-          "idx": 1,
+          "idx": 4,
           "version": 1
         },
         "pin": 0
       },
       "to": {
-        "node": {
-          "idx": 2,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
         "node": {
           "idx": 5,
           "version": 1
         },
         "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 6,
-          "version": 1
-        },
-        "pin": 1
       }
     },
     {
@@ -196,6 +180,22 @@
       "to": {
         "node": {
           "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 2,
           "version": 1
         },
         "pin": 0

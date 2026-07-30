@@ -18,6 +18,9 @@ mod prefabs;
 mod libraries;
 mod core_budget;
 mod player;
+mod diagnostics;
+mod jobs;
+mod verify;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -124,8 +127,8 @@ pub fn compute_render_dimensions(
     let base_k = world_pixel_density.round().max(1.0) as u32;
     let mut k = base_k;
     let mut s = surface_h as f32 / (2.0 * zoom * k as f32);
-    // Octave ladder: never minify (s < 1 would downsample the texel image).
-    while s < 1.0 && k > 1 {
+    // Octave ladder: partial minify (s < 1 downsamples the texel image).
+    while s < 0.85 && k > 1 {
         k /= 2;
         s *= 2.0;
     }
@@ -411,11 +414,24 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
             .expect("failed to build chunk generation thread pool"),
     );
 
+    // Persistence opens *before* the world is built, for two reasons: the
+    // startup fill needs the DB to overlay persisted player edits (without it,
+    // spawn-area edits were discarded and then overwritten on the next save),
+    // and `open` performs the VOXEL_FORMAT_VERSION save wipe, which must happen
+    // before anything reads a record.
+    let persistence = match WorldPersistence::open("default", initial_params.terrain_gen.seed) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("Persistence init failed: {e}. Running without saves.");
+            WorldPersistence::disabled()
+        }
+    };
+
     // World cache disabled: it stored only voxels (no foliage) and went stale as
     // the generation pipeline grew (graphs, slabs, foliage), so cached chunks
     // loaded without grass/scatter. Always regenerate - the generate path
     // produces slabs + foliage identical to streamed reloads.
-    let world = world::World::generate(generator.clone(), &gen_pool, min_y, max_y);
+    let world = world::World::generate(generator.clone(), &gen_pool, min_y, max_y, &persistence);
     log::info!("World generated in {:.2?}", gen_start.elapsed());
     world.print_debug_stats(&material_registry);
 
@@ -482,10 +498,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     let ui_state = UiState::new(initial_params, presets_dir);
 
     // Meshing
-    let mut meshing_pipeline = MeshingPipeline::new(
-        gen_pool.clone(),
-        &ui_state.params.mesh_cache,
-    );
+    let mut meshing_pipeline = MeshingPipeline::new(&ui_state.params.mesh_cache);
     meshing_pipeline.submit_all_dirty(&world);
     let meshing = MeshingCoordinator::new(meshing_pipeline);
 
@@ -536,27 +549,22 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(graph_watcher);
     ecs.insert_resource(meshing);
     ecs.insert_resource(WorldRegenCoordinator::new(gen_pool.clone()));
-    let persistence = match WorldPersistence::open("default", ui_state.params.terrain_gen.seed) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("Persistence init failed: {e}. Running without saves.");
-            WorldPersistence::disabled()
-        }
-    };
+    // `persistence` was opened earlier, before world generation (see above).
     let db_path = persistence.db_path.clone();
     let dict_bytes = persistence.dictionary_bytes().map(|b| Arc::new(b));
     ecs.insert_resource(persistence);
     let streaming_manager = world::streaming::ChunkStreamingManager::new(
-        gen_pool.clone(),
         &ui_state.params.streaming,
         generator.clone(),
         db_path,
         dict_bytes, 
     );
     ecs.insert_resource(streaming_manager);
+    ecs.insert_resource(jobs::JobSystem::new(gen_pool.clone()));
     ecs.insert_resource(ui_state);
     ecs.insert_resource(ui::field_probe::FieldProbe::new(gen_pool.clone()));
     ecs.insert_resource(FrameCounter::new());
+    ecs.insert_resource(diagnostics::FrameTimings::new());
     ecs.insert_resource(RawInputBuffer::default());
     let input_bindings_path = paths::asset_root().join("assets").join("input.ron");
     ecs.insert_resource(InputMap::load_or_default(&input_bindings_path));
@@ -838,6 +846,17 @@ impl ApplicationHandler for App {
 
 fn main() {
     env_logger::init();
+    
+    // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
+    // Handled before the event loop exists, so this path never creates a window
+    // or a GPU device - and, being outside the frame schedule, it is exempt from
+    // `nodegraph_eval`'s schedule-thread evaluation guard for the same reason
+    // the startup world fill is.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = verify::run_from_args(&args) {
+        std::process::exit(code);
+    }
+    
     log::info!("Voxulacrum engine starting...");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");

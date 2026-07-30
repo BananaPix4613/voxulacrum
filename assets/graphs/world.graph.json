@@ -1,13 +1,94 @@
 {
-  "kind": "World",
+  "kind": "Biome",
+  "boundary": {
+    "inputs": [],
+    "outputs": []
+  },
   "nodes": [
-    { "value": null, "version": 0 },
-    { "value": { "kind": { "type": "SurfaceNoise", "seed": 10, "frequency": 0.001, "octaves": 3, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [0.0, 0.0] }, "version": 1 },
-    { "value": { "kind": { "type": "WorldOutput", "zone_bands": [] }, "position": [240.0, 0.0] }, "version": 1 },
-    { "value": { "kind": { "type": "GraphOutput", "name": "climate" }, "position": [240.0, 120.0] }, "version": 1 }
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "SurfaceNoise",
+          "seed": 10,
+          "frequency": 0.001,
+          "octaves": 3,
+          "lacunarity": 2.0,
+          "gain": 0.5,
+          "fractal_type": "FBm"
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "WorldOutput",
+          "zone_bands": [
+            0.0
+          ],
+          "zone_ids": []
+        },
+        "position": [
+          240.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "GraphOutput",
+          "name": "climate"
+        },
+        "position": [
+          240.0,
+          120.0
+        ]
+      },
+      "version": 1
+    }
   ],
   "edges": [
-    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 2, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 3, "version": 1 }, "pin": 0 } }
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 0
+      }
+    }
   ]
 }

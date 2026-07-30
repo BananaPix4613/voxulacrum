@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.8
+**Status:** Baseline reference, v1.9
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -14,6 +14,8 @@
 - v1.6 — Reconciled §5 with Phase 9's settled outcome: the walkability mask no longer exists as a resident runtime artifact. Walkability is computed transiently inside worldgen for slab smoothing; runtime movement, collision, and room detection query geometry directly (`WorldView::solid_interval`); future AI pathfinding consumes the same geometric queries. Documented the cross-chunk seam finalization pass (`world::seam`, persisted `seam_finalized`) as part of slab smoothing. Promoted the underground visibility system (`underground-visibility-design.md`: air-side face rule, cost-priority march, clarity radius) to settled status in §11 camera occlusion. Added §12 subsections for engine versioning & release policy and performance budgets, both anchored by the companion `roadmap.md`, which is authoritative for version sequencing and compatibility boundaries. Named `roadmap.md` a companion document.
 - v1.7 — Added §12 subsections establishing three previously-undocumented foundational commitments: **developer and authoring tooling as a first-class engine surface** (every authorable content type in-engine, previewable, hot-reloadable; maturity model and per-version targets in `roadmap.md` §4), **the game-facing API surface** (the boundary between engine capability and game rules, enumerated in `roadmap.md` §6), and **particles/VFX and non-player entity visuals** as acknowledged architectural gaps that must be designed before they are built. Corrected the performance-budget cross-reference to `roadmap.md` §7.3 following that document's renumbering, and restated 1.0 readiness as the roadmap's rubric rather than a single shipped title.
 - v1.8 — Incorporated the settled conclusions of an external architecture review (`engine-architecture-reference.md`; full disposition in `roadmap.md` §21). Added two foundational principles to §1: **visibility is queryable world state, not a rendering effect** (occlusion decisions must live where the renderer, the interaction system, and the simulation all read the same classification), and **one scheduler, one clock family** (all deferred work on a single job system; all periodic simulation on one tick framework). Added §12 subsections for the **region graph** (enclosure/connectivity promoted from a per-frame rendering computation to persistent multi-consumer world state), the **gameplay/render lighting split** with render light sampled from a per-chunk 3D texture rather than baked into vertex attributes, the **tick and scheduling framework**, **registry identity and save-embedded name mapping** (recording a latent correctness defect in the current numeric-ID persistence), and **per-region generation parameters** as the storage precondition for world-scale change. Noted §10's `light_level_index` as an interim shape pending that lighting decision. Recorded the open architectural decisions the review surfaced — octant shape encoding, grid-handle abstraction, 4-way camera rotation, colored light — as dated decisions in `roadmap.md` §8 rather than settling them here.
+
+- v1.9 — Folded in 0.3.0's settled outcomes. §1's "one scheduler" principle became real: a **job system** subsection in §12 records the single scheduler, its `(class, distance)` priority, its one global concurrency budget, and — with named triggers — the two things it deliberately omits (declared job-to-job dependencies, which have no consumer until the staged cross-chunk generation pass; chunk I/O *writes*, which are sub-millisecond and whose relocation would introduce a save/load ordering hazard). §4 gained the constraint that **tag matching is backward-looking**, which bounds the invalidation table: a ZoneGraph edit changes biome *assignment*, so tags predating it cannot identify the affected chunks. §4 and §12 record that **hot reload is save-triggered** and that disk is authoritative for the world while the editor is authoritative for its canvas — closing a defect where regeneration mixed an in-memory graph with on-disk siblings. §5 documents that stage 9's fluid reaches stage 10's foliage as a downstream filter at the storage boundary rather than a `SurfaceFilter` input, with the migration trigger. §10 records the mesh cache key as **content-addressed** (an interim shape stronger than the documented input-addressed target) and specifies that it must exclude the snapshot's edge and corner border cells. §12's performance budgets are restated **against CPU work rather than frame time**, with release-only measurement and read-at-rest as architectural requirements — learned from a "recurring frame hitch" that proved to be a debug build measured with a metric that inverts under vsync. §12 streaming records the **altitude-aware view test**. Recorded figures now live in the companion `perf-baseline.md`.
 
 ---
 
@@ -327,6 +329,22 @@ Edits to different graph types invalidate different chunk sets. This is the prim
 
 Each chunk's `ChunkTags` makes invalidation a tag-set lookup, not a full-world scan.
 
+**Tag matching is backward-looking, and that bounds the table above** (added v1.9). Tags describe the generation that already ran, so matching on them is sound only for edits that cannot change what the tags would become:
+
+- A **BiomeGraph** or **DetailGraph** edit changes how an already-assigned biome *looks*. A chunk tagged with that biome still will be, so narrow matching is correct.
+- A **ZoneGraph** edit changes which biome each column *is assigned*. The chunks needing regeneration are exactly those whose assignment changes — and their current tags describe the assignment being replaced. The row above ("chunks tagged with Zone Z or within Z's fade range") is therefore **only reachable once multiple Zone graphs exist and zone assignment is itself stable across the edit**; with a single Zone graph governing the whole world, a Zone edit invalidates every loaded chunk.
+- A **WorldGraph** edit changes climate, hence zone assignment, hence everything — already "all loaded chunks".
+
+Ignoring this is not a subtle failure: moving a biome band boundary leaves every reassigned chunk untouched, because each is still tagged with the biome it is leaving.
+
+### Hot reload is save-triggered (added v1.9)
+
+Worldgen regeneration is driven by **a graph file changing on disk**, and by nothing else. The in-engine editor's Save writes the file; an external text editor writes the same file; both take the identical path, and regeneration always reloads the whole hierarchy from the manifest.
+
+This is what makes P2's "the manifest is the resolution root" true in practice. Regenerating from an edited graph held in memory while its siblings came from disk produced a world matching neither — and it degraded worst for the higher-tier graphs, where a ZoneGraph's `GraphRef(WorldGraph)` resolved against the on-disk World while the editor held unsaved World edits. Loading the whole hierarchy from one source makes that state unrepresentable rather than merely avoided.
+
+The cost is that the authoring round trip is edit → save → see result rather than edit → see result. P11's bar is that an author need not restart the engine, hand-edit a file, or guess at a result; a save keystroke is none of those.
+
 ---
 
 ## 5. Generation Pipeline
@@ -397,6 +415,10 @@ Chunk generation runs in **strict pipeline order**. Each stage reads from previo
 13. Meshing
     - Vertex attributes baked per §10
 ```
+
+**How stage 9 reaches stage 10** (added v1.9). Fluid initializing before foliage exists so foliage can respect submersion, but the coupling is a *downstream filter*, not an input to the foliage evaluation. `SurfaceFilter` and scatter placement remain fluid-blind; the finished fluid field is applied at the eval→storage crossing, where paint texels and scatter instances whose surface the field submerges are dropped.
+
+This is deliberate — it keeps the evaluator independent of a storage-domain layer — but it is strictly weaker than a graph-level input: a downstream filter can only *suppress* foliage, never *select* different foliage. **Migration trigger:** the first DetailGraph that wants to place aquatic species where a column is submerged, rather than place nothing, forces submersion to become a real `SurfaceFilter` input.
 
 ### Per-column caches
 
@@ -788,6 +810,12 @@ If any input changes, the cache key changes and the entry is treated as stale. O
 
 **Failure mode to avoid:** keying only on chunk coordinate or only on a "params hash" that doesn't include the graph. The audit risk is that the cache silently serves stale meshes after worldgen edits. The key must capture everything the mesher's output depends on.
 
+**Interim shape: the key is content-addressed, not input-addressed** (added v1.9). The implementation hashes the chunk's actual voxel content rather than the graph/mesher/registry/seed inputs above. This is *stronger* for correctness — the failure mode this section warns about cannot occur, because a stale mesh would have to hash to the content it no longer matches — at the cost of a weaker hit rate, since two chunks with identical content still key separately.
+
+What the key hashes is load-bearing and was got wrong once: it must cover the chunk interior **plus the six face-adjacent border planes, and must exclude the border's edges and corners**. The mesher culls against face-adjacent voxels only and never reads a diagonal, while meshing waits on exactly the six face neighbours being resident — so including edge and corner cells made the key depend on whether unrelated diagonal neighbours happened to be loaded, which varies run to run. Measured before the exclusion: 1,400 of 4,758 lookups on a warm second run over an identical route were re-keys, each rebuilding a mesh already on disk and deleting the file it replaced. After: zero.
+
+Convergence on the input-addressed key is unscheduled; it would raise hit rate but forfeit the correctness property, and is worth doing only alongside a measured need.
+
 ---
 
 ## 11. Isometric Pixel-Art Rendering Requirements
@@ -908,9 +936,24 @@ The world is effectively infinite; only chunks within a configurable radius of a
 - **Chunk lifecycle**: out-of-radius chunks evict; in-radius chunks load (from persistence if they exist, otherwise generate via the pipeline; §5).
 - **Eviction policy** is LRU within out-of-radius chunks, with a hysteresis band to avoid thrashing at the boundary.
 - **Loaded chunks track their resident state** for systems that need to iterate the resident set (mesher, fluid simulation, AI pathfinding).
-- **Background workers** handle chunk generation and meshing without blocking the main thread. The generation pipeline (§5) and the mesher both run on `rayon`-backed worker pools.
+- **Background workers** handle chunk generation and meshing without blocking the main thread. Both submit to the single job system below (revised v1.9); neither owns a pool or spawns threads of its own.
 
 Streaming is foundational: every subsystem must tolerate chunks appearing and disappearing on a frame-by-frame basis. Code that assumes all chunks are resident is incorrect.
+
+**The view test is altitude-aware** (added v1.9). Under the isometric projection a ground displacement `d` along the away-axis shifts a point up-screen by `d·sin(pitch)`, while an altitude `Δy` shifts it by `Δy·cos(pitch)` — so altitude is screen-equivalent to `Δy/tan(pitch)` of ground. A residency test comparing a column's *footprint* against the view band therefore misses columns whose footprint lies outside it but whose raised geometry is plainly on screen. The test compares the column's projected **span**. It is column-granular by necessity: a per-chunk test would be tighter, but omitting a middle Y layer leaves the layer above it permanently unmeshable, since meshing requires both Y neighbours resident.
+
+### The job system (added v1.9)
+
+The realization of §1's "one scheduler" principle. One scheduler owns *when* and *how many* for every continuous background consumer — generation and meshing today; lighting, region detection, pathfinding and structures later — and deliberately does **not** own *what comes back*: each consumer keeps its own result channel, so adding a consumer never widens the scheduler's knowledge of payload types.
+
+- **Priority is `(class, distance²-to-observer)`.** Class dominates, so an interactive job — currently an edit-driven re-mesh — preempts bulk streaming regardless of where the camera is. Within a class, nearest first.
+- **Concurrency is one global budget**, not a per-kind partition. Static partitioning capped generation at a fraction of the pool while the remainder sat reserved for meshing that was usually idle. Per-kind *submission* limits remain, but they are backpressure — bounding how much outstanding work a consumer may hold — not concurrency.
+- **Jobs are introspectable**: queue depth, in-flight count, completion count and per-kind timing are recorded by the jobs themselves through shared atomics, which is what makes a scheduler inspector possible at all. Closures on a bare pool cannot be inspected.
+
+**What it deliberately is not, with triggers:**
+
+- **No declared job-to-job dependencies.** The edge everyone reaches for — "a chunk may not mesh until its six face neighbours exist" — is a *world-state readiness predicate*, not a job edge: a neighbour can be resident without any generation job having run this session. The first genuine job-to-job edge arrives with the staged cross-chunk generation pass that structures and rivers require, where a cross-chunk stage must complete between per-chunk evaluation and finalization.
+- **Chunk I/O writes remain on the main thread.** Reads already run inside generation jobs. Writes measure well under a millisecond per chunk, and moving them would require the database behind a shared handle plus a per-chunk ordering rule to stop a reload reading a record whose save has not landed — a correctness hazard introduced in order to move work that is not on any hot path. Trigger: per-layer save versioning, or any measurement showing writes above ~1 ms.
 
 ### Determinism
 
@@ -965,7 +1008,16 @@ The companion `roadmap.md` is authoritative for version sequencing, per-version 
 
 ### Performance budgets (added v1.6)
 
-Performance is budgeted, not aspirational. Budgets are tracked from 0.3.0 (via per-`FrameStage` timing instrumentation surfaced in the engine's Performance panel) and gate releases from 0.5.0. Current budget values and their measurement procedure live in `roadmap.md` §7.3; the architectural commitment here is that every subsystem is attributable — a recurring frame hitch without an identified owner is a release blocker — and that streaming throughput scales with the observed area (streamed radius, zoom) rather than being fixed constants.
+Performance is budgeted, not aspirational. Budgets are tracked from 0.3.0 (via per-`FrameStage` timing instrumentation surfaced in the engine's Performance panel) and gate releases from 0.5.0. Current budget values and their measurement procedure live in `roadmap.md` §7.3; recorded figures live in `perf-baseline.md`. The architectural commitment here is that every subsystem is attributable — a recurring frame hitch without an identified owner is a release blocker — and that streaming throughput scales with the observed area rather than being fixed constants.
+
+**The budget is stated against CPU work, not frame time** (added v1.9). Under a vsync-limited present mode, wall-clock frame time measures *blocking* and moves inversely to engine cost: a faster engine fills the swapchain sooner and waits longer in acquire. The instrumentation therefore isolates the present block and reports `schedule span − present` as the number the budget applies to. Two corollaries, both learned by getting them wrong:
+
+- **Performance is measured in release builds only.** An unoptimized build ran roughly 7× slower here, which is not a slow version of the truth but a different number entirely.
+- **One-second aggregates must be read at rest.** Sampled immediately after a camera move they describe the fill, not the resting state.
+
+The 0.3.0 baseline was taken after diagnosing a long-standing "recurring at-rest frame hitch" that proved not to exist: it was a debug build measured with wall-clock frame time. **A budget nobody can observe a violation of is not a budget** — which is why the instrumentation is architecture here rather than tooling.
+
+**Throughput also scales with the *declared supported* range, not the permitted one.** Zoom limits that let a user reach configurations the engine cannot hold at budget make "within budget at all supported zooms" unfalsifiable. The supported range is declared by measurement and recorded in `perf-baseline.md`.
 
 ### The region graph (added v1.8)
 
@@ -1044,10 +1096,10 @@ Both are scheduled in `roadmap.md` (VFX at 0.5.0; entity visuals at 0.9.0) and b
 
 ### Hot reload
 
-- File watcher (e.g., `notify` crate) on graph files.
-- On change: parse, diff against running graph, walk `ChunkTags` to find affected chunks, queue regeneration.
-- Editor in-engine edits use the same mutation path as disk edits.
-- Both paths converge on the same authoritative graph state.
+- File watcher (`notify`) on graph files. **A file changing on disk is the only trigger** (revised v1.9).
+- On change: resolve the changed file to its hierarchy slot *through the manifest*, reload the whole hierarchy from disk, walk `ChunkTags` to find affected chunks (subject to §4's backward-looking constraint), queue regeneration.
+- The in-engine editor's Save writes the file; an external edit writes the same file. Both therefore take one path, rather than converging on one by construction.
+- **Disk is authoritative for the world; the editor is authoritative for its canvas.** The watcher does not push graphs back into the editor, so there is no direction in which the two can disagree about what the world is generated from.
 
 ### Audio occlusion
 

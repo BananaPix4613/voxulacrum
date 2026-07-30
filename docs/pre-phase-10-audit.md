@@ -183,6 +183,14 @@ readout that the eye samples at reading speed.
 
 ### 4.1 What is actually being reported
 
+> **Superseded by measurement — see §4.5.** This section's reasoning (and §0.3's
+> vsync reframing) was written before any instrument existed. Substep 1's hitch
+> counter shows that vsync quantization is *not* operative: the engine runs slower
+> than the refresh interval, so Fifo does not clamp it and frame times do not
+> quantize. Both the original "~28 ms hitch" framing and my correction of it are
+> wrong. §4.5 records what the numbers actually show. §4.2–§4.4 are retained as
+> the reasoning that led to the measurement.
+
 ~28 ms frames recurring several times per second with the camera at rest, no
 identified cause (`post-phase-9-audit.md` §3, §4). Given Fifo and the
 inter-frame `dt` measurement (§0.3), the correct restatement is: **the engine
@@ -246,14 +254,23 @@ at 0.5.0, zero engineering before then." If C1 is the hitch, the quarantine and 
 hitch gate collide. Measuring it is not engineering it; deciding what to do if it
 *is* the cause is a scope call for you, not me. Flagged in §14.
 
-**C2 — Reflection pass renders the entire resident set with no frustum culling.**
-`reflection_pass.rs:70–76` iterates `self.chunks` and draws every chunk that has a
-mesh. The detail-paint and scatter loops in the same pass *do* test
-`frustum.is_chunk_visible` (`:85`, `:104`); terrain does not. At a large resident
-set this is a per-frame GPU cost proportional to loaded chunks rather than visible
-ones, on top of an already-added full second scene render. Steady rather than
-bursty, but it eats the headroom that makes an occasional 10 ms spike into a missed
-deadline. Cheap to test: one `is_chunk_visible` guard.
+**C2 — Reflection pass is a full second geometry render every frame.**
+`reflection_pass.rs:44–122` re-renders terrain, detail paint, scatter, and the
+player into the half-res reflection targets with a mirrored view-projection.
+
+*(Corrected 2026-07-28.* An earlier revision of this audit claimed the terrain loop
+was unculled because it lacks the `frustum.is_chunk_visible` test the detail and
+scatter loops carry. That is wrong: `chunks: &visible_chunks` is already
+frustum-culled at `ecs/systems.rs:1278–1280` before it reaches either the main scene
+node or the reflection node. The detail/scatter loops test visibility because they
+iterate their own un-prefiltered per-chunk maps. **No culling fix is needed; no code
+change is proposed here.**)
+
+It remains a real steady per-frame GPU cost — a second full pass over the visible
+set, added in `b258ad7`. Steady rather than bursty, but it consumes the headroom
+that turns an occasional 10 ms spike into a missed deadline. Already gated at
+runtime by `enabled: !ui.params.debug.hide_water && !water_pass.chunk_meshes.is_empty()`
+(`ecs/systems.rs:1347`), so the experiment costs nothing.
 
 **C3 — Chunk churn driving main-thread save/compress.** See §4.2. Requires chunk
 unloads at rest; the streaming visualizer (A3) answers directly whether they occur.
@@ -289,13 +306,400 @@ bounded:
 `visibility_mask_upload_system` (early-returns unless `room.dirty`,
 `ecs/systems.rs:1031–1034`), hot-reload polling (re-verified), autosave interval.
 
-### 4.4 The cheap experiment to run first
+### 4.4 The cheap experiments to run first
 
-Before any instrumentation: toggle the egui panel off and observe whether the hitch
-rate changes; then disable the reflection pass via its `enabled` flag and observe
-again. Both are existing runtime toggles, both take a minute, and either result
-narrows the search substantially. I would run these before writing the first line
-of `FrameTimings`.
+Both candidates that already have runtime toggles, before any instrumentation:
+
+- **F1** hides the entire egui UI (`input.ron` → `ToggleUI`, `input.rs:586–588`) — tests C5.
+- The **Hide Water** debug checkbox sets `params.debug.hide_water`, which disables
+  both the water scene pass and the reflection pass (`ecs/systems.rs:1347`) — tests C2.
+
+Neither costs a line of engine code. The one obstacle is that F1 also hides the
+Performance panel, so the fps readout disappears exactly when it is needed; Substep 1
+adds a once-per-second `log::info!` hitch counter so both experiments are readable
+with the UI hidden. Run them before writing any of `FrameTimings`.
+
+---
+
+### 4.5 Measured — Substep 1 results, 2026-07-28
+
+Three conditions, camera at rest, **debug build** (`cargo build`, dev profile,
+`unoptimized + debuginfo`; the workspace declares no `[profile.dev]` override, so
+every dependency and every workspace crate is at opt-level 0).
+
+| Condition | Samples | Mean fps | Mean frame | Frames > 20 ms | Δ vs. A |
+|---|---|---|---|---|---|
+| **A** baseline | 23 s | 45.2 | **22.1 ms** | **99.3 %** | — |
+| **B** UI hidden (F1) | 16 s | 46.6 | 21.5 ms | 92.5 % | −0.67 ms |
+| **C** water + reflection off | 11 s | 47.7 | 21.0 ms | 76.4 % | −1.17 ms |
+
+**This is not a hitch. It is a uniformly slow frame.** In the baseline, 1,033 of
+1,040 frames exceeded 20 ms — the threshold is not detecting excursions, it is
+sitting below the mean. The engine runs at a steady ~22 ms/frame, every frame.
+The original report ("~28 ms hitch, several times per second") appears to have
+been a reading of ordinary variance around a 22–28 ms baseline, not a distinct
+event class.
+
+**Vsync is not the limiter, and §0.3 was wrong.** Frame times cluster at 21–26 ms
+with no quantization to 16.7/33.3 ms multiples. Under Fifo, the swapchain clamps
+throughput only when the producer is *faster* than the refresh interval; a
+producer slower than refresh runs at its own rate. The engine is that producer.
+So ~22 ms is genuine CPU+GPU cost per frame, not a scheduling artifact — which is
+better news, because genuine cost is attributable and vsync interaction is not.
+
+**Two distinct phenomena, not one:**
+
+1. **An elevated baseline of ~22 ms on every frame.** This is the dominant
+   problem and it is a *throughput* issue, not a hitch. It is what makes the
+   16.6 ms budget (roadmap §7.3) unmet.
+2. **Intermittent 30–53 ms spikes, roughly every 5–8 seconds** (A: 43.0, 53.1,
+   35.1, 33.2; B: 51.6, 35.9; C: 33.3). These *are* excursions, they persist
+   unchanged across all three conditions, and they are far rarer than "several
+   times per second." Closer to the original description in kind, wrong in
+   frequency by an order of magnitude.
+
+**What the toggles proved.** Both candidates are real and both are small:
+egui costs ~0.67 ms/frame (C5), water + reflection ~1.17 ms/frame (C2). Together
+~1.8 ms of a 22 ms frame — under 9 %. **Neither is the story, and neither is
+worth fixing on these numbers.** C5 and C2 are hereby closed as hitch candidates;
+they remain minor optimization targets with no current claim on this phase.
+
+**The unexamined variable: this is a debug build.** For an engine whose hot path
+is per-frame graph evaluation, HashMap iteration over the resident set, and ~8,200
+`density_at` calls in `climate_tick_system` (C1), opt-level 0 is not a small
+factor. Until the same three readings exist from a release build, no conclusion
+about the ~22 ms baseline is safe, and neither `FrameTimings` nor any fix should
+be built against debug numbers — the per-stage *proportions* differ between
+profiles, so a debug profile would point the instrument at the wrong stage.
+**Release measurement is the immediate next step** (§14 Q7).
+
+### 4.6 Measured — release build, same day
+
+Same three conditions, `cargo run --release` (opt-level 3, thin LTO,
+`codegen-units = 1`).
+
+| Condition | Samples | fps | Hitches/s | Worst |
+|---|---|---|---|---|
+| **A** baseline (steady state) | 15 s | **60–61** | 20–21 | **23.7–24.3 ms** |
+| **B** UI hidden | 26 s | 60–61 | 20–21 | 23.8–25.6 ms |
+| **C** water + reflection off, first 11 s | 11 s | 60–62 | 20–25 | 23.9–27.1 ms |
+| **C** water + reflection off, remaining 62 s | 62 s | 54–62 | 13–28 | **26.7–208.9 ms** |
+
+**The originally-reported phenomenon is a debug-build artifact.** Debug: 22.1 ms
+mean, 99.3 % of frames over 20 ms. Release: a locked 60 fps. The "~28 ms hitch
+several times per second" that `post-phase-9-audit.md` §3–§4 carried forward as the
+highest-priority open defect, and that roadmap §3.12 and §10 gate on, **does not
+occur in an optimized build.**
+
+**The steady ~24 ms "worst" in A and B is swapchain pacing, not a stall.** The
+evidence is its metronomic consistency: across ~40 seconds of samples it never
+leaves 23.7–24.3 ms. A stall from compression, I/O, allocation, or eviction varies;
+this does not. With `PresentMode::Fifo` and `desired_maximum_frame_latency: 2`
+(`main.rs:188–191`), the CPU queues several frames quickly and then blocks in
+`get_current_texture()`, producing a bimodal CPU-side inter-frame distribution that
+sums to the refresh rate. 60 fps sustained *is* the deadline being met. **The 20
+hitches/second in A and B are the instrument mislabelling normal pacing**, because
+the 20 ms threshold sits below the pacing peak. Retune to ~35 ms.
+
+**Condition C's second half is the first genuine defect this investigation has
+found.** Roughly one frame per second at 45–60 ms, superimposed on otherwise-locked
+60 fps, with six excursions past 100 ms (111.4, 123.0, 195.2, 208.9, 107.8, 102.4).
+It began ~11 s into the run and persisted and worsened for the remaining 62 s.
+Throughput held (fps stays ~60) — these are single-frame excursions, not a rate drop.
+
+Hiding water is not a plausible *cause* (it removes work, and C's own first 11 s
+were clean). Condition C was, however, **~3× longer than A or B** (73 s vs. 21 s and
+26 s), so the likeliest reading is that C was simply the first window long enough to
+contain the phenomenon. Two candidate mechanisms, not yet distinguished:
+
+1. **Main-thread persistence.** Both write paths run on the main thread:
+   `save_chunk_on_unload` inside `streaming_tick_system` (`ecs/systems.rs:733–739`)
+   and the 30-second `save_dirty_chunks` sweep (`persistence.rs:848–864`,
+   `AUTOSAVE_INTERVAL_SECS = 30.0`). Each does dirty-chunk scan → zstd → SQLite
+   write. Supporting evidence: `saves/world.vxdb-wal` stood at **4.3 MB** immediately
+   after this run. A WAL that large implies sustained write traffic at rest, and
+   SQLite's default auto-checkpoint (~1000 pages ≈ 4 MB) blocks the *writing* thread
+   — which is the main thread. That is a textbook source of cumulative,
+   worsening 100–200 ms stalls. Note the fluid sim marks chunks persist-dirty
+   whenever cells change (`MarkFluidDirty`), so ocean cells still settling would
+   feed this continuously.
+2. **Streaming churn from camera movement**, driving generation, meshing, per-chunk
+   GPU buffer creation, and unload-time saves.
+
+**Ruled out here:** mesh-cache LRU eviction — the cache holds 3.2 MB across 164
+files against a 256 MB budget (`params.rs:618`), so `lru.evict()` has never run.
+
+The unfiltered console log distinguishes (1) from (2) at zero cost: autosave emits
+`"Saved N modified chunks"` (`persistence.rs:843`) and meshing emits
+`"Meshing batch complete in Xms"`, so correlating either against the spike seconds
+settles it without writing a line of code.
+
+### 4.7 Root cause localized — time-of-day sweep, 2026-07-28
+
+Two further zero-code experiments, release build, camera untouched, water visible,
+using the existing `Paused` / `manual_time` controls (`ui/panels.rs:274–289`).
+
+**Test 1 — break the time-of-day / session-length confound.** Time paused at
+`manual_time = 0.30` (daylight) for ~2 minutes: after an initial settling burst
+(including one 704.8 ms frame at the moment of pausing), the engine ran **107
+seconds at a flat 23.8–25.9 ms worst**, spanning an autosave (`Saved 24 modified
+chunks`, 14:09:56) whose second reported **24.0 ms** — no cost at all.
+
+Two conclusions. **Frame cost is a function of time-of-day state, not elapsed
+session time**; every prior run's "degrades after ~130 s" was the sun setting on a
+300-second day (`params.rs:405`) from a start time of 0.30. And **main-thread
+persistence is refuted twice over** — the earlier 3 ms reading was not a fluke.
+
+**Test 2 — sweep `manual_time`, ~10 s held at each value.** Sun elevation is
+`sin((t − 0.25)·2π)`.
+
+| `manual_time` | Sun elevation | Hitches/s | Worst | Regime |
+|---|---|---|---|---|
+| 0.30 | +0.309 | 20–21 | 24.0–24.7 ms | clean |
+| 0.50 (noon) | +1.000 | 20–21 | 24.0–24.5 ms | clean |
+| 0.65 | +0.588 | 20–21 | 24.3–26.4 ms | clean |
+| 0.72 | +0.187 | 20–21 | 23.9–26.2 ms | clean |
+| **0.76** | **−0.063** | 21–25 | **43.9–49.9 ms** | **elevated** |
+| 0.85 | −0.588 | 18–24 | 43.8–50.6 ms | elevated |
+| 0.95 | −0.951 | 30–31 | 29.9–33.2 ms | intermediate |
+| 0.10 | −0.809 | 30–31 | 30.5–33.1 ms | intermediate |
+
+**The transition sits exactly at the sun crossing the horizon.** `light_space_matrix`
+early-returns `Mat4::IDENTITY` when `sun_dir.y <= 0.01`
+(`simulation/time_of_day.rs:91`), which for this arc is `t ≥ 0.7484`. The sweep
+brackets that boundary within 0.04 of a cycle: 0.72 clean, 0.76 elevated. Nothing
+else in the tree is known to be discontinuous in that interval.
+
+**But the obvious mechanism is refuted by reading the code.** I expected the
+identity matrix to inflate the shadow frustum and multiply `shadow_chunks`
+(`ecs/systems.rs:1281–1283`). It does the opposite. Extracting Gribb/Hartmann planes
+from the identity matrix (`rendering/frustum.rs:from_view_projection`) yields the box
+`x,y ∈ [−1,1]`, `z ∈ [0,1]` — every chunk except the one at the origin fails the
+p-vertex test, so the shadow pass draws *almost nothing* at night. It should get
+cheaper. **The mechanism is therefore not shadow-chunk count, and is not yet
+identified.**
+
+**Three regimes, not two.** Deep night (0.95, 0.10) is distinct from early night
+(0.76, 0.85): 30 hitches at ~31 ms versus 24 hitches at ~47 ms. Both are past the
+horizon and both take the identity branch, so a second variable is also in play. A
+single boolean switch does not explain the data.
+
+**Throughput is unaffected in every regime — 59–62 fps throughout.** Only the
+*distribution* of CPU-side inter-frame gaps changes; the mean stays at ~16.6 ms.
+This is consistent with GPU frame cost rising at dusk while remaining under the vsync
+budget, which redistributes how the CPU blocks in `get_current_texture()` without
+dropping a frame. **It is possible there is no user-visible defect here at all** —
+only a metric artifact. Confirming or refuting that is precisely what a per-stage
+instrument separating CPU work from the present block is for (§3).
+
+**What this buys the phase:** a **frozen, 100 %-reproducible bad state**. Park
+`manual_time` at 0.76 and the engine sits at ~47 ms indefinitely; move it to 0.72 and
+it returns to 24 ms. Substep 2's `FrameTimings` is no longer a fishing expedition —
+it is an A/B read against two stable configurations.
+
+---
+
+### 4.8 Closed — the hitch gate, with evidence
+
+Substeps 1–3 (2026-07-28). **There was no hitch.** The defect that
+`post-phase-9-audit.md` §3–§4 carried as the highest-priority open item, that
+roadmap §3.12 lists as a known unknown, and that §10 gates 0.3.0 on, was two
+stacked measurement artifacts.
+
+**Artifact 1 — debug build.** The workspace declares `[profile.release]` but no
+`[profile.dev]`, so `cargo run` builds every crate *and every dependency* at
+opt-level 0. Debug: 22.1 ms mean frame, 99.3 % of frames over 20 ms. Release: a
+locked 60 fps (§4.5, §4.6).
+
+**Artifact 2 — wall-clock inter-frame time under `PresentMode::Fifo`.** It
+measures blocking, not work, and it moves *inversely* to engine cost: a faster
+engine fills the swapchain queue sooner and blocks longer in
+`get_current_texture()`. The "worst frame" statistic was reporting idleness.
+
+**The measurement chain.** `FrameTimings` (Substep 2/2b) separates CPU work per
+`FrameStage` from the present block and from time outside the schedule. Paused at
+`manual_time` 0.72 (day) vs 0.76 (night), release:
+
+| | Fifo, 0.72 | Fifo, 0.76 | Uncapped, 0.72 | Uncapped, 0.76 |
+|---|---|---|---|---|
+| fps | 60–61 | 59–62 | 303–320 | **366–388** |
+| cpu max | 3.2–5.3 ms | 2.8–4.1 ms | 4.3–5.8 ms | 3.6–5.3 ms |
+| frames over 16.6 ms budget | **0** | **0** | **0** | **0** |
+| present max | 21.2–22.4 ms | **41.2–44.7 ms** | ≤0.9 ms | ≤1.3 ms |
+| outside max | 0.3–0.8 ms | 0.3–0.5 ms | ≤1.2 ms | ≤1.0 ms |
+
+Removing the vsync cap (`PresentMode::Immediate`, a temporary diagnostic since
+reverted) shows **night is 22 % faster**, not slower — 376 fps against 309 fps.
+The apparent night-time "hitch" was the engine idling more because it had less to
+do.
+
+**And the mechanism is consistent with §4.7's code reading after all.** Below the
+horizon `light_space_matrix` returns `Mat4::IDENTITY`; the frustum extracted from
+it is the unit box, so nearly every chunk fails the p-vertex test and the shadow
+pass draws almost nothing. `render` stage mean drops from ~0.95 ms to ~0.83 ms
+accordingly. §4.7 called that reading "refuted" because it predicted the opposite
+of the observed symptom — it was correct, and it was the *symptom* that was
+inverted.
+
+**Engine position at 0.3.0.** 3–5 ms of CPU work per frame against a 16.6 ms
+budget, zero over-budget frames in any configuration tested, ~309 fps uncapped at
+the worst time of day. Largest CPU consumer is `FrameStage::Simulation` at
+~1.4–2.2 ms mean / 6.5 ms worst observed. These numbers are the perf baseline.
+
+**Candidates closed by measurement, not reasoning** — none should be
+re-investigated without new symptoms: main-thread persistence (autosave measured
+at ~3 ms for 24 chunks, then 0 ms), streaming churn, session-length accumulation,
+mesh-cache LRU eviction, egui, the water + reflection pass, the winit event loop,
+and `climate_tick_system` — the audit's top-ranked C1, bounded at ≤2.2 ms
+*including* the fluid tick, player sim, room detection, picking, and param-change
+detection. **Roadmap §10's R7 collision between the hitch gate and §3.12's
+cloud-hydrology quarantine never materialized; the quarantine holds untouched.**
+
+**Consequences for the phase:**
+
+- **Q7 is answered by force:** all perf measurement is release-only. §7.3's
+  16.6 ms budget is meaningless against an unoptimized build, and a perf baseline
+  taken from one would be fiction.
+- **§7.3's "no recurring hitch > 4 ms without an attributed cause" needs
+  restating.** As written it is unmeasurable on a vsync-limited app, where
+  wall-clock frame time quantizes to the refresh interval and inverts with load.
+  The budget belongs on **CPU work** (`schedule span − present block`), which is
+  what `FrameTimings.cpu_max_ms` reports. Proposed as a roadmap revision.
+
+---
+
+### 4.9 Frame cost at high zoom is draw-call recording — root-caused, not fixed
+
+Substep 12a (2026-07-28), release, steady state at maximum zoom: camera still for
+15+ seconds, `missing 0`, `in-flight 0`, **`0/20` worker threads busy**.
+
+```
+FPS 32   CPU worst 31.4ms / 16.6 budget   Present mean 7.4ms
+stages mean/max ms:
+  input 0.02/0.07   sim 5.33/7.08   mesh 0.99/2.55
+  uniform 0.43/1.25   render 24.25/29.89   post 0.01/0.01
+Jobs: generate 9.0ms mean (4.2K done), mesh 4.4ms mean (4.0K done), 0 queued
+Chunks 1465 visible / 2210 meshed / 4388 resident, 4.6M triangles
+```
+
+**`render` is 78% of frame CPU.** The worker pool is idle and per-job costs are
+flat across every radius measured (`generate` 8.5–9.0 ms throughout), so
+generation, meshing, and the scheduler are not implicated. The cost is
+**draw-call recording, scaling with *visible* chunk count**: terrain is drawn by
+three separate passes — shadow, main scene, and the reflection pass added in
+`b258ad7` — each issuing `set_vertex_buffer` + `set_index_buffer` +
+`draw_indexed` per chunk, so ~1,465 visible chunks become ~4,400 chunk draws plus
+foliage and scatter, at roughly 5 µs each.
+
+**Not fixed, and deliberately so.** Batching, pass consolidation, or LOD is
+rendering work, which roadmap §10 lists as a non-goal. It already has a home:
+§11's LOD strategy and decision D8 (greedy meshing, due at 0.4.0 exit) both
+target this, and drift observation 5.4 notes §11's LOD text presumes a
+distance gradient the orthographic isometric camera does not produce — so the
+strategy needs revisiting before it is built. **Trigger:** D8 at 0.4.0 exit, or
+sooner if a supported zoom level is found to breach the frame budget.
+
+**Two consequences the phase should carry:**
+
+1. **`sim` at 5.33 ms is ~4× its §4.8 baseline of 1.4 ms**, and it is engine
+   logic rather than rendering, so it *is* in scope. Several systems in that
+   stage scan the entire resident set every frame with no bound —
+   `fluid_tick_system` sums `active.len()` across all 4,388 chunks,
+   `param_change_detection_system` deep-clones and compares all of
+   `EngineParams`. Audit §4.3's C6 list enumerates the rest.
+2. **"Supported zoom" is undeclared.** The gate reads "streamed area fills within
+   budget at all *supported* zooms", but nothing states that range and `zoom_max`
+   permits zoom levels the engine demonstrably cannot hold budget at (fill of
+   2,619 chunks took 8,704 ms at maximum zoom, against a 2,000 ms budget).
+   Incremental steps within the moderate range all measured inside budget. The
+   range must be **declared by measurement** in the perf baseline; closing the
+   gate without that would be reinterpreting it rather than meeting it.
+
+**Measurement caveat worth recording.** An earlier pass at this suggested frame
+time degraded 10× with resident set (down to 10 fps). Those readings were taken
+in the second immediately following each zoom step, so `FPS` and `CPU worst` —
+both one-second aggregates — covered the *fill* rather than steady state. The
+steady-state figures above are ~3× better. When reading `FrameTimings`, let the
+view settle for several seconds first; the instrument aggregates over a window
+and will otherwise attribute transient work to the resting state.
+
+---
+
+### 4.10 First measured input to decision D8 (greedy meshing)
+
+Substep 12b, release, maximum zoom, 4,388 resident chunks:
+
+```
+Memory — 29.9 MB CPU + 490.5 MB GPU   (4388 chunks, 2396 uniform)
+  voxel 15.6   detail 9.6   scatter 0.4   fluid 2.5   overrides 1.76  [MB]
+  session peak 29.9 MB CPU / 490.5 MB GPU
+```
+
+**GPU mesh buffers are 16× the CPU footprint.** At a 32-byte `FaceVertex`, one
+quad costs 4 vertices + 6 indices = 152 bytes, so 490 MB is roughly **3.4M quads
+/ 6.8M triangles resident** across 2,210 meshed chunks — about 1,530 quads per
+chunk. That is what one-quad-per-exposed-face produces: design §10 specifies side
+and bottom faces as greedy-merged, and drift 1.6 records that as unimplemented.
+
+**Roadmap §8 D8 is due at 0.4.0 exit and says to decide "against measured
+triangle budgets on the 3-biome reference world."** Nothing could measure them
+until the residency panel existed; this is the first figure. It is also the same
+root cause as §4.9 — draw-call count and vertex volume are both downstream of
+naive meshing, so D8 and the render-cost finding are one decision, not two.
+
+Forward-looking note for §7.3's min-spec (declared at 0.11.0, audience explicitly
+on modest hardware): 490 MB of mesh buffers at maximum zoom, or roughly 310 MB
+extrapolated to a mid-range supported zoom, is a real constraint on a 2 GB card.
+
+**No leak.** Repeated round trips between areas return CPU and GPU totals to the
+same range and the session peak stops climbing — §7.3's "session growth flat
+after warm-up", verified for the first time. 2,396 of 4,388 chunks (55%) hold
+uniform voxel storage, confirming palette collapse works on the air chunks above
+and below terrain.
+
+---
+
+### 4.11 Drift observation 5.1 — measured, then closed
+
+Substeps 13a / 13a-follow. The observation predicted "systematic
+miss/rebuild/delete churn during load-order-dependent streaming" from the mesh
+cache key including the neighbour border. Cache attribution (splitting misses into
+*cold* — no cached mesh for this position — and *stale* — a cached mesh exists
+under a different key) priced it for the first time.
+
+**Measured, warm second run over an identical route:**
+
+| | before | after |
+|---|---|---|
+| Hit rate | 66 % | **100 %** |
+| Stale misses | ~1,400 | **0** |
+| Total misses | 1,611 | **8** |
+
+1,400 of 4,758 lookups were re-keys — each one a mesh rebuild plus a file delete
+plus a file write for a mesh already on disk. The file count proved the mechanism
+both times: before, `3,092 files + 184 cold = 3,276`, because stale misses
+*replace* a file 1:1; after, `2,452 + 8 = 2,460`, because nothing is rewritten.
+
+**Cause.** `ChunkSnapshot::extract` fills every non-interior cell of the 34³
+snapshot — six face planes (6,144 cells), twelve edges (384) and eight corners
+(8) — from the full 26-neighbour set, missing neighbours becoming `Voxel::EMPTY`.
+But meshing is gated only on the **six face** neighbours (`has_face_neighbors`)
+and `cube_mesher` culls against the single face-adjacent voxel; its own doc
+comment confirms no AO and no diagonal reads. So the 392 edge/corner cells were
+load-order dependent *and never read by the mesher*. One differing corner voxel
+re-keyed the whole chunk.
+
+This refines the observation's suggested fix. It proposed keying on "interior
+content only," but the face-adjacent border genuinely affects the mesh through
+culling. The correct key is **interior + the six face planes**, which is exactly
+the data meshing waits for — making the key load-order independent by
+construction.
+
+**Still recorded as divergent:** the key remains *content*-addressed rather than
+the *input*-addressed form design §10 specifies (graph hash + mesher version +
+registry hash + seed). Content addressing is strictly stronger for correctness —
+§10's stated failure mode cannot occur — and that divergence stays on the books
+rather than being closed here.
 
 ---
 
@@ -436,6 +840,67 @@ independently revertible steps, not one.
 
 ---
 
+### 6.3 Shipped — what the scheduler is, and the three things it deliberately is not
+
+Substeps 7–8a (2026-07-28). `crates/voxulacrum-app/src/jobs.rs`.
+
+**Delivered.** One scheduler owning dispatch and concurrency for every continuous
+background consumer — generation and meshing both submit through it, neither calls
+`pool.spawn`. Priority is `(class, distance²-to-camera)`, so nearest work runs
+first and an interactive class lets an edit-driven re-mesh preempt bulk streaming
+regardless of distance. Per-kind in-flight, completed, mean and max timings are
+recorded by the jobs themselves via shared atomics. The concurrency cap has one
+owner (`JobSystem::cap`), which consumers read rather than re-deriving from
+`CoreBudget`.
+
+**It fixed a live defect.** Before 8a, meshing had no priority at all:
+`submit_all_dirty` filled its queue in `HashMap` iteration order, `swap_remove`
+scrambled it further, and chunks failing the `has_face_neighbors` check accumulated
+while later-queued chunks jumped ahead. The visible symptom was a scattering of
+chunks that meshed only after everything else had. Sorting the pending set by
+camera distance removed it.
+
+**Three things it is not, each with a trigger rather than a drop:**
+
+1. **No declared job-to-job dependencies.** The edge everyone reaches for —
+   "a chunk may not mesh until its six face neighbors exist" — is a *world-state
+   readiness predicate*, not a job edge: a neighbor can be resident without any
+   generation job having run this session. A job-completion proxy would need
+   per-coordinate completion tracked indefinitely, eviction invalidating it, and
+   would still be a worse test than `has_face_neighbors`. **Trigger:** the first
+   genuine job-to-job edge arrives with 0.4.0's staged cross-chunk generation pass
+   (drift 3.3) — structures and rivers need a cross-chunk stage between per-chunk
+   eval and finalize, which is a real ordering constraint between jobs.
+2. **Chunk I/O writes stay on the main thread.** Reads already run as jobs
+   (`apply_persisted_record` executes inside `JobKind::Generate` tasks and inside
+   `World::generate`'s pool `par_iter`). Writes were *measured* at ~0.1 ms/chunk
+   (§4.8: 3 ms for a 24-chunk autosave batch; an unload save is one chunk on the
+   same path) against 3–5 ms of CPU in a 16.6 ms budget. Moving them would require
+   `WorldDatabase` behind an `Arc` — which needs interior mutability for
+   `dict_bytes` across five sites including the compression path, because
+   `try_train_dictionary` takes `&mut self` — plus a per-chunk-key exclusion
+   mechanism to stop `load(C)` reading a stale record before `save(C)` lands.
+   **That hazard would be newly introduced by the move.** **Trigger:** per-layer
+   save versioning at 0.6.0, or any measurement showing writes above ~1 ms.
+3. **Concurrency is still statically partitioned per kind.** One global budget
+   arbitrated purely by priority is the real P14 win, but consumers bound their own
+   submissions at `cap(kind)`, so a global dispatch budget cannot be exercised
+   without also raising those bounds — a live perf and memory change.
+   **Trigger:** Substep 11, where it lands with the load-margin throughput work,
+   because that gate ("streamed area fills within budget at all zooms") is the only
+   metric that can tell whether the change helped.
+
+**Roadmap consequence.** §10's exit gate needs re-wording a second time — I
+rewrote it in the R3 correction to say "declared dependencies, distance-derived
+priority, generation + meshing + chunk I/O as consumers, jobs introspectable,"
+and items 1 and 2 of that list are now recorded as deliberately unbuilt with
+triggers. The gate should read: *one scheduler; every continuous background
+consumer on it; priority derived from distance to the observed region; jobs
+introspectable; no second threading model.* P14's "declared dependencies" clause
+is satisfied at 0.4.0, not here, and §3.4 should say so.
+
+---
+
 ## 7. Workstream E — unification
 
 ### 7.1 The mutation-door enumeration
@@ -546,6 +1011,44 @@ the foreshortened isometric footprint: over-loading along one axis, and the marg
 derivation at `:145` (`max` of two now-identical values) is a no-op. This is a
 doc-vs-code divergence sitting in the middle of the exact function the throughput fix
 must touch. In scope; fix it with the throughput work rather than separately.
+
+### 8.1b Three streaming defects found and fixed, 2026-07-28
+
+Substeps 11a–11c. Two were on the audit's list; the third was not written down
+anywhere and had been live since streaming was built.
+
+**The throughput mechanism was misdiagnosed.** §8.1 and roadmap §10 both frame it
+as "throughput constants don't scale with the radius." They don't scale — but they
+also never bind: `max_gen_per_frame = 64` results/frame against ~24 chunks/sec
+actually completing, and the same for meshing. The binding constraint was
+**statically partitioned concurrency**: `CoreBudget` reserved `usable/3` for
+generation, so on a 16-core machine generation ran 4 threads while 10 sat reserved
+for meshing that was usually idle. One global budget dispatched by priority
+(Substep 11a) is the fix; `CoreBudget` collapses to a single `pool_threads`.
+
+**`half_extents` used `aspect` on both axes** (F-b). The away-axis needs
+`zoom / sin(pitch)` because the isometric tilt foreshortens it —
+`Camera::visible_radius` computes exactly this and documents it, so two functions
+in the tree disagreed. `√3 ≈ 1.732` versus `16/9 ≈ 1.778` is why nobody noticed:
+correct to within 3% at 16:9, under-loading by 30% at 4:3 (pop-in when moving
+forward) and over-loading by 26% at 21:9.
+
+**The view test ignored altitude entirely — new finding, not previously recorded.**
+`is_in_view_rect` compared a chunk's *footprint* against the view band, but under
+an isometric projection altitude moves geometry up-screen: a ground displacement
+`d` shifts by `d·sin(pitch)` while an altitude `Δy` shifts by `Δy·cos(pitch)`, so
+altitude is screen-equivalent to `Δy·√2` of ground. Columns whose footprint sat
+just past the near edge could therefore have raised geometry plainly on screen and
+never load — reported as "one or two chunks at the very edge that vary in height,
+usually up." Fixed by testing the column's projected *span* against the band.
+
+Column granularity is deliberate: a per-chunk Y test would be tighter, but
+skipping a middle layer leaves the layer above it permanently unmeshable because
+`has_face_neighbors` requires both Y neighbours resident. The cost is bounding by
+the world's Y range rather than the terrain's — about 10–20% more columns.
+**Operator note:** `max_chunk_y = 4` covers world Y 0–128 while meadow terrain
+tops out near Y=56; lowering it to 2 roughly halves the resident set *and* shrinks
+this expansion proportionally.
 
 ### 8.2 Process — versions and changelog
 
@@ -761,6 +1264,15 @@ intent whitelist (my recommendation), or does the fluid sim (E-2) and seam pass
 (E-1) get modeled some other way? This determines what the runtime assertions in
 #6 actually assert.
 
+**Q7 — Build profile for all performance work** *(added after Substep 1's measurement, §4.5)*.
+Every number in §4.5 came from a debug build at opt-level 0. Options: (a) do all
+perf measurement in `--release` and add a `[profile.dev]` opt-level so day-to-day
+runs are usable too; (b) release-only measurement, leave dev as-is; (c) accept debug
+numbers as the baseline. (c) is untenable — roadmap §7.3's 16.6 ms budget cannot
+mean an unoptimized build, and the perf baseline document would be worthless. I
+recommend (a).
+
 ---
 
-*End of audit. No code proposed. Substep 1 begins on your answer to Q1 and Q2.*
+*End of audit. Substep 0 proposed no code. §4.5 records Substep 1's measurement,
+which superseded §0.3 and §4.1 and closed hitch candidates C2 and C5.*

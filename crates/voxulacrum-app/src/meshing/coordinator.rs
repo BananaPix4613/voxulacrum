@@ -20,8 +20,11 @@ impl MeshingCoordinator {
     pub fn tick(
         &mut self,
         world: &mut World,
+        jobs: &mut crate::jobs::JobSystem,
         ctx: &RenderContext,
         ui_state: &mut UiState,
+        camera_chunk: IVec3,
+        max_snapshots: usize,
     ) -> Vec<IVec3> {
         // Retry every frame: a chunk marked dirty this frame is still inside its
         // debounce window and gets skipped here, but the next frame's call (or the
@@ -31,7 +34,7 @@ impl MeshingCoordinator {
         self.pipeline.submit_all_dirty(world);
 
         // Drain pending snapshot submissions (bounded per frame)
-        self.pipeline.drain_pending_submissions(world);
+        self.pipeline.drain_pending_submissions(world, jobs, camera_chunk, max_snapshots);
         
         // Poll completed chunks
         let completed = self.pipeline.poll();

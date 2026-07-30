@@ -2249,7 +2249,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nodegraph-editor"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "egui",
  "egui-snarl",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "nodegraph-eval"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "fastnoise-lite",
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "nodegraph-hotreload"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "env_logger",
  "glam",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "nodegraph-ir"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "glam",
  "serde",
@@ -3881,7 +3881,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voxel-core"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "glam",
@@ -3894,7 +3894,7 @@ dependencies = [
 
 [[package]]
 name = "voxulacrum"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "bevy_ecs",
  "bincode",

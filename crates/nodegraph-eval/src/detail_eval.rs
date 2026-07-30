@@ -397,6 +397,20 @@ mod tests {
         g
     }
 
+    /// Chunk-local XZ anchors emitted by `scatter_graph` for one chunk.
+    fn anchor_xz(terrain: &ChunkBuffer<Voxel, 32>, g: &Graph, chunk: IVec3) -> Vec<(u8, u8)> {
+        let mut e = DetailEvaluator::new(g, EvalContext::new(42, chunk), terrain, None, 0);
+        let f = e.evaluate().unwrap();
+        let mut v: Vec<(u8, u8)> = f
+            .scatter
+            .iter()
+            .flat_map(|b| b.instances.iter())
+            .map(|i| (i.anchor[0], i.anchor[2]))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
     #[test]
     fn empty_detail_graph_produces_empty_foliage() {
         let terrain = flat_terrain();
@@ -441,5 +455,40 @@ mod tests {
         let f = e.evaluate().unwrap();
         assert_eq!(f.paint.len(), 1);
         assert!(f.paint[0].texels.iter().all(|t| t.density == 200 && t.species == 1));
+    }
+
+    #[test]
+    fn scatter_layout_is_world_absolute_not_per_chunk() {
+        // `PoissonDistribution` - the node the shipped meadow detail graph
+        // actually uses - seeds each candidate from its *world-absolute* cell
+        // (`world_cell_seed`), which is what makes placement continuous across
+        // chunk borders. If the seed ever became chunk-relative, every chunk
+        // would scan cell indices starting from the same place and produce an
+        // identical local layout: a visible tiling artifact, and a silent
+        // relocation of every derived `StableInstanceId`.
+        let terrain = flat_terrain();
+        let g = scatter_graph();
+        let a = anchor_xz(&terrain, &g, IVec3::new(0, 0, 0));
+        let b = anchor_xz(&terrain, &g, IVec3::new(1, 0, 0));
+        assert!(!a.is_empty() && !b.is_empty(), "both chunks must scatter something");
+        assert_ne!(a, b, "adjacent chunks must not share a local scatter layout");
+    }
+
+    #[test]
+    fn scatter_layout_is_independent_of_chunk_y() {
+        // The candidate grid is a world-XZ cell grid with no Y term, so two
+        // vertically stacked chunks must propose the identical XZ candidates -
+        // what differs between them is which candidates survive the surface
+        // filter, not where the candidates are. A chunk.y term leaking into the
+        // cell seed would break the XZ continuity this node exists to provide.
+        // (Contrast `PoissonDisk` in `scatter.rs`, whose per-chunk Bridson walk
+        // *is* seeded per chunk including Y - a different node with different
+        // guarantees.)
+        let terrain = flat_terrain();
+        let g = scatter_graph();
+        let low = anchor_xz(&terrain, &g, IVec3::new(0, 0, 0));
+        let high = anchor_xz(&terrain, &g, IVec3::new(0, 1, 0));
+        assert!(!low.is_empty(), "chunk must scatter something");
+        assert_eq!(low, high, "XZ candidates must not depend on chunk Y");
     }
 }

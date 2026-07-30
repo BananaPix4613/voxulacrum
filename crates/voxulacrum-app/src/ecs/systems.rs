@@ -1,6 +1,5 @@
 use bevy_ecs::prelude::*;
 use glam::IVec3;
-use voxel_core::Voxel;
 use crate::ecs::resources::*;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::ParamChangeKind;
@@ -32,6 +31,8 @@ use crate::ui;
 use crate::ui::panels::UiState;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::{compute_render_dimensions, palette, FrameCounter};
+use crate::diagnostics::FrameTimings;
+use crate::jobs::JobSystem;
 use crate::world::chunk::{LoadedChunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
 use crate::world::persistence::WorldPersistence;
@@ -43,9 +44,58 @@ use crate::player::sim::WorldView;
 // Input stage
 // ==========================================================================
 
-pub fn frame_counter_system(mut counter: ResMut<FrameCounter>, mut ui: ResMut<UiState>) {
+pub fn frame_counter_system(
+    mut counter: ResMut<FrameCounter>,
+    timings: Res<FrameTimings>,
+    mut ui: ResMut<UiState>
+) {
     counter.tick();
     ui.fps = counter.fps;
+    // Mirror the once-per-second published snapshot; the panel draws from
+    // `UiState`, and these values only change on the second boundary, so the
+    // copy is not a per-frame cost worth avoiding.
+    ui.over_budget_frames = timings.over_budget;
+    ui.worst_frame_ms = timings.inter_max_ms;
+    ui.cpu_max_ms = timings.cpu_max_ms;
+    ui.present_mean_ms = timings.present_mean_ms;
+    ui.stage_mean_ms = timings.stage_mean_ms;
+    ui.stage_max_ms = timings.stage_max_ms;
+}
+
+// ==========================================================================
+// Frame timing boundaries (diagnostics A1)
+// ==========================================================================
+// Seven systems that belong to no `FrameStage` set and are ordered against the
+// sets themselves, so each runs exactly between two stages. Written as separate
+// named functions rather than a closure factory so the schedule reads as an
+// explicit list of boundaries and the stage indices are visible at each site.
+
+pub fn frame_timings_begin(mut t: ResMut<FrameTimings>) {
+    t.frame_begin();
+}
+
+pub fn frame_timings_end_input(mut t: ResMut<FrameTimings>) {
+    t.end_stage(0);
+}
+
+pub fn frame_timings_end_simulation(mut t: ResMut<FrameTimings>) {
+    t.end_stage(1);
+}
+
+pub fn frame_timings_end_meshing(mut t: ResMut<FrameTimings>) {
+    t.end_stage(2);
+}
+
+pub fn frame_timings_end_uniform(mut t: ResMut<FrameTimings>) {
+    t.end_stage(3);
+}
+
+pub fn frame_timings_end_render(mut t: ResMut<FrameTimings>) {
+    t.end_stage(4);
+}
+
+pub fn frame_timings_frame_end(mut t: ResMut<FrameTimings>) {
+    t.frame_end();
 }
 
 pub fn shader_hot_reload_system(
@@ -177,50 +227,41 @@ pub fn shader_hot_reload_system(
     }
 }
 
-/// Hot-reload the active world graph when `biome_meadow.graph.json` changes
-/// on disk (external edits / the standalone preview app saving). Skips the
-/// reload while the embedded editor has unsaved edits, so in-memory work and
-/// the rendered world stay consistent. Routes the new graph to regen via the
-/// same `UiState.pending_graph` transport the embedded editor uses.
+/// A graph file changed on disk: regenerate the world from disk.
+///
+/// **This is the only trigger for worldgen hot-reload.** The editor's Save
+/// writes the file, so an editor save and an external text-editor change take
+/// the identical path, and there is no second source of truth to disagree with.
+///
+/// It previously ran on every dirty keystroke in the editor *and* on file
+/// changes, with regeneration reading the edited graph from memory and every
+/// other graph from disk - so editing one graph while another had unsaved
+/// changes produced a world matching neither. Higher-tier graphs suffered most,
+/// since a Zone graph's `GraphRef(World)` resolved against the on-disk World.
+///
+/// The editor's canvas is deliberately not refreshed here: the editor owns its
+/// canvas and disk owns the world. An external edit updates the world; re-select
+/// the slot to reload the view.
 pub fn graph_hot_reload_system(
     graph_watcher: Res<GraphWatcherRes>,
-    mut egui: NonSendMut<ui::EguiRenderer>,
     mut ui_state: ResMut<UiState>,
 ) {
     let changed = graph_watcher.0.poll_changes();
     if changed.is_empty() {
         return;
     }
-    let default_path = crate::world::world_generator::default_graph_path();
-    let default_name = default_path.file_name();
-
+    let manifest = crate::world::world_generator::world_manifest_path();
     for path in changed {
-        // Only the active world graph drives regeneration.
-        if path.file_name() != default_name {
-            continue;
-        }
-        // Don't clobber unsaved embedded-editor edits.
-        if egui.graph_editor.is_modified() {
-            log::warn!(
-                "{} changed on disk but the editor has unsaved edits; \
-                ignoring the disk change",
-                path.display()
-            );
-            continue;
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => match nodegraph_ir::Graph::from_json(&text) {
-                Ok(graph) => {
-                    // Refresh the editor view, then hand the graph to regen.
-                    let slot = crate::world::world_generator::GraphSlot::Biome(0);
-                    // The watched file is the primary biome (biome 0).
-                    egui.graph_editor.refresh(slot, graph.clone());
-                    ui_state.pending_graph = Some((slot, graph));
-                    log::info!("Hot-reloaded {} from disk", path.display());
+        match crate::world::world_generator::slot_for_graph_file(&manifest, &path) {
+            Some(slot) => {
+                if !ui_state.pending_graph_reload.contains(&slot) {
+                    ui_state.pending_graph_reload.push(slot);
                 }
-                Err(e) => log::warn!("graph hot-reload parse error: {e}"),
-            },
-            Err(e) => log::warn!("graph hot-reload read error: {e}"),
+                log::info!("graph changed on disk: {} ({slot:?})", path.display());
+            }
+            // A `.json` in the graphs directory that the manifest does not
+            // reference cannot affect generation.
+            None => log::debug!("ignoring unreferenced graph file {}", path.display()),
         }
     }
 }
@@ -391,38 +432,17 @@ pub fn fluid_tick_system(
                 plans.push((coord, plan));
             }
         }
-        // Phase 2: commit each plan, recording which *changed* edge cells should
-        // wake their neighbor's mirror so flow keeps crossing the seam (waking
-        // only changed cells avoids perpetual boundary churn once level).
-        let mut wakes: Vec<(voxel_core::ChunkCoord, voxel_core::LocalPos)> = Vec::new();
-        for (coord, plan) in plans {
-            for &(pos, _) in plan.changed_cells() {
-                fluid_edge_mirrors(coord, pos, &mut wakes);
-            }
-            if let Some(chunk) = world.0.chunks.get_mut(&coord) {
-                if crate::world::fluid_sim::commit_chunk(&mut chunk.data.fluids, plan) {
-                    changed.insert(glam::IVec3::from(coord));
-                }
-            }
-        }
-        // Phase 3: wake neighbor edge cells so they participate next tick.
-        for (ncoord, mirror) in wakes {
-            if let Some(chunk) = world.0.chunks.get_mut(&ncoord) {
-                chunk.data.fluids.activate(mirror);
-            }
-        }
+        // Phase 2 and 3 (commit + wake) are the tick's write half and go
+        // through the mutation door, which also does the persistence marking
+        // that used to be a separate `MarkFluidDirty` call. The sim runs in any
+        // mode, so this is a System mutation, not an actor edit.
+        let out = world
+            .0
+            .execute(MutationCommand::system(WorldMutation::CommitFluidPlans { plans }))
+            .expect("system fluid commit accepted in any mode");
+        changed.extend(out.water_rebuild);
     }
 
-    // Any chunk whose fluid changed must persist its field. The fluid sim runs in
-    // any mode, so this bookkeeping is a System mutation, not an actor edit.
-    if !changed.is_empty() {
-        world
-            .0
-            .execute(MutationCommand::system(WorldMutation::MarkFluidDirty {
-                chunks: changed.iter().copied().collect(),
-            }))
-            .expect("system fluid mark accepted in any mode");
-    }
     rebuild_water_with_neighbors(&mut water_pass, &world.0, &ctx.device, changed);
 }
 
@@ -513,35 +533,6 @@ fn fluid_neighbor_faces<'a>(
         }
     }
     faces
-}
-
-/// For each chunk face `pos` lies on, push the neighbor chunk + the mirror cell
-/// on the far side of that face (a corner cell yields up to three).
-fn fluid_edge_mirrors(
-    coord: voxel_core::ChunkCoord,
-    pos: voxel_core::LocalPos,
-    out: &mut Vec<(voxel_core::ChunkCoord, voxel_core::LocalPos)>,
-) {
-    use voxel_core::{ChunkCoord, LocalPos};
-    let d = crate::world::chunk::CHUNK_SIZE as u8;
-    if pos.x == 0 {
-        out.push((ChunkCoord::new(coord.x - 1, coord.y, coord.z), LocalPos::new_unchecked(d - 1, pos.y, pos.z)));
-    }
-    if pos.x == d - 1 {
-        out.push((ChunkCoord::new(coord.x + 1, coord.y, coord.z), LocalPos::new_unchecked(0, pos.y, pos.z)));
-    }
-    if pos.y == 0 {
-        out.push((ChunkCoord::new(coord.x, coord.y - 1, coord.z), LocalPos::new_unchecked(pos.x, d - 1, pos.z)));
-    }
-    if pos.y == d - 1 {
-        out.push((ChunkCoord::new(coord.x, coord.y + 1, coord.z), LocalPos::new_unchecked(pos.x, 0, pos.z)));
-    }
-    if pos.z == 0 {
-        out.push((ChunkCoord::new(coord.x, coord.y, coord.z - 1), LocalPos::new_unchecked(pos.x, pos.y, d - 1)));
-    }
-    if pos.z == d - 1 {
-        out.push((ChunkCoord::new(coord.x, coord.y, coord.z + 1), LocalPos::new_unchecked(pos.x, pos.y, 0)));
-    }
 }
 
 /// Rebuild the player avatar mesh each frame at the interpolated render position
@@ -705,6 +696,7 @@ pub fn streaming_tick_system(
     mut streaming: ResMut<ChunkStreamingManager>,
     mut world: ResMut<VoxelWorld>,
     mut meshing: ResMut<MeshingCoordinator>,
+    mut jobs: ResMut<JobSystem>,
     sim: Res<SimulationManager>,
     frame: Res<FrameState>,
     mut detail_paint: ResMut<DetailPaintPass>,
@@ -723,11 +715,16 @@ pub fn streaming_tick_system(
         rotation: sim.camera.rotation,
         camera_chunk: IVec3::new(cam_cx, 0, cam_cz),
         camera_world_pos: cam_pos,
+        world_y_range: (
+            streaming.params.min_chunk_y as f32 * CHUNK_WORLD_SIZE,
+            streaming.params.max_chunk_y as f32 * CHUNK_WORLD_SIZE,
+        ),
     };
 
     let tick_result = streaming.tick(
         &mut world.0,
         &mut meshing,
+        &mut jobs,
         &camera_view,
         frame.dt,
         &mut |chunk: &crate::world::chunk::LoadedChunk| {
@@ -752,8 +749,21 @@ pub fn streaming_tick_system(
     // appear on the same frame as the terrain.
 
     // Update streaming stats for UI
-    ui.streaming_loaded = world.0.chunks.len() as u32;
-    ui.streaming_pending = streaming.pending_gen_count() as u32;
+    ui.streaming = streaming.stats();
+}
+
+/// Dispatch queued jobs onto the shared pool (P14). Runs after every consumer
+/// has submitted for this frame and before meshing consumes results, so a job
+/// submitted this frame starts this frame.
+pub fn job_pump_system(mut jobs: ResMut<JobSystem>, mut ui: ResMut<UiState>) {
+    jobs.pump();
+    // Snapshot after pumping, so the panel shows the dispatch this frame
+    // produced rather than the state that led to it.
+    for kind in crate::jobs::JobKind::ALL {
+        ui.job_stats[kind.index()] = jobs.stats(kind);
+    }
+    ui.job_running_total = jobs.running_total();
+    ui.job_max_running = jobs.max_running();
 }
 
 // ==========================================================================
@@ -763,6 +773,8 @@ pub fn streaming_tick_system(
 pub fn meshing_tick_system(
     mut meshing: ResMut<MeshingCoordinator>,
     mut world: ResMut<VoxelWorld>,
+    mut jobs: ResMut<JobSystem>,
+    sim: Res<SimulationManager>,
     ctx: Res<RenderContext>,
     mut ui: ResMut<UiState>,
     mut detail_paint: ResMut<DetailPaintPass>,
@@ -770,7 +782,22 @@ pub fn meshing_tick_system(
     mut water_pass: ResMut<WaterPass>,
 ) {
     // Phase 1: tick meshing with &mut world - collects meshed positions.
-    let meshed = meshing.tick(&mut world.0, &ctx, &mut ui);
+    let cam = sim.camera.smooth_target;
+    let camera_chunk = IVec3::new(
+        (cam.x / CHUNK_WORLD_SIZE).floor() as i32,
+        0,
+        (cam.z / CHUNK_WORLD_SIZE).floor() as i32,
+    );
+    // Read before `ui` is mutably borrowed by the call below.
+    let max_snapshots = ui.params.streaming.max_mesh_per_frame as usize;
+    let meshed = meshing.tick(
+        &mut world.0,
+        &mut jobs,
+        &ctx,
+        &mut ui,
+        camera_chunk,
+        max_snapshots,
+    );
 
     // Phase 2: for each newly meshed chunk, build per-chunk foliage
     // and water GPU buffers. world.0 is now borrowed immutably.
@@ -785,42 +812,19 @@ pub fn meshing_tick_system(
     }
 }
 
-/// Remove the foliage generation placed on a column whose surface a seam demotion
-/// just put underwater (the demoted slab's empty half is now water). Mirrors the
-/// submersion cull `world_generator` runs at generation time (design §5 stage 9
-/// before stage 10) - the isolated per-chunk pass ran before this chunk's neighbors
-/// were resident, so it couldn't see this seam-created water.
-fn remove_submerged_column_foliage(
-    data: &mut crate::world::chunk::Chunk,
-    x: usize,
-    z: usize,
-    sy: u8,
-) {
-    let col = x + z * crate::world::chunk::CHUNK_SIZE;
-    // Tier-1 paint: zero the column's texel in every layer.
-    for layer in data.detail_layers.layers.iter_mut() {
-        layer.map[col] = crate::world::layers::DetailTexel::default();
-    }
-    // Tier-2/3 scatter: drop instances anchored to this column's surface voxel.
-    for insts in data.scatter_instances.by_type.values_mut() {
-        insts.retain(|inst| {
-            !(inst.anchor.x as usize == x
-                && inst.anchor.z as usize == z
-                && inst.anchor.y == sy)
-        });
-    }
-}
-
-/// Cross-chunk seam finalization (Substep 2b): once a chunk's six face neighbors
-/// are resident, derive the boundary slab demotions the isolated generation pass
-/// could not see (surface steps that straddle a chunk border, including chunk-Y
-/// seams). One-shot per chunk (`seam_finalized`), bounded per frame, and runs
-/// before meshing so the first mesh already carries the seam slabs. Mutates
-/// generated storage directly (this is generation finalization, not an actor
-/// edit - see world::seam).
+/// Cross-chunk seam finalization (Substep 2b): once a chunk's six face
+/// neighbors are resident, derive the boundary slab demotions the isolated
+/// generation pass could not see (surface steps that straddle a chunk border,
+/// including chunk-Y seams). One-shot per chunk (`seam_finalized`) and bounded
+/// per frame; runs before meshing so the first mesh already carries the seam
+/// slabs.
+///
+/// The derivation is read-only and needs neighbor storage, so it stays here; the
+/// write goes through the mutation door as `FinalizeSeam` (P5 - this was the
+/// largest remaining bypass, audit §7.1 E-1). It is `System` origin: generation
+/// finalization, not an actor edit.
 pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
     const MAX_PER_FRAME: usize = 16;
-    let sea_level = world.0.generator.sea_level();
 
     let mut candidates: Vec<IVec3> = Vec::new();
     for (coord, chunk) in world.0.chunks.iter() {
@@ -838,7 +842,6 @@ pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
 
     for pos in candidates {
         let nb = crate::world::seam::NeighborStorages::capture(&world.0, pos);
-
         let distances = world
             .0
             .get_chunk(pos)
@@ -848,114 +851,13 @@ pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
             None => Vec::new(),
         };
 
-        if let Some(chunk) = world.0.get_chunk_mut(pos) {
-            // Never let a worldgen-derived demotion overwrite a player-placed voxel:
-            // seam demotions are recomputed from current (already edit-overlaid)
-            // storage, so without this guard a border edit could be reverted.
-            let applied: Vec<(usize, Voxel)> = demotions
-                .iter()
-                .filter(|(index, _)| {
-                    !chunk.data.overrides.as_ref().is_some_and(|ovr| {
-                        ovr.voxel_diffs.contains_key(&voxel_core::LocalPos::from_index(*index))
-                    })
-                })
-                .copied()
-                .collect();
-            if !applied.is_empty() {
-                let mut storage = (*chunk.data.voxels).clone();
-                for (index, voxel) in &applied {
-                    storage.set_voxel(*index, *voxel);
-                }
-                chunk.data.voxels = std::sync::Arc::new(storage);
-                chunk.mark_mesh_dirty();
-
-                // A seam demotion only ever turns a Cube (fluid capacity 0, so
-                // ocean_fill correctly placed no water) into a SlabBottom (fluid
-                // capacity SLAB_MASS). ocean_fill already ran before this chunk's
-                // neighbors were resident, so it never saw the new empty half -
-                // without this, a seam-demoted slab stays permanently dry even
-                // when it sits at/below sea level right next to water-bearing
-                // cells the isolated pass got right. Submerged fast-path chunks
-                // don't need this: their capacity is read live off current
-                // storage, so a demotion there is already reflected for free.
-                // Pond water is not covered here - the per-column pond level
-                // isn't retained after generation, so a seam-demoted slab on a
-                // pond shoreline (above sea level) can still come up dry.
-                if !matches!(
-                    chunk.data.fluids.fill_mode,
-                    crate::world::layers::FluidFillMode::Submerged(_)
-                ) {
-                    for (index, voxel) in &applied {
-                        let lp = voxel_core::LocalPos::from_index(*index);
-                        let world_y =
-                            pos.y * crate::world::chunk::CHUNK_SIZE as i32 + lp.y as i32;
-                        if world_y > sea_level {
-                            continue;
-                        }
-                        let capacity = crate::world::fluid_gen::fluid_capacity(*voxel);
-                        if capacity > 0 {
-                            // Sea-level layer fills to the 3/4 waterline (slab-aware),
-                            // matching ocean_fill so the seam slab lines up with the
-                            // surrounding sea instead of bumping up to a full cell.
-                            let mass = if world_y == sea_level {
-                                crate::world::fluid_gen::sea_surface_mass(*voxel)
-                            } else {
-                                capacity
-                            };
-                            chunk.data.fluids.cells.insert(
-                                lp,
-                                crate::world::layers::FluidCell {
-                                    fluid_id: crate::world::layers::FluidId::WATER,
-                                    mass,
-                                    flags: crate::world::layers::FluidCell::FLAG_SETTLED,
-                                },
-                            );
-                            // The demoted cube-turned-slab is now a submerged surface,
-                            // so the foliage generation placed on its (then-dry) cube
-                            // top is underwater. Apply the same submersion cull here.
-                            remove_submerged_column_foliage(
-                                &mut chunk.data,
-                                lp.x as usize,
-                                lp.z as usize,
-                                lp.y,
-                            );
-                        }
-                    }
-                }
-
-                // Persist the decision through the same diff mechanism player edits
-                // use, so `seam_finalized` (below) can be persisted without the
-                // demotion reverting to a sharp cube on the next load. These are
-                // worldgen-finalization entries, not player edits, but the override
-                // guard above treats "present in voxel_diffs" as "already decided"
-                // either way, so sharing the bucket is safe.
-                let ovr = chunk
-                    .data
-                    .overrides
-                    .get_or_insert_with(crate::world::overrides::ChunkOverrides::default);
-                for (index, voxel) in &applied {
-                    ovr.set_voxel(*index, *voxel);
-                }
-                chunk.persist_dirty = true;
-            }
-            chunk.seam_finalized = true;
-        }
-
-        // Boundary demotions change face culling for the six neighbors: re-mesh them.
-        if !demotions.is_empty() {
-            for offset in [
-                IVec3::new(1, 0, 0),
-                IVec3::new(-1, 0, 0),
-                IVec3::new(0, 1, 0),
-                IVec3::new(0, -1, 0),
-                IVec3::new(0, 0, 1),
-                IVec3::new(0, 0, -1),
-            ] {
-                if let Some(n) = world.0.get_chunk_mut(pos + offset) {
-                    n.mark_mesh_dirty();
-                }
-            }
-        }
+        world
+            .0
+            .execute(MutationCommand::system(WorldMutation::FinalizeSeam {
+                chunk: pos,
+                demotions,
+            }))
+            .expect("system seam finalization accepted in any mode");
     }
 }
 
@@ -1081,6 +983,7 @@ pub fn compute_stats_system(
     world: Res<VoxelWorld>,
     sim: Res<SimulationManager>,
     frame: Res<FrameState>,
+    jobs: Res<JobSystem>,
     mut ui: ResMut<UiState>,
 ) {
     ui.frame_time_ms = frame.dt * 1000.0;
@@ -1099,6 +1002,31 @@ pub fn compute_stats_system(
     ui.total_triangles = total_tris;
     ui.chunks_visible = chunks_visible;
     ui.chunks_total = chunks_total;
+
+    ui.mutation_log = world.0.mutation_log();
+
+    // Explicit operator action: ~9 ms per chunk regenerated, so it produces one
+    // long frame by design rather than being spread across many.
+    if ui.determinism_check_requested {
+        ui.determinism_check_requested = false;
+        let cam = sim.camera.smooth_target;
+        let camera_chunk = IVec3::new(
+            (cam.x / CHUNK_WORLD_SIZE).floor() as i32,
+            0,
+            (cam.z / CHUNK_WORLD_SIZE).floor() as i32,
+        );
+        ui.determinism = world.0.verify_determinism(32, camera_chunk, jobs.pool());
+    }
+
+    // Residency sampling walks every resident chunk summing per-layer bytes, so
+    // it runs about once a second rather than joining the per-frame full-set
+    // scans that audit §4.9 identifies as the secondary cost at high zoom.
+    if ui.residency_countdown == 0 {
+        ui.residency = world.0.sample_residency(ui.residency);
+        ui.residency_countdown = 60;
+    } else {
+        ui.residency_countdown -= 1;
+    }
 }
 
 // ==========================================================================
@@ -1169,7 +1097,12 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     ecs.resource_mut::<RenderTargets>().update_view(&dims);
 
     // --- Acquire swapchain ---
+    // Timed separately from the rest of the Render stage: under Fifo this call
+    // is where the frame blocks on vsync, which is waiting rather than work.
+    let acquire_start = std::time::Instant::now();
     let surface_result = ecs.resource::<SurfaceState>().surface.get_current_texture();
+    let acquire_ms = acquire_start.elapsed().as_secs_f32() * 1000.0;
+    ecs.resource_mut::<FrameTimings>().add_present(acquire_ms);
     let surface_frame = match surface_result {
         Ok(f) => f,
         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -1424,20 +1357,15 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
                 &material_name,
                 material_color,
             );
-            // Auto-regen: hand a dirty editor edit to the regen path. Coalesced by
-            // WorldRegenCoordinator - only the latest pending graph is applied, and
-            // only while no regen is in flight. No-op while the editor is hidden
-            // (its `show` isn't called, so it never goes dirty).
-            if let Some((slot, graph)) = egui.graph_editor.consume_dirty() {
-                // The selector reports which hierarchy graph was edited.
-                ui_state.pending_graph = Some((slot, graph));
-            }
         });
     });
 
     // --- Submit + present ---
     ctx.queue.submit(std::iter::once(encoder.finish()));
+    let present_start = std::time::Instant::now();
     surface_frame.present();
+    let present_ms = present_start.elapsed().as_secs_f32() * 1000.0;
+    ecs.resource_mut::<FrameTimings>().add_present(present_ms);
 }
 
 // ==========================================================================

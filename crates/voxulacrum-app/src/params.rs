@@ -584,7 +584,11 @@ pub struct StreamingParams {
     pub unload_margin: f32,
     pub min_chunk_y: i32,
     pub max_chunk_y: i32,
+    /// Completed generation results inserted into the world per frame.
     pub max_gen_per_frame: u32,
+    /// Chunk snapshots extracted for meshing per frame. This is a *main-thread*
+    /// budget - each submission copies a 34^3 voxel snapshot - and is separate
+    /// from how many mesh jobs may run concurrently, which the scheduler owns.
     pub max_mesh_per_frame: u32,
 }
 
@@ -596,7 +600,7 @@ impl Default for StreamingParams {
             min_chunk_y: 0,
             max_chunk_y: 4,
             max_gen_per_frame: 64,
-            max_mesh_per_frame: 64,
+            max_mesh_per_frame: 32,
         }
     }
 }

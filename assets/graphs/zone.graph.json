@@ -1,11 +1,65 @@
 {
-  "kind": "Zone",
+  "kind": "Biome",
+  "boundary": {
+    "inputs": [],
+    "outputs": []
+  },
   "nodes": [
-    { "value": null, "version": 0 },
-    { "value": { "kind": { "type": "GraphRef", "target": "World" }, "position": [0.0, 0.0] }, "version": 1 },
-    { "value": { "kind": { "type": "ZoneOutput", "biome_bands": [0.0] }, "position": [240.0, 0.0] }, "version": 1 }
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "GraphRef",
+          "target": "World"
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "ZoneOutput",
+          "biome_bands": [
+            0.0,
+            0.25
+          ],
+          "biome_ids": [
+            0,
+            1,
+            0
+          ]
+        },
+        "position": [
+          240.0,
+          0.0
+        ]
+      },
+      "version": 1
+    }
   ],
   "edges": [
-    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 2, "version": 1 }, "pin": 0 } }
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      }
+    }
   ]
 }
