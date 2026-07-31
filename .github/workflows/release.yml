@@ -98,7 +98,7 @@ jobs:
             cp target/release/voxulacrum-app "dist/$name/"
           fi
           cp -r shaders assets palettes "dist/$name/"
-          cp CHANGELOG.md "dist/$name/"
+          cp CHANGELOG.md README.md LICENSE THIRD-PARTY-NOTICES.md "dist/$name/"
 
       - name: Verify package layout
         shell: bash
@@ -106,7 +106,8 @@ jobs:
           d="dist/$PKG_NAME"
           fail=0
           for p in shaders assets/graphs assets/libraries palettes \
-                   assets/materials.ron assets/prefabs.ron assets/input.ron; do
+                   assets/materials.ron assets/prefabs.ron assets/input.ron \
+                   LICENSE THIRD-PARTY-NOTICES.md assets/LICENSE; do
             if [ ! -e "$d/$p" ]; then echo "::error::missing $p"; fail=1; fi
           done
           if [ "${{ runner.os }}" = "Windows" ]; then

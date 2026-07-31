@@ -1,0 +1,28 @@
+Sample content — Creative Commons Attribution 4.0 International (CC BY 4.0)
+===========================================================================
+
+Copyright (c) 2026 BananaPix
+
+The content in this directory — node graphs, the world manifest, standard
+libraries, material and prefab registries, input bindings — together with the
+palettes in `/palettes` and the shaders in `/shaders`, is licensed under the
+Creative Commons Attribution 4.0 International License.
+
+    Human-readable summary: https://creativecommons.org/licenses/by/4.0/
+    Full legal code:        https://creativecommons.org/licenses/by/4.0/legalcode
+
+You are free to share and adapt this material for any purpose, including
+commercially, provided you give appropriate credit.
+
+Why this is separate from the engine license
+--------------------------------------------
+
+The engine source is licensed under MPL-2.0 (see `/LICENSE`). That license is
+written about software, and applies poorly to authored content. These files are
+here to be read, copied and modified — they are the worked examples of how the
+graph system is meant to be used, and learning the engine means taking them
+apart. CC BY is the license that says so plainly.
+
+This covers the *sample* content shipped in this repository. It is not a grant
+covering content authored with the engine by anyone else, including content in
+games built on it.

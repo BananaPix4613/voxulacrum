@@ -1,0 +1,23 @@
+# Third-Party Notices
+
+voxulacrum bundles the following open-source components. Each license below is
+reproduced in full, as those licenses require.
+
+The engine's own license is MPL-2.0 (`LICENSE`); its sample content is CC BY 4.0
+(`assets/LICENSE`). Nothing here changes those.
+
+{{#each licenses}}
+---
+
+## {{name}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} — {{crate.repository}}{{/if}}
+{{/each}}
+
+```
+{{text}}
+```
+
+{{/each}}

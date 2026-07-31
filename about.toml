@@ -1,0 +1,43 @@
+# Configuration for `cargo about`, which generates THIRD-PARTY-NOTICES.md.
+#
+# MIT and Apache-2.0 both require their copyright notice travel with distributed
+# copies, so the generated file ships inside every release package. Regenerate it
+# whenever dependencies change:
+#
+#     cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
+#
+# `accepted` is an allowlist, in preference order where a crate offers a choice.
+# If the first run fails on a license not listed here, that is the point to look
+# at what the crate actually is rather than to append reflexively - a copyleft
+# license appearing in this list would be a real finding.
+
+# Only the platforms the release workflow actually builds for. Without this,
+# notices would include dependencies for targets nobody ships.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "OpenSSL",
+
+    # Font licenses, from egui's bundled default fonts (epaint_default_fonts):
+    # Noto Emoji under OFL-1.1, Ubuntu Light under the Ubuntu Font Licence. Note
+    # that crate's expression uses AND, not OR - these are not alternatives to
+    # MIT/Apache, they are additional obligations. Both permit embedding and
+    # redistributing a font inside software, which is exactly this use. They do
+    # not reach the engine's own license, and they impose nothing on a game built
+    # with it. The conditions that do bite: the fonts may not be sold on their
+    # own, and OFL reserves the font names, so a modified font must be renamed.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]

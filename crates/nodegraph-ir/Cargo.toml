@@ -1,3 +1,5 @@
+private = { ignore = true }
+
 [package]
 name = "nodegraph-ir"
 version.workspace = true
