@@ -230,7 +230,7 @@ impl<'g> ColumnEvaluator<'g> {
             .from;
         if let Some(src) = self.graph.nodes.get(from.node) {
             if let NodeKind::GraphRef(gr) = &src.kind {
-                let name = self.graph_ref_output_name(from.node, pin)?;
+                let name = self.graph_ref_output_name(from.node, from.pin)?;
                 let up = self
                     .upstream
                     .ok_or(EvalError::UnresolvedGraphRef { node: from.node })?;
@@ -606,5 +606,62 @@ mod tests {
                 assert_eq!(biome.get(x, z), expect, "biome must follow World's climate");
             }
         }
+    }
+
+    #[test]
+    fn pointwise_and_bulk_read_the_same_graph_ref_output() {
+        use nodegraph_ir::{GraphKind, GraphOutputParams, GraphRefParams, ZoneOutputParams};
+        // World exposes two boundary outputs. Sorted by name, "aridity" is
+        // output pin 0 and "temperature" is pin 1.
+        let mut world = Graph::of_kind(GraphKind::World);
+        let n0 = world.add_node(NodeKind::SurfaceNoise(NoiseParams { seed: 1, ..Default::default() }));
+        let o0 = world.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "aridity".into() }));
+        world.connect(PinRef::new(n0, 0), PinRef::new(o0, 0)).unwrap();
+        let n1 = world.add_node(NodeKind::SurfaceNoise(NoiseParams { seed: 777, frequency: 0.05, ..Default::default() }));
+        let o1 = world.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "temperature".into() }));
+        world.connect(PinRef::new(n1, 0), PinRef::new(o1, 0)).unwrap();
+        world.derive_output_boundary();
+
+        // Zone reads the *second* output pin. Source pin 1 into destination pin
+        // 0 is the case the two paths used to disagree about.
+        let mut zone = Graph::of_kind(GraphKind::Zone);
+        let gr = zone.add_node(NodeKind::GraphRef(GraphRefParams {
+            target: GraphRefTarget::World,
+            ..Default::default()
+        }));
+        let zo = zone.add_node(NodeKind::ZoneOutput(ZoneOutputParams { biome_bands: vec![0.0], ..Default::default() }));
+        let wb = world.boundary.clone();
+        zone.resolve_graph_refs(|t| (t == GraphRefTarget::World).then(|| wb.clone()));
+        zone.connect(PinRef::new(gr, 1), PinRef::new(zo, 0)).unwrap();
+
+        let ctx = EvalContext::new(9, IVec3::new(2, 0, -1));
+        let mut we = ColumnEvaluator::new(&world, ctx);
+        we.evaluate().unwrap();
+        let world_cache = we.into_cache();
+        let mut upstream = UpstreamGraphs::new();
+        upstream.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+
+        let mut ze = ColumnEvaluator::new(&zone, ctx).with_upstream(&upstream);
+        ze.evaluate().unwrap();
+        let bulk = ze.cache().get(zo).unwrap().as_id().unwrap();
+
+        // Pointwise is how two chunks agree about a shared column, so it
+        // disagreeing with the bulk fill is a seam defect, not a detail.
+        let mut disagreements = 0;
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let wx = ctx.chunk.x * CHUNK_DIM as i32 + x as i32;
+                let wz = ctx.chunk.z * CHUNK_DIM as i32 + z as i32;
+                match ze.sample_column(zo, wx, wz).unwrap() {
+                    ColumnSample::Id(v) => {
+                        if v != bulk.get(x, z) {
+                            disagreements += 1;
+                        }
+                    }
+                    other => panic!("expected id, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(disagreements, 0, "pointwise disagreed with bulk on {disagreements} of 1024 columns");
     }
 }

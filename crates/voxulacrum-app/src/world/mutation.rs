@@ -141,9 +141,11 @@ pub enum WorldMutation {
     EditVoxelBatch { chunk: IVec3, edits: Vec<(LocalPos, Voxel)> },
     /// Remove every effective scatter instance anchored at `anchor` in `chunk`:
     /// generated ones are tombstoned (`scatter_removed`), player-added ones dropped.
+    #[allow(dead_code)]
     RemoveScatter { chunk: IVec3, anchor: LocalPos },
     /// Place one player scatter instance at `anchor` in `chunk`. `world_voxel` is
     /// the anchor's world-space voxel coordinate, used to derive the stable id.
+    #[allow(dead_code)]
     PlaceScatter { chunk: IVec3, anchor: LocalPos, world_voxel: IVec3 },
     /// Pour a short settled water column above `anchor` (world-space voxel),
     /// spanning whatever chunks the column crosses. Each poured cell is written as

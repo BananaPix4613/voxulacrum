@@ -256,7 +256,7 @@ not its neighbours were ever resident.
 `world_eval.rs:284` with `FADE_RADIUS = 10`). This already reads *outside* the
 chunk during column evaluation, to find the nearest differing biome. It is the
 closest thing in the tree to a cross-chunk read inside generation, and it is
-pure: it re-derives neighbouring columns rather than reading neighbour chunks.
+pure: it re-derives neighboring columns rather than reading neighbour chunks.
 
 **The design question A must answer** is which of these three the structure/river
 stage is. My reading: (c) is the model — *re-derive, never read a neighbour's
@@ -553,7 +553,7 @@ Three things in this phase will move `generate`:
    deep.
 3. **A third and fourth assigned biome** means `composite_terrain` evaluates
    more `LayerEval`s per chunk — it already evaluates one full biome layer per
-   *present or fade-neighbouring* biome (`world_eval.rs:392–406`).
+   *present or fade-neighboring* biome (`world_eval.rs:392–406`).
 
 The frontier measurement is the one to take **early**, not at the close: it is a
 carried-forward gate, and taking it before content lands gives a comparison
@@ -2094,3 +2094,207 @@ suspicion:
 Cause 1 is a content-tuning question and cause 3 is a parameter; both belong in
 the tuning substep. Cause 2 would be a design revision and should not be reached
 for until 1 and 3 are ruled out - the cheapest explanation first.
+
+---
+
+## Reorientation after the river research (state of play)
+
+Two research documents landed at the S19 pause: `docs/macro-terrain-research.md`
+and `docs/river-generation-research.md`, answering `docs/river-research-brief.md`.
+Both are the reference; this section records only the decision and what happens
+next.
+
+### What the research established
+
+**The brief's open question resolves yes.** `ColumnEvaluator::sample_column(id,
+world_x, world_z)` is world-absolute and valid at arbitrary world XZ. Bed and
+flow topology can come from one wired input.
+
+**The diagnosis was one level too shallow.** The defect is not that the bed fails
+to follow the terrain; it is the **direction of dependence**. Every technique
+that produces convincing rivers has the terrain derive from the network. Two
+independent fields cannot be reconciled into one. "A river cannot follow terrain
+it did not shape" is a specification, not a limitation.
+
+**Three blockers, all graph plumbing, none about terrain design:**
+
+| # | Blocker |
+|---|---|
+| B1 | The column domain implements four node kinds and no arithmetic, so a control channel cannot be scaled into world-Y units |
+| B2 | `GraphRef` errors in the **density** evaluator, so a biome graph containing one fails to evaluate the whole chunk |
+| B3 | No `SurfaceField -> Density` path, so a per-column value cannot enter a density chain |
+
+**B2 is the finding worth keeping.** Design § 4 describes cross-graph dataflow as
+the mechanism "that makes the hierarchy actually compose". It composes in the
+column domain only. No shipped biome graph contains a `GraphRef`, so nothing has
+exercised it. Same pattern as the `prefabs.ron` fallback and the anchor that
+could not see stage 8: **a claimed capability with no exercise is not a
+capability.** S17 and S19 were built directly alongside this and never tripped it.
+
+**The world is also too short.** 128 voxels with `sea_level = 24` gives at most
+~72 voxels of fall, and ~36 for the biome covering most of the world. That is an
+arithmetic fact, not an aesthetic one: a river needs somewhere to fall.
+
+### The decision
+
+Scope: Phase A is five substeps, Phase B six (including a world-height change and
+a chunk-skip bound), Phase C eight - roughly nineteen on top of the twelve already
+remaining. Phase B also rewrites all three biome graphs, invalidating the content
+proof, the hash anchor and the 0.4.0 perf comparison together.
+
+Agreed:
+
+1. **Phase A lands in 0.4.0 regardless of rivers.** Mostly porting; the edge map
+   is worth ~3.5x on every pointwise consumer; B2 is a live architectural defect
+   that should not survive a release themed on worldgen completeness. It is
+   independently valuable, which is the test.
+2. **Phases B and C become 0.5.0**, with macro terrain as that version's
+   headline. **Rivers come off 0.4.0's deliverables** as a roadmap amendment.
+3. **The S19 river code stays but does not ship enabled.** Step 1 of the
+   recommended sequence moves it to the column domain, so it is not wasted - but
+   shipped content must not carry a `River` node that produces ravines.
+
+### Immediate next actions, in order
+
+1. **Commit.** Nothing on this branch is committed. Commit message drafted in
+   session; regular per-substep commits from here on, at the user's request.
+2. **Verify B1 / B2 / B3 against the code directly.** They are load-bearing, the
+   cost figures are explicitly estimates, and this phase has twice been wrong by
+   trusting an unread signature (`composite_terrain`'s `Arc`, the terminals'
+   descriptor pin counts). B2 is the cheapest check and changes the most if wrong.
+3. **Phase A step 0a**: precompute the `(node, pin) -> edge` map. Contained,
+   benefits every pointwise consumer, unrelated to rivers.
+
+### Carried forward
+
+- Anchor hash `0x12e6a0644184099f` (`--verify-generation`, 512 chunks).
+- Remaining pre-existing substeps: 21 (foliage 2/3), 22-24 (preview tools),
+  25-27 (editor ergonomics), 28 (content wave 2), 29 (asset standards),
+  30 (D8 decision + measurement), 31 (close).
+- Roadmap amendments now owed at close: rivers off 0.4.0, macro terrain as the
+  0.5.0 headline, plus the six deferred from Q6.
+- Deferred lints: `InputMap::default()` has no drift test against
+  `assets/input.ron`; `PlaceStructure` outside a ZoneGraph is a runtime error
+  rather than a validation error; unknown-field lint for graph assets.
+
+## Verifying B1 / B2 / B3, and measuring step 0a
+
+Read against the code, not the research summary. All three hold; one is worse
+than stated, and step 0a's premise does not survive measurement.
+
+### B1 - confirmed
+
+`ColumnEvaluator::fill_node` (column_eval.rs) matches exactly four kinds -
+`SurfaceNoise`, `WorldOutput`, `ZoneOutput`, `GraphOutput` - and falls to
+`WrongGraphDomain` for everything else. `sample_column` matches the same four.
+There is no arithmetic in the column domain.
+
+### B3 - confirmed
+
+`PinType::can_coerce` is literally `matches!((from, to), (Scalar, Density) |
+(Curve, Scalar))`. `pin.rs`'s own `new_types_are_strict` test already asserts
+`!is_compatible(SurfaceField, Density)`. No per-column value can enter a density
+chain today.
+
+### B2 - confirmed, and it is an authoring trap rather than a missing feature
+
+The evaluator side is as described: `Evaluator::evaluate` fills every node in
+topological order with no skip, and `fill_node` and `sample_density` both return
+`UnresolvedGraphRef` for `GraphRef`. `ColumnEvaluator::evaluate` has the skip
+(with the comment explaining that a `GraphRef` has no single cached output); the
+density evaluator has no equivalent.
+
+What the research did not say is that the two resolution paths disagree about
+which graphs may contain one:
+
+| Path | Resolves `GraphRef` pins on |
+|---|---|
+| `WorldEvaluator::with_cross_graph_resolved` (generation) | zone graphs only |
+| `load_world_graphs` (editor) | every graph after the world - zones, **biomes, details** |
+
+So the editor renders a `climate` pin on a `GraphRef` dropped into a biome graph,
+lets it be wired, and saves it. Generation then fails that chunk with a warn.
+Nothing catches it in between: `Graph::validate` has no rule about `GraphRef` by
+graph kind, and neither does `--validate-graphs`. The comment on
+`with_cross_graph_resolved` still says biome-graph imports "arrive with the biome
+density rework (Substep 7)", which is where the gap came from.
+
+This is the same shape as the `prefabs.ron` fallback: a capability that reads as
+present, fails silently, and has no exercise proving otherwise.
+
+### A second defect, found while reading and confirmed by test
+
+`ColumnEvaluator` resolves a `GraphRef` read by *name*, and gets that name from
+`graph_ref_output_name(graphref, pin)`, which indexes the `GraphRef` node's
+**output** pins. The bulk path (`input_surface`) passes `from.pin`. The pointwise
+path (`sample_input_surface`) passes `pin` - the *destination's input pin index*.
+
+The two agree only when the source output index equals the destination input
+index, which is why nothing has caught it: the shipped world graph exposes one
+boundary output and everything wires pin 0 to pin 0.
+
+Confirmed rather than reasoned. A world graph exposing `aridity` (output 0) and
+`temperature` (output 1), with a zone graph wiring output 1 into `ZoneOutput`,
+gives **418 of 1024 columns disagreeing** between bulk and pointwise. Bulk reads
+temperature; pointwise reads aridity.
+
+Class matters more than the token: bulk and pointwise disagreeing is the seam
+defect, and pointwise is what neighboring chunks use to agree about a shared
+column. B1's fix - arithmetic in the column domain - is exactly what produces
+multi-input column nodes fed by multi-output `GraphRef`s, so this would have
+started firing during Phase A.
+
+### Step 0a - measured, and the premise does not hold
+
+The research estimated the linear edge scan at ~93% of pointwise probe cost and
+the `(node, pin) -> edge` map at ~3.5x. Measured on a scratch workspace
+(`voxel-core` + `nodegraph-ir` + `nodegraph-eval`, release, criterion, 1024
+samples per iteration), against the graphs actually shipped plus a synthetic
+chain to isolate scaling:
+
+| bench | edges | scan | indexed | change |
+|---|---|---|---|---|
+| `sample_column` / world.graph.json | 2 | 64.8 us | 87.6 us | **+35%** |
+| `sample_density` / biome_meadow | 12 | 291 us | 323 us | **+11%** |
+| `sample_density` / synthetic chain | 9 | 145 us | 194 us | **+33%** |
+| `sample_density` / synthetic chain | 33 | 778 us | 695 us | -11% |
+| `sample_density` / synthetic chain | 129 | 6.89 ms | 2.82 ms | **-59%** |
+
+The quadratic is real and the index removes it - the 129-edge case is 2.4x
+faster. But the crossover is around 25-30 edges, and **no graph in the tree is
+within a factor of two of that.** Below it the index loses: nothing beats
+scanning two contiguous edges, and the indexed lookup costs a version check plus
+two dependent loads.
+
+Two layouts were measured, not one. A `SecondaryMap<NodeId, Vec<Option<PinRef>>>`
+was slower still at the large end (129 edges: 3.26 ms) because every lookup chased
+a per-node heap allocation. The contiguous form - one `Vec` of slots plus a
+per-node `(start, len)` window - is what the 2.82 ms above refers to.
+
+Two hypotheses about where pointwise cost actually goes were tested and rejected:
+
+- **Noise construction.** `sample_density` rebuilds a `FastNoiseLite` per noise
+  node per sample. Measured: construct+sample 94.2 us / 1024, sample alone
+  93.7 us / 1024. Construction is free; the fractal sample is ~90 ns and is what
+  `biome_meadow`'s ~284 ns per sample is made of (six noise evaluations, the
+  domain warp's two counted three times through the diamond).
+- **The scan share.** At `biome_meadow`'s size the edge scan is a small single-
+  digit fraction, not 93%.
+
+One thing the reading did turn up that *is* worth fixing whenever the index
+lands: `UpstreamGraphs::surface_sample` constructs a whole `ColumnEvaluator` per
+sampled column. Adding index construction to `ColumnEvaluator::new` would put an
+allocation on that path, per column, which is how an optimization becomes a
+regression.
+
+### Recommendation
+
+Defer step 0a to 0.5.0 and land it against the graphs that need it. The engine's
+own rule is that a metric with no deficit behind it is not a measurement; this
+measurement found no deficit at current sizes and a large one at sizes that do
+not exist yet. Landing it now buys a real regression - small in absolute terms
+against an 8.5-9.0 ms generate job, but a regression - in exchange for a win
+nothing can observe.
+
+What should land now is the pointwise bench itself. It is the instrument that
+will say when the deficit arrives, and it is the durable half of this work.

@@ -7,14 +7,13 @@
 
 use bevy_ecs::prelude::*;
 use glam::{IVec3, Mat4, Vec3};
-use voxel_core::{LocalPos, MaterialId, Voxel};
+use voxel_core::{MaterialId, Voxel};
 
 use crate::ecs::resources::VoxelWorld;
 use crate::input::{GameAction, InputState, PointerState, RawInputBuffer};
 use crate::player::systems::Player;
 use crate::rendering::debug_lines::DebugLinePass;
 use crate::rendering::render_context::RenderContext;
-use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::surface_state::SurfaceState;
 use crate::simulation::manager::SimulationManager;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
