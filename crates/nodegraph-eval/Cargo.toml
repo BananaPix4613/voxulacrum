@@ -16,8 +16,13 @@ log.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+serde_json.workspace = true
 criterion.workspace = true
 
 [[bench]]
 name = "biome"
+harness = false
+
+[[bench]]
+name = "pointwise"
 harness = false

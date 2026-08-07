@@ -46,6 +46,7 @@ mod diagnostic;
 mod edge;
 mod error;
 mod graph;
+mod index;
 mod library;
 mod node;
 mod pin;
@@ -56,6 +57,7 @@ pub use diagnostic::{Diagnostic, Severity};
 pub use edge::{Edge, PinRef};
 pub use error::{GraphError, GraphResult};
 pub use graph::{Graph, GraphKind};
+pub use index::EdgeIndex;
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
 pub use node::{
     AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams, ConstantParams,

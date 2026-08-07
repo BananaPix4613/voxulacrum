@@ -6,8 +6,8 @@ use std::sync::Arc;
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
 use glam::Vec3;
 use nodegraph_ir::{
-    Axis, DomainWarpParams, Graph, FractalType, LibraryGraphId, NoiseParams, NodeId, NodeKind,
-    Severity,
+    Axis, DomainWarpParams, EdgeIndex, Graph, FractalType, LibraryGraphId, NoiseParams, NodeId,
+    NodeKind, Severity,
 };
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
@@ -44,6 +44,10 @@ pub(crate) fn configured_noise(
 /// Evaluates a graph for one chunk. Holds a chunk-scoped CSE cache.
 pub struct Evaluator<'g> {
     graph: &'g Graph,
+    /// `(node, pin) -> source` over `graph.edges`, built once. The pointwise
+    /// samplers resolve an input per sample, so scanning the edge list here
+    /// makes a probe quadratic in graph size.
+    edges: EdgeIndex,
     ctx: EvalContext,
     cache: EvalCache,
     /// The active biome's scalar parameters, read by `BiomeParam` nodes. `None`
@@ -73,7 +77,7 @@ impl<'g> Evaluator<'g> {
 
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, ctx, cache: EvalCache::new(), biome_params: None, kernels: None, rivers: std::cell::RefCell::new(Vec::new()) }
+        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: EvalCache::new(), biome_params: None, kernels: None, rivers: std::cell::RefCell::new(Vec::new()) }
     }
 
     /// Attach the native kernel bindings, so `LibraryRef` nodes evaluate.
@@ -136,10 +140,10 @@ impl<'g> Evaluator<'g> {
 
     /// Optional Vec3 override on input pin 0 of a noise source.
     fn position_field(&self, node: NodeId) -> EvalResult<Option<Arc<Vec3Field>>> {
-        let Some(edge) = self.graph.edges.iter().find(|e| e.to.node == node && e.to.pin == 0) else {
+        let Some(from) = self.edges.source(node, 0) else {
             return Ok(None);
         };
-        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
+        let src = self.cache.get(from.node).ok_or(EvalError::MissingOutput(from.node))?;
         match src {
             CachedOutput::Vec3(f) => Ok(Some(f.clone())),
             other => Err(EvalError::WrongInputType {
@@ -176,20 +180,17 @@ impl<'g> Evaluator<'g> {
             .ok_or(EvalError::UnresolvedLibraryRef { node })
     }
 
+    /// The cached output feeding `(node, pin)`. Every typed `input_*` resolver
+    /// differs only in which variant it accepts, so they share this.
+    fn input(&self, node: NodeId, pin: u16) -> EvalResult<&CachedOutput> {
+        let from = self.edges.source(node, pin).ok_or(EvalError::MissingInput { node, pin })?;
+        self.cache.get(from.node).ok_or(EvalError::MissingOutput(from.node))
+    }
+    
     /// Resolve the scalar field feeding `(node, pin)`. `Scalar → Density`
     /// coercion is a no-op here (both are `f32` fields).
     fn input_scalar(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ScalarField>> {
-        let edge = self
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        let src = self
-            .cache
-            .get(edge.from.node)
-            .ok_or(EvalError::MissingOutput(edge.from.node))?;
-        match src {
+        match self.input(node, pin)? {
             CachedOutput::Scalar(f) => Ok(f.clone()),
             other => Err(EvalError::WrongInputType {
                 node,
@@ -201,10 +202,7 @@ impl<'g> Evaluator<'g> {
 
     /// Resolve a required Vec3 input - like `input_scalar` but for `Vec3Field`.
     fn input_vec3(&self, node: NodeId, pin: u16) -> EvalResult<Arc<Vec3Field>> {
-        let edge = self.graph.edges.iter().find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
-        match src {
+        match self.input(node, pin)? {
             CachedOutput::Vec3(f) => Ok(f.clone()),
             other => Err(EvalError::WrongInputType {
                 node, expected: "vec3", got: other.kind_name(),
@@ -217,14 +215,7 @@ impl<'g> Evaluator<'g> {
         node: NodeId,
         pin: u16,
     ) -> EvalResult<Arc<ChunkBuffer<MaterialId, 32>>> {
-        let edge = self
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
-        match src {
+        match self.input(node, pin)? {
             CachedOutput::Material(f) => Ok(f.clone()),
             other => Err(EvalError::WrongInputType {
                 node,
@@ -235,11 +226,7 @@ impl<'g> Evaluator<'g> {
     }
 
     fn input_terrain(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ChunkBuffer<Voxel, 32>>> {
-        let edge = self.graph.edges.iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
-        match src {
+        match self.input(node, pin)? {
             CachedOutput::Terrain(f) => Ok(f.clone()),
             other => Err(EvalError::WrongInputType {
                 node, expected: "terrain", got: other.kind_name(),
@@ -248,11 +235,7 @@ impl<'g> Evaluator<'g> {
     }
 
     fn input_positions(&self, node: NodeId, pin: u16) -> EvalResult<Arc<Vec<ScatterPoint>>> {
-        let edge = self.graph.edges.iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        let src = self.cache.get(edge.from.node).ok_or(EvalError::MissingOutput(edge.from.node))?;
-        match src {
+        match self.input(node, pin)? {
             CachedOutput::Positions(p) => Ok(p.clone()),
             other => Err(EvalError::WrongInputType {
                 node, expected: "positions", got: other.kind_name(),
@@ -715,13 +698,8 @@ impl<'g> Evaluator<'g> {
         y: usize,
         z: usize,
     ) -> EvalResult<f32> {
-        let edge = self
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        self.sample_density(edge.from.node, x, y, z)
+        let from = self.edges.source(node, pin).ok_or(EvalError::MissingInput { node, pin })?;
+        self.sample_density(from.node, x, y, z)
     }
 
     /// Pointwise sample of a `Vec3`-producing chain feeding `(node, pin)`.
@@ -731,13 +709,8 @@ impl<'g> Evaluator<'g> {
     /// continuation samples *above* the chunk window, where no filled field
     /// exists.
     fn sample_vec3(&self, node: NodeId, pin: u16, x: usize, y: usize, z: usize) -> EvalResult<Vec3> {
-        let edge = self
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        self.sample_position(edge.from.node, x, y, z)
+        let from = self.edges.source(node, pin).ok_or(EvalError::MissingInput { node, pin })?;
+        self.sample_position(from.node, x, y, z)
     }
 
     fn sample_position(&self, id: NodeId, x: usize, y: usize, z: usize) -> EvalResult<Vec3> {

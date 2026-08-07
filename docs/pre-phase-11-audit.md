@@ -2298,3 +2298,40 @@ nothing can observe.
 
 What should land now is the pointwise bench itself. It is the instrument that
 will say when the deficit arrives, and it is the durable half of this work.
+
+### Outcome: step 0a landed anyway
+
+Landed at the user's call after seeing the measurement above, as substeps 20b
+(the bench) and 20c (the index). Tests pass and the generation hash is unchanged,
+which is the property that matters: the index resolves the same edges by a
+different route, so any hash movement would have meant the two disagree
+somewhere and `agrees_with_a_linear_scan_over_every_pin` had missed it.
+
+The A/B on the development machine, against a saved baseline in one session:
+
+| case | edges | change |
+|---|---|---|
+| `sample_column/world` | 2 | +26% |
+| `sample_density/biome_meadow` | 12 | +11% |
+| `sample_column/zone_via_graph_ref` | 3 | +14% |
+| `sample_density/chain_9edges` | 9 | -1% |
+| `sample_density/chain_33edges` | 33 | -16% |
+| `sample_density/chain_129edges` | 129 | **-58%** |
+
+The user's run reported 33-50% improvement on *every* case including the 9-edge
+one. That is not attributable to this change - the index saves a scan
+proportional to edge count, so a 9-edge graph cannot gain what a 129-edge graph
+gains. The baseline had been taken under load: two runs of identical code in that
+same session differed by up to 146%, and the post-change intervals tightened from
+about +/-10% to +/-1%. Net of a uniform machine factor the two machines agree on
+the shape. **The table above is the figure to cite**, not the raw second run.
+
+One supporting change went in with it. `UpstreamGraphs::surface_sample`
+constructed a whole `ColumnEvaluator` per sampled column; the upstream evaluator
+is now built once at `insert`. Without that, the index would have added an
+allocation to a per-column path - the mechanism by which an optimization becomes
+a regression.
+
+Two edge scans remain, both in `world_eval.rs` free functions over a `&Graph`
+with no evaluator to hang an index on, and both once per chunk rather than per
+column. Indexing them would cost a build to save a scan.

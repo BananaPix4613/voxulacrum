@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fastnoise_lite::NoiseType;
-use nodegraph_ir::{Graph, GraphRefTarget, NodeId, NodeKind, Severity};
+use nodegraph_ir::{EdgeIndex, Graph, GraphRefTarget, NodeId, NodeKind, Severity};
 
 use crate::column::{ColumnCache, ColumnField, ColumnOutput, IdColumn};
 use crate::context::EvalContext;
@@ -25,6 +25,9 @@ use crate::field::CHUNK_DIM;
 /// Evaluates a World/Zone graph for one chunk, producing per-column outputs.
 pub struct ColumnEvaluator<'g> {
     graph: &'g Graph,
+    /// `(node, pin) -> source` over `graph.edges`, built once. See
+    /// [`EdgeIndex`]; `sample_column` resolves an input per column probed.
+    edges: EdgeIndex,
     ctx: EvalContext,
     cache: ColumnCache,
     /// Cross-graph resolution context for `GraphRef` reads (`None` for World and
@@ -35,7 +38,7 @@ pub struct ColumnEvaluator<'g> {
 impl<'g> ColumnEvaluator<'g> {
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, ctx, cache: ColumnCache::new(), upstream: None }
+        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: ColumnCache::new(), upstream: None }
     }
     
     /// Attach a cross-graph resolution context so `GraphRef` reads resolve to
@@ -135,13 +138,7 @@ impl<'g> ColumnEvaluator<'g> {
     /// `GraphRef`, read the referenced upstream graph's named output (bulk, from
     /// the upstream's computed cache); otherwise read this graph's own cache.
     fn input_surface(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ColumnField>> {
-        let from = self
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?
-            .from;
+        let from = self.edges.source(node, pin).ok_or(EvalError::MissingInput { node, pin })?;
         if let Some(src) = self.graph.nodes.get(from.node) {
             if let NodeKind::GraphRef(gr) = &src.kind {
                 let name = self.graph_ref_output_name(from.node, from.pin)?;
@@ -221,13 +218,7 @@ impl<'g> ColumnEvaluator<'g> {
         world_x: i32,
         world_z: i32,
     ) -> EvalResult<f32> {
-        let from = self
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?
-            .from;
+        let from = self.edges.source(node, pin).ok_or(EvalError::MissingInput { node, pin })?;
         if let Some(src) = self.graph.nodes.get(from.node) {
             if let NodeKind::GraphRef(gr) = &src.kind {
                 let name = self.graph_ref_output_name(from.node, from.pin)?;
@@ -271,10 +262,13 @@ pub struct UpstreamGraphs<'g> {
 
 /// One registered upstream graph within [`UpstreamGraphs`].
 struct UpstreamGraph<'g> {
-    graph: &'g Graph,
-    ctx: EvalContext,
     cache: &'g ColumnCache,
     outputs: HashMap<String, NodeId>,
+    /// Pointwise evaluator over the upstream graph, built once. `surface_sample`
+    /// runs per column probed, so building one per call would put an
+    /// `EdgeIndex` construction on a per-column path - which is how an index
+    /// becomes a regression.
+    point: ColumnEvaluator<'g>,
 }
 
 impl<'g> UpstreamGraphs<'g> {
@@ -301,7 +295,8 @@ impl<'g> UpstreamGraphs<'g> {
                 _ => None,
             })
             .collect();
-        self.graphs.insert(target, UpstreamGraph { graph, ctx, cache, outputs });
+        let point = ColumnEvaluator::new(graph, ctx);
+        self.graphs.insert(target, UpstreamGraph { cache, outputs, point });
     }
     
     /// The bulk cached surface field of `target`'s named output. `graphref` is
@@ -335,7 +330,7 @@ impl<'g> UpstreamGraphs<'g> {
     ) -> EvalResult<f32> {
         let ug = self.graphs.get(&target).ok_or(EvalError::UnresolvedGraphRef { node: graphref })?;
         let node = *ug.outputs.get(name).ok_or(EvalError::UnresolvedGraphRef { node: graphref })?;
-        match ColumnEvaluator::new(ug.graph, ug.ctx).sample_column(node, world_x, world_z)? {
+        match ug.point.sample_column(node, world_x, world_z)? {
             ColumnSample::Surface(v) => Ok(v),
             ColumnSample::Id(_) => Err(EvalError::WrongInputType {
                 node,
