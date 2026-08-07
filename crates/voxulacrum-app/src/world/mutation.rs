@@ -14,10 +14,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-
 use glam::IVec3;
 use smallvec::SmallVec;
-use voxel_core::{ChunkCoord, LocalPos, Voxel};
+use voxel_core::{ChunkCoord, LocalPos, ResolvedBlueprint, Voxel, Yaw};
 
 use super::fluid_sim::ChunkPlan;
 use super::chunk::LoadedChunk;
@@ -118,7 +117,6 @@ pub struct MutationOutcome {
 impl MutationOutcome {
     /// Fold another outcome into this one (used when a command touches several
     /// chunks or delegates to sub-handlers).
-    #[allow(dead_code)] // used as multi-chunk handlers land (Substeps 1b/1c/6)
     pub fn extend(&mut self, other: MutationOutcome) {
         self.scatter_rebuild.extend(other.scatter_rebuild);
         self.water_rebuild.extend(other.water_rebuild);
@@ -197,6 +195,18 @@ pub enum WorldMutation {
         chunks: HashMap<ChunkCoord, LoadedChunk>,
         generator: Arc<WorldGenerator>,
     },
+    /// Stamp a resolved blueprint into the world, its anchor cell landing on
+    /// `origin`. Decomposes into one voxel batch per touched chunk internally.
+    /// 
+    /// One intent rather than N `EditVoxelBatch` commands because the door's
+    /// value is that *intent* is legible at the seam - the same reason
+    /// `FinalizeSeam` and `CommitFluidPlans` exist despite both being
+    /// expressible as batches. A stamp is one authored act: one log row, one
+    /// event, one thing undo must treat atomically, one message to replicate.
+    /// 
+    /// Additive: a blueprint carries only solid cells, so this writes them and
+    /// leaves the rest of the volume alone. It never clears.
+    StampBlueprint { origin: IVec3, blueprint: ResolvedBlueprint, yaw: Yaw },
 }
 
 impl WorldMutation {
@@ -214,6 +224,7 @@ impl WorldMutation {
             WorldMutation::EvictChunk { .. } => 7,
             WorldMutation::FinalizeSeam { .. } => 8,
             WorldMutation::SwapRegeneratedChunks { .. } => 9,
+            WorldMutation::StampBlueprint { .. } => 10,
         }
     }
 
@@ -274,7 +285,7 @@ impl MutationCommand {
 }
 
 /// Number of [`WorldMutation`] variants.
-pub const INTENT_COUNT: usize = 10;
+pub const INTENT_COUNT: usize = 11;
 
 /// Intent names, indexed by [`WorldMutation::index`].
 pub const INTENT_NAMES: [&str; INTENT_COUNT] = [
@@ -288,6 +299,7 @@ pub const INTENT_NAMES: [&str; INTENT_COUNT] = [
     "EvictChunk",
     "FinalizeSeam",
     "SwapRegeneratedChunks",
+    "StampBlueprint",
 ];
 
 /// How many recent actor commands the log keeps.

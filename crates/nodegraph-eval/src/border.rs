@@ -9,11 +9,13 @@
 //! - **nearest neighbor biome**: the differing biome found at that distance
 //!   (the column's own biome when none lies within the radius).
 //!
-//! The scan uses [`ColumnEvaluator::sample_column`], which is chunk-independent,
-//! so a column's border analysis is identical no matter which chunk computes it,
-//! and the scan reaches correctly into neighbor chunks. Nothing consumes this
-//! yet - with one biome there are no borders; it activates once the world has
-//! multiple biomes.
+//! The scan is driven by a caller-supplied **per-column id source**, so it is
+//! independent of how an id is obtained. With one zone that is a single
+//! `ZoneOutput` sample; with several it is a zone lookup followed by a sample of
+//! that zone's terminal. The source must be chunk-independent - i.e. framed by
+//! absolute world columns - so a column's analysis is identical no matter which
+//! chunk computes it, which is what makes the scan reach correctly into
+//! neighboring chunks.
 
 use glam::IVec3;
 use nodegraph_ir::NodeId;
@@ -34,20 +36,27 @@ pub struct BorderAnalysis {
     pub neighbor: IdColumn,
 }
 
-/// Compute per-column biome-border metadata for `chunk` by scanning each
-/// column's `radius`-neighborhood (which may reach into adjacent chunks) for the
-/// nearest column of a different biome.
+/// Compute per-column border metadata for `chunk` by scanning each column's
+/// `radius`-neighborhood (which may reach into adjacent chunks) for the nearest
+/// column carrying a different id.
 ///
-/// `biome_node` is the id-producing terminal of the graph `eval` wraps (a
-/// `ZoneOutput`, or a `WorldOutput` for zone borders). Columns are framed by
-/// absolute world coordinates from `chunk`; since [`ColumnEvaluator::sample_column`]
-/// is chunk-independent, the evaluator's own chunk is irrelevant to the result.
-pub fn analyze_biome_borders(
-    eval: &ColumnEvaluator,
-    biome_node: NodeId,
+/// `id_at(world_x, world_z)` supplies the id for any absolute world column. It
+/// is a closure rather than an `(evaluator, node)` pair because the id is not
+/// always one graph's output: once a world has several zones, a column's biome
+/// comes from whichever zone graph governs *that* column, and the lookup is two
+/// levels deep. Generic rather than `dyn` - this runs once per column of a
+/// `(32 + 2·radius)²` footprint, which is no place for a vtable.
+///
+/// `id_at` must be chunk-independent, or two chunks sharing a border will
+/// disagree about the same column.
+pub fn analyze_borders<F>(
+    id_at: F,
     chunk: IVec3,
     radius: i32,
-) -> EvalResult<BorderAnalysis> {
+) -> EvalResult<BorderAnalysis>
+where
+    F: Fn(i32, i32) -> EvalResult<u16>,
+{
     let r = radius.max(0);
     let dim = CHUNK_DIM as i32;
     let side = (dim + 2 * r) as usize;
@@ -62,7 +71,7 @@ pub fn analyze_biome_borders(
         for ex in 0..side {
             let wx = base_x + ex as i32;
             let wz = base_z + ez as i32;
-            grid[ez * side + ex] = sample_id(eval, biome_node, wx, wz)?;
+            grid[ez * side + ex] = id_at(wx, wz)?;
         }
     }
     let at = |ex: i32, ez: i32| grid[ez as usize * side + ex as usize];
@@ -96,8 +105,12 @@ pub fn analyze_biome_borders(
     Ok(BorderAnalysis { distance, neighbor })
 }
 
-/// Sample a column's discrete biome id, erroring if the node is not id-typed.
-fn sample_id(eval: &ColumnEvaluator, node: NodeId, wx: i32, wz: i32) -> EvalResult<u16> {
+/// Sample a column's discrete id from one graph's id-producing terminal,
+/// erroring if the node is not id-typed.
+///
+/// The one-graph id source: callers pass `|x, z| sample_id(&eval, node, x, z)`
+/// to [`analyze_borders`] when a single graph governs every column.
+pub fn sample_id(eval: &ColumnEvaluator, node: NodeId, wx: i32, wz: i32) -> EvalResult<u16> {
     match eval.sample_column(node, wx, wz)? {
         ColumnSample::Id(b) => Ok(b),
         ColumnSample::Surface(_) => Err(EvalError::WrongInputType {
@@ -165,7 +178,7 @@ mod tests {
         let (g, out) = zone_graph(vec![]);
         let eval = ColumnEvaluator::new(&g, EvalContext::new(1, IVec3::ZERO));
         let radius = 6;
-        let b = analyze_biome_borders(&eval, out, IVec3::ZERO, radius).unwrap();
+        let b = analyze_borders(|x, z| sample_id(&eval, out, x, z), IVec3::ZERO, radius).unwrap();
         assert!(b.distance.data().iter().all(|&d| d == radius as f32));
         assert!(b.neighbor.data().iter().all(|&n| n == 0));
     }
@@ -177,7 +190,7 @@ mod tests {
         let chunk = IVec3::new(2, 0, -1);
         let run = || {
             let eval = ColumnEvaluator::new(&g, EvalContext::new(9, chunk));
-            analyze_biome_borders(&eval, out, chunk, 8).unwrap()
+            analyze_borders(|x, z| sample_id(&eval, out, x, z), chunk, 8).unwrap()
         };
         let (a, b) = (run(), run());
         assert_eq!(a.distance.data(), b.distance.data());
@@ -195,7 +208,7 @@ mod tests {
         let chunk = IVec3::new(0, 0, 0);
         let eval = ColumnEvaluator::new(&g, EvalContext::new(4, chunk));
         let radius = 5;
-        let analysis = analyze_biome_borders(&eval, out, chunk, radius).unwrap();
+        let analysis = analyze_borders(|x, z| sample_id(&eval, out, x, z), chunk, radius).unwrap();
 
         let (cx, cz) = (CHUNK_DIM - 1, 0usize);
         let wx = chunk.x * CHUNK_DIM as i32 + cx as i32;

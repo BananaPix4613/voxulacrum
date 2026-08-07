@@ -175,7 +175,7 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting arc
 | **Palette authoring** (per-axis ramps, biome tint sets, time-of-day bands) | T0 | T2 | **0.5.0** |
 | **Blueprint authoring** — in-world blockout → capture, anchor/footprint, destruction policy, sway, variants | T0 | T2 | **0.4.0** |
 | **Structure authoring** — multi-chunk templates, placement rules, priority, protected-volume flag | — | T2 | **0.4.0** |
-| **Foliage/detail authoring** | T1 | T2 | **0.4.0** |
+| **Foliage/detail authoring** | T0 | T2 | **0.4.0** |
 | **Entity/actor definition authoring** | — | T2 | **0.9.0** |
 | **Audio authoring** — surface sound sets, ambience beds, reverb zones, music-director states | — | T1 | **0.9.0** |
 | **Input binding editor** | T0 | T1 | **0.9.0** |
@@ -577,11 +577,13 @@ New biomes, new nodes, rendering features, audio, entity work, networking beyond
 
 ## 11. 0.4.0 — Worldgen completeness & authoring
 
-**Theme:** Take the generation machinery from working to broad, and make it authorable. Content breadth past the two biomes 0.2.0 shipped (three exist as of 0.3.0), the last missing generation infrastructure, and — equally weighted — the tools that make authoring a loop instead of a guess (P11).
+**Theme:** Take the generation machinery from working to broad, and make it authorable. Content breadth past the two biomes 0.2.0 shipped — three biome graphs exist as of 0.3.0 but only two are ever assigned; the third is registered in the manifest and selected by no zone band, so the starting point is two, not three (`pre-phase-11-audit.md` §0.3) — the last missing generation infrastructure, and — equally weighted — the tools that make authoring a loop instead of a guess (P11).
 
 ### Deliverables
 
 **Cross-chunk generation infrastructure** — blocking structures and rivers. Designed first as a design-doc extension: deterministic cross-chunk placement with margin-band ownership generalized from the scatter model, priority-resolved stamping across boundaries, generation-order independence from world-absolute derivation (P1).
+
+**Multi-zone support** — engine work, not content, and a prerequisite for the reference world's "2 zones" clause. The manifest carries a single `zone` path, `GraphSlot::Zone` and `GraphRefTarget::Zone` are unit variants, and `WorldEvaluator` holds one Zone graph, so a second zone is currently inexpressible. This lands as a manifest schema version (adding `version`, `zones`, `libraries`, and moving `seed` off `TerrainGenParams`) plus the zone-id threading behind it — and it is what first makes design §4's `ZoneGraph[Z]` invalidation row reachable, subject to the backward-looking-tag bound recorded there. See `pre-phase-11-audit.md` §0.1 and §0.4.
 
 **World mutation event bus (§6.7)** — typed events emitted by the mutation door and by generation, with subscription and `FrameStage` ordering guarantees. Small now; the thing that keeps region transformation, spawn tables, audio, and pathfinding from being hardcoded into each other later.
 

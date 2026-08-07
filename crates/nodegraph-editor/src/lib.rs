@@ -27,5 +27,6 @@ mod viewer;
 
 pub use bridge::{graph_to_snarl, snarl_to_graph};
 pub use colors::{category_fill, pin_color};
+pub use params::{GraphCatalogs, GraphChoice, LibraryChoice};
 pub use state::{EditorState, UndoLabel};
 pub use viewer::{DiagnosticIndex, GraphViewer};

@@ -13,7 +13,7 @@
 //!
 //! It does not evaluate graphs (that is the evaluator crate) and performs no
 //! filesystem I/O. It embeds `voxel-core` value types (`MaterialId`, `Voxel`)
-//! so that prefab templates can round-trip, but references no chunk buffer for
+//! so that resolved blueprints can round-trip, but references no chunk buffer for
 //! [`PinType::Terrain`] — that is a bare tag here. The IR is purely structure
 //! + validation + serialization.
 //!
@@ -49,7 +49,6 @@ mod graph;
 mod library;
 mod node;
 mod pin;
-mod prefab;
 
 pub use boundary::{BoundaryPort, EffectivePin, GraphBoundary, ResolvedBoundary, ResolvedPin};
 pub use crossgraph::{detect_graph_ref_cycle, GraphRefTarget};
@@ -66,9 +65,9 @@ pub use node::{
     NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams, Perlin2DParams,
     PinSpec, QueueParams, RemapParams, SubtractParams, TerrainOutputParams, ThresholdParams,
     UnionParams, WorldAxisParams, WorldPosParams, BuildTerrainParams, JitteredGridParams,
-    PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlacePrefabParams, WorldOutputParams,
-    ZoneOutputParams, YBandParams, PoissonDistributionParams, SurfaceFilterParams,
-    BiomeContextMaskParams, SpeciesPickerParams, PaintDensityParams, ScatterPlaceParams,
+    PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlaceBlueprintParams, PlaceStructureParams,
+    RiverParams, WorldOutputParams, ZoneOutputParams, YBandParams, PoissonDistributionParams,
+    SurfaceFilterParams, BiomeContextMaskParams, SpeciesPickerParams, PaintDensityParams,
+    ScatterPlaceParams,
 };
 pub use pin::PinType;
-pub use prefab::{PrefabTemplate, PrefabVoxel};

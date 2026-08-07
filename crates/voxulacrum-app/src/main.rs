@@ -20,6 +20,7 @@ mod core_budget;
 mod player;
 mod diagnostics;
 mod jobs;
+mod validate;
 mod verify;
 
 use std::path::PathBuf;
@@ -394,7 +395,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // The single graph-backed generator, shared (via Arc) by the World, the
     // streaming workers, and background regeneration.
-    let generator = world::world_generator::load_default(&initial_params.terrain_gen)
+    let generator = world::world_generator::load_default()
         .expect("Failed to load default_biome graph generator");
     
     // Data-driven material registry (RON primary, built-in fallback). Shared by
@@ -419,7 +420,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // spawn-area edits were discarded and then overwritten on the next save),
     // and `open` performs the VOXEL_FORMAT_VERSION save wipe, which must happen
     // before anything reads a record.
-    let persistence = match WorldPersistence::open("default", initial_params.terrain_gen.seed) {
+    let persistence = match WorldPersistence::open("default", generator.world_seed()) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("Persistence init failed: {e}. Running without saves.");
@@ -606,6 +607,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Initialize event queues
     ecs.init_resource::<Events<RegenerateWorld>>();
     ecs.init_resource::<Events<RemeshAll>>();
+    ecs.init_resource::<Events<world::events::WorldEvent>>();
     ecs.init_resource::<Events<ClearMeshCache>>();
     ecs.init_resource::<Events<LoadPaletteRequest>>();
 
@@ -853,6 +855,9 @@ fn main() {
     // `nodegraph_eval`'s schedule-thread evaluation guard for the same reason
     // the startup world fill is.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = validate::run_from_args(&args) {
+        std::process::exit(code);
+    }
     if let Some(code) = verify::run_from_args(&args) {
         std::process::exit(code);
     }

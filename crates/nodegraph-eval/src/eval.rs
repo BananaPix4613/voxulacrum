@@ -1,12 +1,18 @@
 //! The evaluator: topological whole-chunk fill + pointwise sampling.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
-use nodegraph_ir::{Axis, Graph, FractalType, NoiseParams, NodeId, NodeKind, Severity};
+use glam::Vec3;
+use nodegraph_ir::{
+    Axis, DomainWarpParams, Graph, FractalType, LibraryGraphId, NoiseParams, NodeId, NodeKind,
+    Severity,
+};
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
 use crate::biome_params::BiomeParams;
+use crate::library_kernel::{standard_cave_noise, LibraryKernel};
 use crate::cache::{CachedOutput, EvalCache};
 use crate::context::EvalContext;
 use crate::error::{EvalError, EvalResult};
@@ -43,12 +49,40 @@ pub struct Evaluator<'g> {
     /// The active biome's scalar parameters, read by `BiomeParam` nodes. `None`
     /// falls every `BiomeParam` back to its node default.
     biome_params: Option<&'g BiomeParams>,
+    /// Native kernels by library id, for `LibraryRef` nodes. `None` makes every
+    /// `LibraryRef` an `UnresolvedLibraryRef` error - which is what it was
+    /// unconditionally before this existed.
+    kernels: Option<&'g HashMap<LibraryGraphId, LibraryKernel>>,
+    /// River networks resolved for this chunk, by node. Resolving costs nine
+    /// potential samples per cell, and the pointwise sampler is called once per
+    /// voxel of a vertical span, so this must not be recomputed per sample.
+    /// Interior mutability because `sample_density` takes `&self`.
+    rivers: std::cell::RefCell<Vec<(NodeId, Arc<crate::river::RiverNetwork>)>>,
 }
 
 impl<'g> Evaluator<'g> {
+    /// The river network for a node, resolved once per evaluator.
+    fn river_net(&self, id: NodeId, p: &nodegraph_ir::RiverParams) -> Arc<crate::river::RiverNetwork> {
+        if let Some((_, net)) = self.rivers.borrow().iter().find(|(n, _)| *n == id) {
+            return Arc::clone(net);
+        }
+        let net = Arc::new(crate::river::RiverNetwork::resolve(self.ctx, p));
+        self.rivers.borrow_mut().push((id, Arc::clone(&net)));
+        net
+    }
+
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, ctx, cache: EvalCache::new(), biome_params: None }
+        Self { graph, ctx, cache: EvalCache::new(), biome_params: None, kernels: None, rivers: std::cell::RefCell::new(Vec::new()) }
+    }
+
+    /// Attach the native kernel bindings, so `LibraryRef` nodes evaluate.
+    pub fn with_library_kernels(
+        mut self,
+        kernels: &'g HashMap<LibraryGraphId, LibraryKernel>,
+    ) -> Self {
+        self.kernels = Some(kernels);
+        self
     }
     
     /// Attach the active biome's parameter sidecar, read by `BiomeParam` nodes.
@@ -112,6 +146,34 @@ impl<'g> Evaluator<'g> {
                 node, expected: "vec3", got: other.kind_name(),
             }),
         }
+    }
+
+    /// The two decorrelated noise fields a `DomainWarp` displaces by.
+    ///
+    /// Shared by the fill and pointwise paths so they cannot drift - the same
+    /// discipline the `Layer` node and the `SurfaceLayering` kernel follow. A
+    /// warp that displaced differently in the two paths would show up as a seam
+    /// only at chunk-Y boundaries, which is the hardest kind to attribute.
+    fn warp_noises(&self, p: &DomainWarpParams) -> (FastNoiseLite, FastNoiseLite) {
+        let params = |seed: u32| NoiseParams {
+            seed,
+            frequency: p.frequency,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            fractal_type: FractalType::FBm,
+        };
+        (
+            self.noise(&params(p.seed), NoiseType::OpenSimplex2),
+            self.noise(&params(p.seed ^ 0xDEAD_BEEF), NoiseType::OpenSimplex2),
+        )
+    }
+
+    /// The kernel bound to `library`, or an unresolved-reference error.
+    fn kernel_for(&self, node: NodeId, library: LibraryGraphId) -> EvalResult<LibraryKernel> {
+        self.kernels
+            .and_then(|k| k.get(&library).copied())
+            .ok_or(EvalError::UnresolvedLibraryRef { node })
     }
 
     /// Resolve the scalar field feeding `(node, pin)`. `Scalar → Density`
@@ -342,23 +404,13 @@ impl<'g> Evaluator<'g> {
             // --- Domain ---
             NodeKind::DomainWarp(p) => {
                 let pos = self.input_vec3(id, 0)?;
-                // Two decorrelated 2D noises for X and Z displacements.
                 let amp = p.amplitude;
-                let noise_x = self.noise(
-                    &NoiseParams { seed: p.seed, frequency: p.frequency,
-                        octaves: 3, lacunarity: 2.0, gain: 0.5,
-                        fractal_type: FractalType::FBm },
-                    NoiseType::OpenSimplex2);
-                let noise_z = self.noise(
-                    &NoiseParams { seed: p.seed ^ 0xDEAD_BEEF, frequency: p.frequency,
-                        octaves: 3, lacunarity: 2.0, gain: 0.5,
-                        fractal_type: FractalType::FBm },
-                    NoiseType::OpenSimplex2);
+                let (noise_x, noise_z) = self.warp_noises(p);
                 let warped = Vec3Field::from_fn(|x, y, z| {
                     let p0 = pos.get(x, y, z);
                     let dx = noise_x.get_noise_2d(p0.x, p0.z) * amp;
                     let dz = noise_z.get_noise_2d(p0.x, p0.z) * amp;
-                    glam::Vec3::new(p0.x + dx, p0.y, p0.z + dz)
+                    Vec3::new(p0.x + dx, p0.y, p0.z + dz)
                 });
                 CachedOutput::Vec3(Arc::new(warped))
             }
@@ -370,6 +422,17 @@ impl<'g> Evaluator<'g> {
             NodeKind::Intersect(_) => {
                 let (a, b) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?);
                 CachedOutput::Scalar(Arc::new(a.zip_with(&b, f32::min)))
+            }
+            NodeKind::River(p) => {
+                let terrain = self.input_scalar(id, 0)?;
+                let net = self.river_net(id, p);
+                let mut out = ScalarField::zeroed();
+                for i in 0..ScalarField::VOLUME {
+                    let (x, y, z) = (i % CHUNK_DIM, (i / CHUNK_DIM) % CHUNK_DIM, i / (CHUNK_DIM * CHUNK_DIM));
+                    let w = self.ctx.world_pos(x, y, z);
+                    out.set(x, y, z, net.carve(p, w.x, w.y, w.z, terrain.data()[i]));
+                }
+                CachedOutput::Scalar(Arc::new(out))
             }
             NodeKind::DensitySubtract(_) => {
                 let (a, b) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?);
@@ -483,12 +546,20 @@ impl<'g> Evaluator<'g> {
                 let points = self.input_positions(id, 1)?;
                 CachedOutput::Terrain(Arc::new(crate::place::place_trees(&terrain, &points, p)))
             }
-            NodeKind::PlacePrefab(p) => {
+            NodeKind::PlaceBlueprint(p) => {
                 let terrain = self.input_terrain(id, 0)?;
                 let points = self.input_positions(id, 1)?;
-                let template = p.template.as_ref()
-                    .ok_or(EvalError::UnresolvedPrefab { node: id })?;
-                CachedOutput::Terrain(Arc::new(crate::place::place_prefabs(&terrain, &points, template)))
+                let blueprint = p.resolved.as_ref()
+                    .ok_or(EvalError::UnresolvedBlueprint { node: id })?;
+                CachedOutput::Terrain(Arc::new(crate::place::place_blueprints(&terrain, &points, blueprint)))
+            }
+            // Declaration-only: it has no output pins, so nothing can ask for a value.
+            NodeKind::PlaceStructure(_) => {
+                return Err(EvalError::WrongInputType {
+                    node: id,
+                    expected: "terrain",
+                    got: "declaration",
+                });
             }
             // --- Terrain terminal ---
             NodeKind::TerrainOutput(_) => {
@@ -499,9 +570,30 @@ impl<'g> Evaluator<'g> {
                 material: self.input_material(id, 1)?,
             },
             // --- References (resolved outside the single-graph evaluator) ---
-            NodeKind::LibraryRef(_) => {
-                return Err(EvalError::UnresolvedLibraryRef { node: id });
-            }
+            NodeKind::LibraryRef(p) => match self.kernel_for(id, p.library)? {
+                LibraryKernel::StandardCaveNoise => {
+                    let pos = self.input_vec3(id, 0)?;
+                    // Seeded from the library id, not a node-local seed: the
+                    // library's boundary declares no `seed` input, so two
+                    // references to the same library are the same field - which
+                    // is the correct reading of "the same library".
+                    // **Trigger:** the first graph wanting two independently
+                    // seeded cave fields forces a `seed` port onto the boundary.
+                    let seed = self.ctx.noise_seed(p.library.0);
+                    let mut out = ScalarField::zeroed();
+                    for z in 0..CHUNK_DIM {
+                        for y in 0..CHUNK_DIM {
+                            for x in 0..CHUNK_DIM {
+                                out.set(x, y, z, standard_cave_noise(pos.get(x, y, z), seed));
+                            }
+                        }
+                    }
+                    CachedOutput::Scalar(Arc::new(out))
+                }
+                // The other kernels produce weights, materials or point sets and
+                // are consumed where those are consumed, not in a density chain.
+                _ => return Err(EvalError::WrongGraphDomain { node: id }),
+            },
             NodeKind::GraphRef(_) => {
                 return Err(EvalError::UnresolvedGraphRef { node: id });
             }
@@ -563,6 +655,11 @@ impl<'g> Evaluator<'g> {
             NodeKind::CurveMapper(p) => sample_curve(&p.stops, self.sample_input(id, 0, x, y, z)?),
             NodeKind::Union(_)            => self.sample_input(id, 0, x, y, z)?.max(self.sample_input(id, 1, x, y, z)?),
             NodeKind::Intersect(_)        => self.sample_input(id, 0, x, y, z)?.min(self.sample_input(id, 1, x, y, z)?),
+            NodeKind::River(p) => {
+                let d = self.sample_input(id, 0, x, y, z)?;
+                let w = self.ctx.world_pos(x, y, z);
+                self.river_net(id, p).carve(p, w.x, w.y, w.z, d)
+            }
             NodeKind::DensitySubtract(_)  => self.sample_input(id, 0, x, y, z)?.max(-self.sample_input(id, 1, x, y, z)?),
             NodeKind::Mix(_) => {
                 let (a, b, f) = (self.sample_input(id, 0, x, y, z)?, self.sample_input(id, 1, x, y, z)?, self.sample_input(id, 2, x, y, z)?.clamp(0.0, 1.0));
@@ -591,14 +688,19 @@ impl<'g> Evaluator<'g> {
             | NodeKind::PoissonDisk(_)
             | NodeKind::FindFlat(_)
             | NodeKind::PlaceTree(_)
-            | NodeKind::PlacePrefab(_) => {
+            | NodeKind::PlaceBlueprint(_)
+            | NodeKind::PlaceStructure(_) => {
                 return Err(EvalError::WrongInputType {
                     node: id, expected: "scalar", got: "material/terrain/positions",
                 });
             }
-            NodeKind::LibraryRef(_) => {
-                return Err(EvalError::UnresolvedLibraryRef { node: id });
-            }
+            NodeKind::LibraryRef(p) => match self.kernel_for(id, p.library)? {
+                LibraryKernel::StandardCaveNoise => {
+                    let pos = self.sample_vec3(id, 0, x, y, z)?;
+                    standard_cave_noise(pos, self.ctx.noise_seed(p.library.0))
+                }
+                _ => return Err(EvalError::WrongGraphDomain { node: id }),
+            },
             NodeKind::GraphRef(_) => {
                 return Err(EvalError::UnresolvedGraphRef { node: id });
             }
@@ -620,6 +722,45 @@ impl<'g> Evaluator<'g> {
             .find(|e| e.to.node == node && e.to.pin == pin)
             .ok_or(EvalError::MissingInput { node, pin })?;
         self.sample_density(edge.from.node, x, y, z)
+    }
+
+    /// Pointwise sample of a `Vec3`-producing chain feeding `(node, pin)`.
+    ///
+    /// The pointwise counterpart of `input_vec3`, and the reason the chunk-Y
+    /// seam continuation can follow a density chain through a library: that
+    /// continuation samples *above* the chunk window, where no filled field
+    /// exists.
+    fn sample_vec3(&self, node: NodeId, pin: u16, x: usize, y: usize, z: usize) -> EvalResult<Vec3> {
+        let edge = self
+            .graph
+            .edges
+            .iter()
+            .find(|e| e.to.node == node && e.to.pin == pin)
+            .ok_or(EvalError::MissingInput { node, pin })?;
+        self.sample_position(edge.from.node, x, y, z)
+    }
+
+    fn sample_position(&self, id: NodeId, x: usize, y: usize, z: usize) -> EvalResult<Vec3> {
+        let node = self.graph.nodes.get(id).ok_or(EvalError::MissingOutput(id))?;
+        Ok(match &node.kind {
+            NodeKind::WorldPos(_) => self.ctx.world_pos(x, y, z),
+            NodeKind::DomainWarp(p) => {
+                let p0 = self.sample_vec3(id, 0, x, y, z)?;
+                let (noise_x, noise_z) = self.warp_noises(p);
+                Vec3::new(
+                    p0.x + noise_x.get_noise_2d(p0.x, p0.z) * p.amplitude,
+                    p0.y,
+                    p0.z + noise_z.get_noise_2d(p0.x, p0.z) * p.amplitude,
+                )
+            }
+            _ => {
+                return Err(EvalError::WrongInputType {
+                    node: id,
+                    expected: "vec3",
+                    got: "scalar",
+                })
+            }
+        })
     }
 }
 

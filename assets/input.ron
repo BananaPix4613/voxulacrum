@@ -125,5 +125,25 @@
             action: ToggleCutaway,
             mode: EdgeTriggered,
         ),
+        (
+            trigger: Key("Escape"),
+            action: CancelTool,
+            mode: EdgeTriggered,
+        ),
+        (
+            trigger: Key("ShiftLeft"),
+            action: RepeatTool,
+            mode: Held,
+        ),
+        (
+            trigger: Key("ShiftRight"),
+            action: RepeatTool,
+            mode: Held,
+        ),
+        (
+            trigger: Key("KeyR"),
+            action: RotateTool,
+            mode: EdgeTriggered,
+        ),
     ],
 )

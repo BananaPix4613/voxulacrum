@@ -28,9 +28,31 @@ use crate::world::storage::ChunkStorage;
 use crate::world::world_generator::{world_manifest_path, WorldGenerator};
 
 /// Chunks verified when no count is given.
-const DEFAULT_COUNT: usize = 64;
+///
+/// **512, not 64, because of what a sampled hash can and cannot see.** The
+/// sample is a square XZ patch about the origin repeated over every chunk-Y
+/// layer; 64 chunks is a 128-voxel footprint, and content placed on a coarse
+/// world grid is observed only if an instance happens to land inside it. The
+/// first structure source shipped (cell size 96, density 0.35) expected well
+/// under one instance in that box and in fact produced none, so the anchor was
+/// bit-identical with structures on and off - a regression check that could not
+/// have caught a structure regression. 512 covers a 384-voxel footprint, about
+/// five or six instances, and costs under a second.
+///
+/// **Raising the count buys probability, not a guarantee.** No sample size makes
+/// this instrument reliable for sparse content; it samples a fixed box, and
+/// anything placed sparsely is seen by luck. A new *sparse* content system needs
+/// a targeted test asserting its property directly - `feature.rs`'s derivation
+/// tests and `world_eval`'s seam test are that for stage 8 - and whoever adds
+/// one should check that the anchor actually moves when the content is disabled,
+/// rather than assuming coverage.
+const DEFAULT_COUNT: usize = 512;
 /// Chunk-Y layers to cover, matching the engine's default streaming range.
 const LAYERS: i32 = 4;
+/// Coordinates re-generated in reverse for the order-independence check. A
+/// subset, because accumulated state shows on any coordinate and a full
+/// sequential sweep would cost several times the parallel pass.
+const ORDER_SAMPLE: usize = 64;
 
 /// Handle `--verify-generation [N] [--seed S]`.
 ///
@@ -46,12 +68,14 @@ pub fn run_from_args(args: &[String]) -> Option<i32> {
         .and_then(|a| a.parse::<usize>().ok())
         .unwrap_or(DEFAULT_COUNT);
 
+    // No `--seed` means the manifest's seed - the world as it actually
+    // generates. Previously this defaulted to 0, so CI was verifying
+    // determinism at a seed nothing ever plays at.
     let seed = args
         .iter()
         .position(|a| a == "--seed")
         .and_then(|i| args.get(i + 1))
-        .and_then(|a| a.parse::<u64>().ok())
-        .unwrap_or(0);
+        .and_then(|a| a.parse::<u64>().ok());
 
     Some(verify_generation(count, seed))
 }
@@ -89,12 +113,19 @@ fn hash_storage(storage: &ChunkStorage) -> u64 {
     h.finish()
 }
 
-fn verify_generation(count: usize, seed: u64) -> i32 {
+fn verify_generation(count: usize, seed: Option<u64>) -> i32 {
     let manifest = world_manifest_path();
-    println!("verify-generation: {count} chunks, seed {seed}");
+    match seed {
+        Some(s) => println!("verify-generation: {count} chunks, seed {s} (override)"),
+        None => println!("verify-generation: {count} chunks, seed from manifest"),
+    }
     println!("  manifest: {}", manifest.display());
 
-    let generator = match WorldGenerator::from_manifest(&manifest, seed) {
+    let loaded = match seed {
+        Some(s) => WorldGenerator::from_manifest_seeded(&manifest, s),
+        None => WorldGenerator::from_manifest(&manifest),
+    };
+    let generator = match loaded {
         Ok(g) => g,
         Err(e) => {
             eprintln!("verify-generation: FAILED to load world manifest: {e}");
@@ -123,6 +154,47 @@ fn verify_generation(count: usize, seed: u64) -> i32 {
         }
     }
 
+    // Order independence (P1). The pass above proves repeatability *within* one
+    // generator and under parallelism; it cannot see state that accumulates
+    // across different coordinates - chunk A generated after B differing from A
+    // generated before it. That is exactly what a feature-cell memoization
+    // introduces the moment it stops being purely an optimization, which design
+    // §5 warns about by name, so it is worth a standing check rather than a
+    // reading of the code.
+    //
+    // Reverse catches ordering, sequential removes the parallelism that would
+    // mask it, and a second generator instance catches anything cached in the
+    // first. A strided subset rather than the whole sample: accumulated state
+    // shows on any coordinate, so one mismatch fails, and a full sequential
+    // sweep would quadruple this command's runtime to prove the same thing.
+    let mut order_dependent = 0usize;
+    let reloaded = match seed {
+        Some(s) => WorldGenerator::from_manifest_seeded(&manifest, s),
+        None => WorldGenerator::from_manifest(&manifest),
+    };
+    match reloaded {
+        Ok(fresh) => {
+            let stride = (results.len() / ORDER_SAMPLE).max(1);
+            let mut checked = 0usize;
+            for (pos, expected, _) in results.iter().rev().step_by(stride) {
+                let actual = hash_storage(&fresh.generate_chunk(*pos).storage);
+                checked += 1;
+                if actual != *expected {
+                    order_dependent += 1;
+                    eprintln!(
+                        "  ORDER-DEPENDENT: chunk {pos:?} differs when generated in \
+                         reverse order by a fresh generator",
+                    );
+                }
+            }
+            println!("  {checked} chunks reproduce in reverse order on a fresh generator");
+        }
+        Err(e) => {
+            eprintln!("verify-generation: FAILED to reload manifest for the order check: {e}");
+            return 2;
+        }
+    }
+
     let aggregate = {
         use seahash::SeaHasher;
         use std::hash::Hasher;
@@ -133,11 +205,18 @@ fn verify_generation(count: usize, seed: u64) -> i32 {
         h.finish()
     };
 
-    if diverged > 0 {
-        eprintln!(
-            "verify-generation: FAILED — {diverged}/{} chunks are not reproducible",
-            results.len(),
-        );
+    if diverged > 0 || order_dependent > 0 {
+        if diverged > 0 {
+            eprintln!(
+                "verify-generation: FAILED — {diverged}/{} chunks are not reproducible",
+                results.len(),
+            );
+        }
+        if order_dependent > 0 {
+            eprintln!(
+                "verify-generation: FAILED — {order_dependent} chunks depend on generation order",
+            );
+        }
         return 1;
     }
 

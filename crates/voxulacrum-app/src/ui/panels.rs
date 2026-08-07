@@ -35,6 +35,28 @@ pub struct UiState {
     /// Per-`FrameStage` CPU mean/max last second, in ms.
     pub stage_mean_ms: [f32; crate::diagnostics::STAGE_COUNT],
     pub stage_max_ms: [f32; crate::diagnostics::STAGE_COUNT],
+    /// Generation-frontier sample (roadmap §7.3), mirrored from `FrameTimings`.
+    /// Session-scoped, not per-second - see the note in `diagnostics.rs`.
+    pub frontier_cpu_max_ms: f32,
+    pub frontier_cpu_mean_ms: f32,
+    pub frontier_frames: u32,
+    pub frontier_over_budget: u32,
+    pub frontier_worst_stages: [f32; crate::diagnostics::STAGE_COUNT],
+    pub frontier_worst_sub: [f32; crate::diagnostics::SUB_COUNT],
+    pub frontier_sub_max: [f32; crate::diagnostics::SUB_COUNT],
+    pub frontier_sub_mean: [f32; crate::diagnostics::SUB_COUNT],
+    /// Per-kind world-event counts, filled by a bus subscriber. This is the
+    /// "emitted events" column post-phase-10 recorded as having no referent.
+    pub event_counts: [u64; crate::world::events::WorldEvent::COUNT],
+    pub events_total: u64,
+    /// Column inspector request state and last report (roadmap §4.3).
+    pub column_inspector: crate::ui::column_inspector::ColumnInspectorState,
+    /// Biome/zone map preview state (roadmap §4.3).
+    pub biome_map: crate::ui::biome_map::BiomeMapState,
+    /// Blueprint capture / stamp panel state (roadmap §4.2).
+    pub blueprint_panel: crate::ui::blueprint_panel::BlueprintPanelState,
+    /// Set by the panel's Reset button; consumed at frame end.
+    pub reset_frontier_requested: bool,
     /// Scheduler load per job kind (roadmap §4.4 job system inspector).
     pub job_stats: [crate::jobs::JobKindStats; crate::jobs::JobKind::COUNT],
     /// Jobs executing across all kinds, and the global limit.
@@ -49,13 +71,6 @@ pub struct UiState {
     pub meshing_stats: MeshingStats,
     pub clear_cache_requested: bool,
     pub regenerate_requested: bool,
-    /// Hierarchy slots whose graph file changed on disk, awaiting regeneration.
-    ///
-    /// Carries *slots*, not graphs: regeneration always reloads the whole
-    /// hierarchy from disk, so there is no in-memory graph to hand across and no
-    /// way to end up with a hybrid of edited and on-disk state. The slots are
-    /// kept only to narrow invalidation (§4's table, P3).
-    pub pending_graph_reload: Vec<crate::world::world_generator::GraphSlot>,
     pub remesh_requested: bool,
     pub mesh_params_pending: bool,
     pub regenerating: bool,
@@ -99,6 +114,20 @@ impl UiState {
             present_mean_ms: 0.0,
             stage_mean_ms: [0.0; crate::diagnostics::STAGE_COUNT],
             stage_max_ms: [0.0; crate::diagnostics::STAGE_COUNT],
+            frontier_cpu_max_ms: 0.0,
+            frontier_cpu_mean_ms: 0.0,
+            frontier_frames: 0,
+            frontier_over_budget: 0,
+            frontier_worst_stages: [0.0; crate::diagnostics::STAGE_COUNT],
+            frontier_worst_sub: [0.0; crate::diagnostics::SUB_COUNT],
+            frontier_sub_max: [0.0; crate::diagnostics::SUB_COUNT],
+            frontier_sub_mean: [0.0; crate::diagnostics::SUB_COUNT],
+            event_counts: [0; crate::world::events::WorldEvent::COUNT],
+            events_total: 0,
+            column_inspector: Default::default(),
+            blueprint_panel: Default::default(),
+            biome_map: Default::default(),
+            reset_frontier_requested: false,
             job_stats: [crate::jobs::JobKindStats::default(); crate::jobs::JobKind::COUNT],
             job_running_total: 0,
             job_max_running: 0,
@@ -110,7 +139,6 @@ impl UiState {
             meshing_stats: MeshingStats::default(),
             clear_cache_requested: false,
             regenerate_requested: false,
-            pending_graph_reload: Vec::new(),
             remesh_requested: false,
             mesh_params_pending: false,
             regenerating: false,
@@ -220,6 +248,14 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                     state.remeshing,
                 );
                 ui.separator();
+                crate::ui::column_inspector::draw(ui, &mut state.column_inspector);
+                ui.separator();
+                crate::ui::blueprint_panel::draw(ui, &mut state.blueprint_panel);
+                if ui.button("Biome / Zone Map…").clicked() {
+                    state.biome_map.open = true;
+                    state.biome_map.dirty = true;
+                }
+                ui.separator();
                 draw_performance(ui, state);
                 ui.separator();
                 draw_preset_controls(ui, state);
@@ -281,7 +317,7 @@ pub fn draw_graph_editor_panel(ctx: &egui::Context, hierarchy: &mut HierarchyEdi
                         .desired_width(120.0)
                         .hint_text("name"),
                 );
-                if ui.button("＋ Create").clicked() {
+                if ui.button("+ Create").clicked() {
                     let name = hierarchy.new_name_mut().clone();
                     hierarchy.create_biome(&name);
                     hierarchy.new_name_mut().clear();
@@ -296,6 +332,50 @@ pub fn draw_graph_editor_panel(ctx: &egui::Context, hierarchy: &mut HierarchyEdi
                 }
             });
 
+            ui.horizontal(|ui| {
+                ui.label("New zone:");
+                ui.add(
+                    egui::TextEdit::singleline(hierarchy.new_zone_name_mut())
+                        .desired_width(120.0)
+                        .hint_text("name"),
+                );
+                if ui.button("+ Create").clicked() {
+                    let name = hierarchy.new_zone_name_mut().clone();
+                    hierarchy.create_zone(&name);
+                    hierarchy.new_zone_name_mut().clear();
+                }
+                ui.separator();
+                let can_attach = hierarchy.active_biome_lacks_detail();
+                if ui
+                    .add_enabled(can_attach, egui::Button::new("+ Attach detail"))
+                    .on_hover_text("Create and register a DetailGraph for the selected biome")
+                    .clicked()
+                {
+                    hierarchy.attach_detail();
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Rename selected:");
+                ui.add(
+                    egui::TextEdit::singleline(hierarchy.new_rename_mut())
+                        .desired_width(120.0)
+                        .hint_text("new name"),
+                );
+                let can_rename = hierarchy.active_is_renameable();
+                if ui
+                    .add_enabled(can_rename, egui::Button::new("Rename"))
+                    .on_hover_text("Rename the selected biome or zone, moving its files and repointing the manifest")
+                    .clicked()
+                {
+                    let name = hierarchy.new_rename_mut().clone();
+                    hierarchy.rename_active(&name);
+                    hierarchy.new_rename_mut().clear();
+                }
+            });
+
+            draw_manifest_form(ui, hierarchy);
+
             if let Some(status) = hierarchy.take_status() {
                 ui.colored_label(egui::Color32::LIGHT_BLUE, status);
             }
@@ -303,6 +383,90 @@ pub fn draw_graph_editor_panel(ctx: &egui::Context, hierarchy: &mut HierarchyEdi
             ui.separator();
             hierarchy.show(ui);
         });
+}
+
+/// World-settings form: the manifest fields that are not graph nodes.
+///
+/// `sea_level` is here because the reference world needs a below-sea-level
+/// biome and that value had no in-engine editor at all - it was the last scalar
+/// requiring a text editor to change.
+fn draw_manifest_form(ui: &mut egui::Ui, hierarchy: &mut HierarchyEditor) {
+    let selected_biome = hierarchy.selected_biome_id();
+    let Some((manifest, dirty, new_param)) = hierarchy.manifest_form() else {
+        return;
+    };
+    ui.collapsing("World settings", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Seed:");
+            if ui
+                .add(egui::DragValue::new(&mut manifest.seed))
+                .on_hover_text("World seed. Changing it regenerates every chunk.")
+                .changed()
+            {
+                *dirty = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Sea level:");
+            if ui
+                .add(egui::DragValue::new(&mut manifest.sea_level).speed(1.0))
+                .on_hover_text("Global ocean surface (world Y). Empty voxels at or below it fill with water.")
+                .changed()
+            {
+                *dirty = true;
+            }
+        });
+
+        let Some(bid) = selected_biome else {
+            ui.weak("Select a biome to edit its parameters.");
+            return;
+        };
+        let Some(entry) = manifest.biomes.iter_mut().find(|b| b.id == bid) else {
+            return;
+        };
+
+        ui.separator();
+        ui.weak(format!("Biome {bid} parameters:"));
+
+        // Sorted: `params` is a HashMap, and unsorted iteration would reshuffle
+        // the rows every frame - under the pointer, mid-drag.
+        let mut names: Vec<String> = entry.params.keys().cloned().collect();
+        names.sort();
+
+        let mut remove: Option<String> = None;
+        for name in &names {
+            ui.horizontal(|ui| {
+                ui.label(name);
+                if let Some(v) = entry.params.get_mut(name) {
+                    if ui.add(egui::DragValue::new(v).speed(0.05)).changed() {
+                        *dirty = true;
+                    }
+                }
+                if ui.small_button("×").on_hover_text("Remove parameter").clicked() {
+                    remove = Some(name.clone());
+                }
+            });
+        }
+        if let Some(name) = remove {
+            entry.params.remove(&name);
+            *dirty = true;
+        }
+
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(new_param)
+                    .desired_width(160.0)
+                    .hint_text("parameter name"),
+            );
+            let can_add = !new_param.trim().is_empty();
+            if ui.add_enabled(can_add, egui::Button::new("+ Add")).clicked() {
+                entry.params.insert(new_param.trim().to_string(), 0.0);
+                new_param.clear();
+                *dirty = true;
+            }
+        });
+        ui.weak("e.g. traversal_smoothing_distance");
+    });
 }
 
 fn draw_time_control(ui: &mut egui::Ui, p: &mut TimeControlParams) {
@@ -633,7 +797,6 @@ fn draw_terrain_gen(
     ui.collapsing("Terrain Generation", |ui| {
         // Disable param sliders while regenerating (scoped via add_enabled_ui)
         ui.add_enabled_ui(!regenerating, |ui| {
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Seed:"); ui.add(egui::DragValue::new(&mut p.seed)); });
             ui.horizontal(|ui| { dot_red(ui); ui.label("Base height:"); ui.add(egui::Slider::new(&mut p.base_height, 0.0..=64.0).clamping(egui::SliderClamping::Never)); });
             ui.horizontal(|ui| { dot_red(ui); ui.label("Cliff threshold:"); ui.add(egui::Slider::new(&mut p.cliff_threshold, 0.5..=5.0).clamping(egui::SliderClamping::Never)); });
             ui.horizontal(|ui| { dot_red(ui); ui.label("Hill amplitude:"); ui.add(egui::Slider::new(&mut p.hill_amplitude, 0.0..=50.0).clamping(egui::SliderClamping::Never)); });
@@ -862,6 +1025,46 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
             ));
         }
         ui.separator();
+        // Session-scoped, unlike everything above it, and labeled so nobody
+        // reads it as a one-second figure.
+        ui.horizontal(|ui| {
+            ui.label("Generation frontier (session)");
+            if ui.button("Reset").clicked() {
+                state.reset_frontier_requested = true;
+            }
+        });
+        if state.frontier_frames == 0 {
+            ui.label("  no frontier frames sampled — move the camera to open a deficit");
+        } else {
+            ui.label(format!(
+                "  CPU worst: {:.1}ms / {:.1} budget — {} of {} frames over",
+                state.frontier_cpu_max_ms,
+                crate::diagnostics::FRONTIER_BUDGET_MS,
+                state.frontier_over_budget,
+                state.frontier_frames,
+            ));
+            ui.label(format!("  CPU mean:  {:.1}ms", state.frontier_cpu_mean_ms));
+            let split: Vec<String> = crate::diagnostics::STAGE_NAMES
+                .iter()
+                .enumerate()
+                .map(|(i, n)| format!("{n} {:.1}", state.frontier_worst_stages[i]))
+                .collect();
+            ui.label(format!("  worst frame: {}", split.join("  ")));
+            // Per-span across ALL frontier frames, not the worst frame's split:
+            // spans peak on different frames, so one frame's split names an
+            // owner by accident. Rows 0-3 are the stage's systems; rows 4-7
+            // decompose row 0.
+            ui.label("  span        mean     max    (all frontier frames)");
+            for (i, n) in crate::diagnostics::SUB_NAMES.iter().enumerate() {
+                // Rows 4-7 decompose row 0; 8-11 are separate stages' systems.
+                let indent = if (4..8).contains(&i) { "    " } else { "  " };
+                ui.label(format!(
+                    "{}{:<10}{:>6.2}{:>8.2}",
+                    indent, n, state.frontier_sub_mean[i], state.frontier_sub_max[i],
+                ));
+            }
+        }
+        ui.separator();
         ui.label(format!(
             "Jobs — {}/{} threads busy      queued  running  limit  mean/max ms  done",
             state.job_running_total, state.job_max_running,
@@ -899,6 +1102,17 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
                 "Mutations — {} REJECTED ({} wrong-mode, {} system-origin)",
                 rejected, log.rejected_wrong_mode, log.rejected_system_origin,
             ));
+        }
+        if state.events_total == 0 {
+            ui.label("Events — none yet");
+        } else {
+            let kinds: Vec<String> = crate::world::events::WorldEvent::NAMES
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| state.event_counts[*i] > 0)
+                .map(|(i, n)| format!("{n} {}", format_number(state.event_counts[i])))
+                .collect();
+            ui.label(format!("Events — {}", kinds.join("   ")));
         }
         egui::ScrollArea::vertical()
             .id_salt("mutation_log")
@@ -1102,6 +1316,21 @@ fn draw_preset_controls(ui: &mut egui::Ui, state: &mut UiState) {
             state.params = EngineParams::default();
         }
     });
+}
+
+/// Screen-anchored indicator shown while a blueprint tool is armed. Not
+/// interactable - it is a mode readout, and it must never eat the click it is
+/// telling the operator to make.
+pub fn draw_armed_hud(ctx: &egui::Context, label: &str) {
+    egui::Area::new(egui::Id::new("blueprint_armed_hud"))
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.colored_label(egui::Color32::LIGHT_YELLOW, label);
+                ui.weak("Esc or right-click to cancel");
+            });
+        });
 }
 
 /// Play-mode HUD (Substep 12): the selected build material readout.

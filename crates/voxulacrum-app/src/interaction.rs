@@ -183,74 +183,6 @@ fn is_solid_world(world: &World, v: IVec3) -> bool {
     }
 }
 
-/// Apply scatter edits on left/right click at the picked anchor voxel:
-/// left removes the props there, right places one. Rebuilds the chunk's scatter
-/// instance buffer so the change shows immediately.
-pub fn scatter_edit_system(
-    pointer: Res<PointerState>,
-    buffer: Res<RawInputBuffer>,
-    pick: Res<PickState>,
-    ctx: Res<RenderContext>,
-    mut world: ResMut<VoxelWorld>,
-    mut scatter_pass: ResMut<ScatterPass>,
-) {
-    if buffer.egui_wants_pointer {
-        return;
-    }
-    // Scatter place/remove is an Authoring dev tool; the Play-mode player
-    // interaction lands in Substep 12. Inert (not a crash) in Play mode.
-    if world.0.mode != EngineMode::Authoring {
-        return;
-    }
-    let left = pointer.left.just_pressed;
-    let right = pointer.right.just_pressed;
-    if !left && !right {
-        return;
-    }
-    let Some(anchor_voxel) = pick.anchor else {
-        return;
-    };
-
-    let dim = CHUNK_SIZE as i32;
-    let chunk_pos = IVec3::new(
-        anchor_voxel.x.div_euclid(dim),
-        anchor_voxel.y.div_euclid(dim),
-        anchor_voxel.z.div_euclid(dim),
-    );
-    let anchor = LocalPos::new_unchecked(
-        anchor_voxel.x.rem_euclid(dim) as u8,
-        anchor_voxel.y.rem_euclid(dim) as u8,
-        anchor_voxel.z.rem_euclid(dim) as u8,
-    );
-
-    let mut rebuilt = false;
-    if left {
-        let out = world
-            .0
-            .execute(MutationCommand::authoring(WorldMutation::RemoveScatter {
-                chunk: chunk_pos,
-                anchor,
-            }))
-            .expect("authoring scatter edit in authoring mode");
-        rebuilt |= !out.scatter_rebuild.is_empty();
-    }
-    if right {
-        let out = world
-            .0
-            .execute(MutationCommand::authoring(WorldMutation::PlaceScatter {
-                chunk: chunk_pos,
-                anchor,
-                world_voxel: anchor_voxel,
-            }))
-            .expect("authoring scatter edit in authoring mode");
-        rebuilt |= !out.scatter_rebuild.is_empty();
-    }
-
-    if rebuilt {
-        scatter_pass.add_chunk(chunk_pos, &world.0, &ctx.device);
-    }
-}
-
 /// Max distance (voxels) the player can target for break/place (Substep 11).
 const PLAYER_REACH: f32 = 4.5;
 
@@ -392,20 +324,10 @@ pub fn player_action_system(
 /// (a place target can, in rare edge cases, sit just across a streaming boundary).
 /// `meshing_tick_system` picks up the resulting mesh-dirty flag every frame.
 fn edit_voxel(world: &mut World, world_voxel: IVec3, voxel: Voxel) {
-    let dim = CHUNK_SIZE as i32;
-    let chunk = IVec3::new(
-        world_voxel.x.div_euclid(dim),
-        world_voxel.y.div_euclid(dim),
-        world_voxel.z.div_euclid(dim),
-    );
+    let (chunk, local) = crate::world::split_world_voxel(world_voxel);
     if world.get_chunk(chunk).is_none() {
         return;
     }
-    let local = LocalPos::new_unchecked(
-        world_voxel.x.rem_euclid(dim) as u8,
-        world_voxel.y.rem_euclid(dim) as u8,
-        world_voxel.z.rem_euclid(dim) as u8,
-    );
     world
         .execute(MutationCommand::play(WorldMutation::EditVoxel {
             chunk,

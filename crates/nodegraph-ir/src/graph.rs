@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
-use crate::boundary::{BoundaryPort, GraphBoundary, ResolvedBoundary, ResolvedPin};
+use crate::boundary::{BoundaryPort, GraphBoundary};
 use crate::crossgraph::GraphRefTarget;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::edge::{Edge, PinRef};
@@ -171,14 +171,7 @@ impl Graph {
     {
         for node in self.nodes.values_mut() {
             if let NodeKind::GraphRef(params) = &mut node.kind {
-                params.resolved = boundary_of(params.target).map(|b| ResolvedBoundary {
-                    inputs: Vec::new(),
-                    outputs: b
-                        .outputs
-                        .iter()
-                        .map(|p| ResolvedPin { name: p.name.clone(), ty: p.ty, required: false })
-                        .collect(),
-                });
+                params.resolved = boundary_of(params.target).map(|b| b.to_resolved_outputs());
             }
         }
     }

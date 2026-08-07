@@ -205,5 +205,13 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.draw(0..self.debug_line_pass.highlight_count, 0..1);
         }
+        
+        // Blueprint capture region - drawn whenever the panel holds a selection.
+        if let Some(ref vb) = self.debug_line_pass.selection_buffer {
+            pass.set_pipeline(&self.debug_line_pass.pipeline);
+            pass.set_bind_group(0, self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.draw(0..self.debug_line_pass.selection_count, 0..1);
+        }
     }
 }

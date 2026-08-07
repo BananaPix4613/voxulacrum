@@ -25,7 +25,6 @@ use serde::{Serialize, Deserialize};
 use smallvec::SmallVec;
 use voxel_core::LocalPos;
 
-use crate::params::TerrainGenParams;
 use super::layers::{
     DetailLayer, DetailLayerId, DetailLayers, DetailTexel, FluidFillMode, FluidLayer,
     PrefabId, ScatterFlags, ScatterInstance, ScatterStore, ScatterTypeId, StableInstanceId,
@@ -49,6 +48,8 @@ pub struct WorldGenerator {
     /// The evaluation -> storage domain boundary every generated layer crosses.
     /// Owns the world's sea level, which the fluid crossing needs.
     storage_boundary: StorageBoundary,
+    zone_labels: Vec<(u16, String)>,
+    biome_labels: Vec<(u16, String)>,
 }
 
 impl WorldGenerator {
@@ -75,6 +76,8 @@ impl WorldGenerator {
             world_seed,
             // Single-graph ctor (tests / tooling): no manifest, so no sea level.
             storage_boundary: StorageBoundary::new(0),
+            zone_labels: Vec::new(),
+            biome_labels: Vec::new(),
         })
     }
     
@@ -86,9 +89,21 @@ impl WorldGenerator {
         Self::new(graph, world_seed)
     }
 
-    /// Build a generator from a world manifest: a World graph, a Zone graph, and
-    /// one or more biome graphs assembled into the multi-graph harness.
-    pub fn from_manifest(
+    /// Build a generator from a world manifest, at the seed the manifest
+    /// declares.
+    pub fn from_manifest(manifest_path: &std::path::Path) -> Result<Self, String> {
+        let hierarchy = load_hierarchy(manifest_path)?;
+        let seed = hierarchy.seed;
+        Ok(Self::from_hierarchy(hierarchy, seed))
+    }
+
+    /// Same, with the manifest's seed overridden.
+    ///
+    /// For `--verify-generation --seed S`, which checks determinism at seeds the
+    /// world was not authored against. Nothing in the running engine uses it -
+    /// a seed the engine chose over the manifest's would be exactly the second
+    /// source of truth this move removes.
+    pub fn from_manifest_seeded(
         manifest_path: &std::path::Path,
         world_seed: u64,
     ) -> Result<Self, String> {
@@ -96,22 +111,36 @@ impl WorldGenerator {
         Ok(Self::from_hierarchy(hierarchy, world_seed))
     }
 
+    /// The seed this generator was built at.
+    pub fn world_seed(&self) -> u64 {
+        self.world_seed
+    }
+
     /// Assemble a generator from an already-loaded hierarchy.
     fn from_hierarchy(hierarchy: LoadedHierarchy, world_seed: u64) -> Self {
         // The primary biome anchors `WorldEvaluator::new`; `with_biomes` then
         // installs the full set, replacing that placeholder entry.
         let primary = hierarchy.biomes[0].1.clone();
+        // Libraries load from their asset directory rather than being threaded
+        // in from the app: the generator is built in several places (startup,
+        // regen, the headless verifier) and a library set that depended on which
+        // one built it would be a second source of truth.
+        let libraries = crate::libraries::load_libraries();
         let world_eval = WorldEvaluator::new(primary)
             .with_world(hierarchy.world)
-            .with_zone(hierarchy.zone)
+            .with_zones(hierarchy.zones)
             .with_biomes(hierarchy.biomes)
             .with_biome_details(hierarchy.details)
             .with_biome_params(hierarchy.biome_params)
+            .with_libraries(libraries.registry().clone())
+            .with_library_kernels(libraries.kernels().clone())
             .with_cross_graph_resolved();
         Self {
             world_eval,
             world_seed,
             storage_boundary: StorageBoundary::new(hierarchy.sea_level),
+            zone_labels: hierarchy.zone_labels,
+            biome_labels: hierarchy.biome_labels,
         }
     }
     
@@ -136,20 +165,89 @@ impl WorldGenerator {
         self.storage_boundary.sea_level()
     }
 
-    /// Biome id at a world XZ position, resolved straight from generation via
-    /// a cheap column eval - independent of whether that region's chunks are
-    /// currently streamed in. `None` for single-biome worlds (no Zone graph).
-    /// Used by the climate sim so the cloud humidity field no longer recedes
-    /// when zoom shrinks the chunk-load radius.
+    /// Biome id at a world XZ position, resolved straight from generation -
+    /// independent of whether that region's chunks are streamed in.
+    ///
+    /// Pointwise. The climate simulation calls this per cloud cell, and until
+    /// Substep 12c it went through a path that filled every zone graph over a
+    /// whole chunk to read one column: 2.12 ms mean, 15.17 ms max, and the
+    /// entire measured cost of the `sim` stage.
     pub fn biome_id_at_world(&self, wx: f32, wz: f32) -> Option<u16> {
+        self.world_eval
+            .sample_biome_at(self.world_seed, wx.floor() as i32, wz.floor() as i32)
+            .ok()
+    }
+
+    /// Inspect the column at integer world coordinates (roadmap §4.3).
+    ///
+    /// Mirrors `biome_id_at_world`'s framing: the caller names a world column
+    /// and this resolves the owning chunk, so nothing outside generation has to
+    /// know how columns map to chunks.
+    pub fn inspect_column(
+        &self,
+        wx: i32,
+        wz: i32,
+        chunk_y_range: std::ops::Range<i32>,
+    ) -> Result<ColumnInspection, String> {
         let dim = CHUNK_SIZE as i32;
-        let chunk_x = (wx / CHUNK_SIZE as f32).floor() as i32;
-        let chunk_z = (wz / CHUNK_SIZE as f32).floor() as i32;
-        let lx = (wx.floor() as i32).rem_euclid(dim) as usize;
-        let lz = (wz.floor() as i32).rem_euclid(dim) as usize;
-        let ctx = EvalContext::new(self.world_seed, IVec3::new(chunk_x, 0, chunk_z));
-        let col = self.world_eval.biome_column(ctx).ok().flatten()?;
-        Some(col.get(lx, lz))
+        let ctx = EvalContext::new(
+            self.world_seed,
+            IVec3::new(wx.div_euclid(dim), 0, wz.div_euclid(dim)),
+        );
+        let report = self
+            .world_eval
+            .inspect_column(
+                ctx,
+                wx.rem_euclid(dim) as usize,
+                wz.rem_euclid(dim) as usize,
+                chunk_y_range,
+            )
+            .map_err(|e| e.to_string())?;
+        let name_of = |table: &[(u16, String)], id: u16| {
+            table
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_else(|| format!("unregistered {id}"))
+        };
+        Ok(ColumnInspection {
+            zone_name: name_of(&self.zone_labels, report.zone_id),
+            biome_name: name_of(&self.biome_labels, report.biome_id),
+            neighbor_name: name_of(&self.biome_labels, report.border_neighbor),
+            sea_level: self.sea_level(),
+            report,
+        })
+    }
+
+
+    /// Sample a top-down id map centred on `(cx, cz)` (roadmap §4.3).
+    pub fn sample_id_map(
+        &self,
+        center_x: i32,
+        center_z: i32,
+        step: i32,
+        dim: usize,
+    ) -> Result<nodegraph_eval::IdMap, String> {
+        let half = (dim as i32 / 2) * step.max(1);
+        self.world_eval
+            .sample_id_map(
+                self.world_seed,
+                center_x - half,
+                center_z - half,
+                step,
+                dim,
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    /// `(id, name)` per zone, for legends and pickers.
+    pub fn zone_labels(&self) -> &[(u16, String)] {
+        &self.zone_labels
+    }
+
+    /// `(id, name)` per biome.
+    pub fn biome_labels(&self) -> &[(u16, String)] {
+        &self.biome_labels
     }
 
     /// Generate the voxel storage and identity tags for one chunk by evaluating
@@ -185,12 +283,7 @@ impl WorldGenerator {
         // Worldgen stage 7: halve single-cube surface steps into slab transitions.
         // Each column's smoothing distance comes from its biome's params (default
         // when unset), so biomes can smooth differently.
-        let biome_col = self
-            .world_eval
-            .zone_output_node()
-            .and_then(|n| eval.zone_columns.get(n))
-            .and_then(|c| c.as_id())
-            .cloned();
+        let biome_col = eval.biome_ids.clone();
         let mut distances = [DEFAULT_TRAVERSAL_SMOOTHING_DISTANCE; super::slab_smoothing::COLUMN_COUNT];
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
@@ -236,27 +329,28 @@ impl WorldGenerator {
     /// single-zone, so multi-zone-per-chunk is not yet distinguished). Empty
     /// World/Zone graphs yield the legacy `Zone(0)` + `[Biome(0)]` tags.
     fn derive_tags(&self, eval: &ChunkEvaluation) -> ChunkTags {
-        let zone_ids = self
-            .world_eval
-            .world_output_node()
-            .and_then(|n| eval.world_columns.get(n))
-            .and_then(|c| c.as_id())
+        let zone_ids = eval
+            .zone_ids
+            .as_ref()
             .map(|ids| distinct_sorted(ids.data()))
             .unwrap_or_default();
-        let biome_ids = self
-            .world_eval
-            .zone_output_node()
-            .and_then(|n| eval.zone_columns.get(n))
-            .and_then(|c| c.as_id())
+        let biome_ids = eval
+            .biome_ids
+            .as_ref()
             .map(|ids| distinct_sorted(ids.data()))
             .unwrap_or_default();
 
-        let zone = ZoneId(zone_ids.first().copied().unwrap_or(0));
+        // Every distinct zone, not a representative: a chunk on a zone border
+        // belongs to both, and an edit to either must reach it.
+        let mut zones: SmallVec<[ZoneId; 2]> = zone_ids.into_iter().map(ZoneId).collect();
+        if zones.is_empty() {
+            zones.push(ZoneId(0)); // single-zone fallback (empty World graph)
+        }
         let mut biomes: SmallVec<[BiomeId; 4]> = biome_ids.into_iter().map(BiomeId).collect();
         if biomes.is_empty() {
             biomes.push(BiomeId(0)); // single-biome fallback (empty Zone graph)
         }
-        ChunkTags { zone, biomes, library_refs: SmallVec::new() }
+        ChunkTags { zones, biomes, library_refs: SmallVec::new() }
     }
 }
 
@@ -378,32 +472,153 @@ pub struct GeneratedChunk {
     pub smoothing_distances: Box<[u8; super::slab_smoothing::COLUMN_COUNT]>,
 }
 
-/// Identifies one graph in the world hierarchy, for routing edits and
-/// invalidation to the right slot.
+/// Identifies one editable source in the world hierarchy, for routing edits and
+/// invalidation.
+///
+/// Mostly graphs, plus the manifest - which is not a graph but is an edit source
+/// with its own invalidation rule (design §4's table begins with it).
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum GraphSlot {
+    /// The world manifest itself: sea level, seed, graph registrations.
+    /// 
+    /// Produced only by [`slot_for_graph_file`]; the editor's slot list never
+    /// contains it, because there is no canvas for it.
+    Manifest,
     /// The singleton World graph.
     World,
-    /// The Zone graph.
-    Zone,
+    /// The zone graph, by zone id.
+    Zone(u16),
     /// A biome graph, by biome id.
     Biome(u16),
+    /// A biome's detail (foliage) graph, by the biome id it belongs to.
+    ///
+    /// Distinct from `Biome` even though both invalidate the same chunks: the
+    /// editor needs to open them as separate canvases, and design §4 specifies a
+    /// detail-only re-pass that this slot is the prerequisite for.
+    Detail(u16),
+}
+
+/// A [`ColumnReport`](nodegraph_eval::ColumnReport) with its ids resolved to
+/// names and the world constants a reader needs to interpret it.
+///
+/// Names are resolved here rather than in `nodegraph-eval`: that crate deals in
+/// ids and knows nothing about manifests, and it should stay that way.
+pub struct ColumnInspection {
+    pub report: nodegraph_eval::ColumnReport,
+    pub zone_name: String,
+    pub biome_name: String,
+    pub neighbor_name: String,
+    /// Manifest sea level, so the panel can report the ocean the storage
+    /// boundary will apply - which generation's fluid output does not include.
+    pub sea_level: i32,
+}
+
+/// Current manifest schema version.
+///
+/// Present from the first byte deliberately: 0.6.0's format endgame has to
+/// migrate every asset format this version introduces, and a format with no
+/// version field can only be migrated by guessing at its shape (roadmap §8).
+pub const MANIFEST_VERSION: u32 = 1;
+
+/// Seed used when a manifest declares none - the value the shipped world was
+/// authored against, carried over from `TerrainGenParams` when the seed moved
+/// onto the manifest. A pre-seed manifest therefore keeps generating the world
+/// it always did.
+pub const DEFAULT_SEED: u64 = 54321;
+
+/// One zone entry in a [`WorldManifest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneManifestEntry {
+    /// Zone id this graph governs (matches the World graph's assignment).
+    pub id: u16,
+    /// Zone graph file, relative to the manifest directory.
+    pub graph: String,
 }
 
 /// On-disk manifest describing a world's graph hierarchy. Paths are relative to
 /// the manifest file's directory.
+///
+/// Read through [`WorldManifest::read`], never by deserializing directly, so
+/// every consumer gets a migrated manifest and none has to know what a pre-v1
+/// file looked like.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldManifest {
+    /// Schema version. Absent means pre-v1; [`WorldManifest::migrate`] upgrades
+    /// in memory and the next write emits the current version.
+    #[serde(default)]
+    pub version: u32,
     /// World graph file (climate + zone assignment).
     pub world: String,
     /// Global ocean surface (world-Y); empty voxels at or below fill with water.
     /// Absent => 0 (effectively no ocean for a world sitting above Y 0).
     #[serde(default)]
     pub sea_level: i32,
-    /// Zone graph file (biome assignment).
-    pub zone: String,
+    /// World seed. Every RNG in generation derives from it.
+    ///
+    /// Here rather than on `TerrainGenParams` because P1 states determinism over
+    /// *same seed + same graphs + same coordinates*, and that is only checkable
+    /// if all three live in one place. It also makes a world's identity
+    /// self-contained: the manifest and the graphs it names are the whole input.
+    #[serde(default = "default_seed")]
+    pub seed: u64,
+    /// Zone graphs, keyed by the zone id each governs.
+    #[serde(default)]
+    pub zones: Vec<ZoneManifestEntry>,
+    /// **Legacy, pre-v1.** The single-zone field, read for migration only and
+    /// never written back - `migrate` folds it into `zones` as zone 0. Remove
+    /// when no unmigrated manifest can exist, i.e. at the 0.6.0 format freeze.
+    #[serde(rename = "zone", default, skip_serializing)]
+    pub legacy_zone: Option<String>,
     /// Biome graphs, keyed by the biome id each renders.
     pub biomes: Vec<BiomeManifestEntry>,
+}
+
+fn default_seed() -> u64 {
+    DEFAULT_SEED
+}
+
+impl WorldManifest {
+    /// Read and migrate a manifest. The single parse site - five call sites
+    /// previously each did their own `read_to_string` + `from_str`, which is
+    /// five places a migration would have had to be remembered.
+    pub fn read(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut manifest: WorldManifest =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        manifest.migrate();
+        if manifest.zones.is_empty() {
+            return Err(format!("{}: manifest lists no zones", path.display()));
+        }
+        Ok(manifest)
+    }
+
+    /// Write a manifest, stamping the current schema version.
+    ///
+    /// The single write site, for the same reason [`Self::read`] is the single
+    /// parse site: a second writer is a second place the version stamp or the
+    /// legacy-field suppression can be forgotten.
+    pub fn write(&self, path: &std::path::Path) -> Result<(), String> {
+        let mut out = self.clone();
+        out.version = MANIFEST_VERSION;
+        let json = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Bring an in-memory manifest up to [`MANIFEST_VERSION`]. Idempotent, so
+    /// re-reading an already-migrated file is a no-op.
+    fn migrate(&mut self) {
+        // Pre-v1 files carry `zone` and no `zones`. A file with both is not a
+        // shape this engine ever wrote; `zones` wins, because it is the one the
+        // author edited most recently by definition.
+        if self.zones.is_empty() {
+            if let Some(graph) = self.legacy_zone.take() {
+                self.zones.push(ZoneManifestEntry { id: 0, graph });
+            }
+        }
+        self.legacy_zone = None;
+        self.version = MANIFEST_VERSION;
+    }
 }
 
 /// One biome entry in a [`WorldManifest`].
@@ -426,7 +641,7 @@ pub struct BiomeManifestEntry {
 /// The graphs named by a [`WorldManifest`], loaded into memory.
 struct LoadedHierarchy {
     world: Graph,
-    zone: Graph,
+    zones: Vec<(u16, Graph)>,
     biomes: Vec<(u16, Graph)>,
     /// Per-biome DetailGraphs (by biome id) for biomes that reference one.
     details: Vec<(u16, Graph)>,
@@ -434,23 +649,49 @@ struct LoadedHierarchy {
     biome_params: Vec<(u16, BiomeParams)>,
     /// Global ocean surface (world-Y), from the manifest.
     sea_level: i32,
+    /// World seed, from the manifest.
+    seed: u64,
+    /// `(id, display name)` per zone and per biome, for tools that must name an
+    /// id rather than print it. A bare id is not an answer to "which one is
+    /// this" — the same reason library references are picked by name.
+    zone_labels: Vec<(u16, String)>,
+    biome_labels: Vec<(u16, String)>,
 }
 
-/// Read and parse one `*.graph.json` file.
+/// Read and parse one `*.graph.json` file, resolving its blueprint references.
+///
+/// Blueprint resolution lives *here*, at the single read site, rather than at
+/// each caller: `load_hierarchy` (generator) and `load_world_graphs` (editor)
+/// both go through this function, and resolving on only one of them is the
+/// mistake `resolve_library_refs` made - a reference that looked fine on one
+/// path and was silently empty on the other.
+///
+/// The registry is loaded per read rather than cached: a cached one would
+/// survive a `materials.ron` edit and resolve against a stale table.
 fn read_graph(path: &std::path::Path) -> Result<Graph, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Graph::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))
+    let mut graph = Graph::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let registry = crate::materials::load_registry();
+    nodegraph_hotreload::resolve_blueprints(
+        &mut graph,
+        &crate::world::blueprint::blueprint_dir(),
+        &registry,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(graph)
 }
 
 /// Load a manifest and every graph it references.
 fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, String> {
-    let text = std::fs::read_to_string(manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-    let manifest: WorldManifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let manifest = WorldManifest::read(manifest_path)?;
     let dir = manifest_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     let world = read_graph(&dir.join(&manifest.world))?;
-    let zone = read_graph(&dir.join(&manifest.zone))?;
+    let mut zones = Vec::with_capacity(manifest.zones.len());
+    for entry in &manifest.zones {
+        zones.push((entry.id, read_graph(&dir.join(&entry.graph))?));
+    }
     let mut biomes = Vec::with_capacity(manifest.biomes.len());
     let mut details = Vec::new();
     let mut biome_params = Vec::new();
@@ -466,7 +707,27 @@ fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, St
     if biomes.is_empty() {
         return Err("world manifest lists no biomes".to_string());
     }
-    Ok(LoadedHierarchy { world, zone, biomes, details, biome_params, sea_level: manifest.sea_level })
+    let zone_labels: Vec<(u16, String)> = manifest
+        .zones
+        .iter()
+        .map(|z| (z.id, zone_label(&z.graph, z.id)))
+        .collect();
+    let biome_labels: Vec<(u16, String)> = manifest
+        .biomes
+        .iter()
+        .map(|b| (b.id, biome_label(&b.graph, b.id)))
+        .collect();
+    Ok(LoadedHierarchy {
+        world,
+        zones,
+        biomes,
+        details,
+        biome_params,
+        sea_level: manifest.sea_level,
+        seed: manifest.seed,
+        zone_labels,
+        biome_labels,
+    })
 }
 
 /// Load every editable graph in a world manifest: its slot, display label,
@@ -474,34 +735,81 @@ fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, St
 pub fn load_world_graphs(
     manifest_path: &std::path::Path,
 ) -> Result<Vec<(GraphSlot, String, std::path::PathBuf, Graph)>, String> {
-    let text = std::fs::read_to_string(manifest_path)
-        .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-    let manifest: WorldManifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let manifest = WorldManifest::read(manifest_path)?;
     let dir = manifest_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
+    // Every zone is editable, whether or not the evaluator reaches it yet
+    // (Substep 4b) - a zone you cannot open is a zone you cannot author.
     let mut out = vec![
         (GraphSlot::World, "World".to_string(), dir.join(&manifest.world),
             read_graph(&dir.join(&manifest.world))?),
-        (GraphSlot::Zone, "Zone".to_string(), dir.join(&manifest.zone),
-            read_graph(&dir.join(&manifest.zone))?),
     ];
-    for entry in &manifest.biomes {
+    for entry in &manifest.zones {
         out.push((
-            GraphSlot::Biome(entry.id),
-            biome_label(&entry.graph, entry.id),
+            GraphSlot::Zone(entry.id),
+            zone_label(&entry.graph, entry.id),
             dir.join(&entry.graph),
             read_graph(&dir.join(&entry.graph))?,
         ));
     }
-    // Resolve cross-graph pins so GraphRef pins render correctly.
+    for entry in &manifest.biomes {
+        let label = biome_label(&entry.graph, entry.id);
+        out.push((
+            GraphSlot::Biome(entry.id),
+            label.clone(),
+            dir.join(&entry.graph),
+            read_graph(&dir.join(&entry.graph))?,
+        ));
+        // Immediately after its biome, so the selector reads as a hierarchy
+        // rather than two lists a reader has to join mentally.
+        if let Some(detail) = &entry.detail {
+            out.push((
+                GraphSlot::Detail(entry.id),
+                format!("{label} Detail"),
+                dir.join(detail),
+                read_graph(&dir.join(detail))?,
+            ));
+        }
+    }
+    // Library pins, on this path too. This was resolved only on the generator's
+    // path, so a `LibraryRef` opened in the editor showed no pins no matter how
+    // many times it was saved and reloaded - the same two-resolution-paths
+    // mistake as the `out[1]` index this loop replaced.
+    let libraries = crate::libraries::load_libraries();
+    for entry in out.iter_mut() {
+        entry.3.resolve_library_refs(libraries.registry());
+    }
+
     out[0].3.derive_output_boundary();
     let world_boundary = out[0].3.boundary.clone();
-    out[1].3.resolve_graph_refs(|t| match t {
-        nodegraph_ir::GraphRefTarget::World => Some(world_boundary.clone()),
-        _ => None,
-    });
+    for (slot, label, _, graph) in out.iter_mut().skip(1) {
+        graph.resolve_graph_refs(|t| match t {
+            nodegraph_ir::GraphRefTarget::World => Some(world_boundary.clone()),
+            _ => None,
+        });
+        if let Some(node) = unresolved_graph_ref(graph) {
+            log::warn!(
+                "{label} ({slot:?}): GraphRef {node:?} did not resolve - it will \
+                 render with no pins, and saving this graph would drop the wires \
+                 into it",
+            );
+        }
+    }
     Ok(out)
+}
+
+/// The first `GraphRef` in `graph` whose pins were never resolved, if any.
+///
+/// A node in that state renders with no pins and cannot round-trip through the
+/// canvas, so this is a save-time data-loss hazard rather than a display defect.
+/// Checked after every resolution pass so a future call site that forgets one
+/// says so at load time instead of at the next Save.
+fn unresolved_graph_ref(graph: &Graph) -> Option<nodegraph_ir::NodeId> {
+    graph.nodes.iter().find_map(|(id, n)| match &n.kind {
+        NodeKind::GraphRef(p) if p.resolved.is_none() => Some(id),
+        _ => None,
+    })
 }
 
 /// Which hierarchy slot a graph file belongs to, resolved through the manifest.
@@ -514,8 +822,10 @@ pub fn slot_for_graph_file(
     changed: &std::path::Path,
 ) -> Option<GraphSlot> {
     let changed = changed.canonicalize().ok()?;
-    let text = std::fs::read_to_string(manifest_path).ok()?;
-    let manifest: WorldManifest = serde_json::from_str(&text).ok()?;
+    if manifest_path.canonicalize().map(|p| p == changed).unwrap_or(false) {
+        return Some(GraphSlot::Manifest);
+    }
+    let manifest = WorldManifest::read(manifest_path).ok()?;
     let dir = manifest_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -529,12 +839,15 @@ pub fn slot_for_graph_file(
     if same(&manifest.world) {
         return Some(GraphSlot::World);
     }
-    if same(&manifest.zone) {
-        return Some(GraphSlot::Zone);
+    if let Some(entry) = manifest.zones.iter().find(|z| same(&z.graph)) {
+        return Some(GraphSlot::Zone(entry.id));
     }
     for entry in &manifest.biomes {
-        if same(&entry.graph) || entry.detail.as_deref().is_some_and(same) {
+        if same(&entry.graph) {
             return Some(GraphSlot::Biome(entry.id));
+        }
+        if entry.detail.as_deref().is_some_and(same) {
+            return Some(GraphSlot::Detail(entry.id));
         }
     }
     None
@@ -549,6 +862,18 @@ fn biome_label(file: &str, id: u16) -> String {
     match chars.next() {
         Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
         None => format!("Biome {id}"),
+    }
+}
+
+/// A display label for a zone from its file name (e.g. "zone_highlands.graph.json"
+/// -> "Highlands", "zone.graph.json" -> "Zone"), falling back to the id.
+fn zone_label(file: &str, id: u16) -> String {
+    let stem = file.strip_suffix(".graph.json").unwrap_or(file);
+    let name = stem.strip_prefix("zone_").unwrap_or(stem);
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+        None => format!("Zone {id}"),
     }
 }
 
@@ -575,43 +900,8 @@ fn graphs_dir() -> std::path::PathBuf {
 /// the streaming workers, and background regeneration all share the resulting
 /// `Arc`. Re-reading the file here (rather than caching one immutable graph)
 /// means a regeneration picks up an edited `biome_meadow.graph.json`.
-pub fn load_default(params: &TerrainGenParams) -> Result<Arc<WorldGenerator>, String> {
-    WorldGenerator::from_manifest(&world_manifest_path(), params.seed as u64).map(Arc::new)
-}
-
-/// Rewrite `manifest_path`, adding a biome entry `(id, graph_file)`. `graph_file`
-/// is stored relative to the manifest directory. Overwrites an existing entry
-/// with the same id.
-pub fn add_biome_entry(
-    manifest_path: &std::path::Path,
-    id: u16,
-    graph_file: &str,
-) -> Result<(), String> {
-    let text = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
-    let mut manifest: WorldManifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    match manifest.biomes.iter_mut().find(|b| b.id == id) {
-        Some(entry) => entry.graph = graph_file.to_string(),
-        None => manifest.biomes.push(BiomeManifestEntry {
-            id,
-            graph: graph_file.to_string(),
-            detail: None,
-            params: HashMap::new(),
-        }),
-    }
-    let out = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(manifest_path, out).map_err(|e| e.to_string())
-}
-
-/// Rewrite `manifest_path`, removing the biome entry with the given id.
-pub fn remove_biome_entry(
-    manifest_path: &std::path::Path,
-    id: u16,
-) -> Result<(), String> {
-    let text = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
-    let mut manifest: WorldManifest = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    manifest.biomes.retain(|b| b.id != id);
-    let out = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(manifest_path, out).map_err(|e| e.to_string())
+pub fn load_default() -> Result<Arc<WorldGenerator>, String> {
+    WorldGenerator::from_manifest(&world_manifest_path()).map(Arc::new)
 }
 
 /// The graphs directory (public so the editor can place new graph files there).
@@ -651,6 +941,69 @@ pub fn new_biome_graph() -> Graph {
     g
 }
 
+/// A minimal, valid ZoneGraph: reads the World graph's first declared output as
+/// a climate field and assigns biome 0 to every column. A starting point the
+/// author then bands with the ZoneOutput picker.
+///
+/// Takes the World boundary because a `GraphRef` has **no pins until resolved**,
+/// and `Graph::connect` validates against the pin count - so an unresolved ref
+/// cannot be wired. Resolve, then connect.
+///
+/// Pin 0 is the World's first boundary output, which for the shipped World graph
+/// is `climate`. A World graph exposing several outputs may need the author to
+/// rewire; a World graph exposing none leaves the ZoneOutput's required input
+/// unconnected, which surfaces as an error badge rather than silently.
+pub fn new_zone_graph(world_boundary: &nodegraph_ir::GraphBoundary) -> Graph {
+    use glam::Vec2;
+    use nodegraph_ir::*;
+
+    let mut g = Graph::of_kind(GraphKind::Zone);
+    let climate = g.add_node_at(
+        NodeKind::GraphRef(GraphRefParams {
+            target: GraphRefTarget::World,
+            ..Default::default()
+        }),
+        Vec2::new(0.0, 0.0),
+    );
+    let boundary = world_boundary.clone();
+    g.resolve_graph_refs(|t| match t {
+        GraphRefTarget::World => Some(boundary.clone()),
+        _ => None,
+    });
+    let out = g.add_node_at(
+        NodeKind::ZoneOutput(ZoneOutputParams {
+            biome_bands: Vec::new(),
+            biome_ids: vec![0],
+            ..Default::default()
+        }),
+        Vec2::new(280.0, 0.0),
+    );
+    let _ = g.connect(PinRef::new(climate, 0), PinRef::new(out, 0));
+    g
+}
+
+/// A minimal, valid DetailGraph: one `PaintDensity` terminal painting a default
+/// species across the biome.
+///
+/// `PaintDensity`'s surface input is optional, so this validates as authored and
+/// produces visible foliage immediately - an author can see the graph is
+/// attached before authoring anything into it.
+pub fn new_detail_graph() -> Graph {
+    use glam::Vec2;
+    use nodegraph_ir::*;
+
+    let mut g = Graph::of_kind(GraphKind::Detail);
+    g.add_node_at(
+        NodeKind::PaintDensity(PaintDensityParams {
+            species: 1,
+            density: 180,
+            ..Default::default()
+        }),
+        Vec2::new(0.0, 0.0),
+    );
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,14 +1022,14 @@ mod tests {
             .expect("biome_meadow.graph.json must load");
         let generated = generator.generate_chunk(IVec3::ZERO);
         // Empty World/Zone graphs -> legacy single-biome tags.
-        assert_eq!(generated.tags.zone, ZoneId(0));
+        assert_eq!(generated.tags.zones.as_slice(), &[ZoneId(0)]);
         assert_eq!(generated.tags.biomes.as_slice(), &[BiomeId(0)]);
     }
 
     #[test]
     fn generate_chunk_is_deterministic() {
         use crate::world::chunk::CHUNK_VOLUME;
-        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 7)
+        let generator = WorldGenerator::from_manifest(&world_manifest_path())
             .expect("world manifest must load");
         let pos = IVec3::new(1, 0, 2);
         let a = generator.generate_chunk(pos);
@@ -694,7 +1047,7 @@ mod tests {
         use crate::world::chunk::CHUNK_VOLUME;
         use voxel_core::ShapeId;
 
-        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 7)
+        let generator = WorldGenerator::from_manifest(&world_manifest_path())
             .expect("world manifest must load");
 
         let slab_count = |g: &GeneratedChunk| {
@@ -813,9 +1166,16 @@ mod tests {
                 { "id": 1, "graph": "biome_rocky.graph.json" }
             ]
         }"#;
-        let m: WorldManifest = serde_json::from_str(json).unwrap();
+        // Deserialized directly rather than through `read`, so this covers the
+        // pre-v1 shape and the migration that upgrades it - `read` would have
+        // done both and tested neither in isolation.
+        let mut m: WorldManifest = serde_json::from_str(json).unwrap();
+        assert!(m.zones.is_empty(), "pre-v1 has no `zones` until migrated");
+        m.migrate();
         assert_eq!(m.world, "world.graph.json");
-        assert_eq!(m.zone, "zone.graph.json");
+        assert_eq!(m.zones.len(), 1);
+        assert_eq!(m.zones[0].id, 0);
+        assert_eq!(m.zones[0].graph, "zone.graph.json");
         assert_eq!(m.biomes.len(), 2);
         assert_eq!(m.biomes[1].id, 1);
         assert_eq!(m.biomes[1].graph, "biome_rocky.graph.json");
@@ -823,7 +1183,7 @@ mod tests {
 
     #[test]
     fn default_world_manifest_loads() {
-        let generator = WorldGenerator::from_manifest(&world_manifest_path(), 0)
+        let generator = WorldGenerator::from_manifest(&world_manifest_path())
             .expect("world.manifest.json and its graphs must load");
         // The hierarchy composites a chunk without panicking.
         let _ = generator.generate_chunk(IVec3::ZERO);
@@ -953,5 +1313,137 @@ mod tests {
         texels[1 + 1 * 32] = PaintTexel { species: 1, density: 200, tint: 0, flags: 0 };
         let dl = paint_to_detail_layers(&[PaintLayer { layer_id: 0, texels }], &storage, &fluids);
         assert_eq!(dl.layers[0].map[1 + 1 * 32].density, 0, "submerged column paints nothing");
+    }
+
+
+    #[test]
+    fn pre_v1_manifest_migrates_its_single_zone() {
+        // The exact shape shipped before this substep.
+        let legacy = r#"{
+            "world": "world.graph.json",
+            "sea_level": 24,
+            "zone": "zone.graph.json",
+            "biomes": [{ "id": 0, "graph": "b.graph.json" }]
+        }"#;
+        let mut m: WorldManifest = serde_json::from_str(legacy).expect("legacy parses");
+        assert_eq!(m.version, 0, "absent version reads as pre-v1");
+        m.migrate();
+
+        assert_eq!(m.version, MANIFEST_VERSION);
+        assert_eq!(m.zones.len(), 1);
+        assert_eq!(m.zones[0].id, 0);
+        assert_eq!(m.zones[0].graph, "zone.graph.json");
+        assert!(m.legacy_zone.is_none(), "the legacy field is consumed, not kept");
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_never_writes_the_legacy_field() {
+        let v1 = r#"{
+            "version": 1,
+            "world": "world.graph.json",
+            "sea_level": 24,
+            "zones": [{ "id": 0, "graph": "zone.graph.json" }],
+            "biomes": [{ "id": 0, "graph": "b.graph.json" }]
+        }"#;
+        let mut m: WorldManifest = serde_json::from_str(v1).expect("v1 parses");
+        m.migrate();
+        m.migrate();
+        assert_eq!(m.zones.len(), 1, "re-migrating must not duplicate the zone");
+
+        let written = serde_json::to_string(&m).expect("serializes");
+        assert!(
+            !written.contains("\"zone\""),
+            "the legacy field must never be written back: {written}",
+        );
+        assert!(written.contains("\"version\":1"));
+    }
+
+    #[test]
+    fn shipped_manifest_is_v1_and_loads() {
+        // Locks the asset against the schema, the way the prefab and library
+        // registries lock their RON against their fallbacks.
+        let m = WorldManifest::read(&world_manifest_path())
+            .expect("shipped manifest loads");
+        assert_eq!(m.version, MANIFEST_VERSION);
+        assert!(!m.zones.is_empty());
+        assert!(!m.biomes.is_empty());
+    }
+    
+    #[test]
+    fn saving_the_manifest_routes_to_a_structural_edit() {
+        // Before this existed the water logged "ignoring unreferenced graph
+        // file" and nothing regenerated - so editing sea level in-engine
+        // changed the file and not the world.
+        let path = world_manifest_path();
+        assert_eq!(
+            slot_for_graph_file(&path, &path),
+            Some(GraphSlot::Manifest),
+        );
+    }
+
+    #[test]
+    fn the_shipped_world_assigns_every_registered_zone_and_biome() {
+        // The direct guard for the content gate: "3+ biomes across 2 zones"
+        // stays true. Registration is not assignment - `--validate-graphs` warns
+        // when a band table *can* never reach an entry, but a band whose
+        // threshold no climate value crosses is registered, assignable, and
+        // still absent from the world.
+        //
+        // Sampled rather than generated: assignment is a column-pipeline
+        // property, and 4,096 pointwise samples cost a fraction of 4,096 chunks.
+        let generator =
+            WorldGenerator::from_manifest(&world_manifest_path()).expect("world loads");
+        let manifest = WorldManifest::read(&world_manifest_path()).expect("manifest loads");
+
+        let map = generator
+            .sample_id_map(0, 0, 32, 64)
+            .expect("id map samples");
+        let zones: std::collections::HashSet<u16> = map.zone.iter().copied().collect();
+        let biomes: std::collections::HashSet<u16> = map.biome.iter().copied().collect();
+
+        for z in &manifest.zones {
+            assert!(
+                zones.contains(&z.id),
+                "zone {} is registered but never assigned within 2048 units of the origin",
+                z.id,
+            );
+        }
+        for b in &manifest.biomes {
+            assert!(
+                biomes.contains(&b.id),
+                "biome {} is registered but never assigned within 2048 units of the origin",
+                b.id,
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_world_has_a_library_backed_biome() {
+        // The cave-bearing biome carves with `standard_cave_noise` through a
+        // `LibraryRef`. Asserted structurally, and against the manifest rather
+        // than a file name, so renaming a biome does not break it.
+        //
+        // Disconnection is covered elsewhere: a `LibraryRef` with an unconnected
+        // `position` fails `Graph::validate`, which `--validate-graphs` runs in
+        // CI. Containment plus that is reachability.
+        let path = world_manifest_path();
+        let manifest = WorldManifest::read(&path).expect("manifest loads");
+        let dir = path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+
+        let has_library = manifest.biomes.iter().any(|b| {
+            std::fs::read_to_string(dir.join(&b.graph))
+                .ok()
+                .and_then(|t| Graph::from_json(&t).ok())
+                .is_some_and(|g| {
+                    g.nodes
+                        .iter()
+                        .any(|(_, n)| matches!(n.kind, NodeKind::LibraryRef(_)))
+                })
+        });
+        assert!(
+            has_library,
+            "no biome references a library — the cave-bearing biome lost its \
+             StandardCaveNoise reference, and caves would vanish silently",
+        );
     }
 }

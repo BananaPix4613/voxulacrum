@@ -89,6 +89,23 @@ impl GraphBoundary {
         };
         ResolvedBoundary { inputs: project(&self.inputs), outputs: project(&self.outputs) }
     }
+    
+    /// Project only the outputs as a consumer's dynamic pins.
+    /// 
+    /// A `GraphRef` reads a graph's declared outputs and feeds it nothing, so
+    /// its resolved boundary has no inputs. Shared by the resolve pass and the
+    /// editor's insert-time binding, so a node placed from the menu and one
+    /// resolved at load carry identical pins.
+    pub fn to_resolved_outputs(&self) -> ResolvedBoundary {
+        ResolvedBoundary {
+            inputs: Vec::new(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|p| ResolvedPin { name: p.name.clone(), ty: p.ty, required: false })
+                .collect(),
+        }
+    }
 }
 
 /// A resolved dynamic pin: a boundary port projected onto a referencing node

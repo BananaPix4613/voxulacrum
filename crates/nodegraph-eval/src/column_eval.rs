@@ -76,6 +76,20 @@ impl<'g> ColumnEvaluator<'g> {
             if matches!(self.graph.nodes[id].kind, NodeKind::GraphRef(_)) {
                 continue;
             }
+            // Declaration-only nodes have *no pins in either direction*, so they
+            // cannot participate in dataflow at all and there is nothing to
+            // fill. `PlaceStructure` is read by scanning the graph, not by
+            // pulling through pins.
+            //
+            // The test is deliberately both directions. Terminals such as
+            // `WorldOutput` and `ZoneOutput` also declare no *outputs* - their
+            // value is read from the cache by node id rather than through a pin
+            // - so skipping on outputs alone skips exactly the nodes everything
+            // else depends on.
+            let d = self.graph.nodes[id].kind.descriptor();
+            if d.inputs.is_empty() && d.outputs.is_empty() {
+                continue;
+            }
             let out = self.fill_node(id)?;
             self.cache.insert(id, out);
         }
@@ -343,6 +357,20 @@ fn quantize_one(value: f32, bands: &[f32]) -> u16 {
 /// unchanged).
 fn band_id(k: u16, ids: &[u16]) -> u16 {
     ids.get(k as usize).copied().unwrap_or(k)
+}
+
+/// Every id a band table can assign, `band_id`'s index fallback included.
+/// 
+/// `band_count` thresholds produce `band_count + 1` regions, and a short `ids`
+/// table falls back to the band *index*. So `zone_bands: [0.0]` with no ids
+/// assigns zones 0 **and** 1 - which is how a world silently assigned a zone it
+/// had no graph for. One definition, because the evaluator, the generator's
+/// startup validation, and the validation CLI all have to agree about it.
+pub fn assignable_ids(band_count: usize, ids: &[u16]) -> Vec<u16> {
+    let mut out: Vec<u16> = (0..=band_count).map(|k| band_id(k as u16, ids)).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Quantize a per-column surface field into a discrete id column: band-index per

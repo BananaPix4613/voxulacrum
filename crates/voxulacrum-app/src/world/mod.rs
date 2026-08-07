@@ -16,6 +16,8 @@ pub mod persistence;
 pub mod world_generator;
 pub mod mutation;
 pub mod room;
+pub mod events;
+pub mod blueprint;
 
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -46,11 +48,40 @@ pub struct World {
     /// Every command through the door, counted; recent actor commands kept
     /// (roadmap §4.4). Private so `execute` is the only writer.
     mutation_log: MutationLog,
+    /// Events emitted this frame, awaiting publication.
+    ///
+    /// An outbox rather than a direct `EventWriter` because the door is a method
+    /// on `World`, not a system, and is called from a dozen places that have no
+    /// ECS access. Drained unconditionally once per frame by
+    /// `world_event_pump_system`; if it ever grows, that is a scheduling bug
+    /// rather than a capacity problem.
+    event_outbox: Vec<events::WorldEvent>,
 }
 
 use crate::params::TerrainGenParams;
 use voxel_core::{ChunkCoord, LocalPos, MaterialId, MaterialRegistry, Voxel};
 use crate::world::mutation::MutationOrigin;
+
+/// Split a world-space voxel coordinate into its chunk coordinate and the
+/// position within that chunk.
+/// 
+/// Euclidean division, so it is correct for negative coordinates - which is the
+/// reason this is one function rather than the open-coded `div_euclid` /
+/// `rem_euclid` pair it replaces at three call sites.
+pub fn split_world_voxel(world_voxel: IVec3) -> (IVec3, LocalPos) {
+    let dim = CHUNK_SIZE as i32;
+    let chunk = IVec3::new(
+        world_voxel.x.div_euclid(dim),
+        world_voxel.y.div_euclid(dim),
+        world_voxel.z.div_euclid(dim),
+    );
+    let local = LocalPos::new_unchecked(
+        world_voxel.x.rem_euclid(dim) as u8,
+        world_voxel.y.rem_euclid(dim) as u8,
+        world_voxel.z.rem_euclid(dim) as u8,
+    );
+    (chunk, local)
+}
 
 impl World {
     /// Build the initial world synchronously (blocks boot), fanning the per-chunk
@@ -105,6 +136,7 @@ impl World {
             max_chunk_y: max_y,
             mode: EngineMode::Authoring,
             mutation_log: MutationLog::default(),
+            event_outbox: Vec::new(),
         }
     }
 
@@ -214,6 +246,49 @@ impl World {
                 }
             }
         }
+
+        // Derived before dispatch consumes the intent, published after it
+        // succeeds - a rejected command must announce nothing.
+        let event = match &command.mutation {
+            WorldMutation::EditVoxel { chunk, .. } => {
+                Some(events::WorldEvent::VoxelsChanged { chunk: *chunk, cells: 1 })
+            }
+            WorldMutation::EditVoxelBatch { chunk, edits } => {
+                Some(events::WorldEvent::VoxelsChanged {
+                    chunk: *chunk,
+                    cells: edits.len() as u32,
+                })
+            }
+            WorldMutation::RemoveScatter { chunk, .. }
+            | WorldMutation::PlaceScatter { chunk, .. } => {
+                Some(events::WorldEvent::ScatterChanged { chunk: *chunk })
+            }
+            WorldMutation::PourFluidColumn { .. } => {
+                Some(events::WorldEvent::FluidChanged { chunks: 1 })
+            }
+            WorldMutation::CommitFluidPlans { plans } => {
+                Some(events::WorldEvent::FluidChanged { chunks: plans.len() as u32 })
+            }
+            WorldMutation::InsertLoadedChunk { chunk } => {
+                Some(events::WorldEvent::ChunkLoaded { chunk: chunk.data.coord.into() })
+            }
+            WorldMutation::EvictChunk { chunk } => {
+                Some(events::WorldEvent::ChunkUnloaded { chunk: *chunk })
+            }
+            WorldMutation::FinalizeSeam { chunk, .. } => {
+                Some(events::WorldEvent::SeamFinalized { chunk: *chunk })
+            }
+            WorldMutation::SwapRegeneratedChunks { chunks, .. } => {
+                Some(events::WorldEvent::WorldRegenerated { chunks: chunks.len() as u32 })
+            }
+            WorldMutation::StampBlueprint { origin, blueprint, .. } => {
+                Some(events::WorldEvent::BlueprintStamped {
+                    origin: *origin,
+                    cells: blueprint.cells.len() as u32,
+                })
+            }
+        };
+
         let outcome = match command.mutation {
             WorldMutation::EditVoxel { chunk, index, voxel } => {
                 self.handle_edit_voxel(chunk, index, voxel)
@@ -237,10 +312,21 @@ impl World {
             WorldMutation::SwapRegeneratedChunks { chunks, generator } => {
                 self.handle_swap_regenerated_chunks(chunks, generator)
             }
+            WorldMutation::StampBlueprint { origin, blueprint, yaw } => {
+                self.handle_stamp_blueprint(origin, blueprint, yaw)
+            }
         };
         self.mutation_log
             .record(intent_index, intent_name, origin, mode, &outcome);
+        if let Some(event) = event {
+            self.event_outbox.push(event);
+        }
         Ok(outcome)
+    }
+
+    /// Take this frame's emitted events, for the pump to publish.
+    pub fn drain_events(&mut self) -> std::vec::Drain<'_, events::WorldEvent> {
+        self.event_outbox.drain(..)
     }
 
     /// Handler for [`WorldMutation::EditVoxel`]. A convenience over the batched
@@ -619,6 +705,23 @@ impl World {
             chunk.mesh_dirty = true;
         }
         MutationOutcome::default()
+    }
+    
+    /// Handler for [`WorldMutation::StampBlueprint`]. Decomposes the blueprint
+    /// into one batch per touched chunk and delegates to the batch handler, so
+    /// override bookkeeping, promotion, persist marking and border invalidation
+    /// stay in exactly one place rather than being reimplemented here.
+    fn handle_stamp_blueprint(
+        &mut self,
+        origin: IVec3,
+        blueprint: voxel_core::ResolvedBlueprint,
+        yaw: voxel_core::Yaw,
+    ) -> MutationOutcome {
+        let mut outcome = MutationOutcome::default();
+        for (chunk_pos, edits) in blueprint::stamp_batches(&blueprint, origin, yaw) {
+            outcome.extend(self.handle_edit_voxel_batch(chunk_pos, edits));
+        }
+        outcome
     }
 
     /// Apply a single voxel edit. Thin wrapper over the mutation API's
@@ -1212,10 +1315,7 @@ mod mutation_tests {
 
     /// A minimal world holding a single air chunk at the origin, in `mode`.
     fn world_with_air_chunk(mode: EngineMode) -> World {
-        let generator = world_generator::load_default(
-            &TerrainGenParams::default(),
-        )
-        .expect("default generator loads");
+        let generator = world_generator::load_default().expect("default generator loads");
         let mut chunks = HashMap::new();
         chunks.insert(ChunkCoord::from(IVec3::ZERO), LoadedChunk::new_air(IVec3::ZERO));
         World {
@@ -1225,6 +1325,7 @@ mod mutation_tests {
             max_chunk_y: 4,
             mode,
             mutation_log: MutationLog::default(),
+            event_outbox: Vec::new(),
         }
     }
 

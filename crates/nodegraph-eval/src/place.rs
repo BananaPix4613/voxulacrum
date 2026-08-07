@@ -1,8 +1,8 @@
-//! Prop stamping: write tree / prefab voxels into a terrain buffer at scanned
+//! Prop stamping: write tree / blueprint voxels into a terrain buffer at scanned
 //! surface points, clipping anything outside the chunk's `[0, N)` bounds.
 
-use nodegraph_ir::{PlaceTreeParams, PrefabTemplate};
-use voxel_core::{ChunkBuffer, Voxel};
+use nodegraph_ir::PlaceTreeParams;
+use voxel_core::{ChunkBuffer, ResolvedBlueprint, Voxel};
 
 use crate::field::CHUNK_DIM;
 use crate::scatter::{ScatterPoint, SplitMix64};
@@ -47,24 +47,23 @@ pub(crate) fn place_trees(
     out
 }
 
-
-/// Stamp a prefab template at every point with a surface. The template's
-/// `anchor` voxel lands one cell above the surface on the point's column.
-/// Solid template voxels overwrite unconditionally; clipped at chunk bounds.
-pub(crate) fn place_prefabs(
+/// Stamp a resolved blueprint at every point with a surface. The blueprint's
+/// `anchor` cell lands one cell above the surface on the point's column.
+/// Solid cells overwrite unconditionally; clipped at chunk bounds.
+pub(crate) fn place_blueprints(
     terrain: &ChunkBuffer<Voxel, 32>,
     points: &[ScatterPoint],
-    template: &PrefabTemplate,
+    blueprint: &ResolvedBlueprint,
 ) -> ChunkBuffer<Voxel, 32> {
     let mut out = terrain.clone();
     out.make_dense();
     for &pt in points {
         let Some(sy) = pt.surface_y else { continue; };
-        let bx = pt.lx.round() as i32 - template.anchor[0];
-        let by = sy + 1 - template.anchor[1];
-        let bz = pt.lz.round() as i32 - template.anchor[2];
-        for pv in &template.voxels {
-            set_clipped(&mut out, bx + pv.at[0], by + pv.at[1], bz + pv.at[2], pv.voxel, false);
+        let bx = pt.lx.round() as i32 - blueprint.anchor[0];
+        let by = sy + 1 - blueprint.anchor[1];
+        let bz = pt.lz.round() as i32 - blueprint.anchor[2];
+        for &(at, voxel) in &blueprint.cells {
+            set_clipped(&mut out, bx + at[0], by + at[1], bz + at[2], voxel, false);
         }
     }
     out.try_collapse();
@@ -81,8 +80,7 @@ fn set_clipped(out: &mut ChunkBuffer<Voxel, 32>, x: i32, y: i32, z: i32, v: Voxe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodegraph_ir::PrefabVoxel;
-    use voxel_core::MaterialId;
+    use voxel_core::{DestructionPolicy, MaterialId};
 
     fn floor(top: i32) -> ChunkBuffer<Voxel, 32> {
         let mut b: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
@@ -108,19 +106,22 @@ mod tests {
     }
 
     #[test]
-    fn prefab_stamps_and_clips_at_border() {
+    fn blueprint_stamps_and_clips_at_border() {
         let t = floor(8);
-        // One-voxel prefab at the origin, anchored at origin.
-        let tpl = PrefabTemplate {
+        // One-cell blueprint at the origin, anchored at origin.
+        let bp = ResolvedBlueprint {
+            name: "test".to_string(),
             anchor: [0, 0, 0],
-            voxels: vec![PrefabVoxel { at: [0, 0, 0], voxel: Voxel::cube(MaterialId(2)) }],
+            cells: vec![([0, 0, 0], Voxel::cube(MaterialId(2)))],
+            destruction: DestructionPolicy::Destroy,
+            protected_volume: false,
         };
         // In-bounds point lands granite at (16, 9, 16).
-        let out = place_prefabs(&t, &[scanned(16.0, 16.0, 8)], &tpl);
+        let out = place_blueprints(&t, &[scanned(16.0, 16.0, 8)], &bp);
         assert_eq!(out.get(16, 9, 16).material, MaterialId(2));
         // A point outside [0,N) is fully clipped (no panic, no write). The
         // cell at (0,9,16) sits above the floor top (y=8), so it stays air.
-        let out2 = place_prefabs(&t, &[scanned(-5.0, 16.0, 8)], &tpl);
+        let out2 = place_blueprints(&t, &[scanned(-5.0, 16.0, 8)], &bp);
         assert_eq!(out2.get(0, 9, 16).material, MaterialId(0)); // air, unchanged
     }
 }

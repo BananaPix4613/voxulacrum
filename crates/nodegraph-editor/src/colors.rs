@@ -38,6 +38,7 @@ pub fn category_fill(cat: NodeCategory) -> Color32 {
         NodeCategory::Props     => Color32::from_rgb(0xc8, 0x90, 0x60),
         NodeCategory::Biome     => Color32::from_rgb(0xb0, 0x80, 0xff),
         NodeCategory::Library   => Color32::from_rgb(0xb0, 0x80, 0xff),
+        NodeCategory::Graph     => Color32::from_rgb(0x80, 0xa0, 0xff),
         NodeCategory::Foliage   => Color32::from_rgb(0x6c, 0xb0, 0x4c),
         NodeCategory::Output    => Color32::from_rgb(0xe0, 0x4c, 0x4c),
     }

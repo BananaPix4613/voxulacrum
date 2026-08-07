@@ -121,6 +121,22 @@ fn voxel_box_lines(v: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
     box_edges(min, max, color)
 }
 
+/// Inclusive world-voxel box outline, expanded to cover `max`'s full cell.
+fn region_box_lines(a: IVec3, b: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
+    let s = VOXEL_SCALE;
+    // Slightly larger than the pick highlight's epsilon, so a one-voxel
+    // selection reads as a distinct box rather than z-fighting with it.
+    let eps = s * 0.06;
+    let (lo, hi) = (a.min(b), a.max(b));
+    let min = Vec3::new(lo.x as f32 * s - eps, lo.y as f32 * s - eps, lo.z as f32 * s - eps);
+    let max = Vec3::new(
+        (hi.x as f32 + 1.0) * s + eps,
+        (hi.y as f32 + 1.0) * s + eps,
+        (hi.z as f32 + 1.0) * s + eps,
+    );
+    box_edges(min, max, color)
+}
+
 #[derive(Resource)]
 pub struct DebugLinePass {
     pub pipeline: wgpu::RenderPipeline,
@@ -130,6 +146,13 @@ pub struct DebugLinePass {
     /// boundary lines (and of `show_debug_lines`).
     pub highlight_buffer: Option<wgpu::Buffer>,
     pub highlight_count: u32,
+    /// Optional authoring-region outline (blueprint capture selection).
+    pub selection_buffer: Option<wgpu::Buffer>,
+    pub selection_count: u32,
+    /// The corners the current `selection_buffer` was built from, so a frame
+    /// that changes nothing rebuilds nothing. Unlike the pick highlight, which
+    /// moves with the cursor, a selection changes on a click.
+    selection_key: Option<(IVec3, IVec3)>,
 }
 
 impl DebugLinePass {
@@ -206,6 +229,9 @@ impl DebugLinePass {
             vertex_count: 0,
             highlight_buffer: None,
             highlight_count: 0,
+            selection_buffer: None,
+            selection_count: 0,
+            selection_key: None,
         }
     }
 
@@ -249,6 +275,37 @@ impl DebugLinePass {
             None => {
                 self.highlight_buffer = None;
                 self.highlight_count = 0;
+            }
+        }
+    }
+
+    /// Set (or clear) the authoring-region outline spanning two world voxels,
+    /// inclusive. A no-op when the corners are unchanged since the last call.
+    pub fn set_selection(
+        &mut self,
+        ctx: &RenderContext,
+        corners: Option<(IVec3, IVec3)>,
+        color: [f32; 3],
+    ) {
+        if self.selection_key == corners {
+            return;
+        }
+        self.selection_key = corners;
+        match corners {
+            Some((a, b)) => {
+                let lines = region_box_lines(a, b, color);
+                self.selection_count = lines.len() as u32;
+                self.selection_buffer = Some(ctx.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("selection_region_vertex_buffer"),
+                        contents: bytemuck::cast_slice(&lines),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+            None => {
+                self.selection_buffer = None;
+                self.selection_count = 0;
             }
         }
     }

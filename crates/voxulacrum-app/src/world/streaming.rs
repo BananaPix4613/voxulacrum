@@ -212,10 +212,27 @@ impl CameraView {
     }
 }
 
-/// Result of a streaming tick — lists of chunk positions that changed.
+/// Phases `tick` reports timings for, in the order it runs them.
+pub const PHASE_COUNT: usize = 4;
+
+/// Close one `tick` phase: record elapsed since `mark` into `out[i]`, then reset
+/// the mark. Plain `Instant`s rather than the diagnostics timer type, so this
+/// module keeps no dependency on diagnostics - the caller names the spans.
+fn close_phase(i: usize, mark: &mut Instant, out: &mut [f32; PHASE_COUNT]) {
+    let now = Instant::now();
+    out[i] = (now - *mark).as_secs_f32() * 1000.0;
+    *mark = now;
+}
+
+/// Result of a streaming tick - lists of chunk positions that changed.
 pub struct StreamingTickResult {
     pub inserted: Vec<IVec3>,
     pub unloaded: Vec<IVec3>,
+    /// Per-phase milliseconds, in `tick`'s execution order: drain-and-insert,
+    /// `submit_all_dirty`, candidate scan, unload-and-persist. Named by the
+    /// `diagnostics::SUB_DRAIN..=SUB_UNLOAD` constants; the order here is the
+    /// contract between the two.
+    pub phase_ms: [f32; PHASE_COUNT],
 }
 
 /// What streaming is doing right now (roadmap §4.4 streaming visualizer).
@@ -377,7 +394,11 @@ impl ChunkStreamingManager {
         let mut result = StreamingTickResult {
             inserted: Vec::new(),
             unloaded: Vec::new(),
+            phase_ms: [0.0; PHASE_COUNT],
         };
+
+        let mut phase_ms = [0.0f32; PHASE_COUNT];
+        let mut mark = Instant::now();
 
         // --- Poll completed chunk generations (capped per frame) ---
         //
@@ -419,7 +440,7 @@ impl ChunkStreamingManager {
                 inserted_count += 1;
 
                 // Face-neighbor mesh-dirty marking is the `InsertLoadedChunk`
-                // handler's job and it already happened above; it used to be
+                // handler's job, and it already happened above; it used to be
                 // repeated here, marking every neighbor twice per insert.
 
                 // Stop draining channel when cap is hit. Remaining results stay in
@@ -430,10 +451,12 @@ impl ChunkStreamingManager {
                 }
             }
         }
+        close_phase(0, &mut mark, &mut phase_ms);
 
         if !result.inserted.is_empty() {
             meshing.pipeline.submit_all_dirty(world);
         }
+        close_phase(1, &mut mark, &mut phase_ms);
 
         // --- Spawn new generation tasks, nearest-first, up to the budget ---
         //
@@ -500,6 +523,7 @@ impl ChunkStreamingManager {
                 );
             }
         }
+        close_phase(2, &mut mark, &mut phase_ms);
 
         // --- Unload chunks outside the view rectangle ---
         let to_unload: Vec<IVec3> = world
@@ -509,7 +533,21 @@ impl ChunkStreamingManager {
             .map(|c| IVec3::from(*c))
             .collect();
 
+        // Bounded by time (see `StreamingParams::unload_budget_ms`). `mark` is
+        // the start of this phase - `close_phase(2, ...)` reset it immediately
+        // above - so it doubles as the budget clock without a second `Instant`,
+        // and the budget correctly covers the resident scan as well as the
+        // per-chunk saves.
+        let unload_budget = std::time::Duration::from_secs_f32(
+            self.params.unload_budget_ms.max(0.0) / 1000.0,
+        );
+        let mut evicted = 0usize;
         for pos in to_unload {
+            // One eviction always happens, so a chunk costing more than the whole
+            // budget cannot stall eviction indefinitely.
+            if evicted > 0 && mark.elapsed() >= unload_budget {
+                break;
+            }
             if meshing.pipeline.is_chunk_in_flight(pos) {
                 continue;
             }
@@ -524,7 +562,9 @@ impl ChunkStreamingManager {
                 .execute(MutationCommand::system(WorldMutation::EvictChunk { chunk: pos }))
                 .expect("system chunk evict accepted in any mode");
             result.unloaded.push(pos);
+            evicted += 1;
         }
+        close_phase(3, &mut mark, &mut phase_ms);
 
         // --- Fill-time metric (roadmap §7.3) ---
         // The clock restarts whenever the view changes and stops the first frame
@@ -559,6 +599,7 @@ impl ChunkStreamingManager {
         self.stats.evicted_total += result.unloaded.len() as u64;
         self.stats.load_radius = radius;
 
+        result.phase_ms = phase_ms;
         result
     }
 

@@ -467,7 +467,6 @@ pub struct TerrainGenParams {
     pub cave_surface_margin: f32,      // Depth below surface before caves begin (default: 4.0)
     pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
     pub water_level: f32,
-    pub seed: i32,
 }
 
 impl Default for TerrainGenParams {
@@ -492,7 +491,6 @@ impl Default for TerrainGenParams {
             cave_surface_margin: 2.0,
             cave_y_squash: 0.5,
             water_level: 30.0,
-            seed: 54321,
         }
     }
 }
@@ -590,6 +588,29 @@ pub struct StreamingParams {
     /// budget - each submission copies a 34^3 voxel snapshot - and is separate
     /// from how many mesh jobs may run concurrently, which the scheduler owns.
     pub max_mesh_per_frame: u32,
+    /// Main-thread time budget for the unload phase, in milliseconds.
+    ///
+    /// Eviction runs `save_chunk_on_unload` (zstd + SQLite) for every
+    /// persist-dirty chunk leaving the view, and `FinalizeSeam` writes demotions
+    /// into nearly every chunk's override bucket - so nearly every eviction is a
+    /// write. Unbounded, that phase measured **103 ms on a single frame** during
+    /// a pan at maximum supported zoom (`perf-baseline.md` §0.4.0).
+    ///
+    /// A *time* budget rather than a chunk count, because per-chunk cost scales
+    /// with override-bucket size - exactly what differed between regions in that
+    /// measurement - so a count calibrated against one region is wrong in the
+    /// next. The default is §7.3's "no recurring hitch > 4 ms" line.
+    ///
+    /// Chunks not evicted this frame are reconsidered next frame; nothing is
+    /// lost, they stay resident slightly longer. The trade is residency: if
+    /// evictions cannot keep pace with a sustained pan, the resident set grows.
+    #[serde(default = "default_unload_budget_ms")]
+    pub unload_budget_ms: f32,
+}
+
+/// Serde default so presets written before this field load unchanged.
+fn default_unload_budget_ms() -> f32 {
+    4.0
 }
 
 impl Default for StreamingParams {
@@ -601,6 +622,7 @@ impl Default for StreamingParams {
             max_chunk_y: 4,
             max_gen_per_frame: 64,
             max_mesh_per_frame: 32,
+            unload_budget_ms: default_unload_budget_ms(),
         }
     }
 }

@@ -8,7 +8,7 @@ use crate::boundary::{EffectivePin, ResolvedBoundary, ResolvedPin};
 use crate::crossgraph::GraphRefTarget;
 use crate::library::LibraryGraphId;
 use crate::pin::PinType;
-use crate::prefab::PrefabTemplate;
+use voxel_core::ResolvedBlueprint;
 
 new_key_type! {
     /// Stable identifier for a node. Survives edits and serialization;
@@ -41,10 +41,35 @@ pub enum NodeCategory {
     Biome,
     /// Library graph references.
     Library,
+    /// Cross-graph references into the hierarchy.
+    Graph,
     /// Foliage placement (DetailGraph).
     Foliage,
     /// Terminal output.
     Output,
+}
+
+impl NodeCategory {
+    /// Every category, in menu order. The editor's node menu iterates this
+    /// rather than a list of its own, so a new category cannot be added without
+    /// appearing there - the previous handwritten list has already gone stale
+    /// and omitted `Library`, which would have hidden every reference node.
+    pub const ALL: [NodeCategory; 14] = [
+        NodeCategory::Source,
+        NodeCategory::Math,
+        NodeCategory::Curves,
+        NodeCategory::Domain,
+        NodeCategory::Density,
+        NodeCategory::Material,
+        NodeCategory::Positions,
+        NodeCategory::Scanners,
+        NodeCategory::Props,
+        NodeCategory::Biome,
+        NodeCategory::Library,
+        NodeCategory::Graph,
+        NodeCategory::Foliage,
+        NodeCategory::Output,
+    ];
 }
 
 /// Specification of a single pin on a node. Static metadata, not per-instance.
@@ -381,19 +406,101 @@ impl Default for PlaceTreeParams {
     }
 }
 
-/// Parameters for [`NodeKind::PlacePrefab`]: stamp a named voxel template.
-/// `template` is resolved from disk at the hot-reload boundary and is not
-/// serialized (the `prefab` name is the source of truth on disk).
+/// Parameters for [`NodeKind::PlaceBlueprint`]: stamp a named voxel template.
+/// `resolved` is loaded from disk and material-resolved at the hot-reload
+/// boundary and is not serialized (the `blueprint` name is the source of truth
+/// on disk).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct PlacePrefabParams {
-    /// Prefab name; resolves to `<name>.prefab.json` in the prefab dir.
-    pub prefab: String,
-    /// Resolved template (filled by `resolve_prefabs`; `None` until then).
+pub struct PlaceBlueprintParams {
+    /// Blueprint name; resolves to `<name>.blueprint.json` in the blueprint dir.
+    pub blueprint: String,
+    /// Resolved template (filled by `resolve_blueprints`; `None` until then).
     #[serde(skip)]
-    pub template: Option<PrefabTemplate>,
+    pub resolved: Option<ResolvedBlueprint>,
 }
-impl Default for PlacePrefabParams {
-    fn default() -> Self { Self { prefab: "rock".to_string(), template: None } }
+impl Default for PlaceBlueprintParams {
+    fn default() -> Self { Self { blueprint: "rock".to_string(), resolved: None } }
+}
+
+/// Parameters for [`NodeKind::PlaceStructure`]: a rule producing structure
+/// occurrences on a coarse world grid (design §5, cross-chunk features).
+///
+/// There is deliberately no zone field. Structures live on the ZoneGraph, so
+/// the zone is the graph the node sits in - which makes it impossible to author
+/// a structure whose declared zone disagrees with where it was written.
+///
+/// `resolved` is filled at the hot-reload boundary and is not serialized, the
+/// same arrangement [`PlaceBlueprintParams`] uses.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlaceStructureParams {
+    /// Blueprint name; resolves to `<name>.blueprint.json`.
+    pub blueprint: String,
+    /// Edge length of a feature cell, in voxels. One candidate per cell.
+    pub cell_size: i32,
+    /// Chance a cell produces an occurrence, `0..=1`.
+    pub density: f32,
+    /// Node-local seed, mixed with the world seed and cell coordinates.
+    pub seed: u32,
+    /// Whether each occurrence takes a random quarter turn.
+    pub random_yaw: bool,
+    /// How far above the surface the anchor lands.
+    pub surface_offset: i32,
+    /// Resolved template (filled by `resolve_blueprints`; `None` until then).
+    #[serde(skip)]
+    pub resolved: Option<ResolvedBlueprint>,
+}
+impl Default for PlaceStructureParams {
+    fn default() -> Self {
+        Self {
+            blueprint: "rock".to_string(),
+            cell_size: 48,
+            density: 0.25,
+            seed: 1,
+            random_yaw: true,
+            surface_offset: 1,
+            resolved: None,
+        }
+    }
+}
+
+/// Parameters of a river network (design §5, "River networks").
+///
+/// Lives here rather than in the evaluator for the same reason [`NoiseParams`]
+/// does: a node's parameters are IR, serialized and edited and diffed, while the
+/// field they describe is evaluation.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct RiverParams {
+    /// Edge length of a network cell, in voxels. One node per cell.
+    pub cell_size: f32,
+    /// Node-local seed, mixed with the world seed.
+    pub seed: u32,
+    /// Frequency of the elevation-potential field.
+    pub potential_frequency: f32,
+    /// World-Y the potential maps onto at potential -1.
+    pub bed_low: f32,
+    /// World-Y the potential maps onto at potential +1.
+    pub bed_high: f32,
+    /// Half-width at the headwaters, in voxels.
+    pub min_width: f32,
+    /// Half-width at the mouth, in voxels.
+    pub max_width: f32,
+    /// How far below the bank the channel center cuts.
+    pub depth: f32,
+}
+
+impl Default for RiverParams {
+    fn default() -> Self {
+        Self {
+            cell_size: 128.0,
+            seed: 1,
+            potential_frequency: 0.004,
+            bed_low: 14.0,
+            bed_high: 46.0,
+            min_width: 3.0,
+            max_width: 9.0,
+            depth: 4.0,
+        }
+    }
 }
 
 /// Parameters for [`NodeKind::LibraryRef`]: a reference to a reusable library
@@ -684,8 +791,13 @@ pub enum NodeKind {
     // --- Props ---
     /// Stamp a procedural tree (trunk + canopy) at each point.
     PlaceTree(PlaceTreeParams),
-    /// Stamp a named prefab template at each point.
-    PlacePrefab(PlacePrefabParams),
+    /// Stamp a named blueprint at each point.
+    PlaceBlueprint(PlaceBlueprintParams),
+    /// Carve a river network out of a density field.
+    River(RiverParams),
+    /// Declare a structure source on the owning ZoneGraph. Carries no pins: the
+    /// evaluator scans for these rather than pulling a value through them.
+    PlaceStructure(PlaceStructureParams),
     // --- Per-column (World/Zone graphs) ---
     /// 2D world-space noise emitting a per-column `SurfaceField` (a climate
     /// channel). Evaluated by the column evaluator, not the voxel evaluator.
@@ -927,6 +1039,13 @@ impl NodeKind {
                 outputs: DENSITY_OUT
             },
             // Curves
+            NodeKind::River(_) => NodeDescriptor {
+                display_name: "River",
+                category: NodeCategory::Density,
+                color: DENS,
+                inputs: DENSITY_IN,
+                outputs: DENSITY_OUT
+            },
             NodeKind::Threshold(_) => NodeDescriptor {
                 display_name: "Threshold",
                 category: NodeCategory::Curves,
@@ -1063,12 +1182,19 @@ impl NodeKind {
                 inputs: PLACE_IN,
                 outputs: TERRAIN_OUT,
             },
-            NodeKind::PlacePrefab(_) => NodeDescriptor {
-                display_name: "Place Prefab",
+            NodeKind::PlaceBlueprint(_) => NodeDescriptor {
+                display_name: "Place Blueprint",
                 category: NodeCategory::Props,
                 color: [0xc8, 0x90, 0x60],
                 inputs: PLACE_IN,
                 outputs: TERRAIN_OUT,
+            },
+            NodeKind::PlaceStructure(_) => NodeDescriptor {
+                display_name: "Place Structure",
+                category: NodeCategory::Props,
+                color: [0xc8, 0x90, 0x60],
+                inputs: NO_PINS,
+                outputs: NO_PINS,
             },
             NodeKind::TerrainOutput(_) => NodeDescriptor {
                 display_name: "Terrain Output",
@@ -1086,7 +1212,7 @@ impl NodeKind {
             },
             NodeKind::GraphRef(_) => NodeDescriptor {
                 display_name: "Graph Ref",
-                category: NodeCategory::Library,
+                category: NodeCategory::Graph,
                 color: [0x80, 0xa0, 0xff],
                 inputs: NO_PINS,  // GraphRef has no inputs; outputs via effective_outputs()
                 outputs: NO_PINS,
@@ -1209,6 +1335,32 @@ impl NodeKind {
         }
     }
 
+    /// Every `MaterialId` this node's parameters reference.
+    /// 
+    /// Here rather than in the validator, so the knowledge lives with the node
+    /// definitions that own it.
+    /// 
+    /// **Maintenance obligation:** a new material-carrying node kind must be
+    /// added below. The wildcard arm means the compiler will not remind you, and
+    /// a missing arm is a silent gap in the lint rather than a build failure -
+    /// spelling out all fifty variants to buy that guarantee is not worth what
+    /// it costs to read.
+    pub fn material_refs(&self) -> Vec<voxel_core::MaterialId> {
+        match self {
+            NodeKind::ConstantMaterial(p) => vec![p.material],
+            NodeKind::Layer(p) => {
+                let mut out: Vec<voxel_core::MaterialId> =
+                    p.bands.iter().map(|(m, _)| *m).collect();
+                out.push(p.fill);
+                out
+            }
+            NodeKind::FindFlat(p) => p.on_materials.clone(),
+            NodeKind::PlaceTree(p) => vec![p.trunk_material, p.leaf_material],
+            NodeKind::SurfaceFilter(p) => p.materials.clone(),
+            _ => Vec::new(),
+        }
+    }
+    
     /// Stable string identifier matching the serde `"type"` tag.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -1247,7 +1399,9 @@ impl NodeKind {
             NodeKind::PoissonDisk(_)         => "PoissonDisk",
             NodeKind::FindFlat(_)            => "FindFlat",
             NodeKind::PlaceTree(_)           => "PlaceTree",
-            NodeKind::PlacePrefab(_)         => "PlacePrefab",
+            NodeKind::PlaceBlueprint(_)      => "PlaceBlueprint",
+            NodeKind::PlaceStructure(_)      => "PlaceStructure",
+            NodeKind::River(_)               => "River",
             NodeKind::LibraryRef(_)          => "LibraryRef",
             NodeKind::GraphRef(_)            => "GraphRef",
             NodeKind::GraphOutput(_)         => "GraphOutput",

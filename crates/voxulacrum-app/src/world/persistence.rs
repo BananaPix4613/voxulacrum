@@ -44,13 +44,16 @@ impl From<std::io::Error> for PersistError { fn from(e: std::io::Error) -> Self 
 
 // -- Format constants --------------------------------------------------------
 
-const BLOB_VERSION: u8 = 7; // v7 - persists seam_finalized (world::seam) so the
+const BLOB_VERSION: u8 = 8; // v8 - the tags section carries a zone *list*; a
+                            // chunk straddling a zone border belongs to both
+                            // v7 - persists seam_finalized (world::seam) so the
                             // cross-chunk seam pass isn't recomputed every load
 
 /// Bumped whenever the on-disk voxel/override encoding changes. A stored value
 /// older than this forces a one-shot save wipe on open (pre-release; saves are
-/// not migrated). v3: scatter instance gained a stable_id field.
-const VOXEL_FORMAT_VERSION: u64 = 3;
+/// not migrated). v4: chunk tags record every zone a chunk touches, not one.
+/// v3: scatter instance gained a stable_id field.
+const VOXEL_FORMAT_VERSION: u64 = 4;
 
 // A v6 blob is `[BLOB_VERSION][variant_tag]<variant payload><tags section>`.
 // The variant payload is one of:
@@ -59,10 +62,10 @@ const VOXEL_FORMAT_VERSION: u64 = 3;
 //                         identical override set always produces identical bytes.
 //   TAG_FULL_UNIFORM   -> the single packed u32 voxel.
 //   TAG_FULL_POPULATED -> the palette-compressed material array (self-delimiting).
-// The tags section (zone + biomes + library refs) is appended after the payload
-// in every variant, so each chunk round-trips its identity tags. In Phase 3 only
-// `voxel_diffs` and the trivial tags are non-empty; the remaining override layers
-// round-trip but have no runtime consumer until their systems land.
+// The tags section (zones + biomes + library refs, each count-prefixed) is appended
+// after the payload in every variant, so each chunk round-trips its identity tags.
+// In Phase 3 only `voxel_diffs` and the trivial tags are non-empty; the remaining
+// override layers round-trip but have no runtime consumer until their systems land.
 
 const TAG_DELTA: u8 = 0;
 const TAG_FULL_UNIFORM: u8 = 1;
@@ -351,7 +354,10 @@ fn read_overrides(r: &mut Reader) -> Result<ChunkOverrides, PersistError> {
 }
 
 fn write_tags(buf: &mut Vec<u8>, tags: &ChunkTags) {
-    w_u16(buf, tags.zone.0);
+    w_u32(buf, tags.zones.len()as u32);
+    for zone in &tags.zones {
+        w_u16(buf, zone.0);
+    }
     w_u32(buf, tags.biomes.len() as u32);
     for biome in &tags.biomes {
         w_u16(buf, biome.0);
@@ -363,7 +369,11 @@ fn write_tags(buf: &mut Vec<u8>, tags: &ChunkTags) {
 }
 
 fn read_tags(r: &mut Reader) -> Result<ChunkTags, PersistError> {
-    let zone = ZoneId(r.u16()?);
+    let mut zones: SmallVec<[ZoneId; 2]> = SmallVec::new();
+    let n = r.u32()? as usize;
+    for _ in 0..n {
+        zones.push(ZoneId(r.u16()?));
+    }
     let mut biomes: SmallVec<[BiomeId; 4]> = SmallVec::new();
     let n = r.u32()? as usize;
     for _ in 0..n {
@@ -374,7 +384,7 @@ fn read_tags(r: &mut Reader) -> Result<ChunkTags, PersistError> {
     for _ in 0..n {
         library_refs.push(LibraryGraphId(r.u32()?));
     }
-    Ok(ChunkTags { zone, biomes, library_refs })
+    Ok(ChunkTags { zones, biomes, library_refs })
 }
 
 /// Serialize a ChunkRecord -> raw bytes (caller zstd-compress).
@@ -757,7 +767,7 @@ impl WorldPersistence {
     }
 
     /// Open or create a world database.
-    pub fn open(world_name: &str, seed: i32) -> Result<Self, PersistError> {
+    pub fn open(world_name: &str, seed: u64) -> Result<Self, PersistError> {
         let dir = crate::paths::asset_root().join("saves").join(world_name);
         let db_path = dir.join("world.vxdb");
         let mut db = WorldDatabase::open(&db_path)?;
@@ -769,7 +779,7 @@ impl WorldPersistence {
             Err(e) => log::warn!("Dictionary training failed: {e}"),
         }
 
-        let seed_u64 = seed as u64;
+        let seed_u64 = seed;
         match db.get_meta_u64("seed")? {
             Some(stored) if stored != seed_u64 => {
                 log::warn!("Seed mismatch: DB={stored}, params={seed_u64}. Updating DB.");
@@ -1098,8 +1108,14 @@ mod tests {
     }
 
     /// An empty Delta with default tags is the minimal blob: version + tag, seven
-    /// zero-count override sections, then zone u16 + two zero-count tag sections,
-    /// then the trailing seam_finalized byte.
+    /// zero-count override sections, then three zero-count tag sections (zones,
+    /// biomes, library refs), then the trailing seam_finalized byte.
+    ///
+    /// v8 costs two bytes more than v7: the zone tag became a u32-count-prefixed
+    /// list rather than a bare u16. The count stays u32 to match the two
+    /// sections beside it — mixing widths inside one section to save two
+    /// pre-compression bytes would trade a real readability cost for nothing
+    /// zstd does not already recover.
     #[test]
     fn roundtrip_empty_is_compact() {
         let record = ChunkRecord {
@@ -1108,7 +1124,7 @@ mod tests {
             seam_finalized: false,
         };
         let raw = serialize_chunk_record_raw(&record).unwrap();
-        assert_eq!(raw.len(), 2 + 7 * 4 + 2 + 4 + 4 + 1, "empty v7 blob should be 41 bytes");
+        assert_eq!(raw.len(), 2 + 7 * 4 + 4 + 4 + 4 + 1, "empty v8 blob should be 43 bytes");
 
         let back = deserialize_chunk_record_raw(&raw).unwrap();
         assert_eq!(back.tags, ChunkTags::default());

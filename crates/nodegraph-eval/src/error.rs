@@ -38,10 +38,10 @@ pub enum EvalError {
         got: &'static str,
     },
 
-    /// A `PlacePrefab` node was evaluated without a resolved template (the
-    /// hot-reload layer failed to load its prefab JSON).
-    #[error("node {node:?} has an unresolved prefab template")]
-    UnresolvedPrefab {
+    /// A `PlaceBlueprint` node was evaluated without a resolved template (the
+    /// hot-reload layer failed to load its blueprint JSON).
+    #[error("node {node:?} has an unresolved blueprint")]
+    UnresolvedBlueprint {
         /// The offending node.
         node: NodeId,
     },

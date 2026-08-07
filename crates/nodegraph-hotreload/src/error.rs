@@ -12,10 +12,10 @@ pub enum HotReloadError {
     /// I/O failure (e.g. watched dir does not exist).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    
-    /// Prefab JSON parse failure.
-    #[error("prefab json: {0}")]
-    Serde(#[from] serde_json::Error),
+
+    /// Blueprint load, parse, or material-resolution failure.
+    #[error("blueprint: {0}")]
+    Blueprint(String),
 }
 
 /// Result alias for hot-reload operations.

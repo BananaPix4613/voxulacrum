@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use egui::Ui;
 use egui_snarl::ui::{PinInfo, SnarlPin, SnarlViewer};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
-use nodegraph_ir::{Diagnostic, NodeCategory, NodeKind, PinType, Severity};
+use nodegraph_ir::{Diagnostic, GraphRefParams, LibraryRefParams, NodeCategory, NodeKind, PinType, Severity};
 
 use crate::colors::{category_fill, header_text_color, pin_color, pin_shape};
-use crate::params::params_ui;
+use crate::params::{params_ui, GraphCatalogs};
 use crate::state::UndoLabel;
 
 /// Maximum width of a node's body (parameter area), in egui points. Caps
@@ -61,17 +61,23 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Positions, "Poisson Disk", || NodeKind::PoissonDisk(PoissonDiskParams::default())),
         (NodeCategory::Scanners, "Find Flat",  || NodeKind::FindFlat(FindFlatParams::default())),
         (NodeCategory::Props, "Place Tree",    || NodeKind::PlaceTree(PlaceTreeParams::default())),
-        (NodeCategory::Props, "Place Prefab",  || NodeKind::PlacePrefab(PlacePrefabParams::default())),
+        (NodeCategory::Props, "Place Blueprint", || NodeKind::PlaceBlueprint(PlaceBlueprintParams::default())),
+        (NodeCategory::Props, "Place Structure", || NodeKind::PlaceStructure(PlaceStructureParams::default())),
+        (NodeCategory::Density, "River",       || NodeKind::River(RiverParams::default())),
         (NodeCategory::Output, "Output",       || NodeKind::Output(OutputParams::default())),
         (NodeCategory::Output, "Terrain Output", || NodeKind::TerrainOutput(TerrainOutputParams::default())),
         (NodeCategory::Output, "World Output", || NodeKind::WorldOutput(WorldOutputParams::default())),
         (NodeCategory::Output, "Zone Output",  || NodeKind::ZoneOutput(ZoneOutputParams::default())),
+        (NodeCategory::Output, "Density Output", || NodeKind::DensityOutput(DensityOutputParams::default())),
+        (NodeCategory::Output, "Fluid Output", || NodeKind::FluidOutput(FluidOutputParams::default())),
+        (NodeCategory::Output, "Graph Output", || NodeKind::GraphOutput(GraphOutputParams::default())),
         (NodeCategory::Foliage, "Poisson Distribution", || NodeKind::PoissonDistribution(PoissonDistributionParams::default())),
         (NodeCategory::Foliage, "Surface Filter", || NodeKind::SurfaceFilter(SurfaceFilterParams::default())),
         (NodeCategory::Foliage, "Biome Context Mask", || NodeKind::BiomeContextMask(BiomeContextMaskParams::default())),
         (NodeCategory::Foliage, "Species Picker", || NodeKind::SpeciesPicker(SpeciesPickerParams::default())),
         (NodeCategory::Foliage, "Paint Density", || NodeKind::PaintDensity(PaintDensityParams::default())),
         (NodeCategory::Foliage, "Scatter Place", || NodeKind::ScatterPlace(ScatterPlaceParams::default())),
+        (NodeCategory::Biome, "Biome Param", || NodeKind::BiomeParam(BiomeParamParams::default())),
     ]
 }
 
@@ -134,9 +140,9 @@ pub struct GraphViewer<'a> {
     /// Display name of the node whose parameter changed this frame, if any.
     /// Used to label the coalesced param-edit undo entry.
     pub param_label: &'a mut Option<String>,
-    /// (id, display name) of every biome in the world, for ZoneOutput's biome
-    /// picker. Empty for graphs edited outside a world context.
-    pub biomes: &'a [(u16, String)],
+    /// The world's zones and biomes, for the `WorldOutput` and `ZoneOutput`
+    /// band pickers. Empty for graphs edited outside a world context.
+    pub catalogs: &'a GraphCatalogs,
     /// The node currently selected for inspection, used for highlighting.
     pub selected: Option<NodeId>,
     /// Out-param: the node whose header was left-clicked this frame, if any.
@@ -281,7 +287,7 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
             }
             let name = snarl[node_id].descriptor().display_name;
             let node = &mut snarl[node_id];
-            if params_ui(ui, node, self.biomes) {
+            if params_ui(ui, node, self.catalogs) {
                 *self.dirty_param = true;
                 *self.param_label = Some(name.to_string());
             }
@@ -298,18 +304,59 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
     ) {
         ui.label("Add node");
         ui.separator();
-        for cat in [
-            NodeCategory::Source, NodeCategory::Math, NodeCategory::Curves,
-            NodeCategory::Domain, NodeCategory::Density, NodeCategory::Material,
-            NodeCategory::Positions, NodeCategory::Scanners, NodeCategory::Props,
-            NodeCategory::Biome, NodeCategory::Foliage, NodeCategory::Output,
-        ] {
-            ui.menu_button(format!("{cat:?}"), |ui| {
-                for (entry_cat, label, factory) in catalog() {
-                    if *entry_cat == cat && ui.button(*label).clicked() {
-                        snarl.insert_node(pos, factory());
-                        self.actions.push(format!("Add {}", label));
-                        ui.close();
+        // Copied out so the closures below can read the catalogs while pushing
+        // to `self.actions` - `catalogs` is a shared reference, so reading it
+        // does not borrow `self`.
+        let catalogs = self.catalogs;
+        for cat in NodeCategory::ALL {
+            ui.menu_button(format!("{cat:?}"), |ui| match cat {
+                // Reference nodes are listed by *what they reference*, not as a
+                // generic node you then point at an id. Placing one binds it and
+                // resolves its pins, so an unbound reference - which renders
+                // pinless and invalidates its graph - is unreachable from here.
+                NodeCategory::Library => {
+                    if catalogs.libraries.is_empty() {
+                        ui.weak("no libraries loaded");
+                    }
+                    for lib in &catalogs.libraries {
+                        if ui.button(&lib.name).clicked() {
+                            snarl.insert_node(
+                                pos,
+                                NodeKind::LibraryRef(LibraryRefParams {
+                                    library: lib.id,
+                                    resolved: Some(lib.boundary.to_resolved()),
+                                }),
+                            );
+                            self.actions.push(format!("Add {}", lib.name));
+                            ui.close();
+                        }
+                    }
+                }
+                NodeCategory::Graph => {
+                    if catalogs.graphs.is_empty() {
+                        ui.weak("no referenceable graphs");
+                    }
+                    for g in &catalogs.graphs {
+                        if ui.button(&g.name).clicked() {
+                            snarl.insert_node(
+                                pos,
+                                NodeKind::GraphRef(GraphRefParams {
+                                    target: g.target,
+                                    resolved: Some(g.boundary.to_resolved_outputs()),
+                                }),
+                            );
+                            self.actions.push(format!("Add Graph Ref {}", g.name));
+                            ui.close();
+                        }
+                    }
+                }
+                _ => {
+                    for (entry_cat, label, factory) in catalog() {
+                        if *entry_cat == cat && ui.button(*label).clicked() {
+                            snarl.insert_node(pos, factory());
+                            self.actions.push(format!("Add {}", label));
+                            ui.close();
+                        }
                     }
                 }
             });
@@ -387,5 +434,43 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         );
         snarl.drop_inputs(pin.id);
         self.actions.push(label);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_node_kind_is_insertable_from_the_canvas() {
+        let names: Vec<&'static str> = catalog().iter().map(|entry| (entry.2)().type_name()).collect();
+
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "two catalog entries build the same NodeKind");
+
+        assert_eq!(
+            names.len(),
+            50,
+            "the static catalog covers {} of 50 statically-insertable NodeKinds; \
+             a kind missing from it cannot be placed on a canvas at all",
+            names.len(),
+        );
+
+        // `LibraryRef` and `GraphRef` are deliberately absent: they are listed
+        // by *what they reference*, built from `GraphCatalogs` at menu time and
+        // bound on placement. A static entry would produce an unbound reference,
+        // which renders with no pins and invalidates its graph.
+        for excluded in ["LibraryRef", "GraphRef"] {
+            assert!(
+                !names.contains(&excluded),
+                "{excluded} must be placed bound, not from the static catalog",
+            );
+        }
+
+        for required in ["DensityOutput", "FluidOutput", "GraphOutput", "BiomeParam"] {
+            assert!(names.contains(&required), "{required} is not insertable from the canvas");
+        }
     }
 }

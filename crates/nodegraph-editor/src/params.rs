@@ -35,9 +35,58 @@ fn row2(
         .inner
 }
 
+/// The id catalogs a node's parameter UI can pick from: the world's zones and
+/// biomes, each as `(id, display name)`.
+///
+/// Bundled rather than passed as two bare `&[(u16, String)]` arguments - those
+/// are indistinguishable at a call site and would swap silently, assigning
+/// biome ids to zone bands.
+#[derive(Clone, Debug, Default)]
+pub struct GraphCatalogs {
+    /// Every zone in the world, in selector order.
+    pub zones: Vec<(u16, String)>,
+    /// Every biome in the world, in selector order.
+    pub biomes: Vec<(u16, String)>,
+    /// Every library that can be referenced, with the boundary a reference to it
+    /// resolves to.
+    pub libraries: Vec<LibraryChoice>,
+    /// Every hierarchy graph that can be referenced cross-graph.
+    pub graphs: Vec<GraphChoice>,
+    /// Every blueprint on disk, by name, in selector order.
+    pub blueprints: Vec<String>,
+}
+
+/// One library the author may reference, carrying the boundary a `LibraryRef` to
+/// it resolves to.
+///
+/// The boundary travels with the choice so the editor can bind a node at the
+/// moment it is placed. A reference that had to be pointed at an id and then
+/// saved and reloaded to acquire pins is not authorable - it spends the interval
+/// as an invalid graph.
+#[derive(Clone, Debug)]
+pub struct LibraryChoice {
+    /// Stable library id, stored on the node.
+    pub id: nodegraph_ir::LibraryGraphId,
+    /// Display name (the library's stable string handle).
+    pub name: String,
+    /// The library's declared boundary.
+    pub boundary: nodegraph_ir::GraphBoundary,
+}
+
+/// One hierarchy graph the author may reference cross-graph.
+#[derive(Clone, Debug)]
+pub struct GraphChoice {
+    /// The target stored on the node.
+    pub target: GraphRefTarget,
+    /// Display name.
+    pub name: String,
+    /// The target's declared output boundary.
+    pub boundary: nodegraph_ir::GraphBoundary,
+}
+
 /// Draw the body of a node - its parameters. Returns `true` if anything
 /// was edited this frame.
-pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, biomes: &[(u16, String)]) -> bool {
+pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> bool {
     match kind {
         NodeKind::Constant(p) => row(ui, "value", |ui| {
             ui.add(egui::DragValue::new(&mut p.value).speed(0.05))
@@ -123,17 +172,41 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, biomes: &[(u16, String)]) -> 
             changed |= material_id_ui(ui, &mut p.leaf_material, "leaf");
             changed
         }
-        NodeKind::PlacePrefab(p) => row(ui, "prefab", |ui| ui.text_edit_singleline(&mut p.prefab)),
-        NodeKind::LibraryRef(p) => row(ui, "library id", |ui| {
-            ui.add(egui::DragValue::new(&mut p.library.0))
-        }),
-        NodeKind::GraphRef(p) => graph_ref_target_ui(ui, &mut p.target),
+        NodeKind::PlaceBlueprint(p) => {
+            name_combo(ui, "place_blueprint", "blueprint", &mut p.blueprint, &catalogs.blueprints)
+        }
+        NodeKind::PlaceStructure(p) => {
+            let mut changed = name_combo(
+                ui,
+                "structure_blueprint",
+                "blueprint",
+                &mut p.blueprint,
+                &catalogs.blueprints,
+            );
+            changed |= row(ui, "cell size", |ui| ui.add(egui::DragValue::new(&mut p.cell_size).range(4..=512)));
+            changed |= row(ui, "density", |ui| ui.add(egui::DragValue::new(&mut p.density).speed(0.01).range(0.0..=1.0)));
+            changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "random yaw", |ui| ui.checkbox(&mut p.random_yaw, ""));
+            changed |= row(ui, "surface offset", |ui| ui.add(egui::DragValue::new(&mut p.surface_offset).range(-8..=8)));
+            changed
+        }
+        NodeKind::River(p) => {
+            let mut changed = row(ui, "cell size", |ui| ui.add(egui::DragValue::new(&mut p.cell_size).range(16.0..=1024.0)));
+            changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
+            changed |= row(ui, "potential freq", |ui| ui.add(egui::DragValue::new(&mut p.potential_frequency).speed(0.0005).range(0.0001..=0.05)));
+            changed |= row2(ui, "bed low", |ui| ui.add(egui::DragValue::new(&mut p.bed_low)), "high", |ui| ui.add(egui::DragValue::new(&mut p.bed_high)));
+            changed |= row2(ui, "width min", |ui| ui.add(egui::DragValue::new(&mut p.min_width).range(0.5..=64.0)), "max", |ui| ui.add(egui::DragValue::new(&mut p.max_width).range(0.5..=64.0)));
+            changed |= row(ui, "depth", |ui| ui.add(egui::DragValue::new(&mut p.depth).range(0.0..=32.0)));
+            changed
+        }
+        NodeKind::LibraryRef(p) => library_ref_ui(ui, p, &catalogs.libraries),
+        NodeKind::GraphRef(p) => graph_ref_ui(ui, p, &catalogs.graphs),
         NodeKind::GraphOutput(p) => {
             row(ui, "output name", |ui| ui.text_edit_singleline(&mut p.name))
         }
         NodeKind::SurfaceNoise(p) => noise_params_ui(ui, p),
-        NodeKind::WorldOutput(p) => band_list_ui(ui, "zone bands (ascending)", &mut p.zone_bands),
-        NodeKind::ZoneOutput(p) => zone_bands_ui(ui, p, biomes),
+        NodeKind::WorldOutput(p) => world_output_ui(ui, p, &catalogs.zones),
+        NodeKind::ZoneOutput(p) => zone_bands_ui(ui, p, &catalogs.biomes),
         NodeKind::YBand(p) => row2(
             ui,
             "min y", |ui| ui.add(egui::DragValue::new(&mut p.min).speed(0.5)),
@@ -189,43 +262,71 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, biomes: &[(u16, String)]) -> 
     }
 }
 
-/// Editor for a [`GraphRefTarget`]: pick World / Zone / Biome, plus a biome id
-/// when Biome. Returns `true` if edited this frame.
-fn graph_ref_target_ui(ui: &mut Ui, target: &mut GraphRefTarget) -> bool {
+/// Retarget a `LibraryRef`, re-resolving its pins immediately.
+///
+/// A picker over libraries that exist, not a number: an id field can name a
+/// library that is not there, and the node then renders with no pins and makes
+/// its whole graph invalid. Re-resolving on the spot is the other half - pins
+/// must follow the choice, not wait for a save and a reload.
+fn library_ref_ui(
+    ui: &mut Ui,
+    p: &mut nodegraph_ir::LibraryRefParams,
+    libraries: &[LibraryChoice],
+) -> bool {
     let mut changed = false;
-    let selected = match target {
-        GraphRefTarget::World => "World".to_string(),
-        GraphRefTarget::Zone => "Zone".to_string(),
-        GraphRefTarget::Biome(id) => format!("Biome {id}"),
-    };
+    let selected = libraries
+        .iter()
+        .find(|l| l.id == p.library)
+        .map(|l| l.name.clone())
+        .unwrap_or_else(|| format!("library {} (missing)", p.library.0));
+    ui.horizontal(|ui| {
+        ui.label("library");
+        egui::ComboBox::from_id_salt("library_ref")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for lib in libraries {
+                    if ui.selectable_label(lib.id == p.library, &lib.name).clicked()
+                        && lib.id != p.library
+                    {
+                        p.library = lib.id;
+                        p.resolved = Some(lib.boundary.to_resolved());
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
+}
+
+/// Retarget a `GraphRef`, re-resolving its pins immediately. See
+/// [`library_ref_ui`] - same reasoning, same shape.
+fn graph_ref_ui(
+    ui: &mut Ui,
+    p: &mut nodegraph_ir::GraphRefParams,
+    graphs: &[GraphChoice],
+) -> bool {
+    let mut changed = false;
+    let selected = graphs
+        .iter()
+        .find(|g| g.target == p.target)
+        .map(|g| g.name.clone())
+        .unwrap_or_else(|| format!("{:?} (missing)", p.target));
     ui.horizontal(|ui| {
         ui.label("target");
         egui::ComboBox::from_id_salt("graph_ref_target")
             .selected_text(selected)
             .show_ui(ui, |ui| {
-                if ui.selectable_label(matches!(target, GraphRefTarget::World), "World").clicked()
-                    && !matches!(target, GraphRefTarget::World)
-                {
-                    *target = GraphRefTarget::World;
-                    changed = true;
-                }
-                if ui.selectable_label(matches!(target, GraphRefTarget::Zone), "Zone").clicked()
-                    && !matches!(target, GraphRefTarget::Zone)
-                {
-                    *target = GraphRefTarget::Zone;
-                    changed = true;
-                }
-                if ui.selectable_label(matches!(target, GraphRefTarget::Biome(_)), "Biome").clicked()
-                    && !matches!(target, GraphRefTarget::Biome(_))
-                {
-                    *target = GraphRefTarget::Biome(0);
-                    changed = true;
+                for g in graphs {
+                    if ui.selectable_label(g.target == p.target, &g.name).clicked()
+                        && g.target != p.target
+                    {
+                        p.target = g.target;
+                        p.resolved = Some(g.boundary.to_resolved_outputs());
+                        changed = true;
+                    }
                 }
             });
     });
-    if let GraphRefTarget::Biome(id) = target {
-        changed |= row(ui, "biome id", |ui| ui.add(egui::DragValue::new(id)));
-    }
     changed
 }
 
@@ -390,7 +491,7 @@ fn zone_bands_ui(
     for region in 0..regions {
         ui.horizontal(|ui| {
             ui.label(format!("band {region}:"));
-            changed |= biome_combo(ui, region, &mut p.biome_ids[region], biomes);
+            changed |= id_combo(ui, ("zone_biome", region), &mut p.biome_ids[region], biomes, "biome");
         });
         if region < p.biome_bands.len() {
             ui.horizontal(|ui| {
@@ -421,24 +522,138 @@ fn zone_bands_ui(
     changed
 }
 
-/// A biome picker combo showing biome names, storing the chosen id. Shows a raw
-/// "biome N" fallback for an id not in the current world's set.
-fn biome_combo(ui: &mut Ui, salt: usize, id: &mut u16, biomes: &[(u16, String)]) -> bool {
+/// Labeled picker over string-keyed assets, the string counterpart to
+/// [`id_combo`].
+///
+/// A value absent from the catalog renders as `name (missing)` rather than being
+/// cleared or snapped to something that exists. A renamed asset should be
+/// visible as broken: silently reassigning it turns a fixable error into wrong
+/// content, which is the failure mode named references exist to prevent.
+fn name_combo(
+    ui: &mut Ui,
+    salt: &'static str,
+    label: &str,
+    name: &mut String,
+    catalog: &[String],
+) -> bool {
     let mut changed = false;
-    let selected = biomes
+    let selected = if catalog.iter().any(|c| c == name) {
+        name.clone()
+    } else if name.is_empty() {
+        "(none)".to_string()
+    } else {
+        format!("{name} (missing)")
+    };
+    ui.horizontal(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_salt(salt)
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                if catalog.is_empty() {
+                    ui.weak("no blueprints in assets/blueprints");
+                }
+                for candidate in catalog {
+                    if ui.selectable_label(candidate == name, candidate).clicked()
+                        && candidate != name
+                    {
+                        *name = candidate.clone();
+                        changed = true;
+                    }
+                }
+            });
+    });
+    changed
+}
+
+/// A combo box selecting one id from a catalog of `(id, display name)`.
+///
+/// Shared by the zone and biome pickers. The catalog is the *only* source of
+/// choices, so a band cannot be assigned an id nothing implements - the failure
+/// this guards against was a `WorldOutput` assigning zone 1 in a world with one
+/// zone, which produced silently different terrain and no message.
+///
+/// An id absent from the catalog still renders, marked `(missing)`: hiding it
+/// would make an already-broken graph look fine.
+fn id_combo(
+    ui: &mut Ui,
+    salt: (&'static str, usize),
+    id: &mut u16,
+    catalog: &[(u16, String)],
+    noun: &str,
+) -> bool {
+    let mut changed = false;
+    let selected = catalog
         .iter()
-        .find(|(bid, _)| *bid == *id)
+        .find(|(cid, _)| *cid == *id)
         .map(|(_, name)| name.clone())
-        .unwrap_or_else(|| format!("biome {id}"));
-    egui::ComboBox::from_id_salt(("zone_biome", salt))
+        .unwrap_or_else(|| format!("{noun} {id} (missing)"));
+    egui::ComboBox::from_id_salt(salt)
         .selected_text(selected)
         .show_ui(ui, |ui| {
-            for (bid, name) in biomes {
-                if ui.selectable_label(*bid == *id, name).clicked() && *id != *bid {
-                    *id = *bid;
+            for (cid, name) in catalog {
+                if ui.selectable_label(*cid == *id, name).clicked() && *id != *cid {
+                    *id = *cid;
                     changed = true;
                 }
             }
         });
+    changed
+}
+
+/// Editor for a WorldOutput's climate->zone assignment: a zone picker per band
+/// region, interleaved with the climate thresholds that separate them.
+///
+/// Mirrors [`zone_bands_ui`], and exists for the same reason: `band_id` falls
+/// back to the *band index* when the id list is short, so leaving ids unset does
+/// not mean "zone 0" - it means "zone 0, 1, 2 …". Keeping one slot per band
+/// filled makes that fallback unreachable from the editor.
+fn world_output_ui(
+    ui: &mut Ui,
+    p: &mut nodegraph_ir::WorldOutputParams,
+    zones: &[(u16, String)],
+) -> bool {
+    let mut changed = false;
+    // Keep one editable zone slot per region. Growing to fit isn't a user edit,
+    // so it doesn't set `changed`; it stabilizes after the first frame.
+    let regions = p.zone_bands.len() + 1;
+    let fallback = zones.first().map(|(id, _)| *id).unwrap_or(0);
+    while p.zone_ids.len() < regions {
+        p.zone_ids.push(fallback);
+    }
+    p.zone_ids.truncate(regions);
+
+    ui.weak("Climate bands (low to high):");
+    let mut remove: Option<usize> = None;
+    for region in 0..regions {
+        ui.horizontal(|ui| {
+            ui.label(format!("band {region}:"));
+            changed |= id_combo(ui, ("world_zone", region), &mut p.zone_ids[region], zones, "zone");
+        });
+        if region < p.zone_bands.len() {
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(">=");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut p.zone_bands[region]).speed(0.01))
+                    .changed();
+                if ui.small_button("×").on_hover_text("Remove threshold").clicked() {
+                    remove = Some(region);
+                }
+            });
+        }
+    }
+    if let Some(i) = remove {
+        p.zone_bands.remove(i);
+        if i + 1 < p.zone_ids.len() {
+            p.zone_ids.remove(i + 1); // drop the region that merged away
+        }
+        changed = true;
+    }
+    if ui.button("+ threshold").clicked() {
+        let last = p.zone_bands.last().copied().unwrap_or(0.0);
+        p.zone_bands.push(last + 0.1);
+        p.zone_ids.push(p.zone_ids.last().copied().unwrap_or(fallback));
+        changed = true;
+    }
     changed
 }

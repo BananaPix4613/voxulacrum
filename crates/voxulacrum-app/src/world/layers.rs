@@ -107,7 +107,7 @@ pub struct DetailLayers {
 }
 
 // ============================================================================
-// Tier 2/3 — Discrete scatter (instances + prefabs)
+// Tier 2/3 — Discrete scatter (instances + blueprints)
 // ============================================================================
 
 /// Per-instance flag bits for a [`ScatterInstance`].

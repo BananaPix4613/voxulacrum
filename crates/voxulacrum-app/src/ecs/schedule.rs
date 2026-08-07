@@ -55,6 +55,15 @@ pub fn build_frame_schedule() -> Schedule {
         systems::frame_timings_frame_end.after(FrameStage::PostFrame),
     ));
 
+    // Event bus. `update` before anything writes, the pump inside Input so the
+    // door's outbox is published early, subscribers in PostFrame so they see
+    // everything this frame produced.
+    schedule.add_systems((
+        systems::world_event_update_system.before(FrameStage::Input),
+        systems::world_event_pump_system.in_set(FrameStage::Input),
+        systems::world_event_log_system.in_set(FrameStage::PostFrame),
+    ));
+
     // Input
     schedule.add_systems((
         input::process_input_system.in_set(FrameStage::Input),
@@ -73,6 +82,14 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::Simulation)
             .after(systems::simulation_tick_system),
         systems::param_change_detection_system.in_set(FrameStage::Simulation),
+        systems::column_inspector_system.in_set(FrameStage::Simulation),
+        systems::biome_map_system.in_set(FrameStage::Simulation),
+        systems::blueprint_selection_gizmo_system
+            .in_set(FrameStage::Simulation)
+            .after(systems::blueprint_authoring_system),
+        systems::blueprint_authoring_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::interaction::picking_system), // needs the current pick
         systems::palette_load_system.in_set(FrameStage::Simulation),
         systems::fluid_tick_system
             .in_set(FrameStage::Simulation)
@@ -81,9 +98,6 @@ pub fn build_frame_schedule() -> Schedule {
         crate::interaction::picking_system
             .in_set(FrameStage::Simulation)
             .after(systems::simulation_tick_system),
-        crate::interaction::scatter_edit_system
-            .in_set(FrameStage::Simulation)
-            .after(crate::interaction::picking_system),
     ));
     // Player sim (Substep 4)
     schedule.add_systems((
