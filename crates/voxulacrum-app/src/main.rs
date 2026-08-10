@@ -389,14 +389,17 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // World
     let gen_start = std::time::Instant::now();
-
-    let min_y = initial_params.streaming.min_chunk_y;
-    let max_y = initial_params.streaming.max_chunk_y;
-
+    
     // The single graph-backed generator, shared (via Arc) by the World, the
     // streaming workers, and background regeneration.
     let generator = world::world_generator::load_default()
         .expect("Failed to load default_biome graph generator");
+    
+    // The manifest owns the world's height. Reading it off the generator keeps
+    // streaming and generation on one number rather than two that agree by
+    // habit.
+    let y_range = generator.chunk_y_range();
+    let (min_y, max_y) = (y_range.start, y_range.end);
     
     // Data-driven material registry (RON primary, built-in fallback). Shared by
     // the foliage passes and any system needing material metadata.

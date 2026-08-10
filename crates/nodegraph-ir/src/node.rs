@@ -706,6 +706,21 @@ pub struct BiomeParamParams {
     pub default: f32,
 }
 
+/// Parameters for [`NodeKind::WorldParam`]: read a named world-level scalar from
+/// the world-param sidecar, or `default` when the world declares no such entry
+/// (or no sidecar is threaded).
+/// 
+/// The world analogue of [`BiomeParamParams`]. Separate rather than shared
+/// because the two read different sidecars, and a node whose meaning depends on
+/// which evaluator happens to hold it is not a node an author can reason about.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct WorldParamParams {
+    /// The parameter name to read.
+    pub name: String,
+    /// Fallback value when the parameter is absent.
+    pub default: f32,
+}
+
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -845,6 +860,8 @@ pub enum NodeKind {
     /// Reads a named per-biome scalar parameter (the biome-param sidecar) as a
     /// uniform scalar field, falling back to a node default when unset.
     BiomeParam(BiomeParamParams),
+    /// Read a named scalar from the world-param sidecar.
+    WorldParam(WorldParamParams),
 }
 
 // Static pin layouts, shared by all instances of a kind.
@@ -1328,6 +1345,13 @@ impl NodeKind {
                 inputs: NO_PINS,
                 outputs: SCALAR_OUT,
             },
+            NodeKind::WorldParam(_) => NodeDescriptor {
+                display_name: "World Param",
+                category: NodeCategory::Source,
+                color: SRC,
+                inputs: NO_PINS,
+                outputs: SCALAR_OUT,
+            },
         }
     }
     
@@ -1354,7 +1378,8 @@ impl NodeKind {
 
     /// Whether this kind means the same thing one dimension down: elementwise
     /// arithmetic and curves, which read a field and write a field without
-    /// caring how many dimensions it has.
+    /// caring how many dimensions it has, plus the uniform sources that fill
+    /// one.
     ///
     /// These are the kinds whose declared `Density` / `Scalar` pins carry
     /// [`SurfaceField`](PinType::SurfaceField) in a per-column graph, and the
@@ -1371,6 +1396,7 @@ impl NodeKind {
         matches!(
             self,
             NodeKind::Constant(_)
+                | NodeKind::WorldParam(_)
                 | NodeKind::Add(_)
                 | NodeKind::Subtract(_)
                 | NodeKind::Multiply(_)
@@ -1527,6 +1553,7 @@ impl NodeKind {
             NodeKind::PaintDensity(_)        => "PaintDensity",
             NodeKind::ScatterPlace(_)        => "ScatterPlace",
             NodeKind::BiomeParam(_)          => "BiomeParam",
+            NodeKind::WorldParam(_)          => "WorldParam",
         }
     }
 }

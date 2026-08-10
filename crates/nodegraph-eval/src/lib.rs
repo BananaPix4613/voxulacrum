@@ -1,4 +1,4 @@
-mod biome_params;
+mod scalar_params;
 mod border;
 mod cache;
 mod column;
@@ -19,7 +19,7 @@ mod scan;
 mod scatter;
 mod world_eval;
 
-pub use biome_params::BiomeParams;
+pub use scalar_params::{BiomeParams, ScalarParams, WorldParams};
 pub use border::{analyze_borders, biome_border_fade, blend_density, BorderAnalysis};
 pub use cache::{CachedOutput, EvalCache};
 pub use column::{ColumnCache, ColumnField, ColumnOutput, IdColumn};

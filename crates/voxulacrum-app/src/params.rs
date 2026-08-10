@@ -580,8 +580,6 @@ pub struct StreamingParams {
     /// chunks are unloaded. Should be larger than load_margin to prevent
     /// load/unload thrashing (hysteresis).
     pub unload_margin: f32,
-    pub min_chunk_y: i32,
-    pub max_chunk_y: i32,
     /// Completed generation results inserted into the world per frame.
     pub max_gen_per_frame: u32,
     /// Chunk snapshots extracted for meshing per frame. This is a *main-thread*
@@ -618,8 +616,6 @@ impl Default for StreamingParams {
         Self {
             load_margin: 0.40,
             unload_margin: 0.55,
-            min_chunk_y: 0,
-            max_chunk_y: 4,
             max_gen_per_frame: 64,
             max_mesh_per_frame: 32,
             unload_budget_ms: default_unload_budget_ms(),

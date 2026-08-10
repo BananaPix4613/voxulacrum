@@ -83,6 +83,7 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Foliage, "Paint Density", || NodeKind::PaintDensity(PaintDensityParams::default())),
         (NodeCategory::Foliage, "Scatter Place", || NodeKind::ScatterPlace(ScatterPlaceParams::default())),
         (NodeCategory::Biome, "Biome Param", || NodeKind::BiomeParam(BiomeParamParams::default())),
+        (NodeCategory::Source, "World Param", || NodeKind::WorldParam(WorldParamParams::default())),
     ]
 }
 
@@ -462,8 +463,8 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            52,
-            "the static catalog covers {} of 52 statically-insertable NodeKinds; \
+            53,
+            "the static catalog covers {} of 53 statically-insertable NodeKinds; \
              a kind missing from it cannot be placed on a canvas at all",
             names.len(),
         );

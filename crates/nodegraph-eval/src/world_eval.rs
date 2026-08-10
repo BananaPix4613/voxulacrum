@@ -9,7 +9,7 @@ use nodegraph_ir::{
 };
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
-use crate::biome_params::BiomeParams;
+use crate::scalar_params::{BiomeParams, WorldParams};
 use crate::border::{analyze_borders, biome_border_fade, blend_density, sample_id, BorderAnalysis};
 use crate::library_kernel::{surface_layering, LibraryKernel};
 use crate::column::{ColumnCache, ColumnField, IdColumn};
@@ -196,6 +196,8 @@ pub struct WorldEvaluator {
     /// span for a column's surface; a structure's anchor may sit in a different
     /// chunk-Y than the chunk deriving it.
     chunk_y_range: std::ops::Range<i32>,
+    /// The world's named scalars, read by `WorldParam` nodes in any graph tier.
+    world_params: WorldParams,
 }
 
 impl WorldEvaluator {
@@ -222,11 +224,18 @@ impl WorldEvaluator {
             libraries: LibraryGraphRegistry::new(),
             kernels: HashMap::new(),
             chunk_y_range: 0..4,
+            world_params: WorldParams::new(),
         };
         this.log_validation();
         this
     }
 
+    /// Install the world's scalar parameter sidecar (builder-style).
+    pub fn with_world_params(mut self, params: WorldParams) -> Self {
+        self.world_params = params;
+        self
+    }
+    
     /// Replace the World graph (builder-style).
     pub fn with_world(mut self, world: Graph) -> Self {
         self.world = world;
@@ -460,7 +469,7 @@ impl WorldEvaluator {
             return Ok((0, 0));
         }
         let ctx = EvalContext::new(world_seed, IVec3::ZERO);
-        let world_point = ColumnEvaluator::new(&self.world, ctx);
+        let world_point = self.column_eval(&self.world, ctx);
         let zone = match self.world_output_node() {
             Some(n) => sample_id(&world_point, n, wx, wz)?,
             None => 0,
@@ -470,7 +479,7 @@ impl WorldEvaluator {
         let empty = ColumnCache::new();
         let mut upstream = UpstreamGraphs::new();
         if !self.world.nodes.is_empty() {
-            upstream.insert(GraphRefTarget::World, &self.world, ctx, &empty);
+            upstream.insert(GraphRefTarget::World, &self.world, ctx, &empty, Some(&self.world_params));
         }
         let Some(zg) = self.zones.iter().find(|z| z.id == zone) else {
             return Ok((zone, 0));
@@ -478,7 +487,7 @@ impl WorldEvaluator {
         let Some(out) = zg.output else {
             return Ok((zone, 0));
         };
-        let zone_point = ColumnEvaluator::new(&zg.graph, ctx).with_upstream(&upstream);
+        let zone_point = self.column_eval(&zg.graph, ctx).with_upstream(&upstream);
         Ok((zone, sample_id(&zone_point, out, wx, wz)?))
     }
 
@@ -497,7 +506,7 @@ impl WorldEvaluator {
         // The World evaluator stays alive rather than being consumed into its
         // cache: the border scan samples it pointwise at world columns outside
         // this chunk, which `sample_column` does without any bulk fill.
-        let mut world_eval = ColumnEvaluator::new(&self.world, ctx);
+        let mut world_eval = self.column_eval(&self.world, ctx);
         if !self.world.nodes.is_empty() {
             world_eval.evaluate()?;
         }
@@ -523,7 +532,7 @@ impl WorldEvaluator {
 
         let mut upstream = UpstreamGraphs::new();
         if !self.world.nodes.is_empty() {
-            upstream.insert(GraphRefTarget::World, &self.world, ctx, world_eval.cache());
+            upstream.insert(GraphRefTarget::World, &self.world, ctx, world_eval.cache(), Some(&self.world_params));
         }
 
         // Every zone, not only those with a column in this chunk. The border
@@ -536,7 +545,7 @@ impl WorldEvaluator {
         let mut zone_evals: Vec<(u16, Option<NodeId>, ColumnEvaluator)> =
             Vec::with_capacity(self.zones.len());
         for zg in &self.zones {
-            let mut ev = ColumnEvaluator::new(&zg.graph, ctx).with_upstream(&upstream);
+            let mut ev = self.column_eval(&zg.graph, ctx).with_upstream(&upstream);
             if !zg.graph.nodes.is_empty() {
                 ev.evaluate()?;
             }
@@ -617,7 +626,7 @@ impl WorldEvaluator {
 
         // Pointwise: `sample_column` walks the graph directly, so the climate
         // channels need no bulk fill of their own.
-        let world_point = ColumnEvaluator::new(&self.world, ctx);
+        let world_point = self.column_eval(&self.world, ctx);
         let mut climate: Vec<(String, f32)> = self
             .world
             .nodes
@@ -730,7 +739,7 @@ impl WorldEvaluator {
     ) -> EvalResult<IdMap> {
         let step = step.max(1);
         let ctx = EvalContext::new(world_seed, IVec3::ZERO);
-        let world_point = ColumnEvaluator::new(&self.world, ctx);
+        let world_point = self.column_eval(&self.world, ctx);
         let world_output = self.world_output_node();
 
         // `insert` wants a cache reference; the pointwise path never reads it,
@@ -738,7 +747,7 @@ impl WorldEvaluator {
         let empty = ColumnCache::new();
         let mut upstream = UpstreamGraphs::new();
         if !self.world.nodes.is_empty() {
-            upstream.insert(GraphRefTarget::World, &self.world, ctx, &empty);
+            upstream.insert(GraphRefTarget::World, &self.world, ctx, &empty, Some(&self.world_params));
         }
         let zone_points: Vec<(u16, Option<NodeId>, ColumnEvaluator)> = self
             .zones
@@ -747,7 +756,7 @@ impl WorldEvaluator {
                 (
                     zg.id,
                     zg.output,
-                    ColumnEvaluator::new(&zg.graph, ctx).with_upstream(&upstream),
+                    self.column_eval(&zg.graph, ctx).with_upstream(&upstream),
                 )
             })
             .collect();
@@ -851,6 +860,7 @@ impl WorldEvaluator {
 
             let mut eval = Evaluator::new(&bg.graph, ctx)
                 .with_biome_params(&bg.params)
+                .with_world_params(&self.world_params)
                 .with_library_kernels(&self.kernels)
                 .with_upstream(upstream);
             eval.evaluate()?;
@@ -1134,6 +1144,7 @@ impl WorldEvaluator {
         };
         let mut eval = Evaluator::new(&bg.graph, ctx)
             .with_biome_params(&bg.params)
+            .with_world_params(&self.world_params)
             .with_library_kernels(&self.kernels)
             .with_upstream(upstream);
         eval.evaluate()?;
@@ -1157,9 +1168,20 @@ impl WorldEvaluator {
     fn upstream_for<'u>(&'u self, ctx: EvalContext, cache: &'u ColumnCache) -> UpstreamGraphs<'u> {
         let mut up = UpstreamGraphs::new();
         if !self.world.nodes.is_empty() {
-            up.insert(GraphRefTarget::World, &self.world, ctx, cache);
+            up.insert(GraphRefTarget::World, &self.world, ctx, cache, Some(&self.world_params));
         }
         up
+    }
+    
+    /// A column evaluator over `graph` for this chunk, with the world sidecar
+    /// attached.
+    /// 
+    /// Every per-column evaluation goes through here rather than calling
+    /// `ColumnEvaluator::new` directly, so a `WorldParam` cannot read the
+    /// manifest on one path and its node default on another - two answers for
+    /// one column is how a seam starts.
+    fn column_eval<'u>(&'u self, graph: &'u Graph, ctx: EvalContext) -> ColumnEvaluator<'u> {
+        ColumnEvaluator::new(graph, ctx).with_world_params(&self.world_params)
     }
 
     /// Validate each graph + the library reference set, logging findings.
@@ -2127,5 +2149,46 @@ mod tests {
         // A chunk that came out all one way would satisfy the loop and prove
         // nothing about the channel actually reaching the density.
         assert!(solid > 0 && air > 0, "expected a mix, got {solid} solid / {air} air");
+    }
+
+    #[test]
+    fn the_world_sidecar_reaches_both_the_bulk_and_pointwise_paths() {
+        use nodegraph_ir::{WorldOutputParams, WorldParamParams};
+        // A `WorldParam` driving zone assignment, so one number decides an
+        // observable outcome. The bulk fill and the pointwise probe are separate
+        // evaluators; the sidecar reaching only one of them is the seam this
+        // guards - the same shape as the GraphRef pin-index defect.
+        let world = |name: &str| {
+            let mut g = Graph::of_kind(GraphKind::World);
+            let p = g.add_node(NodeKind::WorldParam(WorldParamParams {
+                name: name.into(),
+                default: 0.0,
+            }));
+            let out = g.add_node(NodeKind::WorldOutput(WorldOutputParams {
+                zone_bands: vec![0.5],
+                zone_ids: vec![0, 1],
+            }));
+            g.connect(PinRef::new(p, 0), PinRef::new(out, 0)).unwrap();
+            g
+        };
+        let ctx = EvalContext::new(3, IVec3::new(1, 0, 1));
+
+        // No sidecar: the node default of 0.0 lands under the band.
+        let bare = WorldEvaluator::new(terrain_graph(1.0)).with_world(world("zone_pick"));
+        let ids = bare.evaluate_chunk(ctx).unwrap().zone_ids.expect("zone ids");
+        assert_eq!(ids.get(0, 0), 0, "without a sidecar the node default must win");
+
+        // With it: 0.9 crosses the band, in both paths.
+        let mut params = WorldParams::new();
+        params.set("zone_pick", 0.9);
+        let we = WorldEvaluator::new(terrain_graph(1.0))
+            .with_world(world("zone_pick"))
+            .with_world_params(params);
+
+        let ids = we.evaluate_chunk(ctx).unwrap().zone_ids.expect("zone ids");
+        assert_eq!(ids.get(0, 0), 1, "bulk fill did not read the sidecar");
+
+        let report = we.inspect_column(ctx, 5, 6, 0..1).unwrap();
+        assert_eq!(report.zone_id, 1, "pointwise probe did not read the sidecar");
     }
 }

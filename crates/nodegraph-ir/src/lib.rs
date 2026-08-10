@@ -68,8 +68,8 @@ pub use node::{
     PinSpec, QueueParams, RemapParams, SubtractParams, TerrainOutputParams, ThresholdParams,
     UnionParams, WorldAxisParams, WorldPosParams, BuildTerrainParams, JitteredGridParams,
     PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlaceBlueprintParams, PlaceStructureParams,
-    RiverParams, WorldOutputParams, ZoneOutputParams, YBandParams, PoissonDistributionParams,
-    SurfaceFilterParams, SurfaceToDensityParams, BiomeContextMaskParams, SpeciesPickerParams,
-    PaintDensityParams, ScatterPlaceParams,
+    RiverParams, WorldOutputParams, WorldParamParams, ZoneOutputParams, YBandParams,
+    PoissonDistributionParams, SurfaceFilterParams, SurfaceToDensityParams, BiomeContextMaskParams,
+    SpeciesPickerParams, PaintDensityParams, ScatterPlaceParams,
 };
 pub use pin::PinType;

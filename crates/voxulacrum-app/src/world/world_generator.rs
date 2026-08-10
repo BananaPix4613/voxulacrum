@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::IVec3;
-use nodegraph_eval::{BiomeParams, ChunkEvaluation, EvalContext, PaintLayer, ScatterBucket, WorldEvaluator};
+use nodegraph_eval::{BiomeParams, ChunkEvaluation, EvalContext, PaintLayer, ScatterBucket, WorldEvaluator, WorldParams};
 use nodegraph_ir::{Graph, NodeKind};
 use serde::{Serialize, Deserialize};
 use smallvec::SmallVec;
@@ -50,6 +50,8 @@ pub struct WorldGenerator {
     storage_boundary: StorageBoundary,
     zone_labels: Vec<(u16, String)>,
     biome_labels: Vec<(u16, String)>,
+    /// Vertical extent in chunk-Y, derived once from the manifest.
+    chunk_y_range: std::ops::Range<i32>,
 }
 
 impl WorldGenerator {
@@ -78,6 +80,7 @@ impl WorldGenerator {
             storage_boundary: StorageBoundary::new(0),
             zone_labels: Vec::new(),
             biome_labels: Vec::new(),
+            chunk_y_range: 0..4,
         })
     }
     
@@ -95,6 +98,14 @@ impl WorldGenerator {
         let hierarchy = load_hierarchy(manifest_path)?;
         let seed = hierarchy.seed;
         Ok(Self::from_hierarchy(hierarchy, seed))
+    }
+
+    /// The world's vertical extent in chunk-Y, rounded outward from the
+    /// manifest's voxel bounds. `min_y` floors and `max_y` ceilings, so an
+    /// unaligned extent grows to the enclosing chunks rather than being refused
+    /// - a world is not misconfigured for being 100 voxels tall.
+    pub fn chunk_y_range(&self) -> std::ops::Range<i32> {
+        self.chunk_y_range.clone()
     }
 
     /// Same, with the manifest's seed overridden.
@@ -118,6 +129,13 @@ impl WorldGenerator {
 
     /// Assemble a generator from an already-loaded hierarchy.
     fn from_hierarchy(hierarchy: LoadedHierarchy, world_seed: u64) -> Self {
+        // Round outward to whole chunks. `div_euclid` rather than `/` so a world
+        // extending below Y 0 floors instead of truncating toward zero, which
+        // would silently drop its lowest chunk.
+        let dim = CHUNK_SIZE as i32;
+        let (min_y, max_y) = hierarchy.y_extent;
+        let chunk_y_range =
+            min_y.div_euclid(dim)..(max_y + dim - 1).div_euclid(dim);
         // The primary biome anchors `WorldEvaluator::new`; `with_biomes` then
         // installs the full set, replacing that placeholder entry.
         let primary = hierarchy.biomes[0].1.clone();
@@ -132,6 +150,8 @@ impl WorldGenerator {
             .with_biomes(hierarchy.biomes)
             .with_biome_details(hierarchy.details)
             .with_biome_params(hierarchy.biome_params)
+            .with_world_params(hierarchy.world_params)
+            .with_chunk_y_range(chunk_y_range.clone())
             .with_libraries(libraries.registry().clone())
             .with_library_kernels(libraries.kernels().clone())
             .with_cross_graph_resolved();
@@ -141,6 +161,7 @@ impl WorldGenerator {
             storage_boundary: StorageBoundary::new(hierarchy.sea_level),
             zone_labels: hierarchy.zone_labels,
             biome_labels: hierarchy.biome_labels,
+            chunk_y_range,
         }
     }
     
@@ -561,6 +582,24 @@ pub struct WorldManifest {
     /// self-contained: the manifest and the graphs it names are the whole input.
     #[serde(default = "default_seed")]
     pub seed: u64,
+    /// The world's vertical extent, in world-Y voxels: `min_y` inclusive,
+    /// `max_y` exclusive. In voxels rather than chunks because `sea_level` is,
+    /// and a manifest that mixes units makes an author convert to read it. The
+    /// engine rounds outward to whole chunks.
+    ///
+    /// This is the world's only statement of its own height. It was previously
+    /// two independent defaults - `StreamingParams` and `WorldEvaluator` - that
+    /// happened to agree.
+    #[serde(default)]
+    pub min_y: i32,
+    /// Exclusive upper bound of [`min_y`](WorldManifest::min_y).
+    #[serde(default = "default_max_y")]
+    pub max_y: i32,
+    /// World-level scalar parameters (the world-param sidecar). Free-form;
+    /// absent => no parameters, and every `WorldParam` falls back to its node
+    /// default. The place to put values several graph tiers must agree on.
+    #[serde(default)]
+    pub params: HashMap<String, f32>,
     /// Zone graphs, keyed by the zone id each governs.
     #[serde(default)]
     pub zones: Vec<ZoneManifestEntry>,
@@ -575,6 +614,12 @@ pub struct WorldManifest {
 
 fn default_seed() -> u64 {
     DEFAULT_SEED
+}
+
+/// Four chunks, the height this engine has always had. A manifest predating the
+/// field keeps its world exactly as tall as it was.
+fn default_max_y() -> i32 {
+    128
 }
 
 impl WorldManifest {
@@ -647,6 +692,10 @@ struct LoadedHierarchy {
     details: Vec<(u16, Graph)>,
     /// Per-biome scalar parameter sidecars (by biome id).
     biome_params: Vec<(u16, BiomeParams)>,
+    /// The world's scalar parameter sidecar.
+    world_params: WorldParams,
+    /// Vertical extent in world-Y voxels, `min` inclusive and `max` exclusive.
+    y_extent: (i32, i32),
     /// Global ocean surface (world-Y), from the manifest.
     sea_level: i32,
     /// World seed, from the manifest.
@@ -723,6 +772,8 @@ fn load_hierarchy(manifest_path: &std::path::Path) -> Result<LoadedHierarchy, St
         biomes,
         details,
         biome_params,
+        world_params: WorldParams::from_entries(manifest.params.clone()),
+        y_extent: (manifest.min_y, manifest.max_y),
         sea_level: manifest.sea_level,
         seed: manifest.seed,
         zone_labels,
@@ -739,7 +790,7 @@ pub fn load_world_graphs(
     let dir = manifest_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    // Every zone is editable, whether or not the evaluator reaches it yet
+    // Every zone is editable, whether the evaluator reaches it yet
     // (Substep 4b) - a zone you cannot open is a zone you cannot author.
     let mut out = vec![
         (GraphSlot::World, "World".to_string(), dir.join(&manifest.world),

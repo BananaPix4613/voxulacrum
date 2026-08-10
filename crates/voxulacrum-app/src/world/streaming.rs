@@ -383,8 +383,8 @@ impl ChunkStreamingManager {
         _dt: f32,
         on_unload: &mut dyn FnMut(&crate::world::chunk::LoadedChunk),
     ) -> StreamingTickResult {
-        let min_y = self.params.min_chunk_y;
-        let max_y = self.params.max_chunk_y;
+        let min_y = world.min_chunk_y;
+        let max_y = world.max_chunk_y;
         let load_margin = self.params.load_margin;
         let unload_margin = self.params.unload_margin;
 

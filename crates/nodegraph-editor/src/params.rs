@@ -249,6 +249,11 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             changed |= row(ui, "default", |ui| ui.add(egui::DragValue::new(&mut p.default).speed(0.05)));
             changed
         }
+        NodeKind::WorldParam(p) => {
+            let mut changed = row(ui, "param name", |ui| ui.text_edit_singleline(&mut p.name));
+            changed |= row(ui, "default", |ui| ui.add(egui::DragValue::new(&mut p.default).speed(0.05)));
+            changed
+        }
         // Parameterless variants:
         NodeKind::WorldPos(_) | NodeKind::Add(_) | NodeKind::Multiply(_)
         | NodeKind::Subtract(_) | NodeKind::Min(_) | NodeKind::Max(_)

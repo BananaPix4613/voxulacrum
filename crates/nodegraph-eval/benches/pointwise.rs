@@ -140,7 +140,7 @@ fn bench(c: &mut Criterion) {
     we.evaluate().unwrap();
     let world_cache = we.into_cache();
     let mut upstream = UpstreamGraphs::new();
-    upstream.insert(GraphRefTarget::World, &cw, ctx, &world_cache);
+    upstream.insert(GraphRefTarget::World, &cw, ctx, &world_cache, None);
     c.bench_function("sample_column/zone_via_graph_ref/1024", |b| {
         let e = ColumnEvaluator::new(&cz, ctx).with_upstream(&upstream);
         b.iter(|| {

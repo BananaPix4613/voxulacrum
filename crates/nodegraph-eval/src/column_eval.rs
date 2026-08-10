@@ -20,6 +20,7 @@ use crate::column::{ColumnCache, ColumnField, ColumnOutput, IdColumn};
 use crate::context::EvalContext;
 use crate::error::{EvalError, EvalResult};
 use crate::eval::{configured_noise, sample_curve};
+use crate::scalar_params::WorldParams;
 use crate::field::CHUNK_DIM;
 
 /// Evaluates a World/Zone graph for one chunk, producing per-column outputs.
@@ -30,6 +31,9 @@ pub struct ColumnEvaluator<'g> {
     edges: EdgeIndex,
     ctx: EvalContext,
     cache: ColumnCache,
+    /// The world's scalar parameters, read by `WorldParam` nodes. `None` fails
+    /// every `WorldParam` back to its node default.
+    world_params: Option<&'g WorldParams>,
     /// Cross-graph resolution context for `GraphRef` reads (`None` for World and
     /// for graphs with no cross-graph references).
     upstream: Option<&'g UpstreamGraphs<'g>>,
@@ -38,9 +42,15 @@ pub struct ColumnEvaluator<'g> {
 impl<'g> ColumnEvaluator<'g> {
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: ColumnCache::new(), upstream: None }
+        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: ColumnCache::new(), world_params: None, upstream: None }
     }
-    
+
+    /// Attach the world's parameter sidecar, read by `WorldParam` nodes.
+    pub fn with_world_params(mut self, params: &'g WorldParams) -> Self {
+        self.world_params = Some(params);
+        self
+    }
+
     /// Attach a cross-graph resolution context so `GraphRef` reads resolve to
     /// upstream graphs' named outputs.
     pub fn with_upstream(mut self, upstream: &'g UpstreamGraphs<'g>) -> Self {
@@ -137,6 +147,10 @@ impl<'g> ColumnEvaluator<'g> {
             // not here type-checks into a World graph and then fails the chunk,
             // which `every_domain_agnostic_kind_evaluates_per_column` forbids.
             NodeKind::Constant(p) => ColumnOutput::Surface(Arc::new(ColumnField::filled(p.value))),
+            NodeKind::WorldParam(p) => {
+                let value = self.world_params.and_then(|wp| wp.get(&p.name)).unwrap_or(p.default);
+                ColumnOutput::Surface(Arc::new(ColumnField::filled(value)))
+            }
             NodeKind::Add(_) => self.zip(id, |a, b| a + b)?,
             NodeKind::Subtract(_) => self.zip(id, |a, b| a - b)?,
             NodeKind::Multiply(_) => self.zip(id, |a, b| a * b)?,
@@ -262,6 +276,9 @@ impl<'g> ColumnEvaluator<'g> {
             // change to one is visibly a change to the other; the two disagreeing
             // is a seam, since pointwise is how neighboring chunks agree.
             NodeKind::Constant(p) => ColumnSample::Surface(p.value),
+            NodeKind::WorldParam(p) => ColumnSample::Surface(
+                self.world_params.and_then(|wp| wp.get(&p.name)).unwrap_or(p.default),
+            ),
             NodeKind::Add(_) => self.sample_zip(id, world_x, world_z, |a, b| a + b)?,
             NodeKind::Subtract(_) => self.sample_zip(id, world_x, world_z, |a, b| a - b)?,
             NodeKind::Multiply(_) => self.sample_zip(id, world_x, world_z, |a, b| a * b)?,
@@ -390,6 +407,7 @@ impl<'g> UpstreamGraphs<'g> {
         graph: &'g Graph,
         ctx: EvalContext,
         cache: &'g ColumnCache,
+        world_params: Option<&'g WorldParams>,
     ) {
         let outputs = graph
             .nodes
@@ -399,7 +417,13 @@ impl<'g> UpstreamGraphs<'g> {
                 _ => None,
             })
             .collect();
-        let point = ColumnEvaluator::new(graph, ctx);
+        // The sidecar reaches the pointwise evaluator too. Without it a
+        // `WorldParam` would read the manifest in the bulk path and its node
+        // default in the pointwise one, which is a seam.
+        let mut point = ColumnEvaluator::new(graph, ctx);
+        if let Some(wp) = world_params {
+            point = point.with_world_params(wp);
+        }
         self.graphs.insert(target, UpstreamGraph { cache, outputs, point });
     }
     
@@ -711,7 +735,7 @@ mod tests {
         we.evaluate().unwrap();
         let world_cache = we.into_cache();
         let mut upstream = UpstreamGraphs::new();
-        upstream.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+        upstream.insert(GraphRefTarget::World, &world, ctx, &world_cache, None);
 
         let mut ze = ColumnEvaluator::new(&zone, ctx).with_upstream(&upstream);
         ze.evaluate().unwrap();
@@ -758,7 +782,7 @@ mod tests {
         we.evaluate().unwrap();
         let world_cache = we.into_cache();
         let mut upstream = UpstreamGraphs::new();
-        upstream.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+        upstream.insert(GraphRefTarget::World, &world, ctx, &world_cache, None);
 
         let mut ze = ColumnEvaluator::new(&zone, ctx).with_upstream(&upstream);
         ze.evaluate().unwrap();
@@ -789,6 +813,7 @@ mod tests {
         use nodegraph_ir::*;
         vec![
             NodeKind::Constant(ConstantParams::default()),
+            NodeKind::WorldParam(WorldParamParams::default()),
             NodeKind::Add(AddParams::default()),
             NodeKind::Subtract(SubtractParams::default()),
             NodeKind::Multiply(MultiplyParams::default()),

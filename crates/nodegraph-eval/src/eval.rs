@@ -11,7 +11,7 @@ use nodegraph_ir::{
 };
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
-use crate::biome_params::BiomeParams;
+use crate::scalar_params::{BiomeParams, WorldParams};
 use crate::column_eval::{graph_ref_output_name, UpstreamGraphs};
 use crate::library_kernel::{standard_cave_noise, LibraryKernel};
 use crate::cache::{CachedOutput, EvalCache};
@@ -54,6 +54,9 @@ pub struct Evaluator<'g> {
     /// The active biome's scalar parameters, read by `BiomeParam` nodes. `None`
     /// falls every `BiomeParam` back to its node default.
     biome_params: Option<&'g BiomeParams>,
+    /// The world's scalar parameters, read by `WorldParam` nodes. `None` falls
+    /// every `WorldParam` back to its node default.
+    world_params: Option<&'g WorldParams>,
     /// Native kernels by library id, for `LibraryRef` nodes. `None` makes every
     /// `LibraryRef` an `UnresolvedLibraryRef` error - which is what it was
     /// unconditionally before this existed.
@@ -82,7 +85,7 @@ impl<'g> Evaluator<'g> {
 
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: EvalCache::new(), biome_params: None, kernels: None, upstream: None, rivers: std::cell::RefCell::new(Vec::new()) }
+        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: EvalCache::new(), biome_params: None, world_params: None, kernels: None, upstream: None, rivers: std::cell::RefCell::new(Vec::new()) }
     }
 
     /// Attach the native kernel bindings, so `LibraryRef` nodes evaluate.
@@ -97,6 +100,12 @@ impl<'g> Evaluator<'g> {
     /// Attach the active biome's parameter sidecar, read by `BiomeParam` nodes.
     pub fn with_biome_params(mut self, params: &'g BiomeParams) -> Self {
         self.biome_params = Some(params);
+        self
+    }
+
+    /// Attach the world's parameter sidecar, read by `WorldParam` nodes.
+    pub fn with_world_params(mut self, params: &'g WorldParams) -> Self {
+        self.world_params = Some(params);
         self
     }
 
@@ -352,6 +361,13 @@ impl<'g> Evaluator<'g> {
                 let value = self
                     .biome_params
                     .and_then(|bp| bp.get(&p.name))
+                    .unwrap_or(p.default);
+                CachedOutput::Scalar(Arc::new(ScalarField::filled(value)))
+            }
+            NodeKind::WorldParam(p) => {
+                let value = self
+                    .world_params
+                    .and_then(|wp| wp.get(&p.name))
                     .unwrap_or(p.default);
                 CachedOutput::Scalar(Arc::new(ScalarField::filled(value)))
             }
@@ -666,6 +682,9 @@ impl<'g> Evaluator<'g> {
             NodeKind::BiomeParam(p) => {
                 self.biome_params.and_then(|bp| bp.get(&p.name)).unwrap_or(p.default)
             }
+            NodeKind::WorldParam(p) => {
+                self.world_params.and_then(|wp| wp.get(&p.name)).unwrap_or(p.default)
+            }
             NodeKind::Perlin2D(p)  => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::Perlin).get_noise_2d(w.x, w.z) }
             NodeKind::Perlin3D(p)  => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::Perlin).get_noise_3d(w.x, w.y, w.z) }
             NodeKind::Simplex2D(p) => { let w = self.ctx.world_pos(x, y, z); self.noise(p, NoiseType::OpenSimplex2).get_noise_2d(w.x, w.z) }
@@ -916,7 +935,7 @@ mod tests {
         let (biome, gr) = graph_ref_biome(&world);
 
         let mut up = crate::UpstreamGraphs::new();
-        up.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+        up.insert(GraphRefTarget::World, &world, ctx, &world_cache, None);
 
         let mut e = Evaluator::new(&biome, ctx).with_upstream(&up);
         e.evaluate().unwrap();
@@ -954,7 +973,7 @@ mod tests {
             let (world, world_cache) = climate_upstream(ctx);
             let (biome, gr) = graph_ref_biome(&world);
             let mut up = crate::UpstreamGraphs::new();
-            up.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+            up.insert(GraphRefTarget::World, &world, ctx, &world_cache, None);
             let mut e = Evaluator::new(&biome, ctx).with_upstream(&up);
             e.evaluate().unwrap();
             let filled = match e.cache().get(gr) {
@@ -1005,7 +1024,7 @@ mod tests {
         assert!(!biome.has_errors(), "the chain must type-check without coercion");
 
         let mut up = crate::UpstreamGraphs::new();
-        up.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+        up.insert(GraphRefTarget::World, &world, ctx, &world_cache, None);
         let mut e = Evaluator::new(&biome, ctx).with_upstream(&up);
         e.evaluate().unwrap();
 

@@ -1088,8 +1088,8 @@ pub fn streaming_tick_system(
         camera_chunk: IVec3::new(cam_cx, 0, cam_cz),
         camera_world_pos: cam_pos,
         world_y_range: (
-            streaming.params.min_chunk_y as f32 * CHUNK_WORLD_SIZE,
-            streaming.params.max_chunk_y as f32 * CHUNK_WORLD_SIZE,
+            world.min_chunk_y as f32 * CHUNK_WORLD_SIZE,
+            world.max_chunk_y as f32 * CHUNK_WORLD_SIZE,
         ),
     };
 
