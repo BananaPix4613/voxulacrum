@@ -60,8 +60,8 @@ pub use graph::{Graph, GraphKind};
 pub use index::EdgeIndex;
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
 pub use node::{
-    AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams, ConstantParams,
-    CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,
+    AbsParams, AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams,
+    ConstantParams, CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,
     FluidOutputParams, FractalType, GraphOutputParams, GraphRefParams, IntersectParams, LayerParams,
     LerpParams, LibraryRefParams, MaskParams, MaxParams, MinParams, MixParams, MultiplyParams, Node,
     NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams, Perlin2DParams,
@@ -69,7 +69,7 @@ pub use node::{
     UnionParams, WorldAxisParams, WorldPosParams, BuildTerrainParams, JitteredGridParams,
     PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlaceBlueprintParams, PlaceStructureParams,
     RiverParams, WorldOutputParams, ZoneOutputParams, YBandParams, PoissonDistributionParams,
-    SurfaceFilterParams, BiomeContextMaskParams, SpeciesPickerParams, PaintDensityParams,
-    ScatterPlaceParams,
+    SurfaceFilterParams, SurfaceToDensityParams, BiomeContextMaskParams, SpeciesPickerParams,
+    PaintDensityParams, ScatterPlaceParams,
 };
 pub use pin::PinType;

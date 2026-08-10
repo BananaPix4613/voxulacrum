@@ -38,6 +38,15 @@ pub enum GraphKind {
     Library,
 }
 
+impl GraphKind {
+    /// Whether graphs of this kind evaluate per column (2D) rather than per
+    /// voxel (3D). The World and Zone graphs answer questions about a column -
+    /// which zone, which biome, what climate - and never about a Y.
+    pub fn is_per_column(self) -> bool {
+        matches!(self, GraphKind::World | GraphKind::Zone)
+    }
+}
+
 /// A typed dataflow graph: a slotmap of nodes plus typed edges, tagged with the
 /// [`GraphKind`] it plays in the hierarchy.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -94,8 +103,8 @@ impl Graph {
         let (out_ty, in_ty) = {
             let from_node = self.nodes.get(from.node).ok_or(GraphError::NodeNotFound(from.node))?;
             let to_node = self.nodes.get(to.node).ok_or(GraphError::NodeNotFound(to.node))?;
-            let outputs = from_node.kind.effective_outputs();
-            let inputs = to_node.kind.effective_inputs();
+            let outputs = from_node.kind.effective_outputs_in(self.kind);
+            let inputs = to_node.kind.effective_inputs_in(self.kind);
             let out_ty = outputs
                 .get(from.pin as usize)
                 .ok_or(GraphError::PinOutOfRange { node: from.node, pin: from.pin, count: outputs.len() })?
@@ -218,8 +227,8 @@ impl Graph {
                 diags.push(Diagnostic::error("edge references missing target target node").with_edge(i));
                 continue;
             };
-            let outputs = from_node.kind.effective_outputs();
-            let inputs = to_node.kind.effective_inputs();
+            let outputs = from_node.kind.effective_outputs_in(self.kind);
+            let inputs = to_node.kind.effective_inputs_in(self.kind);
             let Some(out_spec) = outputs.get(edge.from.pin as usize) else {
                 diags.push(
                     Diagnostic::error(format!("output pin {} out of range", edge.from.pin))
@@ -245,7 +254,28 @@ impl Graph {
             }
         }
 
-        // 2. At most one edge per input pin.
+        // 2. Every node belongs to this graph's domain.
+        //
+        // Without this the graph type-checks, saves, and then fails the chunk at
+        // generation with `WrongGraphDomain` - a warn in a log rather than a
+        // mark on the node that caused it. Same shape as a `GraphRef` in a
+        // biome graph rendering a pin the generator would not resolve.
+        if self.kind.is_per_column() {
+            for (id, node) in &self.nodes {
+                if !node.kind.is_column_kind() {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "{} has no per-column evaluation and cannot appear in a {:?} graph",
+                            node.kind.descriptor().display_name,
+                            self.kind
+                        ))
+                        .with_node(id),
+                    );
+                }
+            }
+        }
+
+        // 3. At most one edge per input pin.
         let mut input_counts: HashMap<(NodeId, u16), usize> = HashMap::new();
         for edge in &self.edges {
             *input_counts.entry((edge.to.node, edge.to.pin)).or_default() += 1;
@@ -261,9 +291,9 @@ impl Graph {
             }
         }
 
-        // 3. All required inputs connected.
+        // 4. All required inputs connected.
         for (id, node) in &self.nodes {
-            for (pin_idx, spec) in node.kind.effective_inputs().iter().enumerate() {
+            for (pin_idx, spec) in node.kind.effective_inputs_in(self.kind).iter().enumerate() {
                 if spec.required {
                     let connected = self
                         .edges

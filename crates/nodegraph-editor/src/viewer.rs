@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use egui::Ui;
 use egui_snarl::ui::{PinInfo, SnarlPin, SnarlViewer};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
-use nodegraph_ir::{Diagnostic, GraphRefParams, LibraryRefParams, NodeCategory, NodeKind, PinType, Severity};
+use nodegraph_ir::{
+    Diagnostic, GraphKind, GraphRefParams, LibraryRefParams, NodeCategory, NodeKind, PinType,
+    Severity,
+};
 
 use crate::colors::{category_fill, header_text_color, pin_color, pin_shape};
 use crate::params::{params_ui, GraphCatalogs};
@@ -45,6 +48,8 @@ pub fn catalog() -> &'static [(NodeCategory, &'static str, fn() -> NodeKind)] {
         (NodeCategory::Math, "Clamp",          || NodeKind::Clamp(ClampParams::default())),
         (NodeCategory::Math, "Lerp",           || NodeKind::Lerp(LerpParams::default())),
         (NodeCategory::Math, "Remap",          || NodeKind::Remap(RemapParams::default())),
+        (NodeCategory::Math, "Abs",            || NodeKind::Abs(AbsParams::default())),
+        (NodeCategory::Density, "Surface To Density", || NodeKind::SurfaceToDensity(SurfaceToDensityParams::default())),
         (NodeCategory::Curves, "Threshold",    || NodeKind::Threshold(ThresholdParams::default())),
         (NodeCategory::Curves, "Curve Mapper", || NodeKind::CurveMapper(CurveMapperParams::default())),
         (NodeCategory::Domain, "Domain Warp",  || NodeKind::DomainWarp(DomainWarpParams::default())),
@@ -147,6 +152,11 @@ pub struct GraphViewer<'a> {
     pub selected: Option<NodeId>,
     /// Out-param: the node whose header was left-clicked this frame, if any.
     pub clicked: &'a mut Option<NodeId>,
+    /// The kind of graph on the canvas. Pin *types* depend on it - an `Add` in a
+    /// World graph carries `SurfaceField` where the same node in a biome graph
+    /// carries `Density` - so the colors and the wire check must ask with it or
+    /// the canvas refuses wires `Graph::connect` would accept.
+    pub kind: GraphKind,
 }
 
 impl SnarlViewer<NodeKind> for GraphViewer<'_> {
@@ -228,7 +238,7 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         ui: &mut Ui,
         snarl: &mut Snarl<NodeKind>,
     ) -> impl SnarlPin + 'static {
-        let pins = snarl[pin.id.node].effective_inputs();
+        let pins = snarl[pin.id.node].effective_inputs_in(self.kind);
         let spec = &pins[pin.id.input];
         ui.label(spec.name);
         PinInfo::default()
@@ -244,7 +254,7 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         ui: &mut Ui,
         snarl: &mut Snarl<NodeKind>,
     ) -> impl SnarlPin + 'static {
-        let pins = snarl[pin.id.node].effective_outputs();
+        let pins = snarl[pin.id.node].effective_outputs_in(self.kind);
         let spec = &pins[pin.id.output];
         // Output rows are right-to-left: this space lands to the *right* of
         // the label, opening clearance before the pin marker so it stops
@@ -385,8 +395,8 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
         let label = {
             let from_node = &snarl[from.id.node];
             let to_node = &snarl[to.id.node];
-            let from_pins = from_node.effective_outputs();
-            let to_pins = to_node.effective_inputs();
+            let from_pins = from_node.effective_outputs_in(self.kind);
+            let to_pins = to_node.effective_inputs_in(self.kind);
             let from_spec = &from_pins[from.id.output];
             let to_spec = &to_pins[to.id.input];
             if !PinType::is_compatible(from_spec.ty, to_spec.ty) {
@@ -452,8 +462,8 @@ mod tests {
 
         assert_eq!(
             names.len(),
-            50,
-            "the static catalog covers {} of 50 statically-insertable NodeKinds; \
+            52,
+            "the static catalog covers {} of 52 statically-insertable NodeKinds; \
              a kind missing from it cannot be placed on a canvas at all",
             names.len(),
         );

@@ -255,7 +255,8 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
         | NodeKind::Lerp(_) | NodeKind::Union(_) | NodeKind::Intersect(_)
         | NodeKind::DensitySubtract(_) | NodeKind::Mix(_) | NodeKind::Mask(_)
         | NodeKind::Queue(_) | NodeKind::TerrainOutput(_) | NodeKind::BuildTerrain(_)
-        | NodeKind::DensityOutput(_) | NodeKind::FluidOutput(_) => {
+        | NodeKind::DensityOutput(_) | NodeKind::FluidOutput(_)
+        | NodeKind::Abs(_) | NodeKind::SurfaceToDensity(_) => {
             ui.weak("(no parameters)");
             false
         }

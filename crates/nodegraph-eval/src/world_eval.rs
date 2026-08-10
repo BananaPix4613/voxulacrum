@@ -87,6 +87,11 @@ struct ResolvedColumns {
     zone_ids: Option<Arc<IdColumn>>,
     biome_ids: Option<Arc<IdColumn>>,
     border: Option<BorderAnalysis>,
+    /// The World graph's per-column cache, kept past this function so the
+    /// downstream biome graphs can resolve `GraphRef(World)` reads against the
+    /// same values the zone assignment used - rather than re-deriving them and
+    /// risking a second answer.
+    world_cache: ColumnCache,
 }
 
 /// What the column pipeline produced for one world column (roadmap §4.3).
@@ -345,6 +350,23 @@ impl WorldEvaluator {
                 _ => None,
             });
         }
+
+        // Biome and detail graphs too. The editors `load_world_graphs` has
+        // always resolved these, so a `GraphRef` dropped into a biome graph
+        // rendered a pin, wired, and saved - and then failed that chunk at
+        // generation, because this side resolved zone graphs only.
+        for bg in &mut self.biomes {
+            bg.graph.resolve_graph_refs(|t: GraphRefTarget| match t {
+                GraphRefTarget::World => Some(world_boundary.clone()),
+                _ => None,
+            });
+            if let Some(d) = bg.detail.as_mut() {
+                d.resolve_graph_refs(|t: GraphRefTarget| match t {
+                    GraphRefTarget::World => Some(world_boundary.clone()),
+                    _ => None,
+                });
+            }
+        }
         self
     }
 
@@ -491,7 +513,12 @@ impl WorldEvaluator {
         // into biomes — and reporting no zone ids in that case would empty
         // `ChunkTags.zones`, losing identity the World graph did compute.
         if self.zones.is_empty() {
-            return Ok(ResolvedColumns { zone_ids, biome_ids: None, border: None });
+            return Ok(ResolvedColumns {
+                zone_ids,
+                biome_ids: None,
+                border: None,
+                world_cache: world_eval.into_cache(),
+            });
         }
 
         let mut upstream = UpstreamGraphs::new();
@@ -553,7 +580,16 @@ impl WorldEvaluator {
             None
         };
 
-        Ok(ResolvedColumns { zone_ids, biome_ids: Some(Arc::new(biome)), border })
+        // Both borrow the world cache and are finished with it; the cache
+        // itself outlives this function on the returned value.
+        drop(zone_evals);
+        drop(upstream);
+        Ok(ResolvedColumns {
+            zone_ids,
+            biome_ids: Some(Arc::new(biome)),
+            border,
+            world_cache: world_eval.into_cache(),
+        })
     }
 
     /// `chunk_y_range` is the vertical span to report over, in chunk Y. The
@@ -572,6 +608,9 @@ impl WorldEvaluator {
         chunk_y_range: std::ops::Range<i32>,
     ) -> EvalResult<ColumnReport> {
         let cols = self.resolve_columns(ctx, true)?;
+        // The column pipeline is chunk-Y independent, so one context serves the
+        // several vertical windows this report walks.
+        let upstream = self.upstream_for(ctx, &cols.world_cache);
         let dim = CHUNK_DIM as i32;
         let world_x = ctx.chunk.x * dim + lx as i32;
         let world_z = ctx.chunk.z * dim + lz as i32;
@@ -609,7 +648,7 @@ impl WorldEvaluator {
 
         let mut density = Vec::new();
         let mut own_surface = None;
-        if let Some(layer) = self.eval_biome_layer(base_ctx, biome_id)? {
+        if let Some(layer) = self.eval_biome_layer(base_ctx, biome_id, &upstream)? {
             for y in 0..span as usize {
                 let v = layer.sample_density(lx, y, lz);
                 if v.is_some_and(|d| d > 0.0) {
@@ -633,8 +672,8 @@ impl WorldEvaluator {
 
         let biome_col = cols.biome_ids.clone();
         let terrain =
-            self.composite_terrain(voxel_ctx, biome_col.as_deref(), cols.border.as_ref())?;
-        let fluid = self.composite_fluid(voxel_ctx, biome_col.as_deref())?;
+            self.composite_terrain(voxel_ctx, biome_col.as_deref(), cols.border.as_ref(), &upstream)?;
+        let fluid = self.composite_fluid(voxel_ctx, biome_col.as_deref(), &upstream)?;
 
         let mut surface_y = None;
         let mut voxels = Vec::new();
@@ -740,15 +779,19 @@ impl WorldEvaluator {
     pub fn evaluate_chunk(&self, ctx: EvalContext) -> EvalResult<ChunkEvaluation> {
         let cols = self.resolve_columns(ctx, true)?;
         let biome_col = cols.biome_ids.clone();
+        // Built once and shared by every stage that evaluates a biome graph, so
+        // a `GraphRef(World)` reads the same columns the zone assignment did.
+        let upstream = self.upstream_for(ctx, &cols.world_cache);
 
-        let terrain = self.composite_terrain(ctx, biome_col.as_deref(), cols.border.as_ref())?;
+        let terrain =
+            self.composite_terrain(ctx, biome_col.as_deref(), cols.border.as_ref(), &upstream)?;
         // Stage 8 (structures) sits between smoothing (7) and fluid (9), per §5.
-        let terrain = self.apply_structures(ctx, terrain)?;
+        let terrain = self.apply_structures(ctx, terrain, &upstream)?;
         // Stage 9 (fluid) precedes stage 10 (foliage) per design doc §5. Foliage
         // submersion is applied at the storage boundary (world_generator), where
         // the fully-composited fluid field is available; the order here matches
         // the documented stage sequence.
-        let fluid_levels = self.composite_fluid(ctx, biome_col.as_deref())?;
+        let fluid_levels = self.composite_fluid(ctx, biome_col.as_deref(), &upstream)?;
         let foliage = self.evaluate_foliage(ctx, &terrain, biome_col.as_deref())?;
 
         Ok(ChunkEvaluation {
@@ -789,6 +832,7 @@ impl WorldEvaluator {
         &self,
         ctx: EvalContext,
         biome_col: Option<&IdColumn>,
+        upstream: &UpstreamGraphs,
     ) -> EvalResult<Option<Arc<ColumnField>>> {
         let biome_at = |x: usize, z: usize| biome_col.map_or(0u16, |c| c.get(x, z));
         let present = present_biomes(biome_col);
@@ -807,7 +851,8 @@ impl WorldEvaluator {
 
             let mut eval = Evaluator::new(&bg.graph, ctx)
                 .with_biome_params(&bg.params)
-                .with_library_kernels(&self.kernels);
+                .with_library_kernels(&self.kernels)
+                .with_upstream(upstream);
             eval.evaluate()?;
             let cache = eval.cache();
             // The FluidOutput node caches its `mask` field; read it at y=0 (the
@@ -838,6 +883,7 @@ impl WorldEvaluator {
         ctx: EvalContext,
         biome_col: Option<&IdColumn>,
         border: Option<&BorderAnalysis>,
+        upstream: &UpstreamGraphs,
     ) -> EvalResult<Arc<ChunkBuffer<Voxel, 32>>> {
         let biome_at = |x: usize, z: usize| biome_col.map_or(0u16, |c| c.get(x, z));
 
@@ -854,7 +900,7 @@ impl WorldEvaluator {
         let mut layers: HashMap<u16, LayerEval> =
             HashMap::new();
         for bid in needed {
-            if let Some(layer) = self.eval_biome_layer(ctx, bid)? {
+            if let Some(layer) = self.eval_biome_layer(ctx, bid, upstream)? {
                 layers.insert(bid, layer);
             }
         }
@@ -1009,6 +1055,7 @@ impl WorldEvaluator {
         wx: i32,
         wz: i32,
         chunk_y_range: std::ops::Range<i32>,
+        upstream: &UpstreamGraphs,
     ) -> EvalResult<Option<ColumnProbe>> {
         let (zone_id, biome_id) = self.sample_zone_and_biome_at(world_seed, wx, wz)?;
         let dim = CHUNK_DIM as i32;
@@ -1017,7 +1064,7 @@ impl WorldEvaluator {
             IVec3::new(wx.div_euclid(dim), chunk_y_range.start, wz.div_euclid(dim)),
         );
         let (lx, lz) = (wx.rem_euclid(dim) as usize, wz.rem_euclid(dim) as usize);
-        let Some(layer) = self.eval_biome_layer(ctx, biome_id)? else {
+        let Some(layer) = self.eval_biome_layer(ctx, biome_id, upstream)? else {
             return Ok(None);
         };
         let span = ((chunk_y_range.end - chunk_y_range.start).max(1) * dim) as usize;
@@ -1041,6 +1088,7 @@ impl WorldEvaluator {
         &self,
         ctx: EvalContext,
         terrain: Arc<ChunkBuffer<Voxel, 32>>,
+        upstream: &UpstreamGraphs,
     ) -> EvalResult<Arc<ChunkBuffer<Voxel, 32>>> {
         let sources = self.structure_sources()?;
         if sources.is_empty() {
@@ -1052,7 +1100,7 @@ impl WorldEvaluator {
             if probe_err.is_some() {
                 return None;
             }
-            match self.probe_column(ctx.world_seed, wx, wz, range.clone()) {
+            match self.probe_column(ctx.world_seed, wx, wz, range.clone(), upstream) {
                 Ok(p) => p,
                 Err(e) => {
                     probe_err = Some(e);
@@ -1072,7 +1120,12 @@ impl WorldEvaluator {
     /// biome id has no graph or the graph has no `DensityOutput`. The evaluator
     /// is kept alive on the returned [`LayerEval`] so the composite can
     /// pointwise-sample density above the chunk window (chunk-Y seam depth).
-    fn eval_biome_layer(&self, ctx: EvalContext, bid: u16) -> EvalResult<Option<LayerEval<'_>>> {
+    fn eval_biome_layer<'u>(
+        &'u self,
+        ctx: EvalContext,
+        bid: u16,
+        upstream: &'u UpstreamGraphs<'u>,
+    ) -> EvalResult<Option<LayerEval<'u>>> {
         let Some(bg) = self.biomes.iter().find(|b| b.id == bid) else {
             return Ok(None);
         };
@@ -1081,7 +1134,8 @@ impl WorldEvaluator {
         };
         let mut eval = Evaluator::new(&bg.graph, ctx)
             .with_biome_params(&bg.params)
-            .with_library_kernels(&self.kernels);
+            .with_library_kernels(&self.kernels)
+            .with_upstream(upstream);
         eval.evaluate()?;
         let fields = eval
             .cache()
@@ -1094,6 +1148,18 @@ impl WorldEvaluator {
             density_src: input_source(&bg.graph, density_node, 0),
             eval,
         }))
+    }
+
+    /// Cross-graph context for one chunk: the World graph's boundary outputs,
+    /// readable by a `GraphRef(World)` in any downstream graph. Empty when there
+    /// is no World graph, which leaves such a reference an `UnresolvedGraphRef`
+    /// rather than silently reading zero.
+    fn upstream_for<'u>(&'u self, ctx: EvalContext, cache: &'u ColumnCache) -> UpstreamGraphs<'u> {
+        let mut up = UpstreamGraphs::new();
+        if !self.world.nodes.is_empty() {
+            up.insert(GraphRefTarget::World, &self.world, ctx, cache);
+        }
+        up
     }
 
     /// Validate each graph + the library reference set, logging findings.
@@ -1944,8 +2010,12 @@ mod tests {
         // only *finds* the feature - every assertion below reads the two
         // independently generated terrains, which is the part under test.
         let sources = we.structure_sources().unwrap();
+        // Empty: this world's biome graphs read no upstream, and the probe is
+        // being driven directly rather than through `evaluate_chunk`.
+        let probe_cache = ColumnCache::new();
+        let probe_upstream = we.upstream_for(ctx1, &probe_cache);
         let features = crate::feature::derive_features(ctx1, &sources, |x, z| {
-            we.probe_column(SEED, x, z, 0..1).unwrap()
+            we.probe_column(SEED, x, z, 0..1, &probe_upstream).unwrap()
         });
         let bp = &sources[0].blueprint;
         let anchor = IVec3::from_array(bp.anchor);
@@ -1993,5 +2063,69 @@ mod tests {
             "no structure straddled the seam ({checked_left} left, {checked_right} right); \
              this test proves nothing until one does",
         );
+    }
+
+    #[test]
+    fn a_biome_density_chain_reads_the_world_graph() {
+        use nodegraph_ir::{GraphOutputParams, GraphRefParams, SurfaceToDensityParams};
+        // B2 and B3 end to end, through the production path: a biome graph whose
+        // density comes from a World climate channel, generated by
+        // `evaluate_chunk`. Before this, the same graph failed the whole chunk
+        // with `UnresolvedGraphRef`.
+        let mut world = Graph::of_kind(GraphKind::World);
+        let wn = world.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let wo = world.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "climate".into() }));
+        world.connect(PinRef::new(wn, 0), PinRef::new(wo, 0)).unwrap();
+
+        let mut biome = Graph::new();
+        let gr = biome.add_node(NodeKind::GraphRef(GraphRefParams {
+            target: GraphRefTarget::World,
+            ..Default::default()
+        }));
+        let s2d = biome.add_node(NodeKind::SurfaceToDensity(SurfaceToDensityParams::default()));
+        let mat = biome.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let out = biome.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
+
+        // Pins are resolved by the builder, exactly as loading a world does -
+        // wiring the GraphRef before that would have nothing to wire to.
+        let we = WorldEvaluator::new(biome).with_world(world).with_cross_graph_resolved();
+        let mut biome = we.biome_graph().clone();
+        biome.connect(PinRef::new(gr, 0), PinRef::new(s2d, 0)).unwrap();
+        biome.connect(PinRef::new(s2d, 0), PinRef::new(out, 0)).unwrap();
+        biome.connect(PinRef::new(mat, 0), PinRef::new(out, 1)).unwrap();
+        let we = WorldEvaluator::new(biome)
+            .with_world(we.world_graph().clone())
+            .with_cross_graph_resolved();
+
+        let ctx = EvalContext::new(7, IVec3::new(3, 0, -2));
+        let chunk = we.evaluate_chunk(ctx).expect("a biome GraphRef must evaluate");
+
+        // Solid exactly where the world's climate channel is positive.
+        let world_point = ColumnEvaluator::new(we.world_graph(), ctx);
+        let climate_node = we
+            .world_graph()
+            .nodes
+            .iter()
+            .find(|(_, n)| matches!(n.kind, NodeKind::GraphOutput(_)))
+            .map(|(id, _)| id)
+            .unwrap();
+        let dim = CHUNK_DIM as i32;
+        let (mut solid, mut air) = (0, 0);
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let wx = ctx.chunk.x * dim + x as i32;
+                let wz = ctx.chunk.z * dim + z as i32;
+                let climate = match world_point.sample_column(climate_node, wx, wz).unwrap() {
+                    ColumnSample::Surface(v) => v,
+                    other => panic!("expected surface, got {other:?}"),
+                };
+                let filled = chunk.terrain.get(x, 0, z).material != MaterialId::AIR;
+                assert_eq!(filled, climate > 0.0, "column ({wx}, {wz}) climate {climate}");
+                if filled { solid += 1 } else { air += 1 }
+            }
+        }
+        // A chunk that came out all one way would satisfy the loop and prove
+        // nothing about the channel actually reaching the density.
+        assert!(solid > 0 && air > 0, "expected a mix, got {solid} solid / {air} air");
     }
 }

@@ -12,6 +12,7 @@ use nodegraph_ir::{
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
 use crate::biome_params::BiomeParams;
+use crate::column_eval::{graph_ref_output_name, UpstreamGraphs};
 use crate::library_kernel::{standard_cave_noise, LibraryKernel};
 use crate::cache::{CachedOutput, EvalCache};
 use crate::context::EvalContext;
@@ -57,6 +58,10 @@ pub struct Evaluator<'g> {
     /// `LibraryRef` an `UnresolvedLibraryRef` error - which is what it was
     /// unconditionally before this existed.
     kernels: Option<&'g HashMap<LibraryGraphId, LibraryKernel>>,
+    /// Cross-graph resolution context for `GraphRef` reads. `None` keeps the
+    /// behavior this evaluator had before: a `GraphRef` is an
+    /// `UnresolvedGraphRef` error.
+    upstream: Option<&'g UpstreamGraphs<'g>>,
     /// River networks resolved for this chunk, by node. Resolving costs nine
     /// potential samples per cell, and the pointwise sampler is called once per
     /// voxel of a vertical span, so this must not be recomputed per sample.
@@ -77,7 +82,7 @@ impl<'g> Evaluator<'g> {
 
     /// New evaluator over a graph and chunk context.
     pub fn new(graph: &'g Graph, ctx: EvalContext) -> Self {
-        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: EvalCache::new(), biome_params: None, kernels: None, rivers: std::cell::RefCell::new(Vec::new()) }
+        Self { graph, edges: EdgeIndex::build(graph), ctx, cache: EvalCache::new(), biome_params: None, kernels: None, upstream: None, rivers: std::cell::RefCell::new(Vec::new()) }
     }
 
     /// Attach the native kernel bindings, so `LibraryRef` nodes evaluate.
@@ -93,6 +98,27 @@ impl<'g> Evaluator<'g> {
     pub fn with_biome_params(mut self, params: &'g BiomeParams) -> Self {
         self.biome_params = Some(params);
         self
+    }
+
+    /// Attach a cross-graph resolution context, so `GraphRef` nodes read the
+    /// referenced graph's named boundary outputs instead of erroring.
+    pub fn with_upstream(mut self, upstream: &'g UpstreamGraphs<'g>) -> Self {
+        self.upstream = Some(upstream);
+        self
+    }
+
+    /// The upstream graph a `GraphRef` node reads, and the boundary-output name
+    /// it exposes on output `pin`.
+    fn graph_ref_read(
+        &self,
+        id: NodeId,
+        pin: u16,
+    ) -> EvalResult<(&'g UpstreamGraphs<'g>, nodegraph_ir::GraphRefTarget, String)> {
+        let Some(NodeKind::GraphRef(gr)) = self.graph.nodes.get(id).map(|n| &n.kind) else {
+            return Err(EvalError::UnresolvedGraphRef { node: id });
+        };
+        let up = self.upstream.ok_or(EvalError::UnresolvedGraphRef { node: id })?;
+        Ok((up, gr.target, graph_ref_output_name(self.graph, id, pin)?))
     }
 
     /// Borrow the CSE cache (populated by [`Evaluator::evaluate`]).
@@ -186,7 +212,7 @@ impl<'g> Evaluator<'g> {
         let from = self.edges.source(node, pin).ok_or(EvalError::MissingInput { node, pin })?;
         self.cache.get(from.node).ok_or(EvalError::MissingOutput(from.node))
     }
-    
+
     /// Resolve the scalar field feeding `(node, pin)`. `Scalar → Density`
     /// coercion is a no-op here (both are `f32` fields).
     fn input_scalar(&self, node: NodeId, pin: u16) -> EvalResult<Arc<ScalarField>> {
@@ -355,6 +381,10 @@ impl<'g> Evaluator<'g> {
                 let (lo, hi) = (p.min, p.max);
                 CachedOutput::Scalar(Arc::new(inp.map(|v| v.clamp(lo, hi))))
             }
+            NodeKind::Abs(_) => {
+                let inp = self.input_scalar(id, 0)?;
+                CachedOutput::Scalar(Arc::new(inp.map(f32::abs)))
+            }
             NodeKind::Lerp(_) => {
                 let (a, b, t) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?, self.input_scalar(id, 2)?);
                 // Three-way zip: build by index since ScalarField only has zip_with(other, f).
@@ -398,6 +428,14 @@ impl<'g> Evaluator<'g> {
                 CachedOutput::Vec3(Arc::new(warped))
             }
             // --- Density combinators ---
+            // Identity at run time: a `SurfaceField` reaching the voxel domain
+            // is already cached as a column-broadcast field. The node exists to
+            // make the domain change explicit in the graph rather than a
+            // coercion, and it is where a distinct column-typed cache entry
+            // would convert if one is ever added.
+            NodeKind::SurfaceToDensity(_) => {
+                CachedOutput::Scalar(self.input_scalar(id, 0)?)
+            }
             NodeKind::Union(_) => {
                 let (a, b) = (self.input_scalar(id, 0)?, self.input_scalar(id, 1)?);
                 CachedOutput::Scalar(Arc::new(a.zip_with(&b, f32::max)))
@@ -577,8 +615,29 @@ impl<'g> Evaluator<'g> {
                 // are consumed where those are consumed, not in a density chain.
                 _ => return Err(EvalError::WrongGraphDomain { node: id }),
             },
+            // A `GraphRef` in the voxel domain reads a per-column value - the
+            // upstream graphs expose `SurfaceField` boundary outputs - so it
+            // broadcasts down each column. Cached as `Scalar` because that is
+            // what a 3D field is here; the pin stays `SurfaceField`, so only a
+            // node that accepts one can consume it.
+            //
+            // Output pin 0: the fill path caches one value per node, and a
+            // `GraphRef` exposing several outputs needs one entry per pin to do
+            // better. **Trigger:** the first biome graph wiring two channels
+            // from the same `GraphRef` forces per-pin cache entries.
             NodeKind::GraphRef(_) => {
-                return Err(EvalError::UnresolvedGraphRef { node: id });
+                let (up, target, name) = self.graph_ref_read(id, 0)?;
+                let column = up.surface_field(target, &name, id)?;
+                let mut field = ScalarField::zeroed();
+                for z in 0..CHUNK_DIM {
+                    for x in 0..CHUNK_DIM {
+                        let v = column.get(x, z);
+                        for y in 0..CHUNK_DIM {
+                            field.set(x, y, z, v);
+                        }
+                    }
+                }
+                CachedOutput::Scalar(Arc::new(field))
             }
             // FluidOutput terminal: cache its `mask` input as its value so the
             // graph-wide evaluate() succeeds; the world evaluator harvests the
@@ -625,6 +684,8 @@ impl<'g> Evaluator<'g> {
             NodeKind::Min(_)       => self.sample_input(id, 0, x, y, z)?.min(self.sample_input(id, 1, x, y, z)?),
             NodeKind::Max(_)       => self.sample_input(id, 0, x, y, z)?.max(self.sample_input(id, 1, x, y, z)?),
             NodeKind::Clamp(p)     => self.sample_input(id, 0, x, y, z)?.clamp(p.min, p.max),
+            NodeKind::Abs(_)       => self.sample_input(id, 0, x, y, z)?.abs(),
+            NodeKind::SurfaceToDensity(_) => self.sample_input(id, 0, x, y, z)?,
             NodeKind::Lerp(_)      => {
                 let (a, b, t) = (self.sample_input(id, 0, x, y, z)?, self.sample_input(id, 1, x, y, z)?, self.sample_input(id, 2, x, y, z)?);
                 a + (b - a) * t
@@ -684,8 +745,15 @@ impl<'g> Evaluator<'g> {
                 }
                 _ => return Err(EvalError::WrongGraphDomain { node: id }),
             },
+            // Chunk-independent by construction: the upstream resamples at the
+            // world column, which is what lets two chunks agree about a column
+            // on their shared border.
             NodeKind::GraphRef(_) => {
-                return Err(EvalError::UnresolvedGraphRef { node: id });
+                let (up, target, name) = self.graph_ref_read(id, 0)?;
+                let dim = CHUNK_DIM as i32;
+                let wx = self.ctx.chunk.x * dim + x as i32;
+                let wz = self.ctx.chunk.z * dim + z as i32;
+                up.surface_sample(target, &name, wx, wz, id)?
             }
         })
     }
@@ -739,7 +807,7 @@ impl<'g> Evaluator<'g> {
 
 /// Piecewise-linear curve sample. Stops should be sorted ascending by `x`;
 /// out-of-range inputs clamp to the endpoint values.
-fn sample_curve(stops: &[(f32, f32)], v: f32) -> f32 {
+pub(crate) fn sample_curve(stops: &[(f32, f32)], v: f32) -> f32 {
     if stops.is_empty() { return v; }
     if v <= stops[0].0 { return stops[0].1; }
     for w in stops.windows(2) {
@@ -811,5 +879,175 @@ mod tests {
         let (density, material) = e.cache().get(out).unwrap().as_biome_layer().expect("biome layer");
         assert_eq!(density.get(0, 0, 0), 0.75);
         assert_eq!(material.get(0, 0, 0), ConstantMaterialParams::default().material);
+    }
+
+    /// World: `SurfaceNoise -> GraphOutput("climate")`, evaluated for `ctx`.
+    fn climate_upstream(ctx: EvalContext) -> (Graph, crate::ColumnCache) {
+        use nodegraph_ir::{GraphKind, GraphOutputParams, PinRef};
+        let mut w = Graph::of_kind(GraphKind::World);
+        let n = w.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let o = w.add_node(NodeKind::GraphOutput(GraphOutputParams { name: "climate".into() }));
+        w.connect(PinRef::new(n, 0), PinRef::new(o, 0)).unwrap();
+        w.derive_output_boundary();
+        let mut we = crate::ColumnEvaluator::new(&w, ctx);
+        we.evaluate().unwrap();
+        let cache = we.into_cache();
+        (w, cache)
+    }
+
+    /// A biome graph that is nothing but a `GraphRef(World)`.
+    fn graph_ref_biome(world: &Graph) -> (Graph, NodeId) {
+        use nodegraph_ir::{GraphRefParams, GraphRefTarget};
+        let mut b = Graph::new();
+        let gr = b.add_node(NodeKind::GraphRef(GraphRefParams {
+            target: GraphRefTarget::World,
+            ..Default::default()
+        }));
+        let wb = world.boundary.clone();
+        b.resolve_graph_refs(|t| (t == GraphRefTarget::World).then(|| wb.clone()));
+        (b, gr)
+    }
+
+    #[test]
+    fn graph_ref_fills_a_column_broadcast_and_samples_the_same_values() {
+        use nodegraph_ir::GraphRefTarget;
+        let ctx = EvalContext::new(9, IVec3::new(2, -1, -3));
+        let (world, world_cache) = climate_upstream(ctx);
+        let (biome, gr) = graph_ref_biome(&world);
+
+        let mut up = crate::UpstreamGraphs::new();
+        up.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+
+        let mut e = Evaluator::new(&biome, ctx).with_upstream(&up);
+        e.evaluate().unwrap();
+        let filled = match e.cache().get(gr) {
+            Some(CachedOutput::Scalar(f)) => f.clone(),
+            _ => panic!("GraphRef must fill as a scalar field"),
+        };
+
+        // The upstream value is per column, so it must be constant down Y, and
+        // the pointwise path must agree with the fill everywhere.
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let at0 = filled.get(x, 0, z);
+                for y in 0..CHUNK_DIM {
+                    assert_eq!(filled.get(x, y, z), at0, "column ({x}, {z}) varies in y");
+                    assert_eq!(
+                        e.sample_density(gr, x, y, z).unwrap(),
+                        at0,
+                        "pointwise disagreed with the fill at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_world_column_reads_the_same_at_every_chunk_y() {
+        use nodegraph_ir::GraphRefTarget;
+        // A biome graph is evaluated once per vertical chunk, and the same world
+        // column appears in all of them. A cross-graph read that varied with
+        // chunk Y would show up as a horizontal seam at every chunk boundary -
+        // the hardest kind to attribute, and one this stack has produced before.
+        let sample_at = |chunk_y: i32| {
+            let ctx = EvalContext::new(9, IVec3::new(2, chunk_y, -3));
+            let (world, world_cache) = climate_upstream(ctx);
+            let (biome, gr) = graph_ref_biome(&world);
+            let mut up = crate::UpstreamGraphs::new();
+            up.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+            let mut e = Evaluator::new(&biome, ctx).with_upstream(&up);
+            e.evaluate().unwrap();
+            let filled = match e.cache().get(gr) {
+                Some(CachedOutput::Scalar(f)) => f.get(5, 0, 6),
+                _ => panic!("expected scalar"),
+            };
+            (filled, e.sample_density(gr, 5, 3, 6).unwrap())
+        };
+        let base = sample_at(0);
+        for chunk_y in [-2, -1, 1, 4] {
+            assert_eq!(sample_at(chunk_y), base, "chunk y {chunk_y} disagreed");
+        }
+    }
+
+    #[test]
+    fn graph_ref_without_an_upstream_is_unresolved() {
+        let ctx = EvalContext::new(9, IVec3::ZERO);
+        let (world, _) = climate_upstream(ctx);
+        let (biome, gr) = graph_ref_biome(&world);
+
+        let mut e = Evaluator::new(&biome, ctx);
+        assert!(
+            matches!(e.evaluate(), Err(EvalError::UnresolvedGraphRef { .. })),
+            "no upstream must stay an error rather than silently reading zero"
+        );
+        assert!(matches!(
+            Evaluator::new(&biome, ctx).sample_density(gr, 0, 0, 0),
+            Err(EvalError::UnresolvedGraphRef { .. })
+        ));
+    }
+
+    #[test]
+    fn a_climate_channel_drives_a_density_chain_through_surface_to_density() {
+        use nodegraph_ir::{
+            AbsParams, GraphRefTarget, OutputParams, PinRef, SurfaceToDensityParams,
+        };
+        // The end-to-end shape B2 and B3 exist for: World climate -> GraphRef ->
+        // SurfaceToDensity -> Abs -> Output, all inside a biome graph.
+        let ctx = EvalContext::new(9, IVec3::new(-4, 2, 5));
+        let (world, world_cache) = climate_upstream(ctx);
+        let (mut biome, gr) = graph_ref_biome(&world);
+        let s2d = biome.add_node(NodeKind::SurfaceToDensity(SurfaceToDensityParams::default()));
+        let abs = biome.add_node(NodeKind::Abs(AbsParams::default()));
+        let out = biome.add_node(NodeKind::Output(OutputParams::default()));
+        biome.connect(PinRef::new(gr, 0), PinRef::new(s2d, 0)).unwrap();
+        biome.connect(PinRef::new(s2d, 0), PinRef::new(abs, 0)).unwrap();
+        biome.connect(PinRef::new(abs, 0), PinRef::new(out, 0)).unwrap();
+        assert!(!biome.has_errors(), "the chain must type-check without coercion");
+
+        let mut up = crate::UpstreamGraphs::new();
+        up.insert(GraphRefTarget::World, &world, ctx, &world_cache);
+        let mut e = Evaluator::new(&biome, ctx).with_upstream(&up);
+        e.evaluate().unwrap();
+
+        let climate = match e.cache().get(gr) {
+            Some(CachedOutput::Scalar(f)) => f.clone(),
+            _ => panic!("expected scalar"),
+        };
+        let density = match e.cache().get(out) {
+            Some(CachedOutput::Scalar(f)) => f.clone(),
+            _ => panic!("expected scalar"),
+        };
+        let mut nonzero = 0;
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let expect = climate.get(x, 0, z).abs();
+                assert_eq!(density.get(x, 7, z), expect, "fill at ({x}, {z})");
+                assert_eq!(
+                    e.sample_density(out, x, 7, z).unwrap(),
+                    expect,
+                    "pointwise at ({x}, {z})"
+                );
+                if expect != 0.0 {
+                    nonzero += 1;
+                }
+            }
+        }
+        // Guard against the whole assertion passing on an all-zero field.
+        assert!(nonzero > 0, "climate was uniformly zero; the test proved nothing");
+    }
+
+    #[test]
+    fn surface_field_still_does_not_coerce_into_a_density_pin() {
+        use nodegraph_ir::{OutputParams, PinRef};
+        // The bridge must be the node, not a silent conversion - `Output` takes
+        // a density and must refuse a `SurfaceField` outright.
+        let ctx = EvalContext::new(9, IVec3::ZERO);
+        let (world, _) = climate_upstream(ctx);
+        let (mut biome, gr) = graph_ref_biome(&world);
+        let out = biome.add_node(NodeKind::Output(OutputParams::default()));
+        assert!(
+            biome.connect(PinRef::new(gr, 0), PinRef::new(out, 0)).is_err(),
+            "SurfaceField -> Density must not connect without SurfaceToDensity"
+        );
     }
 }

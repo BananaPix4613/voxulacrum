@@ -2335,3 +2335,10 @@ a regression.
 Two edge scans remain, both in `world_eval.rs` free functions over a `&Graph`
 with no evaluator to hang an index on, and both once per chunk rather than per
 column. Indexing them would cost a build to save a scan.
+
+A clean re-measurement was attempted from a `git worktree` and did not work: the
+bench and the index landed in the same commit, so no historical commit has the
+instrument without the change, and a worktree at `HEAD` measured the index
+against itself (`chain_129edges` reporting p = 0.38, no change). **Land an
+instrument in its own commit** - a bench that ships with the thing it measures
+cannot produce a baseline afterwards.

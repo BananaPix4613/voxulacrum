@@ -6,6 +6,7 @@ use slotmap::new_key_type;
 
 use crate::boundary::{EffectivePin, ResolvedBoundary, ResolvedPin};
 use crate::crossgraph::GraphRefTarget;
+use crate::graph::GraphKind;
 use crate::library::LibraryGraphId;
 use crate::pin::PinType;
 use voxel_core::ResolvedBlueprint;
@@ -309,6 +310,10 @@ impl Default for LayerParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct MaxParams {}
 /// Parameters for [`NodeKind::Lerp`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct LerpParams {}
+/// Parameters for [`NodeKind::Abs`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct AbsParams {}
+/// Parameters for [`NodeKind::SurfaceToDensity`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct SurfaceToDensityParams {}
 /// Parameters for [`NodeKind::Union`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct UnionParams {}
 /// Parameters for [`NodeKind::Intersect`] (no parameters yet).
@@ -748,7 +753,13 @@ pub enum NodeKind {
     // --- Domain ---
     /// XZ domain-warp: displaces an input position field by a noise offset.
     DomainWarp(DomainWarpParams),
+    /// Absolute value (`|v|`).
+    Abs(AbsParams),
     // --- Density combinators ---
+    /// Lift a per-column [`SurfaceField`](crate::PinType::SurfaceField) into a
+    /// density field, constant down each column. The one door from the column
+    /// domain into a density chain; nothing coerces between the two.
+    SurfaceToDensity(SurfaceToDensityParams),
     /// CSG union (`max(a, b)`).
     Union(UnionParams),
     /// CSG intersection (`min(a, b)`).
@@ -901,6 +912,8 @@ const PLACE_IN: &[PinSpec] = &[
 ];
 const SURFACE_OUT: &[PinSpec] =
     &[PinSpec { name: "surface", ty: PinType::SurfaceField, required: false }];
+const SURFACE_IN_ANY: &[PinSpec] =
+    &[PinSpec { name: "surface", ty: PinType::SurfaceField, required: true }];
 const SURFACE_IN_REQUIRED: &[PinSpec] =
     &[PinSpec { name: "zone field", ty: PinType::SurfaceField, required: true }];
 const SURFACE_IN_BIOME: &[PinSpec] =
@@ -1036,6 +1049,20 @@ impl NodeKind {
                 category: NodeCategory::Math,
                 color: MATH,
                 inputs: DENSITY_IN,
+                outputs: DENSITY_OUT
+            },
+            NodeKind::Abs(_) => NodeDescriptor {
+                display_name: "Abs",
+                category: NodeCategory::Math,
+                color: MATH,
+                inputs: DENSITY_IN,
+                outputs: DENSITY_OUT
+            },
+            NodeKind::SurfaceToDensity(_) => NodeDescriptor {
+                display_name: "Surface To Density",
+                category: NodeCategory::Density,
+                color: DENS,
+                inputs: SURFACE_IN_ANY,
                 outputs: DENSITY_OUT
             },
             // Curves
@@ -1324,6 +1351,88 @@ impl NodeKind {
             None => self.descriptor().outputs.iter().map(spec_to_effective).collect(),
         }
     }
+
+    /// Whether this kind means the same thing one dimension down: elementwise
+    /// arithmetic and curves, which read a field and write a field without
+    /// caring how many dimensions it has.
+    ///
+    /// These are the kinds whose declared `Density` / `Scalar` pins carry
+    /// [`SurfaceField`](PinType::SurfaceField) in a per-column graph, and the
+    /// set must be exactly what `ColumnEvaluator` implements - a kind that
+    /// type-checks into a World graph and then has no per-column evaluation
+    /// fails the chunk at generation instead of failing the author at edit time.
+    /// `nodegraph-eval` asserts the two agree.
+    ///
+    /// Deliberately excluded: `Perlin2D` and the other noise sources, which are
+    /// 2D and *look* domain-agnostic. The column domain's noise is
+    /// `SurfaceNoise`, and admitting a second spelling would mean two ways to
+    /// write the same field with different seeds.
+    pub fn is_domain_agnostic(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Constant(_)
+                | NodeKind::Add(_)
+                | NodeKind::Subtract(_)
+                | NodeKind::Multiply(_)
+                | NodeKind::Min(_)
+                | NodeKind::Max(_)
+                | NodeKind::Clamp(_)
+                | NodeKind::Lerp(_)
+                | NodeKind::Remap(_)
+                | NodeKind::Abs(_)
+                | NodeKind::Threshold(_)
+                | NodeKind::CurveMapper(_)
+        )
+    }
+
+    /// Whether this kind has a per-column evaluation at all, and so may appear
+    /// in a World or Zone graph.
+    ///
+    /// `PlaceStructure` qualifies without being evaluated: it declares a
+    /// structure source on the owning ZoneGraph and carries no pins, so the
+    /// column evaluator skips it rather than filling it.
+    pub fn is_column_kind(&self) -> bool {
+        self.is_domain_agnostic()
+            || matches!(
+                self,
+                NodeKind::SurfaceNoise(_)
+                    | NodeKind::WorldOutput(_)
+                    | NodeKind::ZoneOutput(_)
+                    | NodeKind::GraphOutput(_)
+                    | NodeKind::GraphRef(_)
+                    | NodeKind::PlaceStructure(_)
+            )
+    }
+
+    /// This node's input pins as they read in a graph of `kind` - the pin set
+    /// `connect`, `validate` and the editor operate on.
+    pub fn effective_inputs_in(&self, kind: GraphKind) -> Vec<EffectivePin<'_>> {
+        let mut pins = self.effective_inputs();
+        self.apply_domain(kind, &mut pins);
+        pins
+    }
+
+    /// The output analogue of
+    /// [`effective_inputs_in`](NodeKind::effective_inputs_in).
+    pub fn effective_outputs_in(&self, kind: GraphKind) -> Vec<EffectivePin<'_>> {
+        let mut pins = self.effective_outputs();
+        self.apply_domain(kind, &mut pins);
+        pins
+    }
+    
+    /// Rewrite field pins into the domain `kind` evaluates in. Only the
+    /// domain-agnostic kinds move; everything else declares the one domain it
+    /// belongs to and keeps it.
+    fn apply_domain(&self, kind: GraphKind, pins: &mut [EffectivePin<'_>]) {
+        if !(kind.is_per_column() && self.is_domain_agnostic()) {
+            return;
+        }
+        for pin in pins {
+            if matches!(pin.ty, PinType::Density | PinType::Scalar) {
+                pin.ty = PinType::SurfaceField;
+            }
+        }
+    }
     
     /// The resolved boundary cached on this node, if it is a reference node
     /// (`LibraryRef`) whose pins have been resolved.
@@ -1402,6 +1511,8 @@ impl NodeKind {
             NodeKind::PlaceBlueprint(_)      => "PlaceBlueprint",
             NodeKind::PlaceStructure(_)      => "PlaceStructure",
             NodeKind::River(_)               => "River",
+            NodeKind::Abs(_)                 => "Abs",
+            NodeKind::SurfaceToDensity(_)    => "SurfaceToDensity",
             NodeKind::LibraryRef(_)          => "LibraryRef",
             NodeKind::GraphRef(_)            => "GraphRef",
             NodeKind::GraphOutput(_)         => "GraphOutput",

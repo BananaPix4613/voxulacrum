@@ -140,6 +140,7 @@ impl EditorState {
             catalogs,
             selected: self.selected_node,
             clicked: &mut clicked,
+            kind: self.kind,
         };
         self.snarl.show(
             &mut viewer,

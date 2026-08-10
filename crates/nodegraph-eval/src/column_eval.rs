@@ -19,7 +19,7 @@ use nodegraph_ir::{EdgeIndex, Graph, GraphRefTarget, NodeId, NodeKind, Severity}
 use crate::column::{ColumnCache, ColumnField, ColumnOutput, IdColumn};
 use crate::context::EvalContext;
 use crate::error::{EvalError, EvalResult};
-use crate::eval::configured_noise;
+use crate::eval::{configured_noise, sample_curve};
 use crate::field::CHUNK_DIM;
 
 /// Evaluates a World/Zone graph for one chunk, producing per-column outputs.
@@ -129,9 +129,68 @@ impl<'g> ColumnEvaluator<'g> {
             // GraphOutput marks its input value as a named boundary output; the
             // value passes through so a cross-graph reader can sample it by node.
             NodeKind::GraphOutput(_) => ColumnOutput::Surface(self.input_surface(id, 0)?),
+
+            // --- Arithmetic and curves ---------------------------------------
+            //
+            // The same elementwise operations the voxel domain runs, a dimension
+            // down. `NodeKind::is_domain_agnostic` is the list; a kind there and
+            // not here type-checks into a World graph and then fails the chunk,
+            // which `every_domain_agnostic_kind_evaluates_per_column` forbids.
+            NodeKind::Constant(p) => ColumnOutput::Surface(Arc::new(ColumnField::filled(p.value))),
+            NodeKind::Add(_) => self.zip(id, |a, b| a + b)?,
+            NodeKind::Subtract(_) => self.zip(id, |a, b| a - b)?,
+            NodeKind::Multiply(_) => self.zip(id, |a, b| a * b)?,
+            NodeKind::Min(_) => self.zip(id, f32::min)?,
+            NodeKind::Max(_) => self.zip(id, f32::max)?,
+            NodeKind::Abs(_) => self.unary(id, f32::abs)?,
+            NodeKind::Clamp(p) => {
+                let (lo, hi) = (p.min, p.max);
+                self.unary(id, move |v| v.clamp(lo, hi))?
+            }
+            NodeKind::Threshold(p) => {
+                let t = p.threshold;
+                self.unary(id, move |v| if v >= t { 1.0 } else { 0.0 })?
+            }
+            NodeKind::Remap(p) => {
+                let span = (p.src_hi - p.src_lo).abs().max(1e-9);
+                let scale = (p.dst_hi - p.dst_lo) / span;
+                let (src_lo, dst_lo) = (p.src_lo, p.dst_lo);
+                self.unary(id, move |v| dst_lo + (v - src_lo) * scale)?
+            }
+            NodeKind::CurveMapper(p) => {
+                let stops = p.stops.clone();
+                self.unary(id, move |v| sample_curve(&stops, v))?
+            }
+            NodeKind::Lerp(_) => {
+                let (a, b, f) = (
+                    self.input_surface(id, 0)?,
+                    self.input_surface(id, 1)?,
+                    self.input_surface(id, 2)?,
+                );
+                let mut out = ColumnField::zeroed();
+                for z in 0..CHUNK_DIM {
+                    for x in 0..CHUNK_DIM {
+                        let (av, bv, tv) = (a.get(x, z), b.get(x, z), f.get(x, z));
+                        out.set(x, z, av + (bv - av) * tv);
+                    }
+                }
+                ColumnOutput::Surface(Arc::new(out))
+            }
+
             // Every other kind is a voxel-domain node with no per-column fill.
             _ => return Err(EvalError::WrongGraphDomain { node: id }),
         })
+    }
+
+    /// One-input elementwise fill.
+    fn unary(&self, id: NodeId, f: impl Fn(f32) -> f32) -> EvalResult<ColumnOutput> {
+        Ok(ColumnOutput::Surface(Arc::new(self.input_surface(id, 0)?.map(f))))
+    }
+
+    /// Two-input elementwise fill.
+    fn zip(&self, id: NodeId, f: impl Fn(f32, f32) -> f32) -> EvalResult<ColumnOutput> {
+        let (a, b) = (self.input_surface(id, 0)? ,self.input_surface(id, 1)?);
+        Ok(ColumnOutput::Surface(Arc::new(a.zip_with(&b, f))))
     }
 
     /// Resolve the surface field feeding `(node, pin)`. If the source is a
@@ -162,16 +221,9 @@ impl<'g> ColumnEvaluator<'g> {
         }
     }
     
-    /// The boundary-output name a `GraphRef` node exposes an output `pin` (from
-    /// its resolved pins). Errors if the node is unresolved or the pin is out of
-    /// range.
+    /// The boundary-output name a `GraphRef` node exposes an output `pin`.
     fn graph_ref_output_name(&self, graphref: NodeId, pin: u16) -> EvalResult<String> {
-        let node = self.graph.nodes.get(graphref).ok_or(EvalError::MissingOutput(graphref))?;
-        node.kind
-            .effective_outputs()
-            .get(pin as usize)
-            .map(|p| p.name.to_string())
-            .ok_or(EvalError::UnresolvedGraphRef { node: graphref })
+        graph_ref_output_name(self.graph, graphref, pin)
     }
 
     /// Pointwise per-column evaluation at an absolute world column `(world_x,
@@ -205,8 +257,60 @@ impl<'g> ColumnEvaluator<'g> {
             NodeKind::GraphOutput(_) => {
                 ColumnSample::Surface(self.sample_input_surface(id, 0, world_x, world_z)?)
             }
+
+            // The pointwise counterparts. Kept beside the fill arms above so a
+            // change to one is visibly a change to the other; the two disagreeing
+            // is a seam, since pointwise is how neighboring chunks agree.
+            NodeKind::Constant(p) => ColumnSample::Surface(p.value),
+            NodeKind::Add(_) => self.sample_zip(id, world_x, world_z, |a, b| a + b)?,
+            NodeKind::Subtract(_) => self.sample_zip(id, world_x, world_z, |a, b| a - b)?,
+            NodeKind::Multiply(_) => self.sample_zip(id, world_x, world_z, |a, b| a * b)?,
+            NodeKind::Min(_) => self.sample_zip(id, world_x, world_z, f32::min)?,
+            NodeKind::Max(_) => self.sample_zip(id, world_x, world_z, f32::max)?,
+            NodeKind::Abs(_) => {
+                ColumnSample::Surface(self.sample_input_surface(id, 0, world_x, world_z)?.abs())
+            }
+            NodeKind::Clamp(p) => ColumnSample::Surface(
+                self.sample_input_surface(id, 0, world_x, world_z)?.clamp(p.min, p.max),
+            ),
+            NodeKind::Threshold(p) => ColumnSample::Surface(
+                if self.sample_input_surface(id, 0, world_x, world_z)? >= p.threshold {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
+            NodeKind::Remap(p) => {
+                let v = self.sample_input_surface(id, 0, world_x, world_z)?;
+                let span = (p.src_hi - p.src_lo).abs().max(1e-9);
+                ColumnSample::Surface(p.dst_lo + (v - p.src_lo) * (p.dst_hi - p.dst_lo) / span)
+            }
+            NodeKind::CurveMapper(p) => ColumnSample::Surface(sample_curve(
+                &p.stops,
+                self.sample_input_surface(id, 0, world_x, world_z)?,
+            )),
+            NodeKind::Lerp(_) => {
+                let a = self.sample_input_surface(id, 0, world_x, world_z)?;
+                let b = self.sample_input_surface(id, 1, world_x, world_z)?;
+                let t = self.sample_input_surface(id, 2, world_x, world_z)?;
+                ColumnSample::Surface(a + (b - a) * t)
+            }
+
             _ => return Err(EvalError::WrongGraphDomain { node: id }),
         })
+    }
+
+    /// Two-input elementwise pointwise sample.
+    fn sample_zip(
+        &self,
+        id: NodeId,
+        world_x: i32,
+        world_z: i32,
+        f: impl Fn(f32, f32) -> f32,
+    ) -> EvalResult<ColumnSample> {
+        let a = self.sample_input_surface(id, 0, world_x, world_z)?;
+        let b = self.sample_input_surface(id, 1, world_x, world_z)?;
+        Ok(ColumnSample::Surface(f(a, b)))
     }
 
     /// Pointwise-resolve the surface value feeding `(node, pin)` at a world
@@ -301,7 +405,7 @@ impl<'g> UpstreamGraphs<'g> {
     
     /// The bulk cached surface field of `target`'s named output. `graphref` is
     /// the referencing node, for error context.
-    fn surface_field(
+    pub(crate) fn surface_field(
         &self,
         target: GraphRefTarget,
         name: &str,
@@ -320,7 +424,7 @@ impl<'g> UpstreamGraphs<'g> {
     }
     
     /// The pointwise surface value of `target`'s named output at a world column.
-    fn surface_sample(
+    pub(crate) fn surface_sample(
         &self,
         target: GraphRefTarget,
         name: &str,
@@ -380,6 +484,26 @@ fn quantize_bands(field: &ColumnField, bands: &[f32], ids: &[u16]) -> IdColumn {
         }
     }
     out
+}
+
+/// The boundary-output name a `GraphRef` node exposes as its output `pin`, from
+/// its resolved pins. Errors if the node is unresolved or the pin is out of
+/// range.
+///
+/// One function rather than a copy per evaluator: the bulk and pointwise column
+/// paths each had their own call and disagreed about which pin index to use,
+/// which is a defect that could only exist while there were two of them.
+pub(crate) fn graph_ref_output_name(
+    graph: &Graph,
+    graphref: NodeId,
+    pin: u16,
+) -> EvalResult<String> {
+    let node = graph.nodes.get(graphref).ok_or(EvalError::MissingOutput(graphref))?;
+    node.kind
+        .effective_outputs()
+        .get(pin as usize)
+        .map(|p| p.name.to_string())
+        .ok_or(EvalError::UnresolvedGraphRef { node: graphref })
 }
 
 #[cfg(test)]
@@ -447,7 +571,7 @@ mod tests {
     #[test]
     fn voxel_node_in_column_graph_is_rejected() {
         let mut g = Graph::new();
-        g.add_node(NodeKind::Constant(nodegraph_ir::ConstantParams::default()));
+        g.add_node(NodeKind::Perlin3D(NoiseParams::default()));
         let mut e = ColumnEvaluator::new(&g, EvalContext::new(0, IVec3::ZERO));
         assert!(matches!(e.evaluate(), Err(EvalError::WrongGraphDomain { .. })));
     }
@@ -658,5 +782,140 @@ mod tests {
             }
         }
         assert_eq!(disagreements, 0, "pointwise disagreed with bulk on {disagreements} of 1024 columns");
+    }
+
+    /// Every kind `NodeKind::is_domain_agnostic` admits, with default params.
+    fn domain_agnostic_kinds() -> Vec<NodeKind> {
+        use nodegraph_ir::*;
+        vec![
+            NodeKind::Constant(ConstantParams::default()),
+            NodeKind::Add(AddParams::default()),
+            NodeKind::Subtract(SubtractParams::default()),
+            NodeKind::Multiply(MultiplyParams::default()),
+            NodeKind::Min(MinParams::default()),
+            NodeKind::Max(MaxParams::default()),
+            NodeKind::Clamp(ClampParams::default()),
+            NodeKind::Lerp(LerpParams::default()),
+            NodeKind::Remap(RemapParams::default()),
+            NodeKind::Abs(AbsParams::default()),
+            NodeKind::Threshold(ThresholdParams::default()),
+            NodeKind::CurveMapper(CurveMapperParams::default()),
+        ]
+    }
+
+    #[test]
+    fn every_domain_agnostic_kind_evaluates_per_column() {
+        use nodegraph_ir::{ConstantParams, GraphKind};
+        // The invariant that keeps the type system and the evaluator honest: a
+        // kind that type-checks into a World graph must have a per-column
+        // evaluation, or the graph saves and then fails the chunk. Both
+        // directions - fill and pointwise - because they are separate arms.
+        for kind in domain_agnostic_kinds() {
+            let name = kind.type_name();
+            assert!(kind.is_domain_agnostic(), "{name} is not marked domain-agnostic");
+
+            let mut g = Graph::of_kind(GraphKind::World);
+            let node = g.add_node(kind.clone());
+            // Feed every required input from a constant, which is itself one of
+            // the kinds under test.
+            let inputs = kind.effective_inputs_in(GraphKind::World).len();
+            for pin in 0..inputs {
+                let c = g.add_node(NodeKind::Constant(ConstantParams { value: 0.5 }));
+                g.connect(PinRef::new(c, 0), PinRef::new(node, pin as u16))
+                    .unwrap_or_else(|e| panic!("{name} pin {pin}: {e:?}"));
+            }
+            assert!(!g.has_errors(), "{name} does not validate in a World graph");
+
+            let ctx = EvalContext::new(1, IVec3::ZERO);
+            let mut e = ColumnEvaluator::new(&g, ctx);
+            e.evaluate().unwrap_or_else(|err| panic!("{name} bulk fill: {err:?}"));
+            assert!(
+                e.cache().get(node).and_then(|o| o.as_surface()).is_some(),
+                "{name} filled no surface field",
+            );
+            e.sample_column(node, 3, 4)
+                .unwrap_or_else(|err| panic!("{name} pointwise: {err:?}"));
+        }
+    }
+
+    #[test]
+    fn voxel_only_kinds_stay_out_of_the_column_domain() {
+        use nodegraph_ir::{
+            DomainWarpParams, GraphKind, MaskParams, NoiseParams, UnionParams, WorldPosParams,
+        };
+        // `Perlin2D` is the interesting one: it is a 2D noise and reads as though
+        // it belongs here, but the column domain's noise is `SurfaceNoise`, and
+        // two spellings of the same field with different seeds is not a feature.
+        for kind in [
+            NodeKind::Perlin2D(NoiseParams::default()),
+            NodeKind::Perlin3D(NoiseParams::default()),
+            NodeKind::WorldPos(WorldPosParams::default()),
+            NodeKind::DomainWarp(DomainWarpParams::default()),
+            NodeKind::Union(UnionParams::default()),
+            NodeKind::Mask(MaskParams::default()),
+        ] {
+            let name = kind.type_name();
+            assert!(!kind.is_domain_agnostic(), "{name} must not be domain-agnostic");
+            assert!(!kind.is_column_kind(), "{name} must not be a column kind");
+
+            let mut g = Graph::of_kind(GraphKind::World);
+            g.add_node(kind);
+            assert!(
+                g.validate().iter().any(|d| d.severity == Severity::Error),
+                "{name} in a World graph must be a validation error, not a generation-time warn",
+            );
+        }
+    }
+
+    #[test]
+    fn a_world_graph_can_compute_an_elevation_in_world_y() {
+        use nodegraph_ir::{CurveMapperParams, GraphKind, GraphOutputParams, RemapParams};
+        // What B1 exists for: raw noise in [-1, 1] shaped by a spline and mapped
+        // into world-Y units, which is what makes "below sea level" a comparison
+        // rather than a coincidence.
+        let (min_y, max_y) = (8.0f32, 96.0f32);
+        let mut g = Graph::of_kind(GraphKind::World);
+        let noise = g.add_node(NodeKind::SurfaceNoise(NoiseParams::default()));
+        let spline = g.add_node(NodeKind::CurveMapper(CurveMapperParams {
+            stops: vec![(-1.0, -0.8), (-0.2, -0.3), (0.2, 0.1), (1.0, 0.9)],
+        }));
+        let to_y = g.add_node(NodeKind::Remap(RemapParams {
+            src_lo: -1.0,
+            src_hi: 1.0,
+            dst_lo: min_y,
+            dst_hi: max_y,
+        }));
+        let out = g.add_node(NodeKind::GraphOutput(GraphOutputParams {
+            name: "elevation".into(),
+        }));
+        g.connect(PinRef::new(noise, 0), PinRef::new(spline, 0)).unwrap();
+        g.connect(PinRef::new(spline, 0), PinRef::new(to_y, 0)).unwrap();
+        g.connect(PinRef::new(to_y, 0), PinRef::new(out, 0)).unwrap();
+        assert!(!g.has_errors(), "the elevation chain must validate");
+
+        let ctx = EvalContext::new(4, IVec3::new(-1, 0, 2));
+        let mut e = ColumnEvaluator::new(&g, ctx);
+        e.evaluate().unwrap();
+        let field = e.cache().get(out).unwrap().as_surface().unwrap().clone();
+
+        let mut spread = (f32::MAX, f32::MIN);
+        for z in 0..CHUNK_DIM {
+            for x in 0..CHUNK_DIM {
+                let v = field.get(x, z);
+                assert!((min_y..=max_y).contains(&v), "elevation {v} outside [{min_y}, {max_y}]");
+                let wx = ctx.chunk.x * CHUNK_DIM as i32 + x as i32;
+                let wz = ctx.chunk.z * CHUNK_DIM as i32 + z as i32;
+                match e.sample_column(out, wx, wz).unwrap() {
+                    ColumnSample::Surface(s) => {
+                        assert_eq!(s, v, "pointwise disagreed with the fill at ({x}, {z})")
+                    }
+                    other => panic!("expected surface, got {other:?}"),
+                }
+                spread = (spread.0.min(v), spread.1.max(v));
+            }
+        }
+        // A constant field would satisfy every assertion above and be useless as
+        // terrain control.
+        assert!(spread.1 - spread.0 > 1.0, "elevation is flat: {spread:?}");
     }
 }
