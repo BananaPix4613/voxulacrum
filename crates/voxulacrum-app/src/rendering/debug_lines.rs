@@ -109,7 +109,7 @@ fn box_edges(min: Vec3, max: Vec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
 }
 
 /// Wireframe box hugging a single world voxel, slightly outset to avoid z-fighting.
-fn voxel_box_lines(v: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
+pub fn voxel_box_lines(v: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
     let s = VOXEL_SCALE;
     let eps = s * 0.03;
     let min = Vec3::new(v.x as f32 * s - eps, v.y as f32 * s - eps, v.z as f32 * s - eps);
@@ -153,6 +153,9 @@ pub struct DebugLinePass {
     /// that changes nothing rebuilds nothing. Unlike the pick highlight, which
     /// moves with the cursor, a selection changes on a click.
     selection_key: Option<(IVec3, IVec3)>,
+    /// Optional free-form line overlay for debug views, in world space.
+    pub overlay_buffer: Option<wgpu::Buffer>,
+    pub overlay_count: u32,
 }
 
 impl DebugLinePass {
@@ -232,6 +235,8 @@ impl DebugLinePass {
             selection_buffer: None,
             selection_count: 0,
             selection_key: None,
+            overlay_buffer: None,
+            overlay_count: 0,
         }
     }
 
@@ -306,6 +311,32 @@ impl DebugLinePass {
             None => {
                 self.selection_buffer = None;
                 self.selection_count = 0;
+            }
+        }
+    }
+
+    /// Set (or clear) a free-form world-space line overlay.
+    ///
+    /// Unlike `set_selection` this holds no key and rebuilds on every call:
+    /// the geometry is a whole vertex list rather than two corners, so
+    /// comparing it would cost more than rebuilding it. **The caller owns the
+    /// change detection** and is expected to call only when its own inputs
+    /// moved.
+    pub fn set_overlay(&mut self, ctx: &RenderContext, lines: Option<&[DebugLineVertex]>) {
+        match lines {
+            Some(lines) if !lines.is_empty() => {
+                self.overlay_count = lines.len() as u32;
+                self.overlay_buffer = Some(ctx.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("debug_overlay_vertex_buffer"),
+                        contents: bytemuck::cast_slice(lines),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+            _ => {
+                self.overlay_buffer = None;
+                self.overlay_count = 0;
             }
         }
     }

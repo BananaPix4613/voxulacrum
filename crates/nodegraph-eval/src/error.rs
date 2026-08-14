@@ -38,6 +38,14 @@ pub enum EvalError {
         got: &'static str,
     },
 
+    /// A `PlaceTree` node was evaluated without a resolved species (the
+    /// hot-reload layer failed to load its species JSON).
+    #[error("node {node:?} has an unresolved species")]
+    UnresolvedSpecies {
+        /// The offending node.
+        node: NodeId,
+    },
+
     /// A `PlaceBlueprint` node was evaluated without a resolved template (the
     /// hot-reload layer failed to load its blueprint JSON).
     #[error("node {node:?} has an unresolved blueprint")]

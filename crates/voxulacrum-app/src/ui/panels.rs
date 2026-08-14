@@ -55,6 +55,8 @@ pub struct UiState {
     pub biome_map: crate::ui::biome_map::BiomeMapState,
     /// Blueprint capture / stamp panel state (roadmap §4.2).
     pub blueprint_panel: crate::ui::blueprint_panel::BlueprintPanelState,
+    /// Tree skeleton debug view state.
+    pub skeleton_panel: crate::ui::skeleton_panel::SkeletonPanelState,
     /// Set by the panel's Reset button; consumed at frame end.
     pub reset_frontier_requested: bool,
     /// Scheduler load per job kind (roadmap §4.4 job system inspector).
@@ -67,6 +69,8 @@ pub struct UiState {
     pub total_triangles: u64,
     pub chunks_visible: u32,
     pub chunks_total: u32,
+    /// Wood capsules across resident chunks, awaiting the impostor pass.
+    pub branch_segments: u64,
     pub shader_log: Vec<ShaderLogEntry>,
     pub meshing_stats: MeshingStats,
     pub clear_cache_requested: bool,
@@ -126,6 +130,7 @@ impl UiState {
             events_total: 0,
             column_inspector: Default::default(),
             blueprint_panel: Default::default(),
+            skeleton_panel: Default::default(),
             biome_map: Default::default(),
             reset_frontier_requested: false,
             job_stats: [crate::jobs::JobKindStats::default(); crate::jobs::JobKind::COUNT],
@@ -135,6 +140,7 @@ impl UiState {
             total_triangles: 0,
             chunks_visible: 0,
             chunks_total: 0,
+            branch_segments: 0,
             shader_log: Vec::new(),
             meshing_stats: MeshingStats::default(),
             clear_cache_requested: false,
@@ -251,6 +257,8 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 crate::ui::column_inspector::draw(ui, &mut state.column_inspector);
                 ui.separator();
                 crate::ui::blueprint_panel::draw(ui, &mut state.blueprint_panel);
+                ui.separator();
+                crate::ui::skeleton_panel::draw(ui, &mut state.skeleton_panel);
                 if ui.button("Biome / Zone Map…").clicked() {
                     state.biome_map.open = true;
                     state.biome_map.dirty = true;
@@ -1089,6 +1097,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
             let cull_pct = (1.0 - state.chunks_visible as f64 / state.chunks_total as f64) * 100.0;
             ui.label(format!("Culled: {:.0}%", cull_pct));
         }
+        ui.label(format!("branch capsules: {}", state.branch_segments));
         ui.separator();
         let log = &state.mutation_log;
         let rejected = log.rejected_wrong_mode + log.rejected_system_origin;

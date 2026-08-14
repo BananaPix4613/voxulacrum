@@ -94,6 +94,7 @@ impl PrefabRegistry {
                 PrefabDef { id: 0, id_name: "grass_tuft".into(), shape: PrefabShape::GrassTuft, color: [0.30, 0.55, 0.20], scale: 0.65 },
                 PrefabDef { id: 1, id_name: "bush".into(),       shape: PrefabShape::Bush,      color: [0.20, 0.42, 0.16], scale: 0.85 },
                 PrefabDef { id: 2, id_name: "rock".into(),       shape: PrefabShape::Rock,      color: [0.50, 0.50, 0.53], scale: 0.75 },
+                PrefabDef { id: 3, id_name: "canopy".into(),     shape: PrefabShape::Bush,      color: [0.24, 0.46, 0.18], scale: 4.5 },
             ],
         }
     }

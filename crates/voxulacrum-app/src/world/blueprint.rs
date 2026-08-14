@@ -28,6 +28,14 @@ pub fn blueprint_dir() -> PathBuf {
     crate::paths::asset_root().join("assets").join("blueprints")
 }
 
+/// Where authored species live. Beside `blueprint_dir` rather than in its own
+/// module because both answer "where does authored content sit", and two
+/// open-coded copies of the `assets/` prefix is how the species dir was wrong
+/// the first time. A shared home for content directories is owned.
+pub fn species_dir() -> PathBuf {
+    crate::paths::asset_root().join("assets").join("species")
+}
+
 /// Capture the solid voxels in the inclusive world-space box `[min, max]` into a
 /// blueprint named `name`.
 ///
@@ -116,6 +124,7 @@ pub fn stamp_batches(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use crate::world::chunk::LoadedChunk;
     use crate::world::mutation::{
         EngineMode, MutationCommand, MutationLog, MutationOrigin, WorldMutation,
@@ -135,6 +144,7 @@ mod tests {
         World {
             chunks,
             generator,
+            materials: Arc::new(MaterialRegistry::load_initial()),
             min_chunk_y: 0,
             max_chunk_y: 4,
             mode: EngineMode::Authoring,

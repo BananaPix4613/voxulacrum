@@ -1,7 +1,7 @@
 //! Per-`NodeKind` parameter editor widgets.
 
 use egui::Ui;
-use nodegraph_ir::{Axis, FractalType, GraphRefTarget, NodeKind};
+use nodegraph_ir::{Axis, FractalType, GraphRefTarget, NodeKind, StructureCanopy};
 use voxel_core::MaterialId;
 
 /// One parameter row: a left-aligned label followed by its editor widget.
@@ -163,13 +163,13 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             changed
         }
         NodeKind::PlaceTree(p) => {
-            let mut changed = false;
+            let mut changed = row(ui, "species", |ui| ui.text_edit_singleline(&mut p.species));
+            changed |= row(ui, "wood", |ui| ui.text_edit_singleline(&mut p.wood));
+            changed |= row(ui, "cell size", |ui| ui.add(egui::DragValue::new(&mut p.cell_size).range(4..=512)));
+            changed |= row(ui, "density", |ui| ui.add(egui::DragValue::new(&mut p.density).speed(0.01).range(0.0..=1.0)));
             changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
-            changed |= row(ui, "trunk min", |ui| ui.add(egui::DragValue::new(&mut p.trunk_min).range(1..=32)));
-            changed |= row(ui, "trunk max", |ui| ui.add(egui::DragValue::new(&mut p.trunk_max).range(1..=32)));
-            changed |= row(ui, "canopy radius", |ui| ui.add(egui::DragValue::new(&mut p.canopy_radius).range(1..=8)));
-            changed |= material_id_ui(ui, &mut p.trunk_material, "trunk");
-            changed |= material_id_ui(ui, &mut p.leaf_material, "leaf");
+            changed |= row(ui, "age", |ui| ui.add(egui::DragValue::new(&mut p.age).speed(0.01).range(0.0..=1.0)));
+            changed |= id_list_ui(ui, "tree_biomes", "biomes", &mut p.biomes, &catalogs.biomes, "biome");
             changed
         }
         NodeKind::PlaceBlueprint(p) => {
@@ -188,6 +188,21 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
             changed |= row(ui, "random yaw", |ui| ui.checkbox(&mut p.random_yaw, ""));
             changed |= row(ui, "surface offset", |ui| ui.add(egui::DragValue::new(&mut p.surface_offset).range(-8..=8)));
+            changed |= id_list_ui(ui, "structure_biomes", "biomes", &mut p.biomes, &catalogs.biomes, "biome");
+
+            // A checkbox rather than a sentinel prefab id: "has a canopy" is a
+            // different question from "which canopy", and an id meaning both
+            // makes zero unsayable.
+            let mut has_canopy = p.canopy.is_some();
+            if row(ui, "canopy", |ui| ui.checkbox(&mut has_canopy, "")) {
+                p.canopy = has_canopy.then(StructureCanopy::default);
+                changed = true;
+            }
+            if let Some(c) = p.canopy.as_mut() {
+                changed |= row(ui, "type id", |ui| ui.add(egui::DragValue::new(&mut c.type_id)));
+                changed |= row(ui, "prefab id", |ui| ui.add(egui::DragValue::new(&mut c.prefab_id)));
+                changed |= row(ui, "canopy y", |ui| ui.add(egui::DragValue::new(&mut c.y_offset).range(0..=32)));
+            }
             changed
         }
         NodeKind::River(p) => {
@@ -603,6 +618,42 @@ fn id_combo(
                 }
             }
         });
+    changed
+}
+
+/// Editor for a `Vec<u16>` of catalog ids - the list counterpart to
+/// [`id_combo`].
+///
+/// The label says "empty = all" because that is what an empty list means to
+/// every filter that uses one, and a reader who assumed the opposite would
+/// author a source that places nothing and looks correct.
+fn id_list_ui(
+    ui: &mut Ui,
+    salt: &'static str,
+    label: &str,
+    ids: &mut Vec<u16>,
+    catalog: &[(u16, String)],
+    noun: &str,
+) -> bool {
+    let mut changed = false;
+    ui.weak(format!("{label} (empty = all)"));
+    let mut remove: Option<usize> = None;
+    for (i, id) in ids.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            changed |= id_combo(ui, (salt, i), id, catalog, noun);
+            if ui.small_button("×").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        ids.remove(i);
+        changed = true;
+    }
+    if ui.small_button(format!("+ {noun}")).clicked() {
+        ids.push(catalog.first().map(|(id, _)| *id).unwrap_or(0));
+        changed = true;
+    }
     changed
 }
 

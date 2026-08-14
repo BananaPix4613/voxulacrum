@@ -39,6 +39,10 @@ use mutation::{
 pub struct World {
     pub chunks: HashMap<ChunkCoord, LoadedChunk>,
     pub generator: Arc<WorldGenerator>,
+    /// Shared material table. Held here because the snapshot extractor needs the
+    /// render-delegation mask and `World` is already what carries world-level
+    /// constants to that call - `min_chunk_y` and `max_chunk_y` go the same way.
+    pub materials: Arc<MaterialRegistry>,
     pub min_chunk_y: i32,
     pub max_chunk_y: i32, // exclusive upper bound
     /// The engine's current world-mutation mode (design doc §9). Phase 8 is
@@ -93,6 +97,7 @@ impl World {
         min_y: i32,
         max_y: i32,
         persistence: &persistence::WorldPersistence,
+        materials: Arc<MaterialRegistry>,
     ) -> Self {
         use rayon::prelude::*;
 
@@ -128,10 +133,11 @@ impl World {
                 })
                 .collect()
         });
-        
+
         Self {
             chunks,
             generator,
+            materials,
             min_chunk_y: min_y,
             max_chunk_y: max_y,
             mode: EngineMode::Authoring,
@@ -1321,6 +1327,7 @@ mod mutation_tests {
         World {
             chunks,
             generator,
+            materials: Arc::new(MaterialRegistry::load_initial()),
             min_chunk_y: 0,
             max_chunk_y: 4,
             mode,

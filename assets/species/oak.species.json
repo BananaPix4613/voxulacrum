@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "name": "oak",
+  "species": {
+    "trunk_radius": 0.5,
+    "tip_radius": 0.05,
+    "variance": 0.3,
+    "internode": 2.0,
+    "taper": 0.8,
+    "child_scale": 0.75,
+    "axis_steps": 5,
+    "max_order": 2,
+    "laterals": 1,
+    "branch_angle": 1.0,
+    "gravitropism": 0.25,
+    "wobble": 0.18,
+    "crown_attractors": 0,
+    "crown_center": 0.85,
+    "crown_radius": 3.5,
+    "crown_height": 2.5,
+    "influence": 4.0,
+    "kill_radius": 0.35,
+    "colonize_step": 0.45,
+    "max_lobes": 7,
+    "lobe_scale": 2.15,
+    "lobe_size_jitter": 0.15,
+    "lobe_anisotropy": 0.23,
+    "lobe_separation": 0.75,
+    "lobe_min_radius": 0.45,
+    "max_crown_reach": 8.0
+  }
+}

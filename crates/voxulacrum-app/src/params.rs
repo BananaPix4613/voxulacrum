@@ -59,6 +59,8 @@ impl Default for MaterialParams {
                 MaterialEntry { name: "Grass Soil".into(), color: [0.30, 0.55, 0.18],  sharpness: 0.35, hardness: 0.2,  permeable: false, supports_flora: true  },
                 MaterialEntry { name: "Water".into(),      color: [0.2, 0.35, 0.6],    sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false },
                 MaterialEntry { name: "Gravel".into(),     color: [0.52, 0.49, 0.45],  sharpness: 0.6,  hardness: 0.5,  permeable: true,  supports_flora: false },
+                MaterialEntry { name: "Wood".into(),       color: [0.55, 0.44, 0.30],  sharpness: 0.5,  hardness: 0.6,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Leaves".into(),     color: [0.24, 0.46, 0.18],  sharpness: 0.2,  hardness: 0.1,  permeable: true,  supports_flora: false },
             ],
         }
     }

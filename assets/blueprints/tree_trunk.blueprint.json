@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "name": "tree_trunk",
+  "anchor": [
+    0,
+    0,
+    0
+  ],
+  "cells": [
+    {
+      "at": [
+        2,
+        0,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        2,
+        1,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        2,
+        2,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        2,
+        3,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        2,
+        4,
+        1
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        2,
+        4,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        3,
+        4,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        3,
+        5,
+        0
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        0,
+        5,
+        1
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        1,
+        5,
+        1
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        4,
+        5,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        5,
+        5,
+        2
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        2,
+        5,
+        3
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        3,
+        6,
+        0
+      ],
+      "shape": "cube",
+      "material": "wood"
+    },
+    {
+      "at": [
+        2,
+        6,
+        3
+      ],
+      "shape": "cube",
+      "material": "wood"
+    }
+  ],
+  "destruction": "destroy",
+  "protected_volume": false
+}

@@ -102,6 +102,9 @@ pub struct LoadedChunk {
     /// seam pass knows which columns smooth without re-evaluating the graph.
     /// `None` until a generation path sets it (air/failed-gen chunks stay `None`).
     pub smoothing_distances: Option<Box<[u8; COLUMN_COUNT]>>,
+    /// Wood capsules rooted in this chunk, in world space. Beside `mesh` rather
+    /// than in `data` because it is render-side derived output, not chunk state.
+    pub segments: Vec<nodegraph_eval::feature::BranchSegment>,
 }
 
 impl LoadedChunk {
@@ -115,6 +118,7 @@ impl LoadedChunk {
             mesh_debounce: None,
             seam_finalized: false,
             smoothing_distances: None,
+            segments: Vec::new(),
         }
     }
 
@@ -156,6 +160,7 @@ impl LoadedChunk {
             generated.fluids,
             generated.smoothing_distances,
         );
+        chunk.segments = generated.segments;
         chunk
     }
 
@@ -223,8 +228,32 @@ pub struct ChunkSnapshot {
     pub border_min: [bool; 3],
 }
 
+/// A voxel as the terrain mesher should see it.
+///
+/// Render-delegated materials become air **in the snapshot only**. The chunk
+/// still holds them, so they collide, are mined, and persist; they are simply
+/// drawn by a pass that knows their real shape rather than as cubes.
+///
+/// Applied to the neighbor border as well as the interior, and that is not
+/// incidental: leaving delegated wood in the border would cull the terrain faces
+/// pointing at it, leaving holes where nothing is drawn.
+#[inline]
+fn visible_to_mesher(v: Voxel, delegated: &[bool]) -> Voxel {
+    if delegated.get(v.material.0 as usize).copied().unwrap_or(false) {
+        Voxel::EMPTY
+    } else {
+        v
+    }
+}
+
 impl ChunkSnapshot {
-    pub fn extract(chunk: &LoadedChunk, neighbors: &ChunkNeighbors, min_chunk_y: i32, _max_chunk_y: i32) -> Self {
+    pub fn extract(
+        chunk: &LoadedChunk,
+        neighbors: &ChunkNeighbors,
+        min_chunk_y: i32,
+        _max_chunk_y: i32,
+        delegated: &[bool],
+    ) -> Self {
         let mut materials: Box<[Voxel; SNAP_VOLUME]> = unsafe {
             let v: Vec<Voxel> = vec![Voxel::EMPTY; SNAP_VOLUME];
             let boxed_slice = v.into_boxed_slice();
@@ -236,7 +265,8 @@ impl ChunkSnapshot {
             for y in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
                     let m = chunk.data.voxels.voxel(Chunk::voxel_index(x, y, z));
-                    materials[Self::snap_index(x + SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD)] = m;
+                    materials[Self::snap_index(x + SNAP_PAD, y + SNAP_PAD, z + SNAP_PAD)] =
+                        visible_to_mesher(m, delegated);
                 }
             }
         }
@@ -253,7 +283,7 @@ impl ChunkSnapshot {
                     let cy = sy as i32 - SNAP_PAD as i32;
                     let cz = sz as i32 - SNAP_PAD as i32;
                     materials[Self::snap_index(sx, sy, sz)] =
-                        resolve_voxel(neighbors, cx, cy, cz);
+                        visible_to_mesher(resolve_voxel(neighbors, cx, cy, cz), delegated);
                 }
             }
         }
@@ -327,4 +357,36 @@ pub fn border_dirty_neighbors(index: u16) -> SmallVec<[IVec3; 3]> {
     if z == 0                       { neighbors.push(IVec3::new( 0, 0,-1)); }
     if z == (CHUNK_SIZE as i32 - 1) { neighbors.push(IVec3::new( 0, 0, 1)); }
     neighbors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use voxel_core::MaterialRegistry;
+
+    #[test]
+    fn the_mesher_never_sees_a_render_delegated_material() {
+        // The §2.1a invariant, at the one seam that enforces it. Wood occupies
+        // the cell; the snapshot the mesher reads must not contain it, or every
+        // tree in the world renders as blocks.
+        let reg = MaterialRegistry::load_initial();
+        let mask = reg.render_delegated_mask();
+        let wood = reg.resolve("wood").expect("wood is registered");
+        let stone = reg.resolve("granite").expect("granite is registered");
+
+        assert_eq!(
+            visible_to_mesher(Voxel::cube(wood), mask),
+            Voxel::EMPTY,
+            "wood reached the mesher",
+        );
+        assert_eq!(
+            visible_to_mesher(Voxel::cube(stone), mask),
+            Voxel::cube(stone),
+            "terrain must pass through untouched",
+        );
+        // An id past the end of the table is drawn rather than dropped: losing
+        // geometry is a worse failure than drawing it.
+        let unknown = Voxel::cube(voxel_core::MaterialId(9999));
+        assert_eq!(visible_to_mesher(unknown, mask), unknown);
+    }
 }

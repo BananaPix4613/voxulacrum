@@ -268,6 +268,22 @@ pub struct ScatterVertex {
     pub normal: [f32; 3],
 }
 
+/// One tapered capsule, world space. The whole per-instance payload: the quad
+/// is generated from `@builtin(vertex_index)`, so this pass binds no vertex
+/// buffer at all.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct CapsuleInstanceGpu {
+    /// Thick end.
+    pub a: [f32; 3],
+    /// Radius at `a`.
+    pub ra: f32,
+    /// Thin end.
+    pub b: [f32; 3],
+    /// Radius at `b`.
+    pub rb: f32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct ScatterInstanceGpu {
@@ -534,6 +550,157 @@ pub fn create_scatter_pipeline(
     })
 }
 
+/// Analytic tapered-capsule impostors for wood (spec §5).
+///
+/// No vertex buffer: the covering quad comes from `@builtin(vertex_index)`, so
+/// slot 0 is the instance stream. Depth writes come from the fragment shader,
+/// which is why `depth_compare` still tests but the geometry drawn is a flat
+/// billboard - the rasterizer's own depth is never used.
+pub fn create_capsule_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+    global_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
+) -> wgpu::RenderPipeline {
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("capsule_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("capsule_pipeline_layout"),
+        bind_group_layouts: &[global_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("capsule_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader_module,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<CapsuleInstanceGpu>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                    wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32 },
+                    wgpu::VertexAttribute { offset: 16, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                    wgpu::VertexAttribute { offset: 28, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                ],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            // The quad is built facing the camera, but winding depends on the
+            // yaw, so culling it would drop half the tree on two of the four
+            // camera orientations.
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// Wood impostors as shadow casters. Depth-only, no color targets, solving
+/// against the light basis rather than the view basis.
+pub fn create_capsule_shadow_pipeline(
+    device: &wgpu::Device,
+    shadow_bind_group_layout: &wgpu::BindGroupLayout,
+    shader_source: &str,
+) -> wgpu::RenderPipeline {
+    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("capsule_shadow_shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+    });
+
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("capsule_shadow_pipeline_layout"),
+        bind_group_layouts: &[shadow_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("capsule_shadow_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader_module,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<CapsuleInstanceGpu>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                    wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32 },
+                    wgpu::VertexAttribute { offset: 16, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                    wgpu::VertexAttribute { offset: 28, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                ],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            // No slope-scale bias: the terrain pipeline's exists for flat faces
+            // meeting the light at a grazing angle, and a capsule writes true
+            // curved depth. `terrain.wgsl`'s normal-offset handles the receiver
+            // side either way.
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+        multiview: None,
+        cache: None,
+    })
+}
+
 pub fn create_post_process_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
@@ -601,6 +768,8 @@ pub enum PipelineId {
     Shadow,
     DetailPaint,
     Scatter,
+    Capsule,
+    CapsuleShadow,
     Water,
     #[allow(dead_code)] // reserved; post-process currently runs via PostProcessPass
     PostProcess,
@@ -634,6 +803,8 @@ pub struct PipelineRegistry {
     pub shadow_pipeline: wgpu::RenderPipeline,
     pub detail_paint_pipeline: wgpu::RenderPipeline,
     pub scatter_pipeline: wgpu::RenderPipeline,
+    pub capsule_pipeline: wgpu::RenderPipeline,
+    pub capsule_shadow_pipeline: wgpu::RenderPipeline,
     pub water_pipeline: wgpu::RenderPipeline,
 }
 
@@ -655,6 +826,8 @@ impl PipelineRegistry {
         let shadow_source = read_shader(shader_dir, "shadow.wgsl");
         let detail_paint_source = read_shader(shader_dir, "detail_paint.wgsl");
         let scatter_source = read_shader(shader_dir, "scatter.wgsl");
+        let capsule_source = read_shader(shader_dir, "capsule.wgsl");
+        let capsule_shadow_source = read_shader(shader_dir, "capsule_shadow.wgsl");
         let water_source = read_shader(shader_dir, "water.wgsl");
 
         let terrain_pipeline = create_terrain_pipeline(
@@ -681,6 +854,13 @@ impl PipelineRegistry {
             &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
             &scatter_source,
         );
+        let capsule_pipeline = create_capsule_pipeline(
+            &ctx.device, resources.surface_format, &resources.global_bind_group_layout,
+            &capsule_source,
+        );
+        let capsule_shadow_pipeline = create_capsule_shadow_pipeline(
+            &ctx.device, &resources.shadow_bind_group_layout, &capsule_shadow_source,
+        );
         let water_pipeline = create_water_pipeline(
             &ctx.device, resources.surface_format,
             &resources.global_bind_group_layout, &resources.water_bind_group_layout,
@@ -704,6 +884,14 @@ impl PipelineRegistry {
             pipeline_id: PipelineId::Scatter,
             last_good_source: scatter_source,
         });
+        entries.insert("capsule.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::Capsule,
+            last_good_source: capsule_source,
+        });
+        entries.insert("capsule_shadow.wgsl".to_string(), PipelineEntry {
+            pipeline_id: PipelineId::CapsuleShadow,
+            last_good_source: capsule_shadow_source,
+        });
         entries.insert("water.wgsl".to_string(), PipelineEntry {
             pipeline_id: PipelineId::Water,
             last_good_source: water_source,
@@ -717,6 +905,8 @@ impl PipelineRegistry {
             shadow_pipeline,
             detail_paint_pipeline,
             scatter_pipeline,
+            capsule_pipeline,
+            capsule_shadow_pipeline,
             water_pipeline,
         }
     }
@@ -786,6 +976,19 @@ impl PipelineRegistry {
                 );
                 Some(p)
             }
+            PipelineId::Capsule => {
+                let p = create_capsule_pipeline(
+                    &ctx.device, resources.surface_format,
+                    &resources.global_bind_group_layout, &source,
+                );
+                Some(p)
+            }
+            PipelineId::CapsuleShadow => {
+                let p = create_capsule_shadow_pipeline(
+                    &ctx.device, &resources.shadow_bind_group_layout, &source,
+                );
+                Some(p)
+            }
             PipelineId::Water => {
                 let p = create_water_pipeline(
                     &ctx.device, resources.surface_format,
@@ -815,6 +1018,8 @@ impl PipelineRegistry {
                 PipelineId::Shadow => self.shadow_pipeline = new_pipeline,
                 PipelineId::DetailPaint => self.detail_paint_pipeline = new_pipeline,
                 PipelineId::Scatter => self.scatter_pipeline = new_pipeline,
+                PipelineId::Capsule => self.capsule_pipeline = new_pipeline,
+                PipelineId::CapsuleShadow => self.capsule_shadow_pipeline = new_pipeline,
                 PipelineId::Water => self.water_pipeline = new_pipeline,
                 PipelineId::PostProcess => {}
             }

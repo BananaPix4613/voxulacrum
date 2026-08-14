@@ -90,6 +90,9 @@ pub fn build_frame_schedule() -> Schedule {
         systems::blueprint_authoring_system
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::picking_system), // needs the current pick
+        systems::skeleton_debug_system
+            .in_set(FrameStage::Simulation)
+            .after(crate::interaction::picking_system), // needs the current pick
         systems::palette_load_system.in_set(FrameStage::Simulation),
         systems::fluid_tick_system
             .in_set(FrameStage::Simulation)

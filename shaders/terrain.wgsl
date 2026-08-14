@@ -210,6 +210,8 @@ fn debug_material_color(id: u32) -> vec3<f32> {
         case 6u: { return vec3<f32>(1.0, 0.3, 1.0); }   // Grass Soil (magenta)
         case 7u: { return vec3<f32>(1.0, 0.6, 0.2); }   // Water (orange)
         case 8u: { return vec3<f32>(0.6, 0.2, 1.0); }   // Gravel (purple)
+        case 9u: { return vec3<f32>(0.8, 0.5, 0.2); }   // Wood (tan)
+        case 10u: { return vec3<f32>(0.2, 0.8, 0.5); }  // Leaves (teal)
         default: { return vec3<f32>(1.0, 1.0, 1.0); }   // Unknown (white)
     }
 }

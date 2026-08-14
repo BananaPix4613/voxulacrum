@@ -19,7 +19,10 @@ use crate::detail_eval::DetailEvaluator;
 use crate::error::EvalResult;
 use crate::eval::Evaluator;
 use crate::EvalError;
-use crate::feature::{ColumnProbe, FeatureSource};
+use crate::feature::{
+    BranchSegment, ColumnProbe, Feature, FeatureCanopy, FeaturePayload, FeatureSource,
+    TreeSource,
+};
 use crate::field::{ScalarField, CHUNK_DIM};
 use crate::foliage::ChunkFoliage;
 
@@ -794,14 +797,22 @@ impl WorldEvaluator {
 
         let terrain =
             self.composite_terrain(ctx, biome_col.as_deref(), cols.border.as_ref(), &upstream)?;
-        // Stage 8 (structures) sits between smoothing (7) and fluid (9), per §5.
-        let terrain = self.apply_structures(ctx, terrain, &upstream)?;
+        // Stage 8 (cross-chunk features) sits between smoothing (7) and fluid
+        // (9), per §5.
+        let stamped = self.apply_structures(ctx, terrain, &upstream)?;
+        let terrain = stamped.terrain.clone();
         // Stage 9 (fluid) precedes stage 10 (foliage) per design doc §5. Foliage
         // submersion is applied at the storage boundary (world_generator), where
         // the fully-composited fluid field is available; the order here matches
         // the documented stage sequence.
         let fluid_levels = self.composite_fluid(ctx, biome_col.as_deref(), &upstream)?;
-        let foliage = self.evaluate_foliage(ctx, &terrain, biome_col.as_deref())?;
+        let foliage = self.evaluate_foliage(
+            ctx,
+            &terrain,
+            biome_col.as_deref(),
+            &stamped.sources,
+            &stamped.features,
+        )?;
 
         Ok(ChunkEvaluation {
             terrain,
@@ -809,6 +820,7 @@ impl WorldEvaluator {
             biome_ids: cols.biome_ids,
             foliage,
             fluid_levels,
+            segments: stamped.segments,
         })
     }
 
@@ -819,6 +831,8 @@ impl WorldEvaluator {
         ctx: EvalContext,
         terrain: &ChunkBuffer<Voxel, 32>,
         biome_col: Option<&IdColumn>,
+        sources: &[FeatureSource],
+        features: &[Feature],
     ) -> EvalResult<ChunkFoliage> {
         let mut foliage = ChunkFoliage::default();
         for bid in present_biomes(biome_col) {
@@ -826,6 +840,14 @@ impl WorldEvaluator {
             let Some(detail) = &bg.detail else { continue };
             let mut de = DetailEvaluator::new(detail, ctx, terrain, biome_col, bid);
             foliage.merge(de.evaluate()?);
+        }
+        // Canopies come from stage 8's features rather than a DetailGraph: a
+        // tree's trunk and canopy are one occurrence, so one derivation places
+        // both. Merged through the same path so a canopy sharing a scatter type
+        // with a DetailGraph's props lands in the same bucket.
+        let canopies = crate::feature::canopy_instances(ctx, sources, features);
+        if !canopies.is_empty() {
+            foliage.merge(ChunkFoliage { paint: Vec::new(), scatter: canopies });
         }
         Ok(foliage)
     }
@@ -1013,39 +1035,81 @@ impl WorldEvaluator {
         Ok(Arc::new(out))
     }
 
-    /// Collect every `PlaceStructure` declaration across the zone graphs.
+    /// Collect every feature declaration - `PlaceStructure` and `PlaceTree` -
+    /// across the zone graphs.
     ///
-    /// The zone comes from the graph the node lives in (§5 puts structures on
-    /// the ZoneGraph), so a source cannot claim a zone it was not authored in.
+    /// The zone comes from the graph the node lives in (§5 puts features on the
+    /// ZoneGraph), so a source cannot claim a zone it was not authored in.
     ///
     /// Sorted by content rather than left in slotmap order: the source index is
     /// the last tiebreak in `derive_features`'s ordering, and determinism must
     /// not rest on iteration order happening to be stable.
-    fn structure_sources(&self) -> EvalResult<Vec<FeatureSource>> {
+    fn feature_sources(&self) -> EvalResult<Vec<FeatureSource>> {
         let mut out = Vec::new();
         for zone in &self.zones {
             for (id, node) in zone.graph.nodes.iter() {
-                let NodeKind::PlaceStructure(p) = &node.kind else { continue };
-                // Not a skip: a source with no template places nothing and says
-                // nothing, which is how a wrong world looks like a working one.
-                let blueprint = p
-                    .resolved
-                    .as_ref()
-                    .ok_or(EvalError::UnresolvedBlueprint { node: id })?;
-                out.push(FeatureSource {
-                    cell_size: p.cell_size,
-                    density: p.density,
-                    seed: p.seed,
-                    zones: vec![zone.id],
-                    random_yaw: p.random_yaw,
-                    surface_offset: p.surface_offset,
-                    blueprint: blueprint.clone(),
-                });
+                // Both declarations produce the same rule and differ only in
+                // payload - the cell grid, density roll and ordering below are
+                // one implementation, which is the reason two node kinds can
+                // coexist without two placement behaviors.
+                let source = match &node.kind {
+                    NodeKind::PlaceStructure(p) => {
+                        // Not a skip: a source with no template places nothing
+                        // and says nothing, which is how a wrong world looks
+                        // like a working one.
+                        let blueprint = p
+                            .resolved
+                            .as_ref()
+                            .ok_or(EvalError::UnresolvedBlueprint { node: id })?;
+                        FeatureSource {
+                            cell_size: p.cell_size,
+                            density: p.density,
+                            seed: p.seed,
+                            zones: vec![zone.id],
+                            biomes: p.biomes.clone(),
+                            random_yaw: p.random_yaw,
+                            surface_offset: p.surface_offset,
+                            payload: FeaturePayload::Blueprint(blueprint.clone()),
+                            canopy: p.canopy.as_ref().map(|c| FeatureCanopy {
+                                type_id: c.type_id,
+                                prefab_id: c.prefab_id,
+                                y_offset: c.y_offset,
+                            }),
+                        }
+                    }
+                    NodeKind::PlaceTree(p) => {
+                        let tree = p
+                            .resolved
+                            .as_ref()
+                            .ok_or(EvalError::UnresolvedSpecies { node: id })?;
+                        FeatureSource {
+                            cell_size: p.cell_size,
+                            density: p.density,
+                            seed: p.seed,
+                            zones: vec![zone.id],
+                            biomes: p.biomes.clone(),
+                            // A tree is asymmetric per seed already, and its
+                            // trunk stands on the anchor rather than replacing
+                            // it - see `PlaceTreeParams`.
+                            random_yaw: false,
+                            surface_offset: 0,
+                            payload: FeaturePayload::Tree(TreeSource {
+                                name: p.species.clone(),
+                                species: tree.species,
+                                wood: tree.wood,
+                                age: p.age,
+                            }),
+                            canopy: None,
+                        }
+                    }
+                    _ => continue,
+                };
+                out.push(source);
             }
         }
         out.sort_by(|a, b| {
-            (a.zones.first().copied(), a.seed, a.cell_size, &a.blueprint.name)
-                .cmp(&(b.zones.first().copied(), b.seed, b.cell_size, &b.blueprint.name))
+            (a.zones.first().copied(), a.seed, a.cell_size, a.payload.name())
+                .cmp(&(b.zones.first().copied(), b.seed, b.cell_size, b.payload.name()))
         });
         Ok(out)
     }
@@ -1085,7 +1149,7 @@ impl WorldEvaluator {
                 surface_y = Some(base_y + y as i32);
             }
         }
-        Ok(surface_y.map(|surface_y| ColumnProbe { zone_id, surface_y }))
+        Ok(surface_y.map(|surface_y| ColumnProbe { zone_id, biome_id, surface_y }))
     }
 
     /// Stage 8: derive the features reaching this chunk and stamp their
@@ -1093,16 +1157,16 @@ impl WorldEvaluator {
     ///
     /// Returns the terrain untouched when no source exists, which is what keeps
     /// this inert - and the generation hash unchanged - until content declares a
-    /// structure.
+    /// feature.
     fn apply_structures(
         &self,
         ctx: EvalContext,
         terrain: Arc<ChunkBuffer<Voxel, 32>>,
         upstream: &UpstreamGraphs,
-    ) -> EvalResult<Arc<ChunkBuffer<Voxel, 32>>> {
-        let sources = self.structure_sources()?;
+    ) -> EvalResult<Stamped> {
+        let sources = self.feature_sources()?;
         if sources.is_empty() {
-            return Ok(terrain);
+            return Ok(Stamped { terrain, sources, features: Vec::new(), segments: Vec::new() });
         }
         let range = self.chunk_y_range.clone();
         let mut probe_err = None;
@@ -1121,9 +1185,13 @@ impl WorldEvaluator {
         if let Some(e) = probe_err {
             return Err(e);
         }
-        Ok(Arc::new(crate::feature::stamp_features(
-            &terrain, ctx, &sources, &features
-        )))
+        let stamped = crate::feature::stamp_features(&terrain, ctx, &sources, &features);
+        Ok(Stamped {
+            terrain: Arc::new(stamped.terrain),
+            segments: stamped.segments,
+            sources,
+            features,
+        })
     }
 
     /// Evaluate one biome graph's (density, material) layer, or `None` if the
@@ -1291,6 +1359,16 @@ fn present_biomes(biome_col: Option<&IdColumn>) -> Vec<u16> {
     present
 }
 
+/// What stage 8 produced: the stamped terrain, plus the sources and features it
+/// derived, so stage 10 can anchor canopies to the same occurrences instead of
+/// deriving them a second time and hoping the two agree.
+struct Stamped {
+    terrain: Arc<ChunkBuffer<Voxel, 32>>,
+    sources: Vec<FeatureSource>,
+    features: Vec<Feature>,
+    segments: Vec<BranchSegment>,
+}
+
 /// The result of evaluating the graph set for one chunk: the composited terrain,
 /// the World and Zone per-column caches, and the composited foliage.
 pub struct ChunkEvaluation {
@@ -1311,6 +1389,9 @@ pub struct ChunkEvaluation {
     /// Per-column pond water-surface level (world-Y), or `None` when no biome
     /// authors fluid. Columns without a pond read [`NO_POND`].
     pub fluid_levels: Option<Arc<ColumnField>>,
+    /// Wood capsules this chunk owns, for the impostor pass. Empty unless a
+    /// tree source reaches the chunk.
+    pub segments: Vec<BranchSegment>,
 }
 
 #[cfg(test)]
@@ -1737,9 +1818,76 @@ mod tests {
             seed: 4,
             random_yaw: false,
             surface_offset: 0,
+            biomes: Vec::new(),
+            canopy: None,
             resolved: Some(bar_blueprint()),
         }));
         g
+    }
+
+    /// A zone declaring one tree species, dense enough that the sampled window
+    /// is certain to contain occurrences.
+    fn zone_with_tree() -> Graph {
+        use nodegraph_ir::{PlaceTreeParams, ResolvedTree, TreeSpecies};
+        let mut g = zone_const_biome(0);
+        g.add_node(NodeKind::PlaceTree(PlaceTreeParams {
+            species: "oak".to_string(),
+            wood: "wood".to_string(),
+            cell_size: 12,
+            density: 1.0,
+            seed: 5,
+            age: 1.0,
+            biomes: Vec::new(),
+            resolved: Some(ResolvedTree {
+                species: TreeSpecies { trunk_radius: 2.0, ..TreeSpecies::default() },
+                wood: MaterialId(9),
+            }),
+        }));
+        g
+    }
+
+    #[test]
+    fn a_place_tree_node_becomes_a_tree_source() {
+        let we = WorldEvaluator::new(terrain_graph_mat(1.0, MaterialId(1)))
+            .with_zones(vec![(0, zone_with_tree())])
+            .with_biomes(vec![(0, terrain_graph_mat(1.0, MaterialId(1)))])
+            .with_cross_graph_resolved()
+            .with_chunk_y_range(0..1);
+        let sources = we.feature_sources().unwrap();
+        assert_eq!(sources.len(), 1);
+        let FeaturePayload::Tree(t) = &sources[0].payload else {
+            panic!("a PlaceTree node must produce a tree payload");
+        };
+        assert_eq!(t.name, "oak");
+        assert_eq!(t.wood, MaterialId(9));
+        assert_eq!(t.species.trunk_radius, 2.0);
+        // Fixed by the node kind rather than authored - see `PlaceTreeParams`.
+        assert!(!sources[0].random_yaw);
+        assert_eq!(sources[0].surface_offset, 0);
+    }
+
+    #[test]
+    fn a_declared_tree_puts_wood_in_the_chunk() {
+        // The end-to-end claim of the whole tree path: a node in a zone graph
+        // becomes real, collidable voxels of the material the node named.
+        let we = WorldEvaluator::new(terrain_graph_mat(1.0, MaterialId(1)))
+            .with_zones(vec![(0, zone_with_tree())])
+            .with_biomes(vec![(0, terrain_graph_mat(1.0, MaterialId(1)))])
+            .with_cross_graph_resolved()
+            .with_chunk_y_range(0..1);
+        let chunk = we.evaluate_chunk(EvalContext::new(31, IVec3::ZERO)).unwrap();
+
+        let mut wood = 0usize;
+        for z in 0..32 {
+            for y in 0..32 {
+                for x in 0..32 {
+                    if chunk.terrain.get(x, y, z).material == MaterialId(9) {
+                        wood += 1;
+                    }
+                }
+            }
+        }
+        assert!(wood > 0, "a zone full of trees produced no wood");
     }
 
     #[test]
@@ -2031,7 +2179,7 @@ mod tests {
         // Locate a crosser using the same derivation the evaluator uses. This
         // only *finds* the feature - every assertion below reads the two
         // independently generated terrains, which is the part under test.
-        let sources = we.structure_sources().unwrap();
+        let sources = we.feature_sources().unwrap();
         // Empty: this world's biome graphs read no upstream, and the probe is
         // being driven directly rather than through `evaluate_chunk`.
         let probe_cache = ColumnCache::new();
@@ -2039,7 +2187,9 @@ mod tests {
         let features = crate::feature::derive_features(ctx1, &sources, |x, z| {
             we.probe_column(SEED, x, z, 0..1, &probe_upstream).unwrap()
         });
-        let bp = &sources[0].blueprint;
+        let FeaturePayload::Blueprint(bp) = &sources[0].payload else {
+            panic!("the shipped structure source is a blueprint");
+        };
         let anchor = IVec3::from_array(bp.anchor);
 
         let mut checked_left = 0usize;

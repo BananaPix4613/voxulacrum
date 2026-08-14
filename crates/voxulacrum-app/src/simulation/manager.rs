@@ -31,6 +31,8 @@ pub struct FrameState {
     pub mask_enabled: u32,
     pub volume_radius: f32,
     pub view_dir: [f32; 3],
+    pub view_right: [f32; 3],
+    pub view_up: [f32; 3],
     pub debug_mode: u32,
     #[allow(dead_code)] // sky tint uniform; retained for shader wiring
     pub sky_color: [f32; 3],
@@ -122,6 +124,19 @@ impl SimulationManager {
             -view_pitch.sin(),
             -(self.camera.rotation.sin() * view_pitch.cos()),
         ];
+        // right = normalize(forward x world_up); the pitch terms cancel, leaving
+        // a pure yaw. up = right x forward. Both unit by construction, so the
+        // shader can use them without renormalizing.
+        let view_right = [
+            self.camera.rotation.sin(),
+            0.0,
+            -self.camera.rotation.cos(),
+        ];
+        let view_up = [
+            -self.camera.rotation.cos() * view_pitch.sin(),
+            view_pitch.cos(),
+            -self.camera.rotation.sin() * view_pitch.sin(),
+        ];
 
         // Debug mode
         let debug_mode = compute_debug_mode(&params.debug);
@@ -157,6 +172,8 @@ impl SimulationManager {
             mask_enabled: 0,
             volume_radius: 0.0,
             view_dir,
+            view_right,
+            view_up,
             debug_mode,
             sky_color: params.render_pipeline.sky_color,
             warm_tint_color: warm_tint_color.into(),

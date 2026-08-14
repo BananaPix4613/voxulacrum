@@ -64,8 +64,12 @@ pub struct GlobalUniforms {
     pub render_size: [f32; 2],             //  8 bytes, offset 384
     pub volume_radius: f32,                //  4 bytes, offset 392 (world units)
     pub _pad6: f32,                        //  4 bytes, offset 396
+    pub view_right: [f32; 3],              // 12 bytes, offset 400
+    pub _pad7: f32,                        //  4 bytes, offset 412
+    pub view_up: [f32; 3],                 // 12 bytes, offset 416
+    pub _pad8: f32,                        //  4 bytes, offset 428
 }
-// Total: 400 bytes (25 * 16).
+// Total: 432 bytes (27 * 16).
 
 impl Default for GlobalUniforms {
     fn default() -> Self {
@@ -113,6 +117,10 @@ impl Default for GlobalUniforms {
             render_size: [1.0, 1.0],
             volume_radius: 0.0,
             _pad6: 0.0,
+            view_right: [1.0, 0.0, 0.0],
+            _pad7: 0.0,
+            view_up: [0.0, 1.0, 0.0],
+            _pad8: 0.0,
         }
     }
 }
@@ -126,8 +134,14 @@ pub struct ShadowUniforms {
     pub clip_enabled: u32,                 //  4 bytes, offset 76
     pub clip_max: [f32; 3],                // 12 bytes, offset 80
     pub _pad: f32,                         //  4 bytes, offset 92
+    pub light_dir: [f32; 3],               // 12 bytes, offset 96
+    pub _pad_l0: f32,                      //  4 bytes, offset 108
+    pub light_right: [f32; 3],             // 12 bytes, offset 112
+    pub _pad_l1: f32,                      //  4 bytes, offset 124
+    pub light_up: [f32; 3],                // 12 bytes, offset 128
+    pub _pad_l2: f32,                      //  4 bytes, offset 140
 }
-// Total: 96 bytes (6 * 16)
+// Total: 144 bytes (9 * 16).
 
 /// Post-processing uniforms
 #[repr(C)]
@@ -354,7 +368,7 @@ pub fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
             // binding 6: visibility mask (64^3 window, one uint byte per world cell)
             wgpu::BindGroupLayoutEntry {
                 binding: 6,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Uint,
                     view_dimension: wgpu::TextureViewDimension::D3,

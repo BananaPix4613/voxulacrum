@@ -52,11 +52,33 @@
           "density": 0.35,
           "seed": 3,
           "random_yaw": true,
-          "surface_offset": 1
+          "surface_offset": 1,
+          "biomes": []
         },
         "position": [
-          122.262634,
-          -226.34895
+          -7.470797,
+          -265.04147
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "PlaceTree",
+          "species": "oak",
+          "wood": "wood",
+          "cell_size": 8,
+          "density": 0.65,
+          "seed": 1,
+          "age": 1.0,
+          "biomes": [
+            0
+          ]
+        },
+        "position": [
+          233.83255,
+          -266.1181
         ]
       },
       "version": 1

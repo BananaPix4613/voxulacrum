@@ -578,11 +578,6 @@ impl<'g> Evaluator<'g> {
                 let points = self.input_positions(id, 1)?;
                 CachedOutput::Positions(Arc::new(crate::scan::find_flat(&terrain, &points, p)))
             }
-            NodeKind::PlaceTree(p) => {
-                let terrain = self.input_terrain(id, 0)?;
-                let points = self.input_positions(id, 1)?;
-                CachedOutput::Terrain(Arc::new(crate::place::place_trees(&terrain, &points, p)))
-            }
             NodeKind::PlaceBlueprint(p) => {
                 let terrain = self.input_terrain(id, 0)?;
                 let points = self.input_positions(id, 1)?;
@@ -591,7 +586,7 @@ impl<'g> Evaluator<'g> {
                 CachedOutput::Terrain(Arc::new(crate::place::place_blueprints(&terrain, &points, blueprint)))
             }
             // Declaration-only: it has no output pins, so nothing can ask for a value.
-            NodeKind::PlaceStructure(_) => {
+            NodeKind::PlaceTree(_) | NodeKind::PlaceStructure(_) => {
                 return Err(EvalError::WrongInputType {
                     node: id,
                     expected: "terrain",

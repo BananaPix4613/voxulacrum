@@ -2168,9 +2168,20 @@ Agreed:
 ### Carried forward
 
 - Anchor hash `0x12e6a0644184099f` (`--verify-generation`, 512 chunks).
-- Remaining pre-existing substeps: 21 (foliage 2/3), 22-24 (preview tools),
-  25-27 (editor ergonomics), 28 (content wave 2), 29 (asset standards),
-  30 (D8 decision + measurement), 31 (close).
+- Remaining pre-existing substeps, **by name rather than number**: Phase A took
+  20-24, which this list had already assigned. Named from here on, because a
+  renumber is exactly the kind of bookkeeping that goes wrong twice.
+  - Foliage tiers 2/3
+  - Preview and probe tools (field-probe extensions, live scrubbing, isolated
+    preview scene, regeneration diff view)
+  - Editor ergonomics (multi-select, cross-graph copy/paste, node search
+    palette, comments and groups, collapse-to-library, inline node docs),
+    graph diff, in-engine console
+  - Content wave 2
+  - Asset standards + graph asset versioning
+  - D8 decision with measurements; frontier and fill re-measure
+  - Close: post-phase audit, CHANGELOG, version bump, roadmap amendments,
+    merge and tag
 - Roadmap amendments now owed at close: rivers off 0.4.0, macro terrain as the
   0.5.0 headline, plus the six deferred from Q6.
 - Deferred lints: `InputMap::default()` has no drift test against
@@ -2342,3 +2353,398 @@ instrument without the change, and a worktree at `HEAD` measured the index
 against itself (`chain_129edges` reporting p = 0.38, no change). **Land an
 instrument in its own commit** - a bench that ships with the thing it measures
 cannot produce a baseline afterwards.
+
+## Two foliage defects, found by observation and traced
+
+Neither was recorded anywhere - not the drift review, the design doc, or an
+audit. Both are tier-1 (paint) and rendering issues rather than generation ones.
+
+### F1 - paint has no anchor, so foliage climbs whatever you build under it
+
+Reported: place a block on a grassy column and the grass moves up onto the new
+block instead of disappearing.
+
+`PaintTexel` is `{ species, density, tint, flags }` - four bytes, no Y.
+`DetailLayer` is documented as "a 2D paint map over a chunk's XZ footprint", and
+it is exactly that: a column either has grass or does not. The Y is not stored
+anywhere. `build_chunk_columns` (`rendering/detail_paint_pass.rs`) re-derives it
+every time a chunk's paint buffer is built, by scanning that column top-down for
+the topmost solid voxel and placing blades on its top face.
+
+So the paint does not "clamp" so much as have no memory of where it was placed.
+It re-lands on whatever is currently topmost, forever.
+
+Design § 8 says "modify terrain under foliage triggers `on_anchor_destroyed`
+policy per affected prefab", and § 8 gives every foliage instance an anchor
+voxel. The paint tier has no anchor to destroy. Scatter does not share the
+defect - a `ScatterInstance` carries a real anchor - so foliage tiers 2/3 do not
+inherit it.
+
+**Smallest correct fix:** store the anchor Y on the paint texel and, at
+buffer-build time, drop the column when the current topmost solid Y no longer
+matches. That needs no destruction-policy vocabulary, because for paint the
+policy is "disappear". It does touch the detail-layer format and its
+persistence.
+
+### F2 - enclosure culls foliage by switching the pass off
+
+Reported: enclosure occlusion turns off foliage rendering entirely rather than
+culling the enclosed region.
+
+The mechanism to do it properly already exists and foliage simply does not
+consume it. `flood_visibility` produces a `VisibilityVolume`, which is uploaded
+as a 64-cube `visibility_mask` texture at **group 0 binding 6** - the shared
+globals bind group every pass binds. `terrain.wgsl` samples it per fragment to
+decide whether a surface is within the visible pocket.
+
+`detail_paint.wgsl` and `scatter.wgsl` declare group 0 bindings 0-4 and 7-8,
+skipping 6. They never sample the mask. The CPU compensates by switching the
+whole pass off: `hide_foliage: ui.params.debug.hide_foliage || room_enclosed`,
+at both the main-scene and reflection call sites.
+
+**Fix shape:** declare and sample binding 6 in both foliage shaders the way
+terrain does, then drop `|| room_enclosed`. The texture is already bound, so no
+pipeline layout changes.
+
+## The foliage rework: scope and decisions
+
+Two defects (F1, F2) and the phase's "foliage tiers 2/3 matured" line converged
+into one body of work, after a look at reference art. Decisions, so the reasons
+survive:
+
+**Trees split across two systems.** The trunk occupies the voxel grid; the
+canopy is foliage. This is the only cheap route to the requested trunk
+collision: `player/sim.rs` resolves movement purely through
+`solid_interval(voxel)`, so nothing outside the voxel grid can collide without a
+new physics path. It also makes `AnchorDestructionPolicy` concrete - the canopy
+anchors to the trunk, so breaking the trunk fires the policy rather than the
+policy being a vocabulary with no user.
+
+It does sit against § 6's "foliage does not occupy voxel cells". That property
+still holds for what it was written about - grass, ferns, canopies. A trunk is
+not foliage under this split; it is a structure that a tree happens to grow out
+of.
+
+**Trunks are authored blueprints, for now.** The reference trunks are curved and
+tapering; `place_trees` makes a straight column plus a sphere. Procedural curved
+growth is the better long-run answer and is **explicitly wanted later** - noted
+here because a deferral with no record is a deferral that never happens. For
+0.4.0 the capture-and-stamp tooling this version built is exactly the thing that
+makes authored trunks cheap.
+
+**Grass and leaf sprites are procedurally generated placeholders.** They exercise
+the real sprite pipeline - atlas, animation frames, texel snapping - without
+building an in-engine art pipeline first. The art pipeline is a later version's
+problem; the rendering path is this one's.
+
+**All four parts ship in 0.4.0.** Replacing the 3D blades without a sprite
+replacement would leave the version with no visible foliage, which is a
+regression rather than a deferral. C and D are therefore not separable.
+
+| Part | Work |
+|---|---|
+| A | Trunk into the voxel grid as an authored blueprint; canopy into the foliage store, anchored to it |
+| B | `AnchorDestructionPolicy` enforcement on terrain edits; F1 (paint reanchoring) is the trivial case |
+| C | Sprite pipeline: atlas, procedural sprite generation, animation frames, texel-to-pixel snapping |
+| D | Grass and canopy re-authored as sprites, replacing the 3D blades |
+
+**The texel-lock constraint** (from the reference discussion): sprite texels must
+map one-to-one onto internal render-target pixels so they blend with world
+pixels, and downscale with the world only past the zoom where that stops being
+possible. Tractable under an orthographic camera - a fixed
+world-units-per-pixel scale - but it interacts with the upscale path, and a
+yaw-facing billboard at 45 degrees resamples unless the sprite is authored for
+the isometric axes. That last part is a constraint on the generator, not the
+shader.
+
+*Amended below: the world-units-per-pixel scale is not fixed. See "Pixel density
+is not a constant".*
+
+---
+
+## Trees: the design, agreed. `voxel-tree-rendering-spec.md` v2.
+
+Design agreed before code, per the version's sequencing rule. The spec is the
+reference and carries the reasoning; this records the decisions and the gate.
+
+A spec was produced in a separate session without codebase access, stating that
+the codebase wins wherever they conflict. Reading it against the tree found
+three conflicts. All three resolved in the code's favor, and each changed the
+design rather than just a detail.
+
+| # | Spec v1 | Resolution | Why |
+|---|---|---|---|
+| 1 | Per-block "spine words" baked into a persisted chunk array | **Re-derive.** Skeletons derived per chunk in the margin band; segment instances and clump ellipsoids in a generated non-persisted layer | The spec weighed a persistent registry against baking and rejected the registry. There is a third answer and the engine already runs on it: `derive_features` re-derives world-absolutely, so all four benefits the spec claimed for baking already hold at zero persisted bytes. Baking would add a fifth chunk layer and a `BLOB_VERSION` bump against the save-growth defect recorded at Substep 12 |
+| 2 | "Wood **and leaves** remain real voxels" | **Wood is voxels, leaves are instances**, canopy occupancy is a specified query with no implementation | At 8 px/voxel a leaf voxel is a large unit of canopy, and quantizing the silhouette to the grid reproduces Eco Machina's "the leaves still look like cubes". Sub-voxel instance positions are what the clump field exists to provide |
+| 3 | ~11 px/voxel, treated as constant | `k` is 4, 8 or 16 on an octave ladder, **8 at default zoom** | `compute_render_dimensions` (`main.rs:122`). Every pixel figure in the spec was calibrated against a screenshot estimate |
+
+### Pixel density is not a constant
+
+`world_pixel_density` defaults to 16 and `compute_render_dimensions` halves `k`
+while the upscale factor would fall below 0.85. At 1080p: `k = 16` at zoom 20,
+**8 at the default zoom 40**, 4 at `zoom_max`.
+
+This corrects the texel-lock paragraph above, which assumed a fixed
+world-units-per-pixel scale. It is fixed only within an octave.
+
+Consequences beyond the number: radius quantization becomes `f(k)` and must not
+be persisted (a second, independent argument against spine words); the leaf
+budget halves, since a 6 px sprite covers 0.56 voxel² rather than 0.3; the LOD
+ladder is rekeyed on `radius_px = world_radius * k`, which makes it
+zoom-invariant; and the octave transition is a new event that anything
+pixel-snapped must invalidate against.
+
+The transition is milder than it first looks: `k` halves as the upscale factor
+doubles, so on-screen voxel size is continuous and only the snap grid moves. A
+one-frame sub-voxel reposition on a frame the player caused by scrolling.
+
+### Two costs that dissolved, and one that did not
+
+Removing leaves from the grid raised three questions the design had to answer
+rather than inherit.
+
+- **Lighting - answered by a pass that already exists.** `shadow_pass.rs`
+  renders chunk geometry to a depth map and `terrain.wgsl::compute_shadow`
+  samples it. The canopy's depth-core ellipsoids are already analytic
+  depth-writing primitives, so canopy shadow is one more instanced draw into
+  that pass. No light bake, no voxel field, no dependency on D2 - and the shadow
+  follows the ellipsoid's continuous silhouette rather than a voxel
+  approximation.
+- **Placement - answered by the rebuild rule.** Segments are emitted only where
+  their wood voxels still exist; leaf instances get the same test against the
+  voxel containing the instance position. Building a platform in a tree carves
+  the canopy around it as behavior, with no placement rule to author.
+- **Sky exposure - a real finding.** `room_detection_system`
+  (`ecs/systems.rs:666`) is a *rendering* system: overhead coverage gates a
+  flood, and `u >= 0.6` sets `room.enclosed`, which drives the enclosure
+  cutaway. Feeding canopy into it would make standing under a tree read as an
+  interior. So "am I in a cave" and "is there something over me" are two
+  quantities wearing one name, and only the first exists. They must not be
+  collapsed.
+
+### Canopy occupancy: specified, not built
+
+With lighting and placement resolved, the density field has **no live consumer** -
+weather shelter and canopy-aware spawning both want it and neither exists. So
+the contract is specified (`canopy_density(pos) -> u8`, derived over the same
+band as the segments) with a named trigger, and the representation is decided in
+advance: rasterize to a sparse per-chunk array if the consumer sweeps every
+voxel, query the ellipsoids analytically if it is pointwise. Sparse or absent
+either way - a dense `u8` per voxel is 32 KB per chunk against a fluid layer
+already measured as the largest resident CPU layer at 25.6 MB.
+
+Same rule this phase has applied six times, most recently to `library_refs` and
+the manifest `libraries` list.
+
+### The open gate
+
+Decision 1 trades storage for CPU, and spec §13 carries six measurements that
+gate it. Recorded here because the obvious version of that measurement will pass
+and the real one might not: measure the **largest** species rather than the
+average; include the **vertical** axis, since features derive in every chunk-Y
+layer of the band and 7x7 is really ~98 derivations; measure **latency on the
+chunk-load path**, not throughput, because a pure function parallelizes well
+enough to look fine while individual loads stall; and use **per-span
+distributions**, the lesson Substeps 2b-2d cost four substeps to learn.
+
+If memoization is needed it keys on `(seed, anchor, age)` and Substep 18's
+reverse-order pass is the guard - but that guard is vacuous unless two sampled
+coordinates share a tree, and `ORDER_SAMPLE = 64` strided across 512 makes that
+unlikely. That is 17f again, and it is why the check is written down now.
+
+If the numbers come back bad, the fallback is a **cache** of the derivation, not
+a return to baking as the source of truth.
+
+### 4.4 has a cause, and it is deletion rather than diagnosis
+
+`PlaceStructureParams.canopy` is `#[serde(skip)]`, so the `tree_trunk` node in
+`zone.graph.json` carries no canopy on disk and every load yields `None`.
+`canopy_instances` then skips every feature. The canopy could not appear.
+
+`FeatureCanopy`, `StructureCanopy` and `PlaceTree` all retire under the skeleton
+model - a single blob at a fixed `y_offset` cannot express leaves distributed
+through branches. The uncommitted canopy work is superseded rather than fixed.
+
+### Decisions that outlive trees
+
+Three foliage-system decisions were taken alongside, recorded in spec §12 and
+owed to `engine-design.md` §6:
+
+- **`supports_flora` retires.** It is a one-sided encoding of a two-sided fact:
+  a material can only carry "does foliage grow here" because foliage has no
+  entity to carry the rule instead. Replaced by material trait bitflags named
+  for what the material *is*, plus a substrate mask on a matured `PrefabDef`.
+- **One admission function.** The substrate test exists twice today and
+  disagrees - `material.supports_flora` is authored and read by nothing, while
+  `SurfaceFilter.materials` is read and numeric. Two copies of a lookup is this
+  engine's recurring seam defect.
+- **An anchor is a (voxel, face).** Moss on a wall and vines under an overhang
+  are the same mechanism as grass, with a different face. Paint stays +Y-only:
+  a `PaintTexel` map is indexed by XZ and structurally cannot hold a face.
+
+### A standing lesson, from how this conversation went wrong
+
+Two of the arguments used to reach decision 2 were withdrawn as illegitimate:
+that design §6 says foliage does not occupy voxel cells, and that `ShapeId`
+cannot express present-but-not-solid until D1.
+
+**Code is a constraint on a design. A design document describing the current
+state is an input to the revision, not a constraint on it. A pending decision is
+neither - it is what the work is meant to inform.** If leaf voxels had been
+right, "D1 must land first" would have been an argument for D1, not against
+leaves.
+
+The conclusion survived on the pixel-density argument alone, which is grounded
+in `main.rs:122` and therefore carries. Worth keeping because this project cites
+its own documents heavily, and the same three sentences distinguish a citation
+that settles a question from one that only restates it.
+
+---
+
+## Tree substeps T1-T2 - the skeleton, and the §4 gate closed
+
+| # | Substep | Outcome |
+|---|---|---|
+| **T1a** | `nodegraph-eval/src/skeleton.rs` - nodes, pipe model, heavy path decomposition, parametric recursion | **Landed.** Pure in `(seed, species, age)`, reusing `SplitMix64` and `mix64`, so P1's determinism is inherited rather than rebuilt |
+| **T1b** | Debug visualizer through a new free-form overlay channel on `DebugLinePass` | **Landed** |
+| **T1c** | Click-to-place the preview, replacing a latch on the last pick | **Landed.** See below |
+| **T1d** | Space colonization | **Landed, then retired at T1e.** See below |
+| **T1e** | Trunk radius authored, tip radius derived; colonization off by default | **Landed** |
+| **T1f** | Lobe derivation - the canopy from the limb structure | **Landed** |
+| **T2** | The §13 measurement gate | **Closed.** Figures in the spec |
+
+### Three design findings, each from a measurement rather than a reading
+
+**The skeleton needs no children lists, and that is the local idiom.** A node's
+parent always has a lower index, so the pipe model runs as a reverse pass that
+pushes into parents and heavy-path decomposition as a forward pass that reads an
+already-assigned parent. Two linear passes, one scratch allocation. Substep 20c
+had already measured a per-node `Vec` losing to a linear scan at every graph
+size in this codebase; this is the same lesson applied before rather than after.
+
+**Trunk thickness was a side effect of tip count, and nobody could have
+authored it.** The pipe model gives `trunk = tip_radius * tips^(1/PIPE_EXP)`
+exactly - measured to three digits - so dropping colonization took the trunk
+from 0.617 to 0.163 voxels, i.e. **0.33 voxels thick**, unable to occupy a voxel
+and therefore unable to collide or be mined. The model inverts cleanly, so
+`trunk_radius` is now authored and the tip radius is derived from it. Changing
+branch structure no longer silently changes how thick every tree in the world
+is.
+
+**At 8 px/voxel most of a colonized crown cannot render.** 62 % of segments are
+sub-pixel at default zoom and the median node is a bare tip 0.96 px wide.
+Design §14 already rejects SDF/dual-contouring because the fidelity is
+sub-pixel; the same argument lands on twigs, and it was missed because the
+pixel-density correction was applied to radius quantization and the LOD ladder
+but not to the thing generating the radii.
+
+### Lobes replace colonization
+
+Consulted the spec's author with the measurements. The agreed shape:
+
+- The canopy's "clumps" are **derived from the limb structure**, not authored.
+  Each heavy-path chain is a limb; its base radius is the cross-section
+  supplying it and its terminal is where the foliage hangs. The arrangement
+  rules become constraints on that candidate set. Varied depth on all three axes
+  comes free, because phyllotaxis already spread the limbs.
+- Clustering a tip cloud was considered and rejected: k-means over a uniform
+  ellipsoid is a Voronoi partition, so the clumps tile and touch, and
+  "deliberate gaps" is precisely what it cannot produce. It also carries no
+  species identity - the cloud is uniform, so cluster count and size variance
+  are sampling noise.
+- **Colonization becomes opt-in and off by default.** Its remaining job was
+  branch structure visible through inter-lobe gaps, which the recursion produces
+  directly and with better control.
+- Bare-tree silhouette does not need it either: at this pixel density twig mass
+  is a texture problem, not a geometry problem.
+
+Two things the recipe needed corrected against the code, both found by
+measuring rather than reading:
+
+- "Terminals of chains above a radius threshold" **selects nothing** - a chain
+  terminal is a leaf by definition, so every one sits at tip radius, identically.
+  Rank chains by *base* radius instead.
+- Chain base radii come in **discrete tiers, identical within a tier**, because
+  a uniform recursion gives every limb of one order the same subtree. The pipe
+  model alone therefore produces tiers of equal lobes, not the uneven set the
+  arrangement rules ask for. A deterministic per-lobe size jitter supplies the
+  variation.
+
+Also corrected: lobe radius goes as `supply^(PIPE_EXP/3)`, not the literal
+`^(2/3)`, which assumes area conservation at exponent 2. `PIPE_EXP` is 2.3 and
+is meant to be tuned per species, so a literal would have been a second copy of
+a constant.
+
+**A bug the new tests caught during development, worth recording because the
+test was written for exactly it.** Merging two crowded lobes grows the survivor,
+which can push it inside a lobe that was clear a moment ago. A single pass
+leaves violations behind, so the merge settles to a fixpoint.
+
+**Deferred with a trigger.** The apex lobe is sized from the trunk chain's base
+radius, which is the whole tree's supply rather than that limb's, so it is
+overweighted. The principled fix partitions tips among selected lobes and sizes
+each from its own share. `lobe_scale` absorbs the error today. Trigger: the
+first species whose apex lobe cannot be balanced against the others by tuning.
+
+### The §4 gate, closed
+
+Re-derivation costs **0.015 ms per chunk** (default species) to **0.068 ms**
+(node cap) against an 8.5-9.0 ms `generate`. Baking would recover that for a
+fifth persisted chunk layer, a `BLOB_VERSION` bump and a save wipe, against a
+recorded defect where saves already grow with every chunk *visited*. Closed.
+
+Two findings inside it:
+
+- **The largest species is not the worst case.** Colonization on a maxed-out
+  turtle costs nothing, because the turtle fills the node budget and the pass
+  early-returns. The expensive shape is a *small* turtle leaving a large
+  colonization budget: ~620 µs, up to 1368 µs at 1000 attractors. Colonization
+  is the only thing that can reopen this gate.
+- **Spike ratio is 4-10x** on a mean of tens of microseconds. Recognised rather
+  than chased, and recorded so it is not rediscovered as novel if the mean grows.
+
+§13's points 3 and 4 - chunk-load latency and per-span distributions - are
+**carried, not waived**: nothing derives a tree during generation yet, so there
+is no chunk-load path to measure on. Re-take at segment emission.
+
+### Process defects, all mine, and the corrections adopted
+
+Four consecutive transcription cycles failed, and none was the author's error.
+
+1. **A markdown table of changed values cannot be copied as code.** Three
+   one-line value changes were pulled *out* of a code block to make them more
+   visible, and became the only part of the package that did not land. Every
+   other hunk in the same message, all in code blocks, transcribed correctly.
+2. **"Delete this test" as a prose paragraph** did not land either, for the
+   same reason.
+3. **A default-value change needs the same enumeration a signature change
+   gets.** Changing `crown_attractors` from 400 to 0 broke four tests that
+   assumed the default species had a crown. §1's grep rule covers types and
+   function names, so a literal never triggered it - but reading the test module
+   would have found all four in seconds.
+4. A long BEFORE/AFTER block **where only two of fourteen lines change** is
+   nearly as unreliable as prose. The changes are invisible at a glance.
+
+Corrections in force from here:
+
+- **Every edit is a code block, including deletions.** A deletion is presented
+  as BEFORE-with-it, AFTER-without. This generalizes §1's "every import is a
+  block, no exceptions" from imports to edits, which is what it always meant.
+- **Callouts go beside the block, never instead of it.** Visibility and
+  transcribability are different properties and only the block buys the second.
+- **Enumerate dependents of any changed *value*, not only of a changed name.**
+- **Run the candidate in the scratch workspace before presenting it whenever it
+  has test dependents**, not only when its values are uncertain. Three failed
+  cycles cost far more than the build. Everything from T1e-fix onward was
+  verified this way and landed first time.
+
+One design correction the author caught, in the same class as 16b's: the
+skeleton preview originally latched to the last picked voxel. That survives the
+pointer moving onto the panel but not the trip across the world to reach it, so
+every reach for a slider moved the tree. Replaced with the armed-tool model the
+blueprint panel already uses. H2's prediction held - naming the actions
+`CancelTool` / `RepeatTool` rather than after blueprints meant Esc and Shift
+came free - but the armed *state* was not generalized, so two tools can be armed
+at once and both consume one click. Handled with a precedence rule; a single
+`ArmedTool` owner on `UiState` is recorded as owed, with the third armed tool as
+the trigger.

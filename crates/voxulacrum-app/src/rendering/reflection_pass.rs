@@ -1,9 +1,11 @@
 use wgpu::CommandEncoder;
+use wgpu::util::RenderEncoder;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::frustum::Frustum;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::scatter_pass::ScatterPass;
+use crate::rendering::capsule_pass::CapsulePass;
 use crate::world::chunk::LoadedChunk;
 
 /// Planar water reflection pass. Re-renders terrain + foliage + scatter + player
@@ -25,6 +27,8 @@ pub struct ReflectionPassNode<'a> {
     pub detail_paint_pipeline: &'a wgpu::RenderPipeline,
     pub scatter_pass: &'a ScatterPass,
     pub scatter_pipeline: &'a wgpu::RenderPipeline,
+    pub capsule_pass: &'a CapsulePass,
+    pub capsule_pipeline: &'a wgpu::RenderPipeline,
     pub player_pass: &'a PlayerPass,
     pub hide_foliage: bool,
     pub enabled: bool,
@@ -112,6 +116,24 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
             }
         }
 
+        // Wood impostors. The same pipeline as the main pass - what differs is
+        // the bind group, which carries the mirrored view basis, so the solve
+        // reconstructs the reflected view without a second shader.
+        // 
+        // Not gated on `hide_foliage`, matching the main pass: a trunk is a
+        // solid occluder rather than decoration.
+        if !self.capsule_pass.chunks.is_empty() {
+            pass.set_pipeline(self.capsule_pipeline);
+            pass.set_bind_group(0, self.reflection_bind_group, &[]);
+            for (&chunk_pos, caps) in &self.capsule_pass.chunks {
+                if !self.frustum.is_chunk_visible(chunk_pos) {
+                    continue;
+                }
+                pass.set_vertex_buffer(0, caps.instance_buffer.slice(..));
+                pass.draw(0..6, 0..caps.instance_count);
+            }
+        }
+        
         // Player avatar (cull-None pipeline, reused as-is).
         if self.player_pass.visible && self.player_pass.body_index_count > 0 {
             pass.set_pipeline(&self.player_pass.pipeline);

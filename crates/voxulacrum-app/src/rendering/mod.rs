@@ -8,6 +8,7 @@ pub mod terrain_pass;
 pub mod upscale_pass;
 pub mod detail_paint_pass;
 pub mod scatter_pass;
+pub mod capsule_pass;
 pub mod water_pass;
 pub mod water_scene_pass;
 pub mod reflection_pass;

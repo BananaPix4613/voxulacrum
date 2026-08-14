@@ -4,7 +4,7 @@ use crate::ecs::resources::*;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::ParamChangeKind;
 use crate::rendering::cap_pass::CapPass;
-use crate::rendering::debug_lines::DebugLinePass;
+use crate::rendering::debug_lines::{voxel_box_lines, DebugLinePass};
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::main_scene_pass::{CapConfig, MainScenePassNode};
@@ -18,6 +18,7 @@ use crate::rendering::shadow_pass::ShadowPassNode;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::scatter_pass::ScatterPass;
+use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::water_pass::WaterPass;
 use crate::rendering::reflection_pass::ReflectionPassNode;
 use crate::rendering::player_pass::PlayerPass;
@@ -1007,6 +1008,246 @@ pub fn blueprint_selection_gizmo_system(
     debug_lines.set_selection(&ctx, corners, SELECTION_COLOR);
 }
 
+/// The heavy path, in the color the decomposition is supposed to find.
+const SKELETON_TRUNK_COLOR: [f32; 3] = [1.0, 0.55, 0.15];
+
+/// Canopy lobes, distinct from every branch color.
+const SKELETON_LOBE_COLOR: [f32; 3] = [0.35, 0.85, 0.40];
+
+/// Voxel cells the wood occupies - what collides and what can be mined.
+const SKELETON_WOOD_COLOR: [f32; 3] = [0.75, 0.55, 0.30];
+
+/// Outlines of the capsules the impostor pass actually draws.
+const SKELETON_CAPSULE_COLOR: [f32; 3] = [0.95, 0.85, 0.45];
+
+/// A per-chain color for everything that is not the trunk. Hashed rather than
+/// cycled through a table, so adjacent chain ids do not land on adjacent hues.
+fn skeleton_chain_color(chain: u32) -> [f32; 3] {
+    if chain == 0 {
+        return SKELETON_TRUNK_COLOR;
+    }
+    let h = (chain as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    [
+        0.30 + ((h >> 8) & 0xFF) as f32 / 365.0,
+        0.30 + ((h >> 24) & 0xFF) as f32 / 365.0,
+        0.30 + ((h >> 40) & 0xFF) as f32 / 365.0,
+    ]
+}
+
+/// Derive and draw the debug tree skeleton at its placed anchor.
+///
+/// **Armed placement.** A latch on the last picked voxel is not enough: it
+/// survives the pointer moving onto the panel, but the trip across the world to
+/// get there re-anchors it, so every reach for a slider moved the tree. A click
+/// places it and it stays. Same correction as 16b.
+pub fn skeleton_debug_system(
+    pick: Res<PickState>,
+    pointer: Res<PointerState>,
+    input: Res<InputState>,
+    ctx: Res<RenderContext>,
+    mut ui: ResMut<UiState>,
+    mut debug_lines: ResMut<DebugLinePass>,
+) {
+    use crate::input::GameAction;
+    use crate::rendering::debug_lines::DebugLineVertex;
+    use crate::ui::blueprint_panel::ArmedTool;
+    use crate::world::chunk::VOXEL_SCALE;
+    use glam::Vec3;
+    use nodegraph_eval::skeleton::Skeleton;
+
+    // A blueprint tool owns the click while one is armed. Both systems read the
+    // same left press, and two tools acting on one click reads as a random
+    // extra action rather than as a mode error. Disarming rather than merely
+    // deferring keeps the HUD honest about what the next click will do.
+    let blueprint_armed = ui.blueprint_panel.armed != ArmedTool::None;
+
+    let state = &mut ui.skeleton_panel;
+    if blueprint_armed {
+        state.armed = false;
+    }
+
+    // Esc or right-click cancels the arming. The origin is deliberately kept -
+    // Clear is what discards it, so Esc is never a key that quietly throws
+    // placement away. Decision H3, applied to the second armed tool.
+    if state.armed && (pointer.right.just_pressed || input.just_pressed(GameAction::CancelTool)) {
+        state.armed = false;
+    }
+
+    if state.armed && pointer.left.just_pressed {
+        // `picking_system` clears the anchor while egui wants the pointer, so
+        // the click that armed this can never also place it.
+        if let Some(anchor) = pick.anchor {
+            state.origin = Some(anchor);
+            // Held Shift keeps the tool armed, so the preview can be walked
+            // around the world without re-arming between clicks.
+            if !input.pressed(GameAction::RepeatTool) {
+                state.armed = false;
+            }
+        }
+    }
+
+    if std::mem::take(&mut state.save_requested) {
+        // Disk is authoritative, the rule hot reload already runs on (blueprint
+        // decision E2). There is no unsaved in-memory species to disagree with
+        // the file a `PlaceTree` node will resolve.
+        let file = nodegraph_hotreload::SpeciesFile {
+            version: nodegraph_hotreload::SPECIES_VERSION,
+            name: state.name.clone(),
+            species: state.species,
+        };
+        match file.save(&crate::world::blueprint::species_dir()) {
+            Ok(()) => {
+                state.status = Some(format!("saved {}.species.json", state.name));
+                state.error = None;
+            }
+            Err(e) => state.error = Some(e.to_string()),
+        }
+    }
+
+    let key = match (state.open, state.origin) {
+        (true, Some(v)) => Some((
+            v,
+            state.seed,
+            state.age,
+            state.species,
+            state.show_radii,
+            state.show_wood,
+            state.show_capsules,
+        )),
+        _ => None,
+    };
+    if key == state.built {
+        return;
+    }
+    state.built = key;
+
+    let Some((origin, seed, age, species, show_radii, show_wood, show_capsules)) = key else {
+        debug_lines.set_overlay(&ctx, None);
+        state.nodes = 0;
+        state.chains = 0;
+        state.lobes = 0;
+        state.wood = 0;
+        state.reach = 0.0;
+        state.height = 0.0;
+        return;
+    };
+
+    let skeleton = Skeleton::derive(seed as u64, &species, age);
+
+    // The root stands on top of the picked voxel, centered in it - matching
+    // where `place_blueprints` and the stamp tool put an anchored thing.
+    let base = Vec3::new(
+        (origin.x as f32 + 0.5) * VOXEL_SCALE,
+        (origin.y as f32 + 1.0) * VOXEL_SCALE,
+        (origin.z as f32 + 0.5) * VOXEL_SCALE,
+    );
+
+    let mut lines: Vec<DebugLineVertex> = Vec::new();
+    for seg in skeleton.segments() {
+        let color = skeleton_chain_color(seg.chain);
+        let a = base + seg.a * VOXEL_SCALE;
+        let b = base + seg.b * VOXEL_SCALE;
+        lines.push(DebugLineVertex { position: a.to_array(), color });
+        lines.push(DebugLineVertex { position: b.to_array(), color });
+        if show_radii {
+            // A cross at the child end, as wide as the branch is thick. A line
+            // drawing has no thickness, so this is the only way the pipe
+            // model's taper is visible at all.
+            for axis in [Vec3::X, Vec3::Z] {
+                let arm = axis * seg.rb * VOXEL_SCALE;
+                lines.push(DebugLineVertex { position: (b - arm).to_array(), color });
+                lines.push(DebugLineVertex { position: (b + arm).to_array(), color });
+            }
+        }
+        if show_capsules {
+            // A ring at each end plus four rails: the taper between them is the
+            // thing being judged, and a cross at one end cannot show it.
+            let axis = b - a;
+            let len = axis.length();
+            if len > 1e-5 {
+                let dir = axis / len;
+                let u = dir.any_orthonormal_vector();
+                let v = dir.cross(u);
+                const RING: usize = 12;
+                let step = std::f32::consts::TAU / RING as f32;
+                for (center, radius) in [(a, seg.ra * VOXEL_SCALE), (b, seg.rb * VOXEL_SCALE)] {
+                    for s in 0..RING {
+                        let at = |t: f32| center + (u * t.cos() + v * t.sin()) * radius;
+                        lines.push(DebugLineVertex {
+                            position: at(s as f32 * step).to_array(),
+                            color: SKELETON_CAPSULE_COLOR,
+                        });
+                        lines.push(DebugLineVertex {
+                            position: at((s + 1) as f32 * step).to_array(),
+                            color: SKELETON_CAPSULE_COLOR,
+                        });
+                    }
+                }
+                for k in 0..4 {
+                    let t = k as f32 * std::f32::consts::FRAC_PI_2;
+                    let off = u * t.cos() + v * t.sin();
+                    lines.push(DebugLineVertex {
+                        position: (a + off * (seg.ra * VOXEL_SCALE)).to_array(),
+                        color: SKELETON_CAPSULE_COLOR,
+                    });
+                    lines.push(DebugLineVertex {
+                        position: (b + off * (seg.rb * VOXEL_SCALE)).to_array(),
+                        color: SKELETON_CAPSULE_COLOR,
+                    });
+                }
+            }
+        }
+    }
+
+    // Three orthogonal rings per lobe, so an ellipsoid reads as a volume in a
+    // line drawing rather than as a circle.
+    for lobe in &skeleton.lobes {
+        let c = base + lobe.center * VOXEL_SCALE;
+        let r = lobe.radii() * VOXEL_SCALE;
+        const SEGS: usize = 20;
+        for axis in 0..3 {
+            let at = |t: f32| match axis {
+                0 => Vec3::new(r.x * t.cos(), r.y * t.sin(), 0.0),
+                1 => Vec3::new(0.0, r.y * t.cos(), r.z * t.sin()),
+                _ => Vec3::new(r.x * t.cos(), 0.0, r.z * t.sin()),
+            };
+            for s in 0..SEGS {
+                let step = std::f32::consts::TAU / SEGS as f32;
+                lines.push(DebugLineVertex {
+                    position: (c + at(s as f32 * step)).to_array(),
+                    color: SKELETON_LOBE_COLOR,
+                });
+                lines.push(DebugLineVertex {
+                    position: (c + at((s + 1) as f32 * step)).to_array(),
+                    color: SKELETON_LOBE_COLOR,
+                });
+            }
+        }
+    }
+
+    // What the tree occupies in the voxel grid: the part that collides, can be
+    // mined, and that segment emission will later gate on. Deduplicated,
+    // because `voxelize` visits overlapping capsules and says so.
+    let root_voxels = origin.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
+    let mut wood: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
+    skeleton.voxelize(root_voxels, |c| {
+        wood.insert(c);
+    });
+    if show_wood {
+        for cell in &wood {
+            lines.extend(voxel_box_lines(*cell, SKELETON_WOOD_COLOR));
+        }
+    }
+
+    debug_lines.set_overlay(&ctx, Some(&lines));
+    state.wood = wood.len();
+    state.nodes = skeleton.nodes.len();
+    state.chains = skeleton.chains;
+    state.lobes = skeleton.lobes.len();
+    state.reach = skeleton.reach;
+    state.height = skeleton.height;
+}
+
 /// Sample the biome/zone map when requested (roadmap §4.3).
 ///
 /// On the pool and blocking, like the column inspector: a 128² grid is ~33k
@@ -1067,6 +1308,7 @@ pub fn streaming_tick_system(
     frame: Res<FrameState>,
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
+    mut capsules: ResMut<CapsulePass>,
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
     _ctx: Res<RenderContext>,
@@ -1112,6 +1354,7 @@ pub fn streaming_tick_system(
     for pos in &tick_result.unloaded {
         detail_paint.remove_chunk(*pos);
         scatter.remove_chunk(*pos);
+        capsules.remove_chunk(*pos);
         water_pass.remove_chunk_water(*pos);
     }
 
@@ -1166,6 +1409,7 @@ pub fn meshing_tick_system(
     mut ui: ResMut<UiState>,
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
+    mut capsules: ResMut<CapsulePass>,
     mut water_pass: ResMut<WaterPass>,
     mut timings: ResMut<FrameTimings>,
 ) {
@@ -1194,6 +1438,7 @@ pub fn meshing_tick_system(
         for pos in &meshed {
             detail_paint.add_chunk(*pos, &world.0, &ctx.device);
             scatter.add_chunk(*pos, &world.0, &ctx.device);
+            capsules.add_chunk(*pos, &world.0, &ctx.device);
         }
         // Water welds across seams, so also refresh newly-meshed chunks' neighbors
         // (detail/scatter are per-chunk and don't need this).
@@ -1580,6 +1825,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let render_targets = ecs.resource::<RenderTargets>();
         let detail_paint_pass = ecs.resource::<DetailPaintPass>();
         let scatter_pass = ecs.resource::<ScatterPass>();
+        let capsule_pass = ecs.resource::<CapsulePass>();
         let water_pass = ecs.resource::<WaterPass>();
         let debug_line_pass = ecs.resource::<DebugLinePass>();
         let cap_pass = ecs.resource::<CapPass>();
@@ -1613,6 +1859,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             bind_group: &shadow_bind_group.0,
             shadow_depth_view: &shadow_depth_view.0,
             chunks: &shadow_chunks,
+            capsule_pass: ecs.resource::<CapsulePass>(),
+            capsule_shadow_pipeline: &pipeline_registry.capsule_shadow_pipeline,
         };
         
         let player_pass = ecs.resource::<PlayerPass>();
@@ -1649,9 +1897,11 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
             scatter_pass: &scatter_pass,
             scatter_pipeline: &pipeline_registry.scatter_pipeline,
+            capsule_pass: &capsule_pass,
+            capsule_pipeline: &pipeline_registry.capsule_pipeline,
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
-            hide_foliage: ui.params.debug.hide_foliage || room_enclosed,
+            hide_foliage: ui.params.debug.hide_foliage,
             player_pass: &player_pass,
         };
 
@@ -1669,8 +1919,10 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
             scatter_pass: &scatter_pass,
             scatter_pipeline: &pipeline_registry.scatter_pipeline,
+            capsule_pass: &capsule_pass,
+            capsule_pipeline: &pipeline_registry.capsule_pipeline,
             player_pass: &player_pass,
-            hide_foliage: ui.params.debug.hide_foliage || room_enclosed,
+            hide_foliage: ui.params.debug.hide_foliage,
             enabled: !ui.params.debug.hide_water && !water_pass.chunk_meshes.is_empty(),
         };
 
@@ -1679,7 +1931,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             global_bind_group: &uniform_bind_group.0,
             water_pass: &water_pass,
             frustum: &sim.frustum,
-            hide_water: ui.params.debug.hide_water || room_enclosed,
+            hide_water: ui.params.debug.hide_water,
             scene_tex: &render_targets.scene,
             scene_copy_tex: &render_targets.scene_copy,
             tex_size: wgpu::Extent3d {

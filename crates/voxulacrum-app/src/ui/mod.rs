@@ -5,6 +5,7 @@ pub mod field_probe;
 pub mod hierarchy_editor;
 pub mod biome_map;
 pub mod blueprint_panel;
+pub mod skeleton_panel;
 
 use egui_wgpu::ScreenDescriptor;
 
@@ -192,7 +193,14 @@ impl EguiRenderer {
                 }
                 panels::draw_engine_panel(ctx, ui_state);
             }
-            if let Some(label) = ui_state.blueprint_panel.armed_hud_label() {
+            // At most one tool is armed at a time - `skeleton_debug_system`
+            // disarms itself while a blueprint tool holds the click - so these
+            // chain rather than stacking two HUD lines in the same place.
+            if let Some(label) = ui_state
+                .blueprint_panel
+                .armed_hud_label()
+                .or_else(|| ui_state.skeleton_panel.armed_hud_label())
+            {
                 panels::draw_armed_hud(ctx, &label);
             }
             if probe.enabled {

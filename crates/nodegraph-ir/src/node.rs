@@ -382,31 +382,199 @@ impl Default for FindFlatParams {
     fn default() -> Self { Self { max_step: 1, on_materials: Vec::new() } }
 }
 
-/// Parameters for [`NodeKind::PlaceTree`]: procedural trunk + spherical canopy.
+/// Per-species shape parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+// Every field defaults, so a species file declares only what differs from a
+// generic broadleaf - and adding a field later cannot break one already on
+// disk, which is the half of versioning a version number does not cover.
+#[serde(default)]
+pub struct TreeSpecies {
+    /// Radius of the trunk at the ground, in voxels. **Authored, not derived.**
+    ///
+    /// The pipe model inverts exactly - root area is the sum over every tip, so
+    /// `trunk = tip * tips^(1/PIPE_EXP)` and therefore
+    /// `tip = trunk / tips^(1/PIPE_EXP)`. Reading it this way makes trunk
+    /// thickness a species property instead of a side effect of how many twigs
+    /// a species happens to generate, which is what it was: changing the branch
+    /// structure moved the trunk by nearly 4x and nothing said so.
+    ///
+    /// It is also the only radius that interacts with the voxel grid, so it is
+    /// what decides whether a tree collides at all.
+    pub trunk_radius: f32,
+    /// Radius of a branch tip, in voxels. **Also authored**, and the reason the
+    /// profile exponent is solved rather than fixed.
+    ///
+    /// Deriving this from `trunk_radius` and the tip count - as an area-
+    /// conserving pipe model must - gives `trunk / tips^(1/PIPE_EXP)`. A real
+    /// tree has on the order of 10^5 twigs, so that ratio is large. A skeleton
+    /// with 25 terminals gets a ratio of 4, and every branch ends in a club.
+    /// Author both ends and let the exponent absorb the difference.
+    pub tip_radius: f32,
+    /// Between-tree variation, as a fraction, applied to internode length and
+    /// branch angle. On top of the root yaw and phyllotactic phase, which are
+    /// always randomized per tree.
+    pub variance: f32,
+    /// Length of the first internode, in voxels.
+    pub internode: f32,
+    /// Length multiplier at each successive step along one axis.
+    pub taper: f32,
+    /// Length multiplier applied when a lateral leaves its parent axis.
+    pub child_scale: f32,
+    /// Internodes an axis extends by before it terminates.
+    pub axis_steps: u8,
+    /// Deepest branching order. 0 is a bare trunk.
+    pub max_order: u8,
+    /// Laterals emitted per internode.
+    pub laterals: u8,
+    /// Angle a lateral leaves its parent axis at, in radians.
+    pub branch_angle: f32,
+    /// Per-step bend toward world up (positive) or away from it (negative), as
+    /// a fraction of the full correction. Gravitropism.
+    pub gravitropism: f32,
+    /// Random angular wobble per internode, in radians.
+    pub wobble: f32,
+    /// Attraction points scattered through the crown. 0 disables colonization
+    /// entirely, leaving the turtle skeleton alone.
+    pub crown_attractors: u16,
+    /// Crown ellipsoid center height, as a fraction of the turtle's own height.
+    pub crown_center: f32,
+    /// Crown ellipsoid horizontal radius, in voxels.
+    pub crown_radius: f32,
+    /// Crown ellipsoid vertical radius, in voxels.
+    pub crown_height: f32,
+    /// How far a node can see an attractor. Larger fills faster and straighter.
+    pub influence: f32,
+    /// Attractors this close to a node are consumed. Sized against
+    /// `colonize_step` and measured rather than reasoned: at ~1.5x the step the
+    /// crown exhausts its attractors at about half the node cap, so every age
+    /// above 0.5 produces the identical tree. Below ~0.8x the step the budget
+    /// is the binding constraint at every age, which is what makes the age
+    /// range live end to end.
+    pub kill_radius: f32,
+    /// Length of one colonization growth, in voxels.
+    pub colonize_step: f32,
+    /// Most lobes a canopy may carry. 0 disables the canopy entirely.
+    pub max_lobes: u8,
+    /// Lobe radius per unit of supplying cross-section.
+    pub lobe_scale: f32,
+    /// Per-lobe random size variation, as a fraction.
+    pub lobe_size_jitter: f32,
+    /// Per-axis random stretch, as a fraction, making a lobe an ellipsoid.
+    pub lobe_anisotropy: f32,
+    /// Lobes closer than this fraction of their summed radii are merged.
+    pub lobe_separation: f32,
+    /// Lobes smaller than this are dropped, in voxels.
+    pub lobe_min_radius: f32,
+    /// Declared upper bound on horizontal crown reach, in voxels. A **bound,
+    /// not a target**: the margin band is sized from it before generation runs,
+    /// so it cannot be derived from the tree it bounds.
+    ///
+    /// Nothing checks it yet. The check belongs to the feature source that
+    /// sizes the band, and asserting here would panic the app while sliders are
+    /// being dragged in the debug panel.
+    pub max_crown_reach: f32,
+}
+
+impl Default for TreeSpecies {
+    /// A generic broadleaf. Tuning is content work, not a code default.
+    ///
+    /// `axis_steps` and `max_order` are deliberately modest: the turtle's job
+    /// is the trunk and primary limbs, and a turtle that spends the whole node
+    /// budget leaves the crown with nothing. These terminate at 56 nodes.
+    fn default() -> Self {
+        Self {
+            trunk_radius: 1.0,
+            tip_radius: 0.06,
+            variance: 0.25,
+            internode: 1.2,
+            taper: 0.88,
+            child_scale: 0.7,
+            axis_steps: 5,
+            max_order: 2,
+            laterals: 1,
+            branch_angle: 0.9,
+            gravitropism: 0.25,
+            wobble: 0.18,
+            crown_attractors: 0,
+            crown_center: 0.85,
+            crown_radius: 3.5,
+            crown_height: 2.5,
+            influence: 4.0,
+            kill_radius: 0.35,
+            colonize_step: 0.45,
+            max_lobes: 6,
+            lobe_scale: 1.6,
+            lobe_size_jitter: 0.28,
+            lobe_anisotropy: 0.22,
+            lobe_separation: 0.75,
+            lobe_min_radius: 0.4,
+            max_crown_reach: 8.0,
+        }
+    }
+}
+
+/// A species and its wood material, resolved at the hot-reload boundary.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ResolvedTree {
+    /// Shape parameters, loaded from `<species>.species.json`.
+    pub species: TreeSpecies,
+    /// Wood material id, resolved from the node's material name.
+    pub wood: voxel_core::MaterialId,
+}
+
+/// Parameters for [`NodeKind::PlaceTree`]: a rule producing trees on a coarse
+/// world grid, in a ZoneGraph.
+///
+/// A declaration rather than a dataflow node, exactly like
+/// [`NodeKind::PlaceStructure`] - generation scans the zone graph for these
+/// rather than evaluating them in a chain, so it carries no pins.
+///
+/// The grid fields deliberately mirror `PlaceStructureParams`, because both
+/// become a `FeatureSource` and the cell grid, density roll and ordering are
+/// one implementation shared by both payloads. Folding the two nodes into one
+/// with a payload enum is the tidier end state and is **deferred**: it would be
+/// a wire-format change to a node that ships in live content, and the trigger
+/// for paying that is a third payload kind.
+///
+/// Two fields `PlaceStructureParams` has are deliberately absent. `random_yaw`
+/// buys nothing when every seed already grows a differently-shaped tree, and
+/// `surface_offset` is fixed at 0 because a trunk stands *on* its anchor voxel
+/// where a blueprint's first cell replaces it - a field whose only correct
+/// value is one is a field that only makes wrong worlds reachable.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct PlaceTreeParams {
-    /// Per-node seed, mixed with each point's seed for height variation.
+    /// Species name; resolves to `<name>.species.json` in the species dir.
+    pub species: String,
+    /// Wood material, **by name**. Numeric ids in assets are what D5 exists to
+    /// undo, and a new node should not add another one.
+    pub wood: String,
+    /// Edge length of a feature cell, in voxels. One candidate per cell.
+    pub cell_size: i32,
+    /// Chance a cell produces a tree, `0..=1`.
+    pub density: f32,
+    /// Node-local seed, mixed with the world seed and the cell coordinates.
     pub seed: u32,
-    /// Minimum trunk height (voxels above the surface).
-    pub trunk_min: u32,
-    /// Maximum trunk height (inclusive).
-    pub trunk_max: u32,
-    /// Canopy sphere radius in voxels.
-    pub canopy_radius: u32,
-    /// Trunk material.
-    pub trunk_material: voxel_core::MaterialId,
-    /// Leaf material.
-    pub leaf_material: voxel_core::MaterialId,
+    /// Maturity, `0..=1`. A node budget rather than a scale - see `TreeSpecies`.
+    pub age: f32,
+    /// Biomes this source appears in. Empty means every biome in the zone.
+    #[serde(default)]
+    pub biomes: Vec<u16>,
+    /// Resolved species + wood (filled by `resolve_species`; `None` until then).
+    #[serde(skip)]
+    pub resolved: Option<ResolvedTree>,
 }
+
 impl Default for PlaceTreeParams {
     fn default() -> Self {
         Self {
-            seed: 0,
-            trunk_min: 4,
-            trunk_max: 6,
-            canopy_radius: 3,
-            trunk_material: voxel_core::MaterialId(9), // Wood
-            leaf_material: voxel_core::MaterialId(10), // Leaves
+            species: "oak".to_string(),
+            wood: "wood".to_string(),
+            cell_size: 24,
+            density: 0.35,
+            seed: 1,
+            age: 1.0,
+            biomes: Vec::new(),
+            resolved: None,
         }
     }
 }
@@ -425,6 +593,30 @@ pub struct PlaceBlueprintParams {
 }
 impl Default for PlaceBlueprintParams {
     fn default() -> Self { Self { blueprint: "rock".to_string(), resolved: None } }
+}
+
+/// Foliage a structure occurrence anchors, in addition to the voxels it stamps.
+/// 
+/// A tree is the case this exists for: the trunk is a blueprint that occupies
+/// the voxel grid - so it collides and can be broken - and the canopy is foliage
+/// that does not. Declaring both on one node is what keeps them at the same
+/// place; two independent placements would have to agree, and eventually would
+/// not.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct StructureCanopy {
+    /// Scatter type bucket the instance lands in.
+    pub type_id: u16,
+    /// Prefab instanced at the anchor.
+    pub prefab_id: u32,
+    /// Voxels above the structure's anchor the canopy sits at - normally the
+    /// trunk's height, so the canopy crowns it.
+    pub y_offset: i32,
+}
+
+impl Default for StructureCanopy {
+    fn default() -> Self {
+        Self { type_id: 0, prefab_id: 0, y_offset: 4 }
+    }
 }
 
 /// Parameters for [`NodeKind::PlaceStructure`]: a rule producing structure
@@ -450,6 +642,12 @@ pub struct PlaceStructureParams {
     pub random_yaw: bool,
     /// How far above the surface the anchor lands.
     pub surface_offset: i32,
+    /// Biomes this source appears in. Empty means every biome in the zone.
+    #[serde(default)]
+    pub biomes: Vec<u16>,
+    /// Foliage each occurrence anchors, if any. `None` is a plain structure.
+    #[serde(skip)]
+    pub canopy: Option<StructureCanopy>,
     /// Resolved template (filled by `resolve_blueprints`; `None` until then).
     #[serde(skip)]
     pub resolved: Option<ResolvedBlueprint>,
@@ -463,6 +661,8 @@ impl Default for PlaceStructureParams {
             seed: 1,
             random_yaw: true,
             surface_offset: 1,
+            biomes: Vec::new(),
+            canopy: None,
             resolved: None,
         }
     }
@@ -1222,9 +1422,11 @@ impl NodeKind {
             NodeKind::PlaceTree(_) => NodeDescriptor {
                 display_name: "Place Tree",
                 category: NodeCategory::Props,
+                // No pins: a declaration scanned out of a ZoneGraph, not a
+                // stage in a density chain. Same shape as Place Structure.
+                inputs: NO_PINS,
+                outputs: NO_PINS,
                 color: [0xc8, 0x90, 0x60],
-                inputs: PLACE_IN,
-                outputs: TERRAIN_OUT,
             },
             NodeKind::PlaceBlueprint(_) => NodeDescriptor {
                 display_name: "Place Blueprint",
@@ -1414,9 +1616,9 @@ impl NodeKind {
     /// Whether this kind has a per-column evaluation at all, and so may appear
     /// in a World or Zone graph.
     ///
-    /// `PlaceStructure` qualifies without being evaluated: it declares a
-    /// structure source on the owning ZoneGraph and carries no pins, so the
-    /// column evaluator skips it rather than filling it.
+    /// `PlaceStructure` and `PlaceTree` qualify without being evaluated: each
+    /// declares a feature source on the owning ZoneGraph and carries no pins,
+    /// so the column evaluator skips it rather than filling it.
     pub fn is_column_kind(&self) -> bool {
         self.is_domain_agnostic()
             || matches!(
@@ -1427,6 +1629,7 @@ impl NodeKind {
                     | NodeKind::GraphOutput(_)
                     | NodeKind::GraphRef(_)
                     | NodeKind::PlaceStructure(_)
+                    | NodeKind::PlaceTree(_)
             )
     }
 
@@ -1490,7 +1693,6 @@ impl NodeKind {
                 out
             }
             NodeKind::FindFlat(p) => p.on_materials.clone(),
-            NodeKind::PlaceTree(p) => vec![p.trunk_material, p.leaf_material],
             NodeKind::SurfaceFilter(p) => p.materials.clone(),
             _ => Vec::new(),
         }

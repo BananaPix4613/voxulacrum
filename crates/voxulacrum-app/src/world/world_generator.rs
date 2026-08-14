@@ -290,6 +290,7 @@ impl WorldGenerator {
                     scatter: ScatterStore::default(),
                     fluids: FluidLayer::default(),
                     smoothing_distances: Box::new([0u8; super::slab_smoothing::COLUMN_COUNT]),
+                    segments: Vec::new(),
                 };
             }
         };
@@ -341,7 +342,15 @@ impl WorldGenerator {
             &fluids,
         );
 
-        GeneratedChunk { storage, tags, detail_layers, scatter, fluids, smoothing_distances }
+        GeneratedChunk {
+            storage,
+            tags,
+            detail_layers,
+            scatter,
+            fluids,
+            smoothing_distances,
+            segments: eval.segments,
+        }
     }
 
     /// Aggregate a chunk evaluation's per-column zone/biome assignments into
@@ -491,6 +500,10 @@ pub struct GeneratedChunk {
     /// so the cross-chunk seam pass (`world::seam`) can finish boundaries without
     /// re-evaluating the graph.
     pub smoothing_distances: Box<[u8; super::slab_smoothing::COLUMN_COUNT]>,
+    /// Wood capsules this chunk owns, for the impostor pass. Derived, never
+    /// persisted - a chunk reloading re-runs generation, so these come back with
+    /// the terrain rather than needing a place in the save format.
+    pub segments: Vec<nodegraph_eval::feature::BranchSegment>,
 }
 
 /// Identifies one editable source in the world hierarchy, for routing edits and
@@ -724,6 +737,12 @@ fn read_graph(path: &std::path::Path) -> Result<Graph, String> {
     nodegraph_hotreload::resolve_blueprints(
         &mut graph,
         &crate::world::blueprint::blueprint_dir(),
+        &registry,
+    )
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    nodegraph_hotreload::resolve_species(
+        &mut graph,
+        &crate::world::blueprint::species_dir(),
         &registry,
     )
     .map_err(|e| format!("{}: {e}", path.display()))?;

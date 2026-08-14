@@ -1,51 +1,12 @@
-//! Prop stamping: write tree / blueprint voxels into a terrain buffer at scanned
+//! Prop stamping: write blueprint voxels into a terrain buffer at scanned
 //! surface points, clipping anything outside the chunk's `[0, N)` bounds.
 
-use nodegraph_ir::PlaceTreeParams;
 use voxel_core::{ChunkBuffer, ResolvedBlueprint, Voxel};
 
 use crate::field::CHUNK_DIM;
-use crate::scatter::{ScatterPoint, SplitMix64};
+use crate::scatter::ScatterPoint;
 
 const N: i32 = CHUNK_DIM as i32;
-
-/// Stamp a trunk + spherical canopy at every point that has a surface.
-/// Returns a new buffer (input cloned). Leaves overwrite only air; trunk
-/// overwrites unconditionally. Out-of-bounds voxels are clipped.
-pub(crate) fn place_trees(
-    terrain: &ChunkBuffer<Voxel, 32>,
-    points: &[ScatterPoint],
-    p: &PlaceTreeParams,
-) -> ChunkBuffer<Voxel, 32> {
-    let mut out = terrain.clone();
-    out.make_dense();
-    for &pt in points {
-        let Some(sy) = pt.surface_y else { continue; };
-        let mut rng = SplitMix64::new(pt.seed ^ (p.seed as u64).wrapping_mul(0x9E3779B97F4A7C15));
-        let lo = p.trunk_min;
-        let hi = p.trunk_max.max(lo);
-        let trunk_h = (lo + (rng.next_u64() % (hi - lo + 1) as u64) as u32) as i32;
-        let bx = pt.lx.round() as i32;
-        let bz = pt.lz.round() as i32;
-        let trunk_top = sy + trunk_h;
-        for y in (sy + 1)..=trunk_top {
-            set_clipped(&mut out, bx, y, bz, Voxel::cube(p.trunk_material), false);
-        }
-        let r = p.canopy_radius as i32;
-        let cy = trunk_top;
-        for dy in -r..=r {
-            for dz in -r..=r {
-                for dx in -r..=r {
-                    if dx * dx + dy * dy + dz * dz > r * r { continue; }
-                    set_clipped(&mut out, bx + dx, cy + dy, bz + dz,
-                                Voxel::cube(p.leaf_material), true);
-                }
-            }
-        }
-    }
-    out.try_collapse();
-    out
-}
 
 /// Stamp a resolved blueprint at every point with a surface. The blueprint's
 /// `anchor` cell lands one cell above the surface on the point's column.
@@ -92,17 +53,6 @@ mod tests {
 
     fn scanned(lx: f32, lz: f32, sy: i32) -> ScatterPoint {
         ScatterPoint { lx, lz, surface_y: Some(sy), seed: 99 }
-    }
-
-    #[test]
-    fn tree_stamps_trunk_above_surface() {
-        let t = floor(8);
-        let p = PlaceTreeParams::default();
-        let out = place_trees(&t, &[scanned(16.0, 16.0, 8)], &p);
-        // Cell directly above the surface is trunk material.
-        assert_eq!(out.get(16, 9, 16).material, p.trunk_material);
-        // Surface itself is unchanged grass.
-        assert_eq!(out.get(16, 8, 16).material, MaterialId(6));
     }
 
     #[test]

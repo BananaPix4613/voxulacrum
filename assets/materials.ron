@@ -13,5 +13,7 @@
         (id: 6, id_name: "grass_soil", display_name: "Grass Soil", color: (0.30, 0.55, 0.18), sharpness: 0.35, hardness: 0.2,  permeable: false, supports_flora: true),
         (id: 7, id_name: "water",      display_name: "Water",      color: (0.2, 0.35, 0.6),   sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false),
         (id: 8, id_name: "gravel",     display_name: "Gravel",     color: (0.52, 0.49, 0.45), sharpness: 0.6,  hardness: 0.5,  permeable: true,  supports_flora: false),
+        (id: 9, id_name: "wood",       display_name: "Wood",       color: (0.55, 0.44, 0.30), sharpness: 0.5,  hardness: 0.6,  permeable: false, supports_flora: false, render_delegated: true),
+        (id: 10, id_name: "leaves",    display_name: "Leaves",     color: (0.24, 0.46, 0.18), sharpness: 0.2,  hardness: 0.1,  permeable: true,  supports_flora: false),
     ],
 )
