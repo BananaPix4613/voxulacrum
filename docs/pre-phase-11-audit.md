@@ -1227,7 +1227,8 @@ template.
 | Through 5c-2 | *(seed 0)* | `--verify-generation` defaulted to seed 0 |
 | From 5c-3 | `0x762455f194348d88` | Seed now comes from the manifest (54321). Reproduce with `--verify-generation 64`; `--seed 0` still yields the previous value |
 | From S11 | `0x4b7242f2a2c2c6de` | Content wave 1 (three biomes, two zones). Held unchanged through S12-S17 |
-| **From 17f** | **`0x12e6a0644184099f`** | `DEFAULT_COUNT` 64 -> 512. Reproduce with `--verify-generation` (no argument) |
+| From 17f | `0x12e6a0644184099f` | `DEFAULT_COUNT` 64 -> 512. Reproduce with `--verify-generation` (no argument). Held through the Phase A blockers and the world parameter sidecar |
+| **From T6** | **`0xed02babdf0f40420`** | Trees: the first `PlaceTree` in shipped content, with skeleton smoothing and the re-tuned oak. A content change, so movement was the expected outcome. Recorded 2026-09-24 |
 
 The 5c-3 change is expected, not a regression: verifying determinism at a seed
 the world is never played at was the weaker check.
@@ -2748,3 +2749,214 @@ came free - but the armed *state* was not generalized, so two tools can be armed
 at once and both consume one click. Handled with a precedence rule; a single
 `ArmedTool` owner on `UiState` is recorded as owed, with the third armed tool as
 the trigger.
+
+## Tree substeps T3-T6 - wood in the world, and the render path
+
+Wood generates, collides, renders as analytic capsules, casts shadows, outlines,
+occludes the player, and reflects in water. What follows is the decisions and
+the findings; the code is its own documentation.
+
+### The layer split, and the one clause that was missing
+
+Design § 6 says foliage does not occupy voxel cells; the tree work needs wood
+that does. Both hold, because they are different layers: **wood is voxels for
+collision, mining and the DDA query, and is drawn by the capsule pass.**
+
+Nothing anywhere said "and therefore the mesher must not draw it", and that
+omission nearly shipped cubic trees. `cube_mesher.rs` has exactly one rule -
+`if !v.is_solid() { continue; }`, no material discrimination - so wiring wood
+into the grid renders every tree as blocks by default. The clause is now
+`voxel-tree-rendering-spec.md` § 2.1a, stated as an ordering constraint rather
+than a preference: no wood enters the grid until a render-delegated material
+trait exists and the mesher honours it.
+
+Two thresholds pull opposite ways here, which is what makes the mistake
+plausible. `voxelize` fills a cell whose centre is inside a capsule, so thin
+branches occupy nothing - correct, a twig has no room to be solid in. Cubic
+rendering is harmless on a 1px twig and worst on a 24px trunk. **Occupancy
+should follow thickness; rendering must not follow occupancy.**
+
+### `ChunkSnapshot::extract` is the seam, not the mesher
+
+The mesher runs on the job pool behind three call layers with no registry in
+reach. Threading one down would have touched four signatures and the mesh cache
+key. The snapshot is a mesh-only view of a chunk - its only consumer is
+`meshing/` - so stripping delegated materials during extraction leaves the
+mesher untouched, invalidates the disk cache for free (the content differs), and
+cannot affect collision, which reads the chunk rather than the snapshot.
+
+Rejected on the way: a "do not mesh" bit in `Voxel::flags`. It needs no plumbing
+at all, and it duplicates a per-material fact onto every voxel, **persists it**,
+and goes stale the moment `materials.ron` changes. Recorded because it is the
+tempting shortcut.
+
+The mask is derived from the registry each load rather than stored beside it -
+one copy of the fact - and read as a `&[bool]` slice because a 34^3 snapshot is
+39,304 lookups, up to 32 times a frame.
+
+### The pipe model is no longer the pipe model
+
+Area conservation derives tip radius as `trunk / tips^(1/PIPE_EXP)`. With 25
+terminals that is a trunk-to-tip ratio of 4, and every branch ends in a club.
+A real tree has ~10^5 twigs, which is where the large ratios come from.
+
+So **both radii are authored and the exponent is solved**: `e = ln(tips) /
+ln(trunk/tip)`. The root lands on `trunk_radius` exactly for any branch
+structure, and tips land on `tip_radius`. This is a deliberate trade of
+biological fidelity for proportions an author can control, forced by skeletons
+with tens of terminals rather than tens of thousands.
+
+An unbranched skeleton is the exception: a chain has nothing to sum, so no
+exponent can separate its ends. There the trunk wins, because a bare trunk's
+whole point is its thickness.
+
+### Trees were clones, and the spec's own advice caused it
+
+§ 3.1 recommends phyllotactic azimuth over uniform random, and that is right -
+but `azimuth = GOLDEN_ANGLE * (step * laterals + k)` has **no seed term**, and
+the first bud started at `Quat::IDENTITY`. Every oak grew its laterals at
+identical azimuths from an identically upright trunk, and the only per-tree
+variation was 0.18 rad of wobble. A stand read as one tree copied with noise on
+it.
+
+Fixed by drawing a root yaw, a phyllotactic phase, and length/angle scales once
+per tree before any node exists. Worth recording because the claim "a tree is
+asymmetric per seed already" was written into `PlaceTreeParams` as justification
+for `random_yaw: false`, and it was simply false - a screenshot disproved it.
+
+### Two shader bugs, neither guessable, both costly
+
+**The impostor quad must clear the capsule's full reach along the view axis.**
+It was pushed toward the camera by the capsule's *radius*, but a capsule's near
+end reaches `|dot(half_axis, view_dir)|` past its midpoint - most of its length
+when it points at the camera. The quad is the ray origin, so everything in front
+of that plane solved to negative `t` and was discarded as a miss. This bit
+crescents out of trunks and deleted branches aimed at the viewer outright.
+
+The tell was there for two rounds and I missed it: **joint spheres survived
+while cones vanished**, leaving branches as strings of beads. A sphere has a
+zero half-axis, so its offset was already correct. Spheres and cones differ in
+exactly one place in that shader, and that is where I should have looked instead
+of reasoning about lighting from a still image.
+
+It was found by the author, empirically: raising the discard threshold from
+`< 0.0` to `< -0.99` made the tree "almost perfect" while `< -1.0` made it all
+squares. That is a decisive experiment - it says real hits have small negative
+`t` and the sentinel is -1.0 - and it beat several rounds of my analysis.
+
+**The round-cone root selection must branch on the sign of `k2`.** iq's
+intersector takes `(-k1 - sqrt(h))/k2` as the near root, which is only the near
+root when `k2 > 0`. `k2 = m0*sin^2(theta) - rr^2` goes negative whenever a
+branch points toward or away from the camera, and the fixed form then returns
+the **back** surface with an inward normal - a dark bite beside every branch
+aimed at the viewer.
+
+### Joints: one sphere per node, cap-free cones
+
+The first attempt biased a radius to break a z-fighting tie, per § 5.3. That was
+the wrong fix twice over: the fight was two capsules drawing the *same* cap
+sphere, and shrinking one radius also broke the tangency that makes a round cone
+join its end spheres smoothly, replacing rings with steps.
+
+The right shape: **cones carry no caps, and every node emits its sphere once**,
+as a degenerate capsule the shader recognises by `a == b`. The union is then
+exactly the convex hull of consecutive spheres - smooth by construction, nothing
+drawn twice, and no magic bias. § 5.3's advice is superseded.
+
+### Integration conventions a new pass has to know
+
+Three things that are not discoverable from the pass being written:
+
+- **The normal target's alpha is a surface class**, not padding: 0.0 sky, 0.5
+  vegetation, 0.9 wood, 1.0 terrain. And the normal is stored **raw**, not
+  remapped - writing `n * 0.5 + 0.5` halves every neighbour difference and most
+  outline edges stop registering.
+- **The outline's ownership rules assume flat axis-aligned faces.** `top_c` bars
+  a vertical surface from owning its own depth silhouette, and the larger-Y test
+  hands the normal edge to the ground a trunk stands on - so the outline came
+  out in grass colour. Wood owns its depth silhouette and is excluded from the
+  normal-edge path entirely, because a capsule's normal field is smooth and
+  trips a threshold tuned for creases.
+- **The reflection pass mirrors only `view_proj`.** That is sufficient for a
+  triangle, whose world position is what gets mirrored. A ray reconstruction
+  also needs the *basis*: the capsule shader builds a world-space billboard from
+  `view_right`/`view_up` and marches `view_dir`. Reflecting those three (negate
+  Y - the plane's offset moves points, not directions) makes the existing shader
+  correct in the reflection with no changes, via the identity that the mirrored
+  world seen by this camera is the real world seen by the mirrored camera.
+
+### Chaikin, as corner cutting with the node set fixed
+
+Literal Chaikin inserts two vertices per segment and drops the original. Here
+that would blow the node budget, invalidate every lateral's parent index, and
+move the points laterals attach at. Implemented instead as its effect: each
+interior node slides toward the midpoint of its parent and the child continuing
+its axis.
+
+The continuation child is chosen **geometrically** - best alignment with the
+direction its parent arrived from - not by heavy-path weight, because weight
+shifts as a tree grows and a weight-based choice would re-smooth settled nodes
+every time the crown extended.
+
+It does weaken the age-prefix invariant, and the test was sharpened rather than
+loosened to say what survives: topology is a strict prefix, and any node whose
+children are all present in both ages resolves to the same position in both. A
+frontier tip necessarily moves once it gains a child - that is what corner
+cutting means - and the test now also fails if fewer than half the nodes are
+settled, so it cannot pass vacuously.
+
+### Process defects, and what changed
+
+**Prose does not transcribe, and neither does a table.** After the recorded
+prose failures at 6a-fix and 17a I adopted "every import is a block". It failed
+three more times: a markdown table of three value changes (none landed), a
+"must be deleted" paragraph (the test stayed and failed), and a described write
+site for a counter (it never existed, so the readout displayed its initial 0).
+The rule is now **every edit is one complete copyable block, and there is
+exactly one of it** - no alternatives inside a package, no "and add X to the
+body". If a choice is genuinely open, ask before writing the hunk.
+
+**Enumeration applies to values, not just symbols.** The grep rule is written
+about types and function names. Changing `crown_attractors` from 400 to 0 broke
+four tests; adding fields to `TreeSpecies` and `FrameState` each missed a
+construction site. A literal is not a symbol, so the habit does not fire - but
+the blast radius is identical.
+
+**Scratch verification was net-negative and has been abandoned.** A trimmed
+workspace of three crates with stubbed assets compiles things that are not the
+engine, and "it builds there" was repeatedly mistaken for "it is correct here".
+It also consumed a large share of the session. Worse, `cargo check -p voxulacrum`
+works fine in the real tree - the app crate's native dependency is already built
+- so the thing assumed impossible was available the whole time. **Read the real
+tree, reason carefully, and check against the real build.**
+
+**A screenshot is evidence; reason from what differs in it.** Beads surviving
+where cones vanished was visible two rounds before it was used, and it pointed
+directly at the one place spheres and cones differ.
+
+### Deferred, with triggers
+
+| Item | Trigger |
+|---|---|
+| Segments gated on skeleton-intersect-voxel-occupancy (§ 4.4 settled it; most branches are sub-voxel and gating now would drop the crown) | Chopping wood becomes a player action |
+| Canopy occupancy density field | First weather-shelter or canopy-aware spawning system |
+| Growth tick mutating `age` | First system needing per-instance mutable state across a chunk round trip |
+| One `ArmedTool` owner on `UiState` | Third armed tool |
+| Merging `PlaceStructure` and `PlaceTree` | Third feature payload kind |
+| Species picker in the editor (text fields against no catalog today) | A second shipped species |
+| Branch tips end in a hemisphere rather than a point | Cosmetic; wants leaf radii driven toward zero after `solve` |
+| Screen-space minimum branch width (§ 11 LOD) | Thin branches breaking up at far zoom |
+| Reflection pass culls the visibility mask along the mirrored direction | Water reflections viewed from an enclosed space |
+
+### Generation hash
+
+Trees moved the anchor when content declared its first `PlaceTree`, as expected -
+this is the case where movement is the correct outcome and its absence would
+have been the finding. Recorded in the anchor table above as **`0xed02babdf0f40420`**,
+measured on 2026-09-24 with the skeleton smoothing and the re-tuned oak (trunk
+0.4, tip 0.025, smoothing 0.1) in place. Both move wood occupancy, so the value
+the trees commit alone would have produced was never taken and is not worth
+reconstructing: nothing ships between the two.
+
+Canopy lobes do not move it. They are render-side output beside `segments`,
+never written into the voxel grid the hash covers.

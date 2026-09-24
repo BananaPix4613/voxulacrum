@@ -239,6 +239,14 @@ Notes:
   uniform random. Large, cheap realism win.
 - Apply gravitropism: lerp each child direction toward or away from world-up per
   species.
+- **Draw a per-tree root yaw, phyllotactic phase, and length/angle scale before
+  any node exists.** Not optional, and the reason is that the two rules above
+  are *deterministic*: `azimuth = GOLDEN_ANGLE * (step * laterals + k)` has no
+  seed term, and an identity root frame points every trunk the same way. Without
+  a per-tree draw, every tree of a species grows its laterals at identical
+  azimuths from an identically upright trunk, and per-node wobble varies detail
+  without varying shape - a stand reads as one tree copied with noise on it.
+  This shipped and had to be found in a screenshot.
 
 ### 3.2 Data structure
 
@@ -257,11 +265,37 @@ pub struct Node {
 }
 ```
 
-### 3.3 Radii — the pipe model (Shinozaki 1964)
+### 3.3 Radii — a solved profile, not the pipe model
 
-Cross-sectional area is conserved across a fork: parent area = sum of child
-areas. Solved bottom-up. This is what prevents conical trunks and blocky
-saplings.
+**Amended after implementation.** The pipe model conserves cross-sectional area
+across a fork — parent area = sum of child areas, solved bottom-up — and that
+is still the shape of the recursion. What does not survive is using it to
+*derive* the tip radius.
+
+Area conservation fixes the trunk-to-tip ratio at `tips^(1/PIPE_EXP)`. A real
+tree gets a large ratio because it carries on the order of 10⁵ twigs. A skeleton
+with 25 terminals gets a ratio of **4**, so every branch ends in a club and no
+amount of tuning helps: the ratio is a function of the terminal count, not of
+anything an author controls.
+
+So **both radii are authored and the exponent is solved**:
+
+```
+e = ln(tips) / ln(trunk_radius / tip_radius)
+```
+
+which lands the root on `trunk_radius` exactly for any branch structure while
+tips land on `tip_radius`. This is a deliberate trade of biological fidelity for
+proportions an author can control, forced by skeletons with tens of terminals
+rather than tens of thousands. `PIPE_EXP` survives only as the fallback when the
+two radii are too close together to solve for.
+
+One exception: an unbranched skeleton is a chain with nothing to sum, so no
+exponent can separate its ends. There the trunk radius wins, because a bare
+trunk's whole point is its thickness.
+
+Whatever exponent a tree solves for is also what sizes its canopy lobes (§6.1),
+so the two cannot drift.
 
 ### 3.4 Trunk selection — heavy path decomposition
 
@@ -516,21 +550,103 @@ gl_FragDepth = encodeOrtho(t);
 Fragment cost is negligible — the low-res target means shading a small fraction
 of the pixels a full-res renderer would.
 
+### 5.2a Two requirements the solve has, and neither is obvious
+
+Both of these shipped as bugs and each took a round to find. They are recorded
+here because nothing in the intersector's derivation hints at either, and any
+future ray-reconstructed primitive in this engine will need both.
+
+**The quad must clear the capsule's full reach along the view axis, not just its
+radius.** The quad is where each fragment's ray *starts*, so anything nearer the
+camera than the quad plane solves to a negative `t` and is thrown away as a
+miss. A capsule's near end reaches `|dot(half_axis, view_dir)| + radius` past
+its midpoint — most of its length when it points at the camera. Offsetting by
+radius alone slices the front off every segment and deletes outright the ones
+aimed at the viewer:
+
+```wgsl
+let plane = mid - view_dir * (abs(dot(ea, view_dir)) + maxr + 0.01);
+```
+
+Free under ortho: moving along the view axis changes the depth the ray starts
+from, never the screen coverage. The symptom to recognise is **joint spheres
+surviving while cones vanish**, leaving branches as strings of beads — a sphere
+has a zero half-axis, so its offset was correct all along.
+
+**The root selection must branch on the sign of `k2`.** iq's round-cone
+intersector takes `(-k1 - sqrt(h)) / k2`, which is the *near* root only when
+`k2 > 0`. Here `k2 = m0·sin²θ − rr²`, and θ is the angle between the branch axis
+and the view — so `k2` goes negative whenever a branch points toward or away
+from the camera, and the fixed form silently returns the **back** surface with
+an inward normal:
+
+```wgsl
+let sq = sqrt(h);
+let t = select((-k1 + sq) / k2, (-k1 - sq) / k2, k2 > 0.0);
+```
+
+The symptom is a dark crescent bitten out of the trunk beside every branch aimed
+at the viewer — and because it depends on the light rather than the camera at
+first glance, it is easy to misread as a shading bug.
+
 ### 5.3 Details
 
 - **Radius quantization: `f(k)`,** roughly `1.5k` steps (§1.3). Computed at
   render time from the current `k`, never baked into an asset or a save.
-- **Polyline smoothing:** one Chaikin pass before instancing. Two is wasted at
-  this resolution.
-- **Fork connectors:** start a child segment *inside* the parent's radius —
-  offset the first endpoint backward along the child direction by about
-  `parent_radius` — and let surfaces interpenetrate. Cheaper than junction
-  geometry and reads fine.
-- **Z-fighting:** bias child radius down by a fraction of a step where a branch
-  matches its parent's thickness exactly. This was a real shipped bug in Eco
-  Machina.
+- **Polyline smoothing:** one Chaikin pass before instancing — but *as corner
+  cutting with the node set fixed*, not literally. Literal Chaikin inserts two
+  vertices per segment and drops the original, which blows the node budget,
+  invalidates every lateral's parent index, and moves the points laterals attach
+  at. Slide each interior node toward the midpoint of its parent and the child
+  continuing its axis, and pick that child **geometrically** (best alignment
+  with the direction its parent arrived from) rather than by heavy-path weight —
+  weight shifts as a tree grows, so a weight-based choice re-smooths settled
+  nodes every time the crown extends. Two passes is still wasted here.
+- **Joints: one sphere per node, cap-free cones.** *Supersedes the fork-connector
+  and z-fighting advice this document previously gave, both of which were the
+  wrong fix.* The artifact is not interpenetration and not a tie needing a bias:
+  it is that two capsules sharing a node each draw the **same** cap sphere, so
+  the two copies fight. Biasing a radius to break the tie also breaks the
+  tangency that makes a round cone join its end spheres smoothly, trading rings
+  for steps.
+
+  Emit cones with no caps, and emit every node's sphere exactly once as a
+  degenerate capsule (`a == b`, which the shader can branch on with no change to
+  the instance format). Because the cone body is tangent to both end spheres,
+  the union is exactly the convex hull of consecutive spheres: smooth by
+  construction, nothing drawn twice, no magic constant.
 - **Bark texturing:** triplanar or view-space projection in the impostor shader.
   No swept mesh means no UVs to unwrap and no rotation-minimizing frames.
+
+### 5.4 What the rest of the engine expects from a new pass
+
+Learned by getting each of these wrong. They apply to the canopy passes in §6
+and §7 exactly as they did to wood.
+
+- **The normal target's alpha is a surface class, not padding.** 0.0 sky, 0.5
+  vegetation, 0.9 wood, 1.0 terrain. The outline pass reads it to decide what to
+  skip and who owns an edge.
+- **Store the normal raw**, not remapped. Terrain writes `vec4(n, 1.0)`. Writing
+  `n * 0.5 + 0.5` halves every neighbour difference, so most edges fall under
+  the outline threshold and the ones that survive pick the wrong owner.
+- **The outline's ownership rules assume flat, axis-aligned faces.** A top-facing
+  surface owns the depth silhouette and the larger-Y normal owns a crease. Both
+  are wrong for a curved vertical object standing on the ground: the first bars
+  a trunk from outlining itself, the second hands the edge to the grass so the
+  outline comes out green. A smooth normal field also trips a threshold tuned
+  for creases, speckling the interior. Wood therefore owns its depth silhouette
+  and is excluded from the normal-edge path entirely.
+- **The player-silhouette stencil is marked before foliage, deliberately.** It
+  tests `Greater` against the depth buffer, so only what is already drawn counts
+  as an occluder. Anything solid enough that the player should show through it
+  must draw *before* that mark; anything decorative must draw after.
+- **The reflection pass mirrors only `view_proj`.** Sufficient for a triangle,
+  whose world position is what gets mirrored. A pass that reconstructs a ray
+  also needs the *basis* mirrored — reflecting `view_dir`, `view_right` and
+  `view_up` (negate Y; the plane's offset moves points, not directions) makes
+  such a shader correct in the reflection with no changes to it, via the
+  identity that the mirrored world seen by this camera is the real world seen by
+  the mirrored camera.
 
 ---
 
@@ -1207,21 +1323,29 @@ is answered no, see §7.1.
 
 ## 16. Implementation order
 
-Each step is independently verifiable.
+Each step is independently verifiable. **Steps 1–4 and 6 are done**; the wood
+half of this document is implemented, and steps 5, 7 onward are the canopy.
 
-1. **Skeleton generation + pipe model + HPD**, with a debug visualizer drawing
-   the node graph as lines. `DebugLinePass` (Substep 16c) is the existing hook.
-   No rendering integration yet.
-2. **§13's measurements**, against the largest species. Cheap here, because step
-   1 is the thing being measured and nothing depends on it yet. **This is the
-   gate on §4** — take it before building the emitters, not after.
-3. **Segment emission into the generated layer**, with a debug view decoding
-   instances back to line segments. Verify continuity across chunk borders
-   explicitly, and add `max_reach` (§3.7) with its assertion.
-4. **Analytic capsule impostors** for wood. This alone should look like a
-   substantial visual upgrade.
+1. ~~**Skeleton generation + pipe model + HPD**, with a debug visualizer.~~
+   **Done.** Plus per-tree variance (§3.1), the solved profile exponent (§3.3),
+   space colonization as an opt-in stage, canopy lobes derived from limb
+   terminals (§6.1), corner cutting (§5.3), and voxelization.
+2. ~~**§13's measurements**, against the largest species.~~ **Done, gate closed**
+   — see §13.
+3. ~~**Segment emission into the generated layer.**~~ **Done.** Capsules travel
+   `Skeleton` → `StampResult` → `ChunkEvaluation` → `LoadedChunk` → a per-chunk
+   instance buffer, with the seam property under test. `max_reach` is asserted
+   in the derivation.
+4. ~~**Analytic capsule impostors** for wood.~~ **Done**, along with the
+   integration the rest of the engine needed: a render-delegated material trait
+   so the mesher skips wood (§2.1a), a shadow-casting variant against the light
+   basis (§6.3's technique applied to wood), a wood surface class in the outline
+   pass, trees as player-silhouette occluders, and reflections via a mirrored
+   camera basis.
 5. **Ellipsoid depth cores**, rendered visibly rather than depth-only, to confirm
-   clump placement and distribution.
+   clump placement and distribution. **Next.** The lobes already exist on
+   `Skeleton`; nothing carries them out of generation yet, so the first substep
+   is the road segments already took.
 6. **Depth cores into the shadow map** (§6.3).
 7. **Leaf scatter**, emitting into `ScatterBucket`. Static camera only.
 8. **Prototype #1 from §15** — rotation, shimmer verdict, yaw decision.

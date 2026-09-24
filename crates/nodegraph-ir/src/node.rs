@@ -433,6 +433,16 @@ pub struct TreeSpecies {
     pub gravitropism: f32,
     /// Random angular wobble per internode, in radians.
     pub wobble: f32,
+    /// Corner-cutting strength, `0..=1`. 0 leaves the raw polyline; 0.5 is one
+    /// Chaikin-equivalent pass.
+    ///
+    /// Literal Chaikin inserts two vertices per segment and drops the original,
+    /// which would blow the node budget, invalidate every lateral's parent
+    /// index, and move the points laterals attach at. This is its effect with
+    /// the node set fixed: each interior node slides toward the midpoint of its
+    /// neighbors, which is what a single Chaikin pass does to an interior
+    /// vertex.
+    pub smoothing: f32,
     /// Attraction points scattered through the crown. 0 disables colonization
     /// entirely, leaving the turtle skeleton alone.
     pub crown_attractors: u16,
@@ -495,6 +505,7 @@ impl Default for TreeSpecies {
             branch_angle: 0.9,
             gravitropism: 0.25,
             wobble: 0.18,
+            smoothing: 0.5,
             crown_attractors: 0,
             crown_center: 0.85,
             crown_radius: 3.5,

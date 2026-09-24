@@ -158,6 +158,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut SkeletonPanelState) {
         ui.add(egui::Slider::new(&mut sp.branch_angle, 0.0..=1.6).text("branch angle"));
         ui.add(egui::Slider::new(&mut sp.gravitropism, -1.0..=1.0).text("gravitropism"));
         ui.add(egui::Slider::new(&mut sp.wobble, 0.0..=0.6).text("wobble"));
+        ui.add(egui::Slider::new(&mut sp.smoothing, 0.0..=1.0).text("smoothing"));
 
         ui.weak("Crown (space colonization)");
         ui.add(egui::Slider::new(&mut sp.crown_attractors, 0..=800).text("attractors"));

@@ -679,6 +679,8 @@ mod tests {
         let out = stamp_features(&base, ctx, &sources, &features);
         assert!(!out.segments.is_empty(), "a tree emitted no capsules");
 
+        let mut cones = 0usize;
+        let mut spheres = 0usize;
         for s in &out.segments {
             let owner = s.a.floor().as_ivec3();
             assert!(
@@ -686,9 +688,30 @@ mod tests {
                 "capsule rooted at {:?} is outside the owning window",
                 s.a,
             );
-            assert!(s.ra >= s.rb, "a capsule must taper away from the trunk");
-            assert_ne!(s.a, s.b, "a capsule must have length");
+            if s.a == s.b {
+                // A joint sphere: one per node, emitted as a degenerate capsule
+                // the shader recognizes by `a == b`. Both radii are that node's,
+                // which is what makes the cones meeting it tangent.
+                assert_eq!(s.ra, s.rb, "a joint sphere must have one radius");
+                spheres += 1;
+                continue;
+            }
+            // A cone runs parent -> child, and a parent's cross-section is the
+            // sum of its children's, so it is never the thinner end. The
+            // tolerance is for the solver's round trip: a single-child node
+            // recovers its child's radius through `(r^e)^(1/e)`, which lands
+            // within an ulp or two rather than exactly. A real inversion is
+            // orders of magnitude larger than this.
+            assert!(
+                s.ra >= s.rb - 1e-4,
+                "a capsule must taper away from the trunk: ra {} rb {}",
+                s.ra,
+                s.rb,
+            );
+            cones += 1;
         }
+        assert!(cones > 0, "no cone bodies were emitted");
+        assert!(spheres > 0, "no joint spheres were emitted");
     }
 
     #[test]

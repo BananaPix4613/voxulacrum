@@ -77,6 +77,7 @@ const MAX_COLONIZE_ITERS: usize = 64;
 /// this reads as a plant, and costs the same.
 const GOLDEN_ANGLE: f32 = 2.399_963_2;
 
+
 /// One node: a point on a branch centerline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Node {
@@ -169,6 +170,7 @@ impl Skeleton {
         let budget = node_budget(age);
         let mut nodes = grow(seed, species, budget);
         colonize(&mut nodes, seed, species, budget);
+        smooth(&mut nodes, species.smoothing);
         let (chains, tip_radius, pipe_exp) =
             solve(&mut nodes, species.trunk_radius, species.tip_radius);
         let lobes = derive_lobes(&nodes, chains, seed, species, pipe_exp);
@@ -344,6 +346,61 @@ fn grow(seed: u64, sp: &TreeSpecies, budget: usize) -> Vec<Node> {
         }
     }
     nodes
+}
+
+/// Corner-cut the skeleton: slide each interior node toward the midpoint of its
+/// parent and the child continuing its axis.
+///
+/// Every joint is a sphere the cones meet tangentially, so a sharp bend leaves
+/// that sphere bulging past both of them as a visible knuckle. Reducing the
+/// angle at each joint is what makes a branch read as a curve rather than a
+/// chain of beads.
+///
+/// **The continuation child is chosen geometrically**, as the one whose
+/// direction best matches the direction its parent arrived from - not by
+/// heavy-path weight. Weight shifts as a tree grows, so a weight-based choice
+/// would re-smooth settled nodes every time the crown extended.
+///
+/// The root never moves: it stands on the anchor voxel and everything else is
+/// positioned relative to it.
+fn smooth(nodes: &mut [Node], amount: f32) {
+    let n = nodes.len();
+    if amount <= 0.0 || n < 3 {
+        return;
+    }
+
+    let mut cont = vec![NO_PARENT; n];
+    let mut best = vec![f32::MIN; n];
+    for i in 1..n {
+        let p = nodes[i].parent as usize;
+        let incoming = if nodes[p].parent == NO_PARENT {
+            // The trunk arrives from below; nothing precedes the root.
+            Vec3::Y
+        } else {
+            (nodes[p].pos - nodes[nodes[p].parent as usize].pos).normalize_or_zero()
+        };
+        let out = (nodes[i].pos - nodes[p].pos).normalize_or_zero();
+        let align = incoming.dot(out);
+        if align > best[p] {
+            best[p] = align;
+            cont[p] = i as u32;
+        }
+    }
+
+    // Simultaneous update. Sweeping in place would feed each node its already
+    // moved neighbor, which is a different filter and one that depends on
+    // iteration order.
+    let orig: Vec<Vec3> = nodes.iter().map(|x| x.pos).collect();
+    for i in 1..n {
+        let c = cont[i];
+        if c == NO_PARENT {
+            // A tip has nothing ahead of it to cut a corner against.
+            continue;
+        }
+        let p = nodes[i].parent as usize;
+        let mid = (orig[p] + orig[c as usize]) * 0.5;
+        nodes[i].pos = orig[i].lerp(mid, amount);
+    }
 }
 
 /// Bend a frame toward world up (or away), then add a random wobble. The
@@ -721,6 +778,24 @@ mod tests {
         TreeSpecies { crown_attractors: 400, ..TreeSpecies::default() }
     }
 
+    /// How many children each of the first `len` nodes has, counting children
+    /// from anywhere in the skeleton.
+    ///
+    /// Smoothing is a filter over the finished topology: a node's position is a
+    /// function of its parent and the child continuing its axis. So a node whose
+    /// child set is identical in two skeletons resolves to the same place in
+    /// both, and one that gained a child necessarily moves - that is what corner
+    /// cutting means. This is how a test says which nodes it can hold fixed.
+    fn child_counts(s: &Skeleton, len: usize) -> Vec<usize> {
+        let mut c = vec![0usize; len];
+        for n in &s.nodes {
+            if n.parent != NO_PARENT && (n.parent as usize) < len {
+                c[n.parent as usize] += 1;
+            }
+        }
+        c
+    }
+
     #[test]
     fn a_child_never_precedes_its_parent() {
         // The invariant both solver passes rest on. It holds by construction -
@@ -806,10 +881,20 @@ mod tests {
         let young = Skeleton::derive(5, &crowned(), 0.4);
         let old = Skeleton::derive(5, &crowned(), 1.0);
         assert!(young.nodes.len() < old.nodes.len(), "age must change the node count");
+
+        let ny = young.nodes.len();
+        let cy = child_counts(&young, ny);
+        let co = child_counts(&old, ny);
+
+        let mut settled = 0;
         for (i, (y, o)) in young.nodes.iter().zip(old.nodes.iter()).enumerate() {
             assert_eq!(y.parent, o.parent, "node {i} was reparented by growth");
-            assert_eq!(y.pos, o.pos, "node {i} moved during growth");
+            if cy[i] == co[i] {
+                settled += 1;
+                assert_eq!(y.pos, o.pos, "settled node {i} moved during growth");
+            }
         }
+        assert!(settled > ny / 2, "only {settled} of {ny} nodes were settled; vacuous");
         assert!(
             young.nodes.iter().zip(old.nodes.iter()).any(|(y, o)| y.radius != o.radius),
             "growth must thicken something",
@@ -847,10 +932,27 @@ mod tests {
         assert!(full.nodes.len() > turtle.nodes.len(), "colonization added nothing");
 
         // Colonized nodes append after the turtle's, so the turtle is a prefix.
+        // Topology is a strict prefix and is asserted as one. Position is not:
+        // smoothing runs after colonization, so a turtle node that gained a
+        // colonized child gets a continuation child it did not have alone and
+        // slides toward a different midpoint. The property that survives is that
+        // a turtle node whose children are all present in both resolves to the
+        // same position in both.
+        let nt = turtle.nodes.len();
+        let ct = child_counts(&turtle, nt);
+        let cf = child_counts(&full, nt);
+        let mut settled = 0;
         for (i, (a, b)) in turtle.nodes.iter().zip(full.nodes.iter()).enumerate() {
-            assert_eq!(a.pos, b.pos, "colonization moved turtle node {i}");
             assert_eq!(a.parent, b.parent, "colonization reparented turtle node {i}");
+            if ct[i] == cf[i] {
+                settled += 1;
+                assert_eq!(a.pos, b.pos, "colonization moved settled turtle node {i}");
+            }
         }
+        // Only a vacuity guard, and deliberately loose: how far down the turtle
+        // the crown reaches is a tuning fact, and encoding it here would make a
+        // structural test fail on a species change.
+        assert!(settled * 4 > nt, "only {settled} of {nt} turtle nodes were settled; vacuous");
         // And they keep the invariant both solver passes depend on.
         for (i, n) in full.nodes.iter().enumerate().skip(turtle.nodes.len()) {
             assert!((n.parent as usize) < i, "colonized node {i} has parent {}", n.parent);
