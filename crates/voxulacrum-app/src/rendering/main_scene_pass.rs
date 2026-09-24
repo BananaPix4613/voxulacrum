@@ -6,6 +6,8 @@ use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::capsule_pass::CapsulePass;
+use crate::rendering::canopy_pass::CanopyPass;
+use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
 use crate::world::chunk::LoadedChunk;
 
 /// Configuration for cross-section cap rendering within the main scene pass.
@@ -34,6 +36,10 @@ pub struct MainScenePassNode<'a> {
     pub scatter_pipeline: &'a wgpu::RenderPipeline,
     pub capsule_pass: &'a CapsulePass,
     pub capsule_pipeline: &'a wgpu::RenderPipeline,
+    pub canopy_pass: &'a CanopyPass,
+    pub canopy_pipeline: &'a wgpu::RenderPipeline,
+    pub show_canopy_cores: bool,
+    pub skeleton_preview_pass: &'a SkeletonPreviewPass,
     pub debug_line_pass: &'a DebugLinePass,
     pub show_debug_lines: bool,
     pub hide_foliage: bool,
@@ -138,6 +144,42 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
                 pass.set_vertex_buffer(0, caps.instance_buffer.slice(..));
                 pass.draw(0..6, 0..caps.instance_count);
             }
+        }
+
+        // Canopy cores - one instanced quad per lobe, ellipsoid solved
+        // analytically. Beside the wood and before the silhouette mark for the
+        // same reason: a canopy occludes the way a trunk does, and after the
+        // mark a player standing behind a tree would simply vanish.
+        //
+        // Gated on `hide_foliage`, unlike wood: a canopy is decoration you
+        // cannot collide with, so hiding it hides nothing you would walk into.
+        if self.show_canopy_cores && !self.hide_foliage && !self.canopy_pass.chunks.is_empty() {
+            pass.set_pipeline(self.canopy_pipeline);
+            pass.set_bind_group(0, self.uniform_bind_group, &[]);
+            for (&chunk_pos, lobes) in &self.canopy_pass.chunks {
+                if !self.frustum.is_chunk_visible(chunk_pos) {
+                    continue;
+                }
+                pass.set_vertex_buffer(0, lobes.instance_buffer.slice(..));
+                pass.draw(0..6, 0..lobes.instance_count);
+            }
+        }
+
+        // Tree skeleton preview, drawn solid. Through the world's own pipelines
+        // and ungated by the foliage toggles: it is a preview of exactly what
+        // generation produces, and a debug view that hides itself when an
+        // unrelated overlay is off is a debug view you cannot trust.
+        if let Some(buf) = &self.skeleton_preview_pass.capsule_buffer {
+            pass.set_pipeline(self.capsule_pipeline);
+            pass.set_bind_group(0, self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, buf.slice(..));
+            pass.draw(0..6, 0..self.skeleton_preview_pass.capsule_count);
+        }
+        if let Some(buf) = &self.skeleton_preview_pass.lobe_buffer {
+            pass.set_pipeline(self.canopy_pipeline);
+            pass.set_bind_group(0, self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, buf.slice(..));
+            pass.draw(0..6, 0..self.skeleton_preview_pass.lobe_count);
         }
 
         // Player silhouette step 1 (R5): mark the stencil wherever the avatar is behind

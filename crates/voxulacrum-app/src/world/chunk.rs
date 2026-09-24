@@ -105,6 +105,9 @@ pub struct LoadedChunk {
     /// Wood capsules rooted in this chunk, in world space. Beside `mesh` rather
     /// than in `data` because it is render-side derived output, not chunk state.
     pub segments: Vec<nodegraph_eval::feature::BranchSegment>,
+    /// Canopy lobes rooted in this chunk, in world space. Beside `segments` and
+    /// for the same reason: render-side derived output, not chunk state.
+    pub lobes: Vec<nodegraph_eval::feature::CanopyLobe>,
 }
 
 impl LoadedChunk {
@@ -119,6 +122,7 @@ impl LoadedChunk {
             seam_finalized: false,
             smoothing_distances: None,
             segments: Vec::new(),
+            lobes: Vec::new(),
         }
     }
 
@@ -161,6 +165,7 @@ impl LoadedChunk {
             generated.smoothing_distances,
         );
         chunk.segments = generated.segments;
+        chunk.lobes = generated.lobes;
         chunk
     }
 

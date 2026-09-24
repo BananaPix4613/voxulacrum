@@ -160,6 +160,29 @@ pub struct BranchSegment {
     pub rb: f32,
 }
 
+/// One canopy lobe, in world space, ready for the depth core and the leaf
+/// scatter.
+///
+/// The skeleton's `Lobe` is anchor-relative and carries a node index, neither of
+/// which means anything outside the derivation that produced it. This is the
+/// form that crosses the boundary: world space, and an anchor expressed as the
+/// voxel a player would break.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CanopyLobe {
+    /// Center, world space.
+    pub center: Vec3,
+    /// Ellipsoid radii, world space.
+    pub radii: Vec3,
+    /// The voxel of the limb terminal carrying this lobe. Every leaf instance in
+    /// the lobe reports to it, so breaking that limb takes the foliage with it.
+    pub anchor: IVec3,
+    /// Stable per-tree identity - the occurrence hash the skeleton was derived
+    /// from. Leaf positions hash against it, so they survive a reload.
+    pub tree_id: u64,
+    /// This lobe's index within its tree, the second term of that hash.
+    pub index: u32,
+}
+
 /// What one chunk's feature stamping produced.
 pub struct StampResult {
     /// Terrain with every in-window feature cell written.
@@ -171,6 +194,9 @@ pub struct StampResult {
     /// cut edge and no duplicate - and unloading a chunk removes only the
     /// segments rooted in it, rather than making a whole tree vanish.
     pub segments: Vec<BranchSegment>,
+    /// Canopy lobes this chunk owns, by the same rule: the chunk containing the
+    /// lobe's center, drawn whole rather than clipped.
+    pub lobes: Vec<CanopyLobe>,
 }
 
 /// One derived occurrence.
@@ -331,8 +357,9 @@ pub fn stamp_features(
 ) -> StampResult {
     let mut out = terrain.clone();
     let mut segments = Vec::new();
+    let mut lobes = Vec::new();
     if features.is_empty() {
-        return StampResult { terrain: out, segments };
+        return StampResult { terrain: out, segments, lobes };
     }
     out.make_dense();
     let base = IVec3::new(ctx.chunk.x * N, ctx.chunk.y * N, ctx.chunk.z * N);
@@ -428,12 +455,36 @@ pub fn stamp_features(
                     }
                     segments.push(BranchSegment { a: p, b: p, ra: node.radius, rb: node.radius });
                 }
+
+                // The canopy. A lobe is point-like, so exactly one chunk owns
+                // each - the one holding its center - and it is not clipped, so
+                // a lobe overhanging a border is still drawn whole by its owner.
+                //
+                // `priority` doubles as the tree's stable id: it is already the
+                // per-occurrence hash of (world seed, source seed, cell), and it
+                // is what the skeleton was derived from, so leaf positions
+                // hashed against it agree with the tree they hang on.
+                for (i, lobe) in skeleton.lobes.iter().enumerate() {
+                    let center = root + lobe.center;
+                    let owner = center.floor().as_ivec3() - base;
+                    if out_of_window(owner) {
+                        continue;
+                    }
+                    let anchor_pos = root + skeleton.nodes[lobe.anchor_node as usize].pos;
+                    lobes.push(CanopyLobe {
+                        center,
+                        radii: lobe.radii(),
+                        anchor: anchor_pos.floor().as_ivec3(),
+                        tree_id: feature.priority,
+                        index: i as u32,
+                    });
+                }
             }
         }
     }
 
     out.try_collapse();
-    StampResult { terrain: out, segments }
+    StampResult { terrain: out, segments, lobes }
 }
 
 #[cfg(test)]

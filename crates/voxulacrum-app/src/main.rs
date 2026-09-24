@@ -44,6 +44,7 @@ use rendering::upscale_pass::UpscalePass;
 use rendering::detail_paint_pass::DetailPaintPass;
 use rendering::scatter_pass::ScatterPass;
 use rendering::capsule_pass::CapsulePass;
+use rendering::canopy_pass::CanopyPass;
 use rendering::water_pass::WaterPass;
 use rendering::post_process::PostProcessPass;
 use rendering::outline_pass::OutlinePass;
@@ -446,6 +447,7 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
     let detail_paint_pass = DetailPaintPass::new(&ctx, &world);
     let scatter_pass = ScatterPass::new(&ctx, &world, &prefab_registry);
     let capsule_pass = CapsulePass::new(&ctx, &world);
+    let canopy_pass = CanopyPass::new(&ctx, &world);
     let water_pass = WaterPass::new(
         &ctx.device,
         &pipeline_resources.water_bind_group_layout,
@@ -548,6 +550,8 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
     ecs.insert_resource(detail_paint_pass);
     ecs.insert_resource(scatter_pass);
     ecs.insert_resource(capsule_pass);
+    ecs.insert_resource(canopy_pass);
+    ecs.insert_resource(rendering::skeleton_preview_pass::SkeletonPreviewPass::default());
     ecs.insert_resource(water_pass);
     ecs.insert_resource(post_process);
     ecs.insert_resource(outline_pass);

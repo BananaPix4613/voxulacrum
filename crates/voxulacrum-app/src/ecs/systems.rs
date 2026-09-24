@@ -19,6 +19,8 @@ use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::capsule_pass::CapsulePass;
+use crate::rendering::canopy_pass::CanopyPass;
+use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::rendering::reflection_pass::ReflectionPassNode;
 use crate::rendering::player_pass::PlayerPass;
@@ -1047,10 +1049,13 @@ pub fn skeleton_debug_system(
     ctx: Res<RenderContext>,
     mut ui: ResMut<UiState>,
     mut debug_lines: ResMut<DebugLinePass>,
+    mut preview: ResMut<SkeletonPreviewPass>,
 ) {
     use crate::input::GameAction;
     use crate::rendering::debug_lines::DebugLineVertex;
+    use crate::rendering::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu};
     use crate::ui::blueprint_panel::ArmedTool;
+    use crate::ui::skeleton_panel::PreviewRender;
     use crate::world::chunk::VOXEL_SCALE;
     use glam::Vec3;
     use nodegraph_eval::skeleton::Skeleton;
@@ -1086,6 +1091,32 @@ pub fn skeleton_debug_system(
         }
     }
 
+    if std::mem::take(&mut state.list_dirty) {
+        state.species_list =
+            nodegraph_hotreload::list_species(&crate::world::blueprint::species_dir());
+        state.selected_species = state.selected_species.min(state.species_list.len().saturating_sub(1));
+    }
+
+    if std::mem::take(&mut state.load_requested) {
+        // Disk is authoritative both ways: what loads here is exactly what a
+        // `PlaceTree` node resolves, so tuning starts from the shipped tree
+        // rather than from defaults that only resemble it.
+        if let Some(name) = state.species_list.get(state.selected_species).cloned() {
+            match nodegraph_hotreload::load_species(
+                &crate::world::blueprint::species_dir(),
+                &name,
+            ) {
+                Ok(species) => {
+                    state.species = species;
+                    state.name = name.clone();
+                    state.status = Some(format!("loaded {name}.species.json"));
+                    state.error = None;
+                }
+                Err(e) => state.error = Some(e.to_string()),
+            }
+        }
+    }
+
     if std::mem::take(&mut state.save_requested) {
         // Disk is authoritative, the rule hot reload already runs on (blueprint
         // decision E2). There is no unsaved in-memory species to disagree with
@@ -1099,6 +1130,8 @@ pub fn skeleton_debug_system(
             Ok(()) => {
                 state.status = Some(format!("saved {}.species.json", state.name));
                 state.error = None;
+                // A species saved here must appear in this panel's own picker.
+                state.list_dirty = true;
             }
             Err(e) => state.error = Some(e.to_string()),
         }
@@ -1113,6 +1146,7 @@ pub fn skeleton_debug_system(
             state.show_radii,
             state.show_wood,
             state.show_capsules,
+            state.render,
         )),
         _ => None,
     };
@@ -1121,10 +1155,11 @@ pub fn skeleton_debug_system(
     }
     state.built = key;
 
-    let Some((origin, seed, age, species, show_radii, show_wood, show_capsules)) = key else {
+    let Some((origin, seed, age, species, show_radii, show_wood, show_capsules, render)) = key
+    else {
         debug_lines.set_overlay(&ctx, None);
+        preview.clear();
         state.nodes = 0;
-        state.chains = 0;
         state.lobes = 0;
         state.wood = 0;
         state.reach = 0.0;
@@ -1142,7 +1177,61 @@ pub fn skeleton_debug_system(
         (origin.z as f32 + 0.5) * VOXEL_SCALE,
     );
 
+    // Occupancy is derived either way: it feeds the readout, and its outline is
+    // the one overlay that complements a solid render rather than restating it.
+    let root_voxels = origin.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
+    let mut wood: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
+    skeleton.voxelize(root_voxels, |c| {
+        wood.insert(c);
+    });
+
     let mut lines: Vec<DebugLineVertex> = Vec::new();
+    if show_wood {
+        for cell in &wood {
+            lines.extend(voxel_box_lines(*cell, SKELETON_WOOD_COLOR));
+        }
+    }
+
+    if render == PreviewRender::Solid {
+        // The same two instance kinds `stamp_features` emits, built the same
+        // way: cones parent-to-child, then one sphere per node as a degenerate
+        // capsule. Reproducing the emission rather than the geometry is what
+        // makes this a preview of generation and not of a second renderer.
+        let mut capsules: Vec<CapsuleInstanceGpu> = Vec::new();
+        for seg in skeleton.segments() {
+            capsules.push(CapsuleInstanceGpu {
+                a: (base + seg.a * VOXEL_SCALE).to_array(),
+                ra: seg.ra * VOXEL_SCALE,
+                b: (base + seg.b * VOXEL_SCALE).to_array(),
+                rb: seg.rb * VOXEL_SCALE,
+            });
+        }
+        for node in &skeleton.nodes {
+            let p = (base + node.pos * VOXEL_SCALE).to_array();
+            let r = node.radius * VOXEL_SCALE;
+            capsules.push(CapsuleInstanceGpu { a: p, ra: r, b: p, rb: r });
+        }
+        let lobe_instances: Vec<LobeInstanceGpu> = skeleton
+            .lobes
+            .iter()
+            .map(|l| LobeInstanceGpu {
+                center: (base + l.center * VOXEL_SCALE).to_array(),
+                radii: (l.radii() * VOXEL_SCALE).to_array(),
+            })
+            .collect();
+        preview.set(&ctx, &capsules, &lobe_instances);
+
+        debug_lines.set_overlay(&ctx, Some(&lines));
+        state.wood = wood.len();
+        state.nodes = skeleton.nodes.len();
+        state.chains = skeleton.chains;
+        state.lobes = skeleton.lobes.len();
+        state.reach = skeleton.reach;
+        state.height = skeleton.height;
+        return;
+    }
+
+    preview.clear();
     for seg in skeleton.segments() {
         let color = skeleton_chain_color(seg.chain);
         let a = base + seg.a * VOXEL_SCALE;
@@ -1224,21 +1313,7 @@ pub fn skeleton_debug_system(
             }
         }
     }
-
-    // What the tree occupies in the voxel grid: the part that collides, can be
-    // mined, and that segment emission will later gate on. Deduplicated,
-    // because `voxelize` visits overlapping capsules and says so.
-    let root_voxels = origin.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
-    let mut wood: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
-    skeleton.voxelize(root_voxels, |c| {
-        wood.insert(c);
-    });
-    if show_wood {
-        for cell in &wood {
-            lines.extend(voxel_box_lines(*cell, SKELETON_WOOD_COLOR));
-        }
-    }
-
+    
     debug_lines.set_overlay(&ctx, Some(&lines));
     state.wood = wood.len();
     state.nodes = skeleton.nodes.len();
@@ -1309,6 +1384,7 @@ pub fn streaming_tick_system(
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
     mut capsules: ResMut<CapsulePass>,
+    mut canopy: ResMut<CanopyPass>,
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
     _ctx: Res<RenderContext>,
@@ -1355,6 +1431,7 @@ pub fn streaming_tick_system(
         detail_paint.remove_chunk(*pos);
         scatter.remove_chunk(*pos);
         capsules.remove_chunk(*pos);
+        canopy.remove_chunk(*pos);
         water_pass.remove_chunk_water(*pos);
     }
 
@@ -1410,6 +1487,7 @@ pub fn meshing_tick_system(
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
     mut capsules: ResMut<CapsulePass>,
+    mut canopy: ResMut<CanopyPass>,
     mut water_pass: ResMut<WaterPass>,
     mut timings: ResMut<FrameTimings>,
 ) {
@@ -1439,6 +1517,7 @@ pub fn meshing_tick_system(
             detail_paint.add_chunk(*pos, &world.0, &ctx.device);
             scatter.add_chunk(*pos, &world.0, &ctx.device);
             capsules.add_chunk(*pos, &world.0, &ctx.device);
+            canopy.add_chunk(*pos, &world.0, &ctx.device);
         }
         // Water welds across seams, so also refresh newly-meshed chunks' neighbors
         // (detail/scatter are per-chunk and don't need this).
@@ -1628,7 +1707,11 @@ pub fn compute_stats_system(
     let mut total_tris: u64 = 0;
     let mut chunks_visible: u32 = 0;
     let mut chunks_total: u32 = 0;
+    let mut branch_segments: u64 = 0;
+    let mut canopy_lobes: u64 = 0;
     for chunk in world.0.chunks.values() {
+        branch_segments += chunk.segments.len() as u64;
+        canopy_lobes += chunk.lobes.len() as u64;
         if chunk.mesh.is_some() {
             chunks_total += 1;
             if sim.frustum.is_chunk_visible(chunk.data.coord.into()) {
@@ -1640,6 +1723,8 @@ pub fn compute_stats_system(
     ui.total_triangles = total_tris;
     ui.chunks_visible = chunks_visible;
     ui.chunks_total = chunks_total;
+    ui.branch_segments = branch_segments;
+    ui.canopy_lobes = canopy_lobes;
 
     ui.mutation_log = world.0.mutation_log();
 
@@ -1826,6 +1911,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let detail_paint_pass = ecs.resource::<DetailPaintPass>();
         let scatter_pass = ecs.resource::<ScatterPass>();
         let capsule_pass = ecs.resource::<CapsulePass>();
+        let canopy_pass = ecs.resource::<CanopyPass>();
+        let skeleton_preview_pass = ecs.resource::<SkeletonPreviewPass>();
         let water_pass = ecs.resource::<WaterPass>();
         let debug_line_pass = ecs.resource::<DebugLinePass>();
         let cap_pass = ecs.resource::<CapPass>();
@@ -1899,6 +1986,10 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             scatter_pipeline: &pipeline_registry.scatter_pipeline,
             capsule_pass: &capsule_pass,
             capsule_pipeline: &pipeline_registry.capsule_pipeline,
+            canopy_pass: &canopy_pass,
+            canopy_pipeline: &pipeline_registry.canopy_core_pipeline,
+            skeleton_preview_pass: &skeleton_preview_pass,
+            show_canopy_cores: ui.params.debug.show_canopy_cores,
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
             hide_foliage: ui.params.debug.hide_foliage,

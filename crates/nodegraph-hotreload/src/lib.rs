@@ -26,5 +26,5 @@ mod watcher;
 pub use error::{HotReloadError, HotReloadResult};
 pub use example::{bootstrap_example_graph, build_example_graph};
 pub use blueprint::{load_blueprint, resolve_blueprints};
-pub use species::{load_species, resolve_species, SpeciesFile, SPECIES_VERSION};
+pub use species::{list_species, load_species, resolve_species, SpeciesFile, SPECIES_VERSION};
 pub use watcher::GraphWatcher;

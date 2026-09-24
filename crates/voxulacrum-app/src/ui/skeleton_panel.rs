@@ -18,6 +18,18 @@
 use glam::IVec3;
 use nodegraph_ir::TreeSpecies;
 
+/// How the preview draws itself.
+///
+/// Lines show the construction - which node is on which chain, where the heavy
+/// path went. Solid shows the result, through the world's own pipelines. Tuning
+/// branch structure wants the first; tuning proportion and canopy wants the
+/// second, where a line drawing turns into a thicket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewRender {
+    Lines,
+    Solid,
+}
+
 /// Panel state for the skeleton debug view.
 pub struct SkeletonPanelState {
     /// Whether the section is expanded. Collapsed clears the overlay and
@@ -34,6 +46,17 @@ pub struct SkeletonPanelState {
     pub age: f32,
     /// Shape parameters.
     pub species: TreeSpecies,
+    /// Lines or solid.
+    pub render: PreviewRender,
+    /// Species files on disk, refreshed when `list_dirty` is set.
+    pub species_list: Vec<String>,
+    /// Index into `species_list`.
+    pub selected_species: usize,
+    /// Set by the Load button; consumed by the system.
+    pub load_requested: bool,
+    /// Re-read the species directory. Set on first draw and after a save, so a
+    /// species saved from this panel appears in its own picker.
+    pub list_dirty: bool,
     /// Draw a cross at each node sized by its radius.
     pub show_radii: bool,
     /// Outline the voxel cells the wood occupies.
@@ -42,7 +65,7 @@ pub struct SkeletonPanelState {
     pub show_capsules: bool,
     /// The inputs the current overlay was built from, so a frame that changes
     /// nothing rebuilds nothing. Same role as `BlueprintPanelState::preview_for`.
-    pub built: Option<(IVec3, u32, f32, TreeSpecies, bool, bool, bool)>,
+    pub built: Option<(IVec3, u32, f32, TreeSpecies, bool, bool, bool, PreviewRender)>,
     /// Node count of the last derivation. Written back by the system.
     pub nodes: usize,
     /// Chain count of the last derivation. Written back by the system.
@@ -73,6 +96,11 @@ impl Default for SkeletonPanelState {
             seed: 1,
             age: 1.0,
             species: TreeSpecies::default(),
+            render: PreviewRender::Lines,
+            species_list: Vec::new(),
+            selected_species: 0,
+            load_requested: false,
+            list_dirty: true,
             show_radii: false,
             show_wood: false,
             show_capsules: false,
@@ -139,12 +167,45 @@ pub fn draw(ui: &mut egui::Ui, state: &mut SkeletonPanelState) {
             }
         });
         ui.add(egui::Slider::new(&mut state.age, 0.0..=1.0).text("age"));
-        ui.checkbox(&mut state.show_radii, "show radii");
+
+        ui.horizontal(|ui| {
+            ui.label("draw");
+            ui.selectable_value(&mut state.render, PreviewRender::Lines, "lines");
+            ui.selectable_value(&mut state.render, PreviewRender::Solid, "solid");
+        });
+        let lines_mode = state.render == PreviewRender::Lines;
+        // Both of these draw a line approximation of something the solid mode
+        // renders exactly, so they have nothing to add there.
+        ui.add_enabled_ui(lines_mode, |ui| {
+            ui.checkbox(&mut state.show_radii, "show radii");
+            ui.checkbox(&mut state.show_capsules, "show capsules");
+        });
         ui.checkbox(&mut state.show_wood, "show wood voxels");
-        ui.checkbox(&mut state.show_capsules, "show capsules");
 
         ui.separator();
         ui.weak("Species");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("species_select")
+                .selected_text(
+                    state.species_list.get(state.selected_species)
+                        .cloned().unwrap_or_else(|| "(none)".into()),
+                )
+                .show_ui(ui, |ui| {
+                    for (i, name) in state.species_list.iter().enumerate() {
+                        ui.selectable_value(&mut state.selected_species, i, name);
+                    }
+                });
+            if ui
+                .add_enabled(!state.species_list.is_empty(), egui::Button::new("Load"))
+                .on_hover_text("Replace the sliders below with this species")
+                .clicked()
+            {
+                state.load_requested = true;
+            }
+            if ui.button("↻").on_hover_text("Re-read assets/species").clicked() {
+                state.list_dirty = true;
+            }
+        });
         let sp = &mut state.species;
         ui.add(egui::Slider::new(&mut sp.trunk_radius, 0.1..=4.0).text("trunk radius"));
         ui.add(egui::Slider::new(&mut sp.tip_radius, 0.01..=1.0).text("tip radius"));
@@ -204,8 +265,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut SkeletonPanelState) {
             "{} nodes, {} chains, {} lobes, {} wood cells, reach {:.2}, height {:.2}",
             state.nodes, state.chains, state.lobes, state.wood, state.reach, state.height
         ));
-        ui.weak("orange is the heavy path — the trunk decomposition picked");
-        ui.weak("green rings are canopy lobes, sized by the limb that carries them");
+        if state.render == PreviewRender::Lines {
+            ui.weak("orange is the heavy path — the trunk decomposition picked");
+            ui.weak("green rings are canopy lobes, sized by the limb that carries them");
+        } else {
+            ui.weak("drawn by the world's own capsule and canopy passes");
+        }
     });
     state.open = header.fully_open();
     // A tool armed behind a collapsed section is a mode with no indicator.

@@ -71,6 +71,8 @@ pub struct UiState {
     pub chunks_total: u32,
     /// Wood capsules across resident chunks, awaiting the impostor pass.
     pub branch_segments: u64,
+    /// Canopy lobes across resident chunks, awaiting the depth-core pass.
+    pub canopy_lobes: u64,
     pub shader_log: Vec<ShaderLogEntry>,
     pub meshing_stats: MeshingStats,
     pub clear_cache_requested: bool,
@@ -141,6 +143,7 @@ impl UiState {
             chunks_visible: 0,
             chunks_total: 0,
             branch_segments: 0,
+            canopy_lobes: 0,
             shader_log: Vec::new(),
             meshing_stats: MeshingStats::default(),
             clear_cache_requested: false,
@@ -857,6 +860,7 @@ fn draw_debug(ui: &mut egui::Ui, p: &mut DebugParams) {
         ui.checkbox(&mut p.show_chunk_boundaries, "Chunk boundaries");
         ui.checkbox(&mut p.hide_water, "Hide water");
         ui.checkbox(&mut p.hide_foliage, "Hide foliage");
+        ui.checkbox(&mut p.show_canopy_cores, "Canopy cores");
 
         ui.separator();
         ui.label("Shader debug (mutually exclusive):");
@@ -1097,7 +1101,10 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
             let cull_pct = (1.0 - state.chunks_visible as f64 / state.chunks_total as f64) * 100.0;
             ui.label(format!("Culled: {:.0}%", cull_pct));
         }
-        ui.label(format!("branch capsules: {}", state.branch_segments));
+        ui.label(format!(
+            "branch capsules: {}   canopy lobes: {}",
+            state.branch_segments, state.canopy_lobes
+        ));
         ui.separator();
         let log = &state.mutation_log;
         let rejected = log.rejected_wrong_mode + log.rejected_system_origin;

@@ -291,6 +291,7 @@ impl WorldGenerator {
                     fluids: FluidLayer::default(),
                     smoothing_distances: Box::new([0u8; super::slab_smoothing::COLUMN_COUNT]),
                     segments: Vec::new(),
+                    lobes: Vec::new(),
                 };
             }
         };
@@ -350,6 +351,7 @@ impl WorldGenerator {
             fluids,
             smoothing_distances,
             segments: eval.segments,
+            lobes: eval.lobes,
         }
     }
 
@@ -504,6 +506,8 @@ pub struct GeneratedChunk {
     /// persisted - a chunk reloading re-runs generation, so these come back with
     /// the terrain rather than needing a place in the save format.
     pub segments: Vec<nodegraph_eval::feature::BranchSegment>,
+    /// Canopy lobes this chunk owns. Derived, never persisted, same as segments.
+    pub lobes: Vec<nodegraph_eval::feature::CanopyLobe>,
 }
 
 /// Identifies one editable source in the world hierarchy, for routing edits and

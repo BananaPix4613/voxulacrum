@@ -9,6 +9,8 @@ pub mod upscale_pass;
 pub mod detail_paint_pass;
 pub mod scatter_pass;
 pub mod capsule_pass;
+pub mod canopy_pass;
+pub mod skeleton_preview_pass;
 pub mod water_pass;
 pub mod water_scene_pass;
 pub mod reflection_pass;

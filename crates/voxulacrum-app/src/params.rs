@@ -502,6 +502,7 @@ impl Default for TerrainGenParams {
 // ============================================================================
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct DebugParams {
     pub show_wireframe: bool,
     pub show_chunk_boundaries: bool,
@@ -514,6 +515,7 @@ pub struct DebugParams {
     pub freeze_culling: bool,
     pub hide_water: bool,
     pub hide_foliage: bool,
+    pub show_canopy_cores: bool,
 }
 
 impl Default for DebugParams {
@@ -530,6 +532,7 @@ impl Default for DebugParams {
             freeze_culling: false,
             hide_water: false,
             hide_foliage: false,
+            show_canopy_cores: false,
         }
     }
 }

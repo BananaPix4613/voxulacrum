@@ -20,8 +20,8 @@ use crate::error::EvalResult;
 use crate::eval::Evaluator;
 use crate::EvalError;
 use crate::feature::{
-    BranchSegment, ColumnProbe, Feature, FeatureCanopy, FeaturePayload, FeatureSource,
-    TreeSource,
+    BranchSegment, CanopyLobe, ColumnProbe, Feature, FeatureCanopy, FeaturePayload,
+    FeatureSource, TreeSource,
 };
 use crate::field::{ScalarField, CHUNK_DIM};
 use crate::foliage::ChunkFoliage;
@@ -821,6 +821,7 @@ impl WorldEvaluator {
             foliage,
             fluid_levels,
             segments: stamped.segments,
+            lobes: stamped.lobes,
         })
     }
 
@@ -1166,7 +1167,13 @@ impl WorldEvaluator {
     ) -> EvalResult<Stamped> {
         let sources = self.feature_sources()?;
         if sources.is_empty() {
-            return Ok(Stamped { terrain, sources, features: Vec::new(), segments: Vec::new() });
+            return Ok(Stamped {
+                terrain,
+                sources,
+                features: Vec::new(),
+                segments: Vec::new(),
+                lobes: Vec::new(),
+            });
         }
         let range = self.chunk_y_range.clone();
         let mut probe_err = None;
@@ -1189,6 +1196,7 @@ impl WorldEvaluator {
         Ok(Stamped {
             terrain: Arc::new(stamped.terrain),
             segments: stamped.segments,
+            lobes: stamped.lobes,
             sources,
             features,
         })
@@ -1367,6 +1375,7 @@ struct Stamped {
     sources: Vec<FeatureSource>,
     features: Vec<Feature>,
     segments: Vec<BranchSegment>,
+    lobes: Vec<CanopyLobe>,
 }
 
 /// The result of evaluating the graph set for one chunk: the composited terrain,
@@ -1392,6 +1401,8 @@ pub struct ChunkEvaluation {
     /// Wood capsules this chunk owns, for the impostor pass. Empty unless a
     /// tree source reaches the chunk.
     pub segments: Vec<BranchSegment>,
+    /// Canopy lobes this chunk owns. Empty unless a tree source reaches it.
+    pub lobes: Vec<CanopyLobe>,
 }
 
 #[cfg(test)]

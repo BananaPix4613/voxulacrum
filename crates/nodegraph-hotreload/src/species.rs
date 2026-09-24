@@ -57,6 +57,25 @@ impl SpeciesFile {
     }
 }
 
+/// Every species on disk, by name. Sorted, so a picker's order is stable across
+/// runs rather than following directory order.
+pub fn list_species(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file) = path.file_name().and_then(|f| f.to_str()) else { continue };
+            // Not `file_stem`: the suffix is two extensions, and that would
+            // leave "<name>.species" - which is not what `load_species` takes.
+            if let Some(name) = file.strip_suffix(".species.json") {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Load `<dir>/<name>.species.json`.
 pub fn load_species(dir: &Path, name: &str) -> HotReloadResult<TreeSpecies> {
     let path = dir.join(format!("{name}.species.json"));
