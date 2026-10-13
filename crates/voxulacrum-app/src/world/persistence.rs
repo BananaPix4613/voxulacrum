@@ -510,6 +510,12 @@ impl WorldDatabase {
         })
     }
 
+    /// Train a dictionary from the first `DICT_SAMPLE_TARGET` rows once that many
+    /// exist and none is stored yet. Returns whether one was trained.
+    ///
+    /// Call this only before any reader has been handed the dictionary, which in
+    /// practice means at world open. Rows written afterwards use it, and a reader
+    /// built without it cannot decode them.
     pub fn try_train_dictionary(&mut self) -> Result<bool, PersistError> {
         if self.dict_bytes.is_some() { return Ok(false); }
 
@@ -774,7 +780,9 @@ impl WorldPersistence {
         let db_path = dir.join("world.vxdb");
         let mut db = WorldDatabase::open(&db_path)?;
 
-        // Try training dictionary if enough chunks exist
+        // Try training dictionary if enough chunks exist. This is the only place
+        // one is trained: the streaming workers capture the dictionary once, after
+        // this returns, so one trained later would never reach them.
         match db.try_train_dictionary() {
             Ok(true) => log::info!("Dictionary trained on first open"),
             Ok(false) => {} // Not enough chunks yet, or already trained
@@ -870,13 +878,7 @@ impl WorldPersistence {
         self.autosave_timer = 0.0;
         match self.save_dirty_chunks(world) {
             Ok(0) => false,
-            Ok(_) => {
-                // Attempt dictionary training if not yet done
-                if let Some(ref mut db) = self.db {
-                    let _ = db.try_train_dictionary();
-                }
-                true
-            }
+            Ok(_) => true,
             Err(e) => { log::error!("Auto-save failed: {e}"); false }
         }
     }
@@ -1263,5 +1265,174 @@ mod tests {
         assert!(matches!(chunk.data.edit_state, EditState::Delta(_)), "diff retained so the next save keeps it");
         assert!(chunk.seam_finalized, "seam flag restored, so the pass is not re-derived");
         assert!(!chunk.persist_dirty, "a freshly loaded chunk is not dirty");
+    }
+
+    // ---- The dictionary is only ever trained at open (F2, #2) ----------------
+
+    /// A throwaway directory, removed on drop. Declared first in a test so it is
+    /// dropped last, after every database handle inside it is closed.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("voxulacrum_dictionary_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+
+        fn db_path(&self) -> PathBuf {
+            self.0.join("world.vxdb")
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Overrides with enough repeated structure for the trainer to find content,
+    /// varied by `i` so the rows are not identical.
+    fn trainable_overrides(i: usize) -> ChunkOverrides {
+        let mut ovr = ChunkOverrides::default();
+        for j in 0..400 {
+            let index = j * 5 + i % 7;
+            ovr.voxel_diffs.insert(LocalPos::from_index(index), vox(1 + (j % 4) as u16));
+        }
+        ovr
+    }
+
+    fn trainable_record(i: usize) -> ChunkRecord {
+        ChunkRecord {
+            edits: ChunkEdits::Delta(trainable_overrides(i)),
+            tags: ChunkTags::default(),
+            seam_finalized: false,
+        }
+    }
+
+    /// A world holding one chunk, for driving `tick_autosave`.
+    fn world_holding(chunk: LoadedChunk) -> crate::world::World {
+        use crate::world::mutation::{EngineMode, MutationLog};
+
+        let mut chunks = std::collections::HashMap::new();
+        chunks.insert(chunk.data.coord, chunk);
+        crate::world::World {
+            chunks,
+            generator: crate::world::world_generator::load_default()
+                .expect("default generator loads"),
+            materials: Arc::new(voxel_core::MaterialRegistry::load_initial()),
+            min_chunk_y: 0,
+            max_chunk_y: 4,
+            mode: EngineMode::Authoring,
+            mutation_log: MutationLog::default(),
+            event_outbox: Vec::new(),
+        }
+    }
+
+    /// Control: a row written with the dictionary is readable by a reader that
+    /// holds it. Passes before and after the fix, and shows the rows used here
+    /// train and that the dictionary read path works.
+    #[test]
+    fn a_dictionary_row_is_readable_by_a_reader_holding_the_dictionary() {
+        let dir = ScratchDir::new("control");
+        let mut db = WorldDatabase::open(&dir.db_path()).expect("open");
+        let rows: Vec<(IVec3, ChunkRecord)> = (0..DICT_SAMPLE_TARGET)
+            .map(|i| (IVec3::new(i as i32, 0, 0), trainable_record(i)))
+            .collect();
+        db.save_chunks_batch(&rows).expect("seed rows");
+        assert!(
+            db.try_train_dictionary().expect("training runs"),
+            "the seed rows must be trainable",
+        );
+        let dict = db
+            .get_meta_blob("zstd_dictionary")
+            .expect("meta read")
+            .expect("dictionary stored");
+
+        let pos = IVec3::new(5000, 0, 0);
+        db.save_chunk(pos, &trainable_record(1)).expect("save");
+        let flags: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT flags FROM chunks WHERE cx = ?1 AND cy = 0 AND cz = 0",
+                params![pos.x],
+                |r| r.get(0),
+            )
+            .expect("row exists");
+        assert_eq!(flags, FLAG_ZSTD_DICT, "the row was written with the dictionary");
+
+        let reader = WorldDatabase::open_readonly(&dir.db_path(), Some(dict.as_slice()))
+            .expect("reader opens");
+        assert!(reader.load_chunk_record(pos).expect("readable").is_some());
+    }
+
+    /// A session that crosses `DICT_SAMPLE_TARGET` rows must not start writing
+    /// rows its own streaming readers cannot decode. The readers are built once
+    /// from the dictionary captured at open (main.rs), so a dictionary trained
+    /// mid-session never reaches them.
+    #[test]
+    fn rows_written_mid_session_are_readable_with_the_dictionary_from_open() {
+        let dir = ScratchDir::new("midsession");
+
+        // One row short of the trainer's threshold, all plain: no dictionary yet.
+        let db = WorldDatabase::open(&dir.db_path()).expect("open");
+        let seed: Vec<(IVec3, ChunkRecord)> = (0..DICT_SAMPLE_TARGET - 1)
+            .map(|i| (IVec3::new(i as i32, 0, 0), trainable_record(i)))
+            .collect();
+        db.save_chunks_batch(&seed).expect("seed rows");
+        let mut persistence = WorldPersistence {
+            db: Some(db),
+            db_path: Some(dir.db_path()),
+            autosave_timer: 0.0,
+            autosave_enabled: true,
+        };
+
+        // What main.rs captures for the streaming workers, before any autosave.
+        let dict_at_open = persistence.dictionary_bytes();
+        assert!(dict_at_open.is_none(), "nothing is trained at open");
+        let reader = WorldDatabase::open_readonly(&dir.db_path(), dict_at_open.as_deref())
+            .expect("reader opens");
+
+        // One edited chunk. The first autosave takes the table to the threshold.
+        let pos = IVec3::new(5000, 0, 0);
+        let mut chunk = LoadedChunk::new_air(pos);
+        chunk.data.edit_state = EditState::Delta(trainable_overrides(DICT_SAMPLE_TARGET - 1));
+        chunk.persist_dirty = true;
+        let mut world = world_holding(chunk);
+        assert!(
+            persistence.tick_autosave(AUTOSAVE_INTERVAL_SECS, &mut world),
+            "first autosave saves the chunk",
+        );
+
+        // A later edit is written by the next autosave.
+        {
+            let chunk = world.get_chunk_mut(pos).expect("chunk resident");
+            chunk.data.edit_state.bucket_mut().set_voxel(30_000, vox(9));
+            chunk.persist_dirty = true;
+        }
+        assert!(
+            persistence.tick_autosave(AUTOSAVE_INTERVAL_SECS, &mut world),
+            "second autosave saves the edit",
+        );
+
+        let record = reader
+            .load_chunk_record(pos)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "a row written mid-session must be readable by a reader holding \
+                     only the dictionary from open: {e}"
+                )
+            })
+            .expect("row exists");
+        match record.edits {
+            ChunkEdits::Delta(ovr) => assert!(
+                ovr.voxel_diffs.contains_key(&LocalPos::from_index(30_000)),
+                "the later edit is in the row",
+            ),
+            _ => panic!("expected a Delta record"),
+        }
     }
 }
