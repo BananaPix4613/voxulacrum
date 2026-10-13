@@ -1,0 +1,767 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Voxulacrum Engine Map</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: five horizontal region bands, top to bottom in rough data-flow order, with a sticky detail panel on the right; stacks to one column below 960px. */
+:root {
+  --bg: #eceef0;
+  --surface: #f9fafb;
+  --surface-2: #e2e6ea;
+  --ink: #1b2128;
+  --muted: #59636f;
+  --line: #c8ced5;
+  --accent: #2b54c4;
+  --accent-soft: rgba(43, 84, 196, 0.12);
+  --oak: #a8743a;
+  --moss: #5b8a3a;
+  --limestone: #978d74;
+  --slate: #5a6c96;
+  --water: #2a8a97;
+  --settled: #3d7b4c;
+  --interim: #a97810;
+  --active: #7a4fc4;
+  --f-display: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Consolas, "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171b; --surface: #1c2025; --surface-2: #262b32; --ink: #e3e7ec; --muted: #9aa4af;
+    --line: #353c45; --accent: #8aa6ff; --accent-soft: rgba(138, 166, 255, 0.16);
+    --oak: #c99257; --moss: #7fae5a; --limestone: #b9ae94; --slate: #8399cb; --water: #4fb4c1;
+    --settled: #6fbf82; --interim: #d9a843; --active: #b493f2;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171b; --surface: #1c2025; --surface-2: #262b32; --ink: #e3e7ec; --muted: #9aa4af;
+  --line: #353c45; --accent: #8aa6ff; --accent-soft: rgba(138, 166, 255, 0.16);
+  --oak: #c99257; --moss: #7fae5a; --limestone: #b9ae94; --slate: #8399cb; --water: #4fb4c1;
+  --settled: #6fbf82; --interim: #d9a843; --active: #b493f2;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--f-body); font-size: 14px; line-height: 1.5;
+  padding-inline: 20px; padding-block: 0 40px;
+}
+code, .mono { font-family: var(--f-mono); font-size: 0.86em; }
+code { background: var(--surface-2); padding: 0.05em 0.35em; border-radius: 3px; overflow-wrap: anywhere; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- Header ---------- */
+.top {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 14px 24px;
+  padding-block: 22px 16px; border-bottom: 1px solid var(--line); margin-bottom: 18px;
+}
+.brand h1 {
+  font-family: var(--f-display); font-weight: 600; font-size: 26px; letter-spacing: 0.01em;
+  margin: 0; line-height: 1.1; text-wrap: balance;
+}
+.brand p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
+.brand p .mono { color: var(--ink); }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; }
+.ctl { display: flex; flex-direction: column; gap: 4px; border: 0; margin: 0; padding: 0; min-width: 0; }
+.ctl legend, .ctl .lbl {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); padding: 0; margin-bottom: 4px;
+}
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: var(--surface); }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label {
+  padding: 5px 11px; cursor: pointer; font-size: 13px; border-right: 1px solid var(--line); white-space: nowrap;
+}
+.seg label:last-of-type { border-right: 0; }
+.seg input:checked + label { background: var(--ink); color: var(--bg); }
+.seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
+.notes-btn {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 5px; padding: 5px 11px; cursor: pointer; font-size: 13px;
+}
+.notes-btn b { font-family: var(--f-mono); font-weight: 500; color: var(--interim); }
+.notes-btn[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.notes-btn[aria-pressed="true"] b { color: inherit; }
+
+/* ---------- Layout ---------- */
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; align-items: start; }
+@media (max-width: 959px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- Map ---------- */
+.map { position: relative; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; z-index: 2; }
+.edges path.e { fill: none; stroke-width: 1.6; }
+.edges path.e.out { stroke: var(--accent); }
+.edges path.e.in { stroke: var(--muted); stroke-dasharray: 5 4; }
+.edges path.e.hot { stroke-width: 3.2; }
+.edges path.e.lens { stroke: var(--accent); stroke-width: 2.4; }
+.edges marker path { stroke: none; }
+.edges .m-out path { fill: var(--accent); }
+.edges .m-in path { fill: var(--muted); }
+
+.band {
+  display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px;
+}
+@media (max-width: 700px) { .band { grid-template-columns: minmax(0, 1fr); } }
+.band-head {
+  display: flex; flex-direction: column; gap: 6px; text-align: left; background: none; border: 0; padding: 4px 2px; cursor: pointer; border-radius: 4px;
+}
+.band-head:hover .rname { text-decoration: underline; text-underline-offset: 3px; }
+.band-head.sel { background: var(--accent-soft); }
+.rtitle { display: flex; align-items: center; gap: 8px; }
+.rname { font-family: var(--f-display); font-weight: 600; font-size: 16px; line-height: 1.15; }
+.rmat { font-family: var(--f-mono); font-size: 10.5px; color: var(--muted); letter-spacing: 0.04em; }
+.rblurb { color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.rstats { font-family: var(--f-mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.z-regions .rblurb { display: block; }
+
+.cube { width: 22px; height: 22px; flex: none; }
+.cube .t { fill: color-mix(in oklab, var(--m) 52%, white); }
+.cube .l { fill: var(--m); }
+.cube .r { fill: color-mix(in oklab, var(--m) 62%, black); }
+
+.cards { display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; min-width: 0; }
+.card {
+  position: relative; z-index: 3;
+  flex: 1 1 224px; max-width: 100%; min-width: 0;
+  display: flex; flex-direction: column;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+  transition: opacity 120ms ease, border-color 120ms ease;
+}
+.z-modules .card { flex-basis: 290px; }
+.z-regions .card { flex: 0 1 auto; }
+.card-main {
+  display: flex; flex-direction: column; gap: 4px; text-align: left; background: none; border: 0; padding: 9px 11px 8px; cursor: pointer; min-width: 0;
+}
+.card-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.nm { font-weight: 600; font-size: 14px; line-height: 1.25; }
+.card-main:hover .nm { text-decoration: underline; text-underline-offset: 3px; }
+.crate { font-family: var(--f-mono); font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.sum { font-size: 12.5px; color: var(--muted); line-height: 1.42; }
+.loc { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
+.bar { flex: 1; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--m); }
+.num { font-family: var(--f-mono); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.steps { margin-left: auto; display: flex; gap: 3px; flex-wrap: wrap; justify-content: flex-end; }
+.steps span {
+  font-family: var(--f-mono); font-size: 10.5px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
+  display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--accent); color: var(--accent); background: var(--bg);
+}
+.steps span.now { background: var(--accent); color: var(--bg); }
+
+.mods-toggle {
+  border: 0; border-top: 1px dashed var(--line); background: none; text-align: left; padding: 5px 11px; cursor: pointer;
+  font-size: 11.5px; color: var(--muted);
+}
+.mods-toggle:hover { color: var(--ink); }
+.mods { list-style: none; margin: 0; padding: 2px 6px 8px; display: none; border-top: 1px dashed var(--line); }
+.card.open .mods, .z-modules .mods { display: block; }
+.z-modules .mods-toggle { display: none; }
+.mods button {
+  display: flex; width: 100%; justify-content: space-between; gap: 10px; align-items: baseline;
+  background: none; border: 0; padding: 3px 5px; cursor: pointer; border-radius: 3px; text-align: left;
+}
+.mods button:hover { background: var(--surface-2); }
+.mods button.sel { background: var(--accent-soft); }
+.mn { font-family: var(--f-mono); font-size: 11.5px; overflow-wrap: anywhere; min-width: 0; }
+.ml { font-family: var(--f-mono); font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+
+.z-regions .crate, .z-regions .sum, .z-regions .loc, .z-regions .mods, .z-regions .mods-toggle { display: none !important; }
+.z-regions .card-main { padding: 6px 10px; }
+
+.card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card.linked { border-color: var(--accent); }
+.card.now { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.map.focus .card:not(.sel):not(.linked):not(.now):not(.inlens) { opacity: 0.42; }
+.map.lensing .card:not(.inlens) { opacity: 0.42; }
+
+/* status glyph: shape + color */
+.st { width: 10px; height: 10px; flex: none; display: inline-block; border-radius: 1px; }
+.st-settled { background: var(--settled); }
+.st-interim { border: 1.5px dashed var(--interim); }
+.st-active { border: 1.5px solid var(--active); background: linear-gradient(135deg, var(--active) 50%, transparent 50%); }
+
+/* ---------- Panel ---------- */
+.panel {
+  position: sticky; top: calc(14px + env(safe-area-inset-top, 0px));
+  max-height: calc(100vh - 28px); overflow: auto;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 18px 18px 22px; min-width: 0;
+}
+@media (max-width: 959px) { .panel { position: static; max-height: none; } }
+.panel h2 { font-family: var(--f-display); font-weight: 600; font-size: 21px; line-height: 1.15; margin: 2px 0 6px; text-wrap: balance; }
+.panel h3 {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; margin: 18px 0 6px;
+}
+.panel p { margin: 0 0 8px; }
+.panel ul { margin: 0; padding-left: 18px; }
+.panel li { margin-bottom: 5px; }
+.eyebrow { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 2px 8px 2px 6px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--bg); white-space: nowrap;
+}
+.status-note { font-size: 12.5px; color: var(--muted); border-left: 2px solid var(--interim); padding: 2px 0 2px 10px; margin: 8px 0 0; }
+.summary { font-size: 14px; }
+.kv { display: grid; grid-template-columns: 62px minmax(0, 1fr); gap: 4px 10px; font-size: 13px; }
+.kv dt { color: var(--muted); font-size: 12px; }
+.kv dd { margin: 0; }
+.links { list-style: none; padding: 0 !important; display: flex; flex-direction: column; gap: 3px; }
+.links li { margin: 0 !important; }
+.lnk {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 2px 8px; width: 100%; text-align: left;
+  background: none; border: 0; padding: 5px 6px; border-radius: 4px; cursor: pointer;
+}
+.lnk:hover, .lnk:focus-visible { background: var(--surface-2); }
+.lnk .arr { font-family: var(--f-mono); color: var(--accent); }
+.lnk .arr.in { color: var(--muted); }
+.lnk .who { font-weight: 600; font-size: 13px; }
+.lnk .what { grid-column: 2; font-size: 12.5px; color: var(--muted); }
+.paths { list-style: none; padding: 0 !important; }
+.paths li { font-family: var(--f-mono); font-size: 11.5px; overflow-wrap: anywhere; display: flex; justify-content: space-between; gap: 10px; margin-bottom: 2px !important; }
+.paths li span:last-child { color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+.textbtn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; font-size: 13px; }
+.backbar { margin: -4px 0 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.chip { font-size: 11.5px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--ink); white-space: nowrap; }
+.chip.main { background: var(--ink); color: var(--bg); }
+.chip.stage { border-color: var(--line); color: var(--muted); font-family: var(--f-mono); font-size: 11px; }
+
+.stepper { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 10px; }
+.stepper button {
+  border: 1px solid var(--line); background: var(--bg); border-radius: 5px; padding: 4px 11px; cursor: pointer; font-size: 13px;
+}
+.stepper button:disabled { opacity: 0.4; cursor: default; }
+.stepper .pos { font-family: var(--f-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.stepbox { border: 1px solid var(--accent); border-radius: 5px; padding: 12px 13px; background: var(--bg); }
+.stepbox h4 { margin: 0 0 2px; font-size: 15.5px; }
+.steplist { list-style: none; padding: 0 !important; margin-top: 4px !important; counter-reset: s; }
+.steplist li { margin: 0 !important; }
+.steplist button {
+  display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 8px; width: 100%; text-align: left; align-items: baseline;
+  background: none; border: 0; padding: 4px 6px; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+.steplist button:hover { background: var(--surface-2); }
+.steplist button.cur { background: var(--accent-soft); }
+.steplist .n { font-family: var(--f-mono); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.steplist .w { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.legend { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 10px; align-items: center; font-size: 13px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 4px 0 4px; }
+.stat { border: 1px solid var(--line); border-radius: 4px; padding: 8px 9px; background: var(--bg); }
+.stat b { display: block; font-family: var(--f-display); font-weight: 600; font-size: 19px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.stat span { font-size: 11.5px; color: var(--muted); }
+.note { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+.note:first-of-type { border-top: 0; margin-top: 4px; padding-top: 0; }
+.note h4 { margin: 0 0 4px; font-size: 14px; }
+.foot { font-size: 12px; color: var(--muted); margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+
+/* where-to-look list: file and symbol on their own lines, wrapping inside the panel */
+.where { list-style: none; padding: 0 !important; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.where li { margin: 0 !important; min-width: 0; overflow-wrap: anywhere; font-family: var(--f-mono); line-height: 1.35; }
+.where .wf { display: block; font-size: 11px; color: var(--muted); }
+.where .ws { display: block; font-size: 12px; }
+.where .miss { display: inline-block; margin-top: 2px; font-family: var(--f-body); font-size: 11px; color: var(--interim); }
+.paths li > :first-child { min-width: 0; overflow-wrap: anywhere; text-align: left; }
+.chip.stage { white-space: normal; overflow-wrap: anywhere; }
+.warn { font-family: var(--f-mono); font-size: 10.5px; color: var(--interim); border: 1px dashed var(--interim); border-radius: 3px; padding: 0 4px; }
+.health h4 { margin: 14px 0 6px; font-size: 13px; }
+.health li { font-size: 13px; }
+.src-tag { font-size: 11px; color: var(--muted); }
+.coupling { font-size: 13px; }
+.coupling .no { color: var(--interim); font-size: 12px; }
+.empty-data { padding: 40px 0; color: var(--muted); }
+</style>
+
+<header class="top">
+  <div class="brand">
+    <h1>Voxulacrum Engine Map</h1>
+    <p id="meta-line"></p>
+  </div>
+  <div class="controls">
+    <fieldset class="ctl">
+      <legend>Zoom</legend>
+      <div class="seg" role="radiogroup">
+        <input type="radio" name="zoom" id="z-regions" value="regions"><label for="z-regions">Regions</label>
+        <input type="radio" name="zoom" id="z-subsystems" value="subsystems" checked><label for="z-subsystems">Subsystems</label>
+        <input type="radio" name="zoom" id="z-modules" value="modules"><label for="z-modules">Modules</label>
+      </div>
+    </fieldset>
+    <fieldset class="ctl">
+      <legend>Lens</legend>
+      <div class="seg" role="radiogroup" id="lens-seg"></div>
+    </fieldset>
+    <div class="ctl">
+      <span class="lbl">Drift</span>
+      <button class="notes-btn" id="notes-btn" aria-pressed="false">Drift and checks <b id="notes-count"></b></button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <main class="map z-subsystems" id="map" aria-label="Engine map"></main>
+  <aside class="panel" id="panel" aria-live="polite"></aside>
+</div>
+
+<!-- extract.py replaces the marker below with the merged map data. -->
+<script id="map-data" type="application/json">{"meta":{"commit":"4e0fe67","branch":"v0.4.0","dirty":true,"date":"2026-10-01","rust":47619,"wgsl":3092,"crates":6,"files":197},"regions":[{"id":"content","name":"Content & Authoring","mat":"oak","blurb":"What authors make and the tools they make it with. All of it is data on disk or a panel inside the engine (P9, P11)."},{"id":"gen","name":"Generation","mat":"moss","blurb":"Turns the manifest and graphs into chunk contents. Pure functions of seed, graphs and position (P1), so a chunk can be regenerated instead of saved."},{"id":"state","name":"World State","mat":"limestone","blurb":"What exists right now: resident chunks, their sidecar layers, player edits, and the one door every write goes through."},{"id":"runtime","name":"Runtime","mat":"slate","blurb":"Decides what runs, when, and on which thread: the frame schedule, the job system, and which chunks should be in memory."},{"id":"present","name":"Presentation & Play","mat":"water","blurb":"Turns world state into pixels and lets the player act on it: meshing, rendering, simulation and the player."}],"subs":[{"id":"assets","region":"content","name":"Content on disk","crate":"assets/ · palettes/","status":"settled","short":"The manifest and every authored file it names.","summary":"The manifest is the root. It names the seed, sea level, world height, world-level parameters, and the graph files for the World, each Zone and each Biome. Libraries, blueprints, species, materials and prefabs are referenced by name and resolved at load.","owns":["`world.manifest.json` (schema v1)","Graph files (`.graph.json`, `.detail.json`)","Library assets, blueprints, species","`materials.ron`, `prefabs.ron`, `input.ron`, palettes"],"runs":"Read at startup, and again whenever a watched file is saved.","rules":["Names, never numbers. Blueprints and species name their materials, and an unknown name is a hard error at load. A numeric id would silently change meaning when the registry reorders.","Disk is authoritative for the world. The editor is authoritative only for its own canvas (design v1.9)."],"refs":["Design §4 Manifest-driven world structure","Roadmap P2"],"modules":[{"p":"assets/LICENSE","lang":"asset","l":null,"d":"","src":""},{"p":"assets/blueprints/chunk-o-land.blueprint.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/blueprints/monolith.blueprint.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/blueprints/mountain.blueprint.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/blueprints/rock.blueprint.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/blueprints/something.blueprint.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/blueprints/tree_trunk.blueprint.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/.gitkeep","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/biome_meadow.detail.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/biome_meadow.graph.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/biome_ocean.detail.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/biome_ocean.graph.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/biome_rocky.detail.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/biome_rocky.graph.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/example.graph.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/world.graph.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/world.manifest.json","lang":"asset","l":null,"d":"Seed, sea_level, min_y/max_y, world params, zone and biome registrations. Read through `WorldManifest::read`, which migrates pre-v1 files.","src":"note"},{"p":"assets/graphs/zone.graph.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/graphs/zone_highlands.graph.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/input.ron","lang":"asset","l":null,"d":"Key bindings for the semantic action layer.","src":"note"},{"p":"assets/libraries/biome_border_fade.library.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/libraries/exposure_layering.library.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/libraries/poisson_placement.library.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/libraries/standard_cave_noise.library.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/libraries/surface_layering.library.json","lang":"asset","l":null,"d":"","src":""},{"p":"assets/materials.ron","lang":"asset","l":null,"d":"The material table, including the `render_delegated` flag that hands wood to the capsule pass.","src":"note"},{"p":"assets/prefabs.ron","lang":"asset","l":null,"d":"Scatter prefab silhouettes, colors and scales.","src":"note"},{"p":"assets/species/oak.species.json","lang":"asset","l":null,"d":"","src":""},{"p":"palettes/autumn.json","lang":"asset","l":null,"d":"","src":""},{"p":"palettes/forest_day.json","lang":"asset","l":null,"d":"","src":""},{"p":"palettes/gameboy.json","lang":"asset","l":null,"d":"","src":""},{"p":"palettes/terrain.json","lang":"asset","l":null,"d":"","src":""}]},{"id":"tools","region":"content","name":"Authoring & debug tools","crate":"nodegraph-editor · ui/ · validate · verify","status":"active","short":"In-engine editors, inspectors, and two headless checks.","summary":"Panels inside the engine for editing and inspecting content: the node-graph editor and hierarchy editor, the column inspector, the biome map, the field probe, blueprint capture and stamping, and the tree skeleton view. Two CLI checks run from the same binary.","owns":["Editor state: Snarl model, undo/redo, dirty tracking","`UiState` and each panel's request state"],"runs":"egui draws in the Render stage. Inspection queries run in Simulation (column inspector, biome map, blueprint, skeleton) and Meshing (field probe), and any graph evaluation they need is sent to the worker pool.","rules":["Debug tools run the production path, not a parallel derivation. A tool that computes its own answer reports what it thinks, and that disagreement is the bug you would be using it to find.","Armed tools, not act-on-hover. A button arms a tool and the next click in the world performs it, because aiming and clicking share the mouse."],"refs":["Roadmap §4 The tooling track","Design §12 Tooling as a first-class engine surface"],"modules":[{"p":"crates/voxulacrum-app/src/ui/panels.rs","lang":"rs","l":1372,"d":"`UiState` and the side panels. The graph editor panel toggles with F2.","src":"note"},{"p":"crates/voxulacrum-app/src/ui/hierarchy_editor.rs","lang":"rs","l":757,"d":"The embedded editor plus the multi-graph hierarchy it edits.","src":"doc"},{"p":"crates/nodegraph-editor/src/params.rs","lang":"rs","l":716,"d":"Per-`NodeKind` parameter editor widgets.","src":"doc"},{"p":"crates/nodegraph-editor/src/viewer.rs","lang":"rs","l":487,"d":"`SnarlViewer` implementation: how each node draws itself and validates its connections.","src":"doc"},{"p":"crates/voxulacrum-app/src/ui/blueprint_panel.rs","lang":"rs","l":468,"d":"Blueprint authoring panel (roadmap §4.2): capture a region of the world into a blueprint, and stamp a saved one back.","src":"doc"},{"p":"crates/voxulacrum-app/src/ui/field_probe.rs","lang":"rs","l":432,"d":"Field probe: headless data plane for the graph-authoring debug panel.","src":"doc"},{"p":"crates/nodegraph-editor/src/state.rs","lang":"rs","l":329,"d":"Editor state: the Snarl model, undo/redo stack, and dirty tracking.","src":"doc"},{"p":"crates/voxulacrum-app/src/validate.rs","lang":"rs","l":315,"d":"Graph validation CLI (roadmap §4.5, Category D).","src":"doc"},{"p":"crates/voxulacrum-app/src/ui/skeleton_panel.rs","lang":"rs","l":280,"d":"Debug view for tree skeletons (`voxel-tree-rendering-spec.md` §16 step 1).","src":"doc"},{"p":"crates/voxulacrum-app/src/ui/mod.rs","lang":"rs","l":257,"d":"UI module root and the field-probe texture cache.","src":"note"},{"p":"crates/voxulacrum-app/src/verify.rs","lang":"rs","l":254,"d":"Headless generation verification (roadmap §4.5 Category D).","src":"doc"},{"p":"crates/voxulacrum-app/src/ui/biome_map.rs","lang":"rs","l":163,"d":"Biome / zone map preview §4.3).","src":"doc"},{"p":"crates/voxulacrum-app/src/ui/column_inspector.rs","lang":"rs","l":154,"d":"Column inspector (roadmap §4.3): the generation pipeline for one world column, stage by stage.","src":"doc"},{"p":"crates/voxulacrum-app/src/ui/colormap.rs","lang":"rs","l":147,"d":"Value -> color ramps for debug data visualization.","src":"doc"},{"p":"crates/nodegraph-editor/src/colors.rs","lang":"rs","l":83,"d":"Pin and node colors for the editor canvas.","src":"note"},{"p":"crates/nodegraph-editor/src/bridge.rs","lang":"rs","l":60,"d":"Conversion between `egui_snarl::Snarl<NodeKind>` and `nodegraph_ir::Graph`.","src":"doc"},{"p":"crates/nodegraph-editor/src/style.rs","lang":"rs","l":36,"d":"Canvas-wide `SnarlStyle` for the editor. Per-node visuals (header band, body) and per-pin visuals (shape, fill) live in `viewer.rs`; this module holds only the global baseline shared by every node and wire.","src":"doc"},{"p":"crates/nodegraph-editor/src/lib.rs","lang":"rs","l":32,"d":"Visual node-graph editor for `nodegraph_ir::Graph`, built on `egui_snarl::Snarl`. The editor's source of truth is `Snarl<NodeKind>`; conversion to/from `Graph` happens at save/load and at every push to the live preview runtime.","src":"doc"}]},{"id":"hotreload","region":"content","name":"Loading & hot reload","crate":"nodegraph-hotreload · app loaders","status":"settled","short":"Registries, file watching, and name-to-template resolution.","summary":"Loads registries at startup and watches assets while running. Names in graph nodes (a blueprint, a tree species) become in-memory templates here, so the evaluator never touches the filesystem.","owns":["`GraphWatcher`, `ShaderWatcher`","Material, prefab and library registries"],"runs":"Polled in the Input stage each frame. A changed graph file becomes a `GraphChanged` event; nothing regenerates directly from here.","rules":["Hot reload is save-triggered. Regeneration reads disk, never a mix of in-memory and on-disk graphs (design v1.9).","Registries fall back to a built-in table when their file is missing or invalid, so the engine never fails to start over content."],"refs":["Design §12 Hot reload","Design §4 Hot reload is save-triggered"],"modules":[{"p":"crates/voxulacrum-app/src/libraries.rs","lang":"rs","l":302,"d":"Data-driven library registry (Phase 6 Substep 2).","src":"doc"},{"p":"crates/voxulacrum-app/src/prefabs.rs","lang":"rs","l":187,"d":"Data-driven scatter prefab registry (Substep 10).","src":"doc"},{"p":"crates/nodegraph-hotreload/src/example.rs","lang":"rs","l":156,"d":"Bootstrap helper: write a default example graph if a watched dir is empty.","src":"doc"},{"p":"crates/nodegraph-hotreload/src/species.rs","lang":"rs","l":126,"d":"Species resolution at the hot-reload boundary, keeping the evaluator filesystem-pure. `PlaceTree` nodes carry a species name and a wood material name; this layer loads `<name>.species.json`, resolves the material through the registry, and fills the node's in-memory template.","src":"doc"},{"p":"crates/nodegraph-hotreload/src/bin/watch_demo.rs","lang":"rs","l":100,"d":"CLI demo: watch `assets/graphs/` (or an arg-supplied dir), re-evaluate each `*.json` graph on change, and write its `<name>.png` heightmap.","src":"doc"},{"p":"crates/voxulacrum-app/src/materials.rs","lang":"rs","l":51,"d":"Engine-side material registry loading and the shared `MaterialRegistryRes` ECS resource.","src":"doc"},{"p":"crates/voxulacrum-app/src/shader_reload.rs","lang":"rs","l":49,"d":"Shader file watcher.","src":"note"},{"p":"crates/nodegraph-hotreload/src/blueprint.rs","lang":"rs","l":48,"d":"Blueprint resolution at the hot-reload boundary, keeping the evaluator filesystem-pure. `PlaceBlueprint` nodes carry a name; this layer loads `<name>.blueprint.json`, resolves its material names through the registry, and fills the node's in-memory template.","src":"doc"},{"p":"crates/nodegraph-hotreload/src/watcher.rs","lang":"rs","l":48,"d":"File watcher for `*.json` graph files.","src":"doc"},{"p":"crates/nodegraph-hotreload/src/bin/regen_example.rs","lang":"rs","l":33,"d":"Regenerate `<dir>/example.graph.json` from the canonical `build_example_graph` recipe. Overwrites any existing file.","src":"doc"},{"p":"crates/nodegraph-hotreload/src/lib.rs","lang":"rs","l":30,"d":"Lightweight file-watcher for `nodegraph-ir` JSON graphs.","src":"doc"},{"p":"crates/voxulacrum-app/src/graph_reload.rs","lang":"rs","l":26,"d":"Engine-side `Resource` wrapper around `nodegraph_hotreload::GraphWatcher`.","src":"doc"},{"p":"crates/nodegraph-hotreload/src/error.rs","lang":"rs","l":22,"d":"Error type for hot-reload operations.","src":"doc"},{"p":"crates/voxulacrum-app/src/paths.rs","lang":"rs","l":22,"d":"Asset path resolution, anchored to the workspace root at compile time so paths work regardless of the process working directory (cargo run, a release exe launched from any directory, IDE launch, etc.).","src":"doc"}]},{"id":"graph-ir","region":"gen","name":"Graph IR","crate":"nodegraph-ir","status":"settled","short":"The structure every graph is made of. No evaluation, no I/O.","summary":"Nodes in a slotmap, typed edges between pins, and the rules for which pins may connect. It validates and serializes graphs but never evaluates them and does no file I/O.","owns":["`Graph`, `Node`, `NodeKind` (every node type and its parameters)","Pin types and compatibility","`GraphBoundary` declarations, `LibraryGraphRegistry`"],"runs":"No runtime of its own. Used by the editor, the loaders and the evaluator.","rules":["One edge per input pin, enforced by `Graph::connect`. That makes 'what feeds this input' a function, which is why the input index can be a flat lookup instead of a scan.","`GraphRef` and `LibraryRef` targets are cycle-checked, so cross-graph reads cannot loop."],"refs":["Design §4 Pin types","Design §4 Cross-graph dataflow","Design §4 Named boundary pins"],"modules":[{"p":"crates/nodegraph-ir/src/node.rs","lang":"rs","l":1805,"d":"Nodes: stable IDs, polymorphic kinds + params, and static descriptors.","src":"doc"},{"p":"crates/nodegraph-ir/src/graph.rs","lang":"rs","l":633,"d":"The graph container, mutation API, validation, and JSON serialization.","src":"doc"},{"p":"crates/nodegraph-ir/src/boundary.rs","lang":"rs","l":203,"d":"Typed boundary declarations: the named, typed inputs/outputs a graph or library exposes to its consumers.","src":"doc"},{"p":"crates/nodegraph-ir/src/library.rs","lang":"rs","l":189,"d":"Library graphs: reusable sub-graphs referenced by `LibraryRef` nodes, and a registry that resolves those references and rejects cycles.","src":"doc"},{"p":"crates/nodegraph-ir/src/index.rs","lang":"rs","l":158,"d":"An input-pin index over a graph's edges: `(node, pin) -> source pin`.","src":"doc"},{"p":"crates/nodegraph-ir/src/crossgraph.rs","lang":"rs","l":156,"d":"Cross-graph references: a `GraphRef` node points at another graph in the hierarchy (the World graph, the Zone graph, or a Biome graph) and exposes that graph's declared boundary outputs as its own pins.","src":"doc"},{"p":"crates/nodegraph-ir/src/pin.rs","lang":"rs","l":122,"d":"Pin types and compatibility rules.","src":"doc"},{"p":"crates/nodegraph-ir/src/lib.rs","lang":"rs","l":76,"d":"Typed dataflow graph intermediate representation for the voxulacrum world-generation node system.","src":"doc"},{"p":"crates/nodegraph-ir/src/diagnostic.rs","lang":"rs","l":56,"d":"Validation diagnostics.","src":"doc"},{"p":"crates/nodegraph-ir/src/error.rs","lang":"rs","l":50,"d":"Error type for graph mutation and serialization.","src":"doc"},{"p":"crates/nodegraph-ir/src/edge.rs","lang":"rs","l":32,"d":"Edges and pin references.","src":"doc"}]},{"id":"evaluator","region":"gen","name":"Graph evaluation","crate":"nodegraph-eval","status":"settled","short":"Runs graphs: per voxel, per column, per foliage pass, and the five-graph harness.","summary":"Four evaluators share one strategy, a topological whole-graph fill. Per voxel (biome density and material), per column (World and Zone graphs), foliage (DetailGraphs), and `WorldEvaluator`, which strings the five-graph hierarchy into one chunk evaluation. Each also has a pointwise mode that answers for a single world position without a chunk.","owns":["`WorldEvaluator`, `Evaluator`, `ColumnEvaluator`, `DetailEvaluator`","Evaluation and column caches","Biome border analysis, library kernels, scalar parameter sidecars"],"runs":"On workers only. `guard.rs` asserts that evaluation never runs inline on the frame-schedule thread. The startup fill and `--verify-generation` run outside the schedule, so they are allowed.","rules":["Bulk and pointwise evaluation must agree. `WorldEvaluator::column_eval` is the single door for per-column evaluation because the two paths once gave different answers.","Library kernels are the same native code the original node used, so moving a computation into a library asset adds no numeric drift."],"refs":["Design §4 World generation graph architecture","Design §5 Stage order","Design §5 Per-column caches, Fade blending"],"modules":[{"p":"crates/nodegraph-eval/src/world_eval.rs","lang":"rs","l":2355,"d":"Multi-graph evaluation harness for the five-graph hierarchy.","src":"doc"},{"p":"crates/nodegraph-eval/src/eval.rs","lang":"rs","l":1067,"d":"The evaluator: topological whole-chunk fill + pointwise sampling.","src":"doc"},{"p":"crates/nodegraph-eval/src/column_eval.rs","lang":"rs","l":946,"d":"The per-column evaluator: fills a World/Zone graph's per-column nodes (`SurfaceNoise`, `WorldOutput`, `ZoneOutput`) into a `ColumnCache`.","src":"doc"},{"p":"crates/nodegraph-eval/src/detail_eval.rs","lang":"rs","l":496,"d":"The DetailGraph evaluator: runs a foliage placement graph against a chunk's terrain to produce paint maps + scatter instances.","src":"doc"},{"p":"crates/nodegraph-eval/src/border.rs","lang":"rs","l":239,"d":"Per-column biome-border analysis and the `BiomeBorderFade` kernel.","src":"doc"},{"p":"crates/nodegraph-eval/src/column.rs","lang":"rs","l":227,"d":"Per-column (2D) field container and cache.","src":"doc"},{"p":"crates/nodegraph-eval/src/library_kernel.rs","lang":"rs","l":176,"d":"Native library kernels: the byte-identical home of the computations that authored library assets bind to by name.","src":"doc"},{"p":"crates/nodegraph-eval/src/cache.rs","lang":"rs","l":112,"d":"Chunk-scoped common-subexpression cache.","src":"doc"},{"p":"crates/nodegraph-eval/src/field.rs","lang":"rs","l":102,"d":"Dense scalar / vector fields produced during evaluation.","src":"doc"},{"p":"crates/nodegraph-eval/src/foliage.rs","lang":"rs","l":102,"d":"Foliage generation output - the DetailGraph evaluator's product.","src":"doc"},{"p":"crates/nodegraph-eval/src/context.rs","lang":"rs","l":89,"d":"Per-chunk evaluation context. Explicit; no global state.","src":"doc"},{"p":"crates/nodegraph-eval/src/error.rs","lang":"rs","l":89,"d":"Evaluation errors.","src":"doc"},{"p":"crates/nodegraph-eval/src/png.rs","lang":"rs","l":76,"d":"Heightmap rendering: grayscale PNG (viewable artifact) and ASCII (snapshot).","src":"doc"},{"p":"crates/nodegraph-eval/src/scalar_params.rs","lang":"rs","l":57,"d":"Named scalar parameter sidecars.","src":"doc"},{"p":"crates/nodegraph-eval/src/guard.rs","lang":"rs","l":41,"d":"Frame-schedule thread guard.","src":"doc"},{"p":"crates/nodegraph-eval/src/lib.rs","lang":"rs","l":39,"d":"Crate root and re-exports.","src":"note"}]},{"id":"features","region":"gen","name":"Cross-chunk features","crate":"nodegraph-eval","status":"active","short":"Structures, trees, rivers and props that straddle chunk borders.","summary":"Anything that can cross a chunk border. Every chunk that can see a feature re-derives it identically from world position and seed, then keeps only the part inside its own bounds. No chunk ever reads a neighbor's output.","owns":["Feature and `FeatureSource` derivation","Tree skeletons","River networks","Jittered-grid and Poisson scatter, blueprint stamping"],"runs":"Inside a chunk's Generate job: as stage 8 for structures and trees, or as a graph node during density for rivers (stages 3-4).","rules":["Order independence is structural. A feature's anchor height comes from a pointwise surface query, never from a neighboring chunk's voxels.","Nothing is stored. A tree's skeleton is a pure function of (seed, species, age), re-derived by every chunk in its margin band.","A river's bed belongs to the network, not the terrain, so a river cannot follow terrain it did not shape."],"refs":["Design §5 Cross-chunk feature generation (v1.10)","Design §5 River networks (v1.11)","voxel-tree-rendering-spec.md"],"modules":[{"p":"crates/nodegraph-eval/src/skeleton.rs","lang":"rs","l":1121,"d":"Tree skeletons: a branching path derived from an anchor.","src":"doc"},{"p":"crates/nodegraph-eval/src/feature.rs","lang":"rs","l":829,"d":"Cross-chunk feature derivation (design §5, \"Cross-chunk feature generation\").","src":"doc"},{"p":"crates/nodegraph-eval/src/river.rs","lang":"rs","l":286,"d":"River networks (design §5, \"River networks\").","src":"doc"},{"p":"crates/nodegraph-eval/src/scatter.rs","lang":"rs","l":262,"d":"Deterministic point scatter for prop placement.","src":"doc"},{"p":"crates/nodegraph-eval/src/scan.rs","lang":"rs","l":104,"d":"Surface scanners: annotate scatter points with the terrain surface Y and filter by flatness / material.","src":"doc"},{"p":"crates/nodegraph-eval/src/place.rs","lang":"rs","l":77,"d":"Prop stamping: write blueprint voxels into a terrain buffer at scanned surface points, clipping anything outside the chunk's `[0, N)` bounds.","src":"doc"}]},{"id":"worldgen","region":"gen","name":"Chunk generation","crate":"voxulacrum-app · world/","status":"interim","short":"Engine-side pipeline: evaluate, cross into storage, smooth, tag, add water and foliage.","summary":"`WorldGenerator` calls the evaluator, carries the result across the storage boundary, applies slab smoothing, derives chunk tags, and builds the fluid and foliage layers. It also owns the work that needs neighbors (seam finalization) and regeneration after a graph edit.","owns":["`WorldGenerator`, `WorldManifest`, `GraphSlot`","`StorageBoundary`","Slab smoothing, seam finalization, fluid generation","`ChunkTags`, `WorldRegenCoordinator`"],"runs":"`generate_chunk` runs on a worker inside a Generate job. Seam finalization runs on the main thread in the Meshing stage. Regeneration is polled in PostFrame.","rules":["The evaluation-to-storage crossing is permanent and singular. Terrain, fluid and foliage all cross in `storage_boundary.rs`, so each side can be tuned for its own job.","Graph edits invalidate by tag lookup, never a world scan. Tags describe the previous generation, so narrow matching is used only where an edit cannot change the tags themselves."],"statusNote":"Stage 11 (lighting bake) is not built yet: every chunk carries `LightData`, but it stays at its default.","refs":["Design §5 Stage order","Design §5 Traversal smoothing distance","Design §4 Edit invalidation table"],"modules":[{"p":"crates/voxulacrum-app/src/world/world_generator.rs","lang":"rs","l":1523,"d":"Graph-backed world generation.","src":"doc"},{"p":"crates/voxulacrum-app/src/world/regen.rs","lang":"rs","l":328,"d":"Queues edited slots, maps each to the chunks it invalidates, swaps results in.","src":"note"},{"p":"crates/voxulacrum-app/src/world/slab_smoothing.rs","lang":"rs","l":304,"d":"Slab smoothing (design doc §5 stage 7, §\"Slab smoothing\").","src":"doc"},{"p":"crates/voxulacrum-app/src/world/fluid_gen.rs","lang":"rs","l":291,"d":"Fluid generation (design doc §7, generation stage 9).","src":"doc"},{"p":"crates/voxulacrum-app/src/world/seam.rs","lang":"rs","l":282,"d":"Cross-chunk seam finalization (Substep 2b).","src":"doc"},{"p":"crates/voxulacrum-app/src/world/storage_boundary.rs","lang":"rs","l":132,"d":"The evaluation -> storage domain boundary","src":"doc"},{"p":"crates/voxulacrum-app/src/world/tags.rs","lang":"rs","l":63,"d":"Per-chunk identity tags (design doc §3, §16).","src":"doc"},{"p":"crates/voxulacrum-app/src/world/generation.rs","lang":"rs","l":11,"d":"World extent constants.","src":"doc"}]},{"id":"voxel-core","region":"state","name":"Voxel core","crate":"voxel-core","status":"settled","foundation":true,"short":"The Voxel, the generation-side chunk buffer, materials and blueprints.","summary":"The smallest pieces: the `Voxel` (shape, material, flags, packed into 27 bits), the three-variant chunk container used during generation, palette compression, coordinates, the material registry and the blueprint format.","owns":["`Voxel`, `ShapeId`, `MaterialId`, `MaterialRegistry`","`ChunkBuffer` (Uniform, Palette, Dense)","`ChunkCoord`, `LocalPos`, `NeighborView`","`Blueprint`"],"runs":"Library code, used everywhere.","rules":["Owns the material and shape primitive only. Lighting, fluids and foliage are sidecar layers in the app crate, keyed by the same indexing.","Blueprints use their own shape vocabulary and named materials, so the asset format does not change when the runtime shape set does."],"statusNote":"Open decision (roadmap §8): the current shape vocabulary versus an octant-occupancy mask.","refs":["Design §2 Voxel format","Design §3 Chunk data model"],"modules":[{"p":"crates/voxel-core/src/blueprint.rs","lang":"rs","l":501,"d":"Blueprints: authored voxel templates (design §6.6).","src":"doc"},{"p":"crates/voxel-core/src/buffer.rs","lang":"rs","l":324,"d":"`ChunkBuffer`: the generic three-variant chunk storage container.","src":"doc"},{"p":"crates/voxel-core/src/material_registry.rs","lang":"rs","l":299,"d":"Stable material registry: numeric `MaterialId`s plus snake_case name resolution. The table is data-driven — authored in `assets/materials.ron` and loaded via `MaterialRegistry::load_from_ron` — with `MaterialRegistry::load_initial` kept as a built-in fallback.","src":"doc"},{"p":"crates/voxel-core/src/palette.rs","lang":"rs","l":286,"d":"Generic palette-compressed storage.","src":"doc"},{"p":"crates/voxel-core/src/voxel.rs","lang":"rs","l":152,"d":"The `Voxel` struct.","src":"doc"},{"p":"crates/voxel-core/src/coord.rs","lang":"rs","l":147,"d":"Chunk-space and chunk-local coordinate primitives.","src":"doc"},{"p":"crates/voxel-core/src/neighbor.rs","lang":"rs","l":132,"d":"Batched neighbor-chunk view for cross-chunk lookups.","src":"doc"},{"p":"crates/voxel-core/src/lib.rs","lang":"rs","l":76,"d":"Voxel and chunk primitives for the voxulacrum world-generation engine.","src":"doc"},{"p":"crates/voxel-core/src/shape.rs","lang":"rs","l":57,"d":"Voxel shape.","src":"doc"},{"p":"crates/voxel-core/src/error.rs","lang":"rs","l":50,"d":"Error types for voxel-core.","src":"doc"},{"p":"crates/voxel-core/src/material.rs","lang":"rs","l":37,"d":"Material identifier newtype.","src":"doc"}]},{"id":"world","region":"state","name":"Resident world","crate":"voxulacrum-app · world/","status":"interim","short":"The chunks in memory, their sidecar layers, and player overrides.","summary":"Each `LoadedChunk` holds the data-model `Chunk` (compact storage, sidecar layers, overrides) plus the runtime state needed while it is loaded: mesh handle, dirty flags, mesh sequence number, and derived wood and canopy instances.","owns":["`World`: chunk map, generator, materials, mode, mutation log, event outbox","`LoadedChunk`, `Chunk`, `ChunkStorage` (SoA, palette-compressed)","`DetailLayers`, `ScatterStore`, `FluidLayer`, `DecalLayer`, `LightData`","`ChunkOverrides`"],"runs":"One ECS resource (`VoxelWorld`). Read by most systems; written only through `World::execute`.","rules":["Generated content is never persisted. Only `ChunkOverrides` are saved, then re-applied on top of fresh generation (P4).","`mesh_seq` detects stale meshes: a mesh result is dropped if the chunk changed while it was being meshed."],"statusNote":"`DecalLayer` and `LightData` are scaffolding with no producer yet.","refs":["Design §3 Chunk data model","Design §9 Authored vs. generated diff model"],"modules":[{"p":"crates/voxulacrum-app/src/world/mod.rs","lang":"rs","l":1616,"d":"`World`, the intent handlers behind `execute`, mesh upload, the startup fill.","src":"note"},{"p":"crates/voxulacrum-app/src/world/storage.rs","lang":"rs","l":458,"d":"Chunk storage: SoA layout with Uniform/Populated variants and palette compression.","src":"doc"},{"p":"crates/voxulacrum-app/src/world/chunk.rs","lang":"rs","l":397,"d":"`Chunk`, `LoadedChunk`, the 34³ meshing snapshot, `DELTA_THRESHOLD`.","src":"note"},{"p":"crates/voxulacrum-app/src/world/layers.rs","lang":"rs","l":344,"d":"Parallel chunk data layers (design doc §3, §6, §7).","src":"doc"},{"p":"crates/voxulacrum-app/src/world/overrides.rs","lang":"rs","l":116,"d":"Player-edit override model (design doc §9).","src":"doc"}]},{"id":"door","region":"state","name":"Mutation door & events","crate":"voxulacrum-app · world/","status":"settled","short":"Every write to the world, checked and announced in one place.","summary":"Every write is a `MutationCommand` passed to `World::execute`. The command says who is asking (Authoring, PlayTime or System) and what it intends. The door checks the origin against the engine mode, then the intent's handler does persistence marking, mesh invalidation and event emission.","owns":["`MutationCommand`, `WorldMutation` intents","`EngineMode`, `MutationOrigin`, `MutationLog`","`WorldEvent` and the event outbox"],"runs":"Called synchronously from systems. Events go to an outbox that `world_event_pump_system` publishes at the start of the next frame, so door events arrive one frame late by construction.","rules":["A write that bypasses the door is a bug by definition (P5).","Authoring and play do not coexist. Each mode accepts only its own origin; System commands are accepted in any mode.","Intent stays legible. A blueprint stamp is one command rather than N voxel batches: one log row, one event, one undo step."],"refs":["Design §9 Modes: content authoring vs. play","Roadmap §6.2 The door","Roadmap §6.7 Event layer"],"modules":[{"p":"crates/voxulacrum-app/src/world/mutation.rs","lang":"rs","l":380,"d":"The mutation command API (design doc §9): the single seam every world-state mutation flows through.","src":"doc"},{"p":"crates/voxulacrum-app/src/world/blueprint.rs","lang":"rs","l":274,"d":"World-side blueprint operations: capture a region of the live world into an authored `Blueprint`, and decompose a `ResolvedBlueprint` into the per-chunk voxel batches the mutation door writes.","src":"doc"},{"p":"crates/voxulacrum-app/src/world/events.rs","lang":"rs","l":98,"d":"Typed world events (design §6.7, roadmap §11).","src":"doc"}]},{"id":"persistence","region":"state","name":"Persistence","crate":"voxulacrum-app · world/","status":"interim","short":"SQLite + zstd. Stores only what the player changed.","summary":"SQLite with zstd compression and a trained dictionary. Only chunks with player changes are stored, and only as their overrides. Everything else regenerates from seed.","owns":["`WorldDatabase` (meta and chunks tables)","`ChunkRecord` encoding","`WorldPersistence` autosave"],"runs":"Reads happen on generation workers, each with its own cached read-only handle. Writes happen on the main thread: autosave in PostFrame, and when a dirty chunk is evicted.","rules":["A chunk whose edits exceed a quarter of its volume is stored whole instead of as a delta (`DELTA_THRESHOLD`).","Worker handles are keyed by a generation token, so a regen that rebuilds streaming makes every worker reopen its handle."],"statusNote":"Interim shapes recorded in the design doc: save versioning is wipe-on-bump, and fluid persists as a full snapshot rather than a diff.","refs":["Design §3 Chunk storage on disk","Design §9 Interim fluid persistence","Design §12 Save format versioning"],"modules":[{"p":"crates/voxulacrum-app/src/world/persistence.rs","lang":"rs","l":1258,"d":"SQLite-based world persistence with delta compression. Only player-modified chunks are stored. Base terrain is regenerated from seed.","src":"doc"}]},{"id":"runtime","region":"runtime","name":"Frame schedule & ECS","crate":"voxulacrum-app · ecs/ · main.rs","status":"settled","short":"One schedule, one thread, six ordered stages.","summary":"One bevy_ecs schedule run on one thread, in six ordered stages: Input, Simulation, Meshing, UniformWrite, Render, PostFrame. Everything that happens 'each frame' is a system in one of these stages.","owns":["`FrameStage` and the schedule","ECS resources: window, render context, params, `UiState`","`FrameTimings` diagnostics, `EngineParams`"],"runs":"Main thread. `main.rs` builds resources, fills the initial world, then runs the schedule inside the schedule-thread guard each frame.","rules":["Background work never runs inline on the schedule thread; it goes to the job system.","Budgets are measured against CPU work, not frame time. Under vsync the wait inside present looks like cost but is not (the at-rest hitch lesson)."],"refs":["Design §12 Runtime architecture","Design §12 Performance budgets","Roadmap §7.3"],"modules":[{"p":"crates/voxulacrum-app/src/ecs/systems.rs","lang":"rs","l":2154,"d":"Almost every system the schedule runs, grouped by stage.","src":"note"},{"p":"crates/voxulacrum-app/src/main.rs","lang":"rs","l":884,"d":"Startup, the event loop, and `--validate-graphs` / `--verify-generation` dispatch.","src":"note"},{"p":"crates/voxulacrum-app/src/params.rs","lang":"rs","l":782,"d":"`EngineParams`: tunables for materials, streaming, debug views and rendering.","src":"note"},{"p":"crates/voxulacrum-app/src/diagnostics.rs","lang":"rs","l":553,"d":"Frame timing instrumentation (roadmap §4.4 `FrameTimings`, deliverable A1).","src":"doc"},{"p":"crates/voxulacrum-app/src/ecs/resources.rs","lang":"rs","l":261,"d":"Shared ECS resources: window handle, render context and other singletons.","src":"note"},{"p":"crates/voxulacrum-app/src/ecs/schedule.rs","lang":"rs","l":164,"d":"`FrameStage` and every system's placement and ordering in the frame.","src":"note"},{"p":"crates/voxulacrum-app/src/ecs/events.rs","lang":"rs","l":20,"d":"UI request events: regenerate, remesh, clear cache, load palette.","src":"note"},{"p":"crates/voxulacrum-app/src/ecs/mod.rs","lang":"rs","l":4,"d":"Module root.","src":"note"}]},{"id":"jobs","region":"runtime","name":"Job system","crate":"voxulacrum-app","status":"interim","short":"One scheduler, one pool, one global running limit.","summary":"One scheduler for all background work, on one rayon pool. Jobs are ordered by priority (class first, then distance to the camera) and share one global running limit, so idle meshing capacity flows to generation instead of sitting reserved.","owns":["`JobSystem`","`JobKind`: Generate, Mesh, ChunkIo","`Priority`, `CoreBudget`"],"runs":"Consumers submit inside their systems. `job_pump_system` dispatches in the Meshing stage, after streaming submits and before meshing collects results.","rules":["The scheduler owns when and how many, never what comes back. Each consumer keeps its own result channel.","Interactive work (a re-mesh after an edit) outranks all streaming work regardless of distance."],"statusNote":"No declared job-to-job dependencies yet. 'Mesh only after the neighbors exist' is a per-frame check in meshing. `ChunkIo` is defined but nothing submits it.","refs":["Design §12 The job system (v1.9)","Roadmap P14"],"modules":[{"p":"crates/voxulacrum-app/src/jobs.rs","lang":"rs","l":362,"d":"The unified job system (pillar P14; design §1 \"one scheduler, one clock family\").","src":"doc"},{"p":"crates/voxulacrum-app/src/core_budget.rs","lang":"rs","l":36,"d":"Shared CPU worker-budget arithmetic","src":"doc"}]},{"id":"streaming","region":"runtime","name":"Chunk streaming","crate":"voxulacrum-app · world/","status":"settled","short":"Which chunks should be in memory, and getting them there.","summary":"Each frame it projects the camera's view onto the ground (accounting for altitude), requests missing chunks nearest-first, inserts finished ones, and evicts the ones outside the view.","owns":["`ChunkStreamingManager`, `CameraView`","The in-flight set, the fill-time metric"],"runs":"`streaming_tick_system`, main thread, first in the Meshing stage.","rules":["Insertions are capped per frame and cut further when meshing is backlogged, so a burst of finished chunks cannot stall a frame.","Eviction is time-budgeted and skips chunks that are mid-mesh. Dirty chunks are saved before they are dropped."],"refs":["Design §12 Chunk streaming","Roadmap §7.3 fill time"],"modules":[{"p":"crates/voxulacrum-app/src/world/streaming.rs","lang":"rs","l":610,"d":"View test with altitude, nearest-first submission, capped insertion, budgeted eviction, worker DB handles.","src":"note"}]},{"id":"meshing","region":"present","name":"Meshing","crate":"voxulacrum-app · meshing/","status":"interim","short":"Voxels to triangles, via snapshots, workers and a disk cache.","summary":"A dirty chunk is meshed only once its six face neighbors are resident. The main thread copies a padded 34³ snapshot; a worker checks the disk cache and, on a miss, runs the cube mesher.","owns":["`MeshingPipeline`, `MeshingCoordinator`","Mesh disk cache (content-addressed, LRU)","Cube mesher"],"runs":"`meshing_tick_system` in the Meshing stage (main thread) for submission and upload; Mesh jobs on workers.","rules":["The cache key is the snapshot's content, excluding the edge and corner border cells the mesher never reads.","Materials marked `render_delegated` (wood) are skipped. Their voxels exist for collision and mining but are drawn by the capsule pass."],"statusNote":"Naive cube mesher: one quad per exposed face, no greedy merging. Decision D8 (greedy meshing) is due in 0.4.0 with measurements.","refs":["Design §10 Meshing and mesh data","Design §10 Mesh disk cache"],"modules":[{"p":"crates/voxulacrum-app/src/meshing/cache.rs","lang":"rs","l":529,"d":"Compact on-disk vertices, the content-addressed cache key, LRU eviction.","src":"note"},{"p":"crates/voxulacrum-app/src/meshing/mod.rs","lang":"rs","l":427,"d":"Dirty tracking, the face-neighbor gate, snapshot submission, result polling.","src":"note"},{"p":"crates/voxulacrum-app/src/meshing/cube_mesher.rs","lang":"rs","l":244,"d":"Naive cube mesher: one quad per exposed voxel face.","src":"doc"},{"p":"crates/voxulacrum-app/src/meshing/coordinator.rs","lang":"rs","l":79,"d":"Per-frame tick: submit, drain, poll, upload; remesh and cache-clear requests.","src":"note"}]},{"id":"rendering","region":"present","name":"Rendering","crate":"voxulacrum-app · rendering/ · shaders/","status":"active","short":"A declared pass graph at low resolution, upscaled for the pixel look.","summary":"A small render graph of declared passes: shadow, reflection, main scene, water, outline, post-process, palette, upscale, then egui. The scene renders at low resolution and is upscaled with sub-pixel camera correction.","owns":["Render passes and pipelines","Per-chunk GPU buffers: terrain, water, grass density, scatter, wood capsules, canopy","Uniforms, render targets, WGSL shaders"],"runs":"Uniforms are written in UniformWrite; the graph is built and executed in Render. Per-chunk instance buffers are built when a chunk's mesh uploads and dropped on unload.","rules":["Grass is generated on the GPU from a per-column density map; blades are never stored.","Wood is drawn as analytic capsule impostors with true per-fragment depth. The impostor quad must clear the capsule's full reach along the view axis, or near-facing branches disappear."],"refs":["Design §11 Isometric pixel-art rendering","cloud-shadow-architecture.md","voxel-tree-rendering-spec.md"],"modules":[{"p":"crates/voxulacrum-app/src/rendering/pipelines.rs","lang":"rs","l":1165,"d":"Pipeline construction and GPU instance types (`FaceVertex`, `CapsuleInstanceGpu`).","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/uniforms.rs","lang":"rs","l":577,"d":"Uniform layouts and the 256-slot material color table.","src":"note"},{"p":"crates/voxulacrum-app/src/cloud_shadow.rs","lang":"rs","l":525,"d":"Cloud shadow textures: a baked detail layer plus a window sampled from the climate grid.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/cap_pass.rs","lang":"rs","l":469,"d":"Cross-section caps where the clip volume cuts terrain.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/water_pass.rs","lang":"rs","l":419,"d":"One water surface mesh per chunk, welded across seams.","src":"note"},{"p":"shaders/detail_paint.wgsl","lang":"wgsl","l":393,"d":"","src":""},{"p":"shaders/terrain.wgsl","lang":"wgsl","l":382,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/player_pass.rs","lang":"rs","l":360,"d":"Avatar and drop shadow, rebuilt each frame at the interpolated position.","src":"note"},{"p":"shaders/capsule.wgsl","lang":"wgsl","l":352,"d":"","src":""},{"p":"shaders/water.wgsl","lang":"wgsl","l":347,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/debug_lines.rs","lang":"rs","l":343,"d":"Chunk bounds, pick highlight and skeleton lines.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/outline_pass.rs","lang":"rs","l":294,"d":"Outlines from scene, depth and normal; wood has its own surface class.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/main_scene_pass.rs","lang":"rs","l":291,"d":"Terrain, foliage, scatter, wood, canopy, player and debug lines.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/palette_pass.rs","lang":"rs","l":291,"d":"Quantizes the scene to the active palette.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/detail_paint_pass.rs","lang":"rs","l":273,"d":"Tier-1 foliage paint render pass (design doc §6, §11).","src":"doc"},{"p":"shaders/palette.wgsl","lang":"wgsl","l":269,"d":"","src":""},{"p":"shaders/scatter.wgsl","lang":"wgsl","l":260,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/scatter_pass.rs","lang":"rs","l":253,"d":"Tier-2/3 scatter instance render pass (design doc §6, §11).","src":"doc"},{"p":"crates/voxulacrum-app/src/rendering/uniform_writer.rs","lang":"rs","l":250,"d":"Writes per-frame uniforms.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/upscale_pass.rs","lang":"rs","l":236,"d":"Low-res image to the swapchain with sub-pixel correction.","src":"note"},{"p":"shaders/canopy_core.wgsl","lang":"wgsl","l":224,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/render_targets.rs","lang":"rs","l":217,"d":"Low-resolution targets for the pixel-art pipeline.","src":"note"},{"p":"crates/voxulacrum-app/src/camera.rs","lang":"rs","l":194,"d":"Texel-aligned view-projection snapping, with a sub-pixel correction applied during upscale.","src":"note"},{"p":"shaders/outline.wgsl","lang":"wgsl","l":193,"d":"","src":""},{"p":"crates/voxulacrum-app/src/palette.rs","lang":"rs","l":153,"d":"Palette loading for the palette pass.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/reflection_pass.rs","lang":"rs","l":145,"d":"Planar reflection into half-res targets with a mirrored camera basis.","src":"note"},{"p":"shaders/capsule_shadow.wgsl","lang":"wgsl","l":141,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/post_process.rs","lang":"rs","l":140,"d":"Post-processing over the outlined image.","src":"note"},{"p":"shaders/post_process.wgsl","lang":"wgsl","l":123,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/render_graph.rs","lang":"rs","l":114,"d":"Pass declarations (reads and writes), validation, ordered execution.","src":"note"},{"p":"shaders/cap.wgsl","lang":"wgsl","l":110,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/frustum.rs","lang":"rs","l":101,"d":"Frustum culling, also used for the shadow frustum.","src":"note"},{"p":"shaders/player.wgsl","lang":"wgsl","l":91,"d":"","src":""},{"p":"shaders/debug_lines.wgsl","lang":"wgsl","l":89,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/capsule_pass.rs","lang":"rs","l":86,"d":"Wood imposter instance buffers (spec §5).","src":"doc"},{"p":"crates/voxulacrum-app/src/rendering/canopy_pass.rs","lang":"rs","l":85,"d":"Canopy lobe instance buffers (spec §6.2).","src":"doc"},{"p":"crates/voxulacrum-app/src/rendering/water_scene_pass.rs","lang":"rs","l":81,"d":"Water drawn over a copy of the scene.","src":"note"},{"p":"shaders/upscale.wgsl","lang":"wgsl","l":79,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/shadow_pass.rs","lang":"rs","l":62,"d":"Shadow depth, including wood through the capsule shadow solve.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/skeleton_preview_pass.rs","lang":"rs","l":60,"d":"Solid rendering of the tree skeleton debug preview.","src":"doc"},{"p":"shaders/shadow.wgsl","lang":"wgsl","l":39,"d":"","src":""},{"p":"crates/voxulacrum-app/src/rendering/mod.rs","lang":"rs","l":26,"d":"Module root.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/surface_state.rs","lang":"rs","l":19,"d":"Swapchain surface state.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/render_context.rs","lang":"rs","l":14,"d":"Device and queue handles.","src":"note"},{"p":"crates/voxulacrum-app/src/rendering/terrain_pass.rs","lang":"rs","l":0,"d":"","src":""}]},{"id":"simulation","region":"present","name":"World simulation","crate":"voxulacrum-app · simulation/ · world/","status":"active","short":"Time, wind, water flow, climate, and what's visible underground.","summary":"What changes over time without the player: time of day and the sun, wind, the fluid cellular automaton, the coarse climate grid behind cloud shadows, and the enclosure flood that decides what is visible underground.","owns":["`SimulationManager` and `FrameState` (camera, sun, wind, light space)","Fluid simulation","`ClimateGrid`","Room / visibility volume"],"runs":"Simulation stage. Fluid runs on its own fixed-rate clock: it plans read-only, then commits through the door as `CommitFluidPlans`.","rules":["Fluid mass is fixed-point u16, so results do not depend on the machine or thread order.","Weather and fluid do not feed each other; fluid is already expensive."],"statusNote":"Visibility is computed each frame from the player (`room.rs`). The region graph that would make it shared world state (P13) is still a design item.","refs":["Design §7 Water system","Design §11 Camera occlusion","Design §12 The region graph"],"modules":[{"p":"crates/voxulacrum-app/src/world/climate.rs","lang":"rs","l":640,"d":"Cloud/vapor density simulation (climate redesign phase 3): a coarse macro- grid cellular automaton, independent of the voxel/chunk grid.","src":"doc"},{"p":"crates/voxulacrum-app/src/world/fluid_sim.rs","lang":"rs","l":515,"d":"Fluid flow simulation (design doc §7): mass-conserving cellular automata over a chunk's active fluid cells.","src":"doc"},{"p":"crates/voxulacrum-app/src/simulation/manager.rs","lang":"rs","l":254,"d":"`FrameState`: everything rendering needs from this frame's simulation.","src":"note"},{"p":"crates/voxulacrum-app/src/world/room.rs","lang":"rs","l":224,"d":"Runtime visibility / enclosure detection (design §11: underground-visibility note).","src":"doc"},{"p":"crates/voxulacrum-app/src/simulation/time_of_day.rs","lang":"rs","l":210,"d":"Sun direction and color over the day.","src":"note"},{"p":"crates/voxulacrum-app/src/simulation/wind.rs","lang":"rs","l":33,"d":"Wind vector.","src":"note"},{"p":"crates/voxulacrum-app/src/simulation/mod.rs","lang":"rs","l":3,"d":"Module root.","src":"note"}]},{"id":"player","region":"present","name":"Player & interaction","crate":"voxulacrum-app · player/ · interaction · input","status":"settled","short":"Semantic input, a pure fixed-step player, picking and tools.","summary":"Input becomes semantic actions. A pure `player_step` advances the player at a fixed 30 Hz using only a `WorldView` of solid intervals. Picking casts a voxel DDA from the cursor to find the anchor voxel, and tools turn actions into door commands.","owns":["Player state, double-buffered for interpolation","`PlayerClock`, the input action layer","Picking and player tools"],"runs":"Input gather and the sim run in the Simulation stage; picking runs after the simulation tick. F5 toggles Authoring and Play.","rules":["`player_step` has no ECS, renderer or `World` type, so it can move to server-core unchanged (P6).","Collision queries geometry directly; there is no walkability mask at runtime."],"refs":["Design §8 Anchor model","Design §12 Networking","networking-architecture-proposal.md"],"modules":[{"p":"crates/voxulacrum-app/src/input.rs","lang":"rs","l":608,"d":"Raw input to semantic game actions.","src":"note"},{"p":"crates/voxulacrum-app/src/player/sim.rs","lang":"rs","l":416,"d":"Pure player simulation (Substep 4). No ECS, no renderer, no `World` type - only `glam` and the `WorldView` seam - so this module moves to the server-core crate unchanged at Phase 10.","src":"doc"},{"p":"crates/voxulacrum-app/src/interaction.rs","lang":"rs","l":337,"d":"Player world interaction: cursor-ray picking and (Substep 8c) scatter edits.","src":"doc"},{"p":"crates/voxulacrum-app/src/player/systems.rs","lang":"rs","l":175,"d":"ECS glue for the player sim: components, the fixed clock, the `WorldView` impl, and the systems that wrap the pure `player_step`.","src":"doc"},{"p":"crates/voxulacrum-app/src/player/mod.rs","lang":"rs","l":2,"d":"Module root.","src":"note"}]}],"edges":[{"from":"tools","to":"assets","label":"Saves graphs, blueprints and species edits."},{"from":"assets","to":"hotreload","label":"Files on disk; saves are watched."},{"from":"assets","to":"worldgen","label":"Manifest and graph set build the `WorldGenerator`."},{"from":"graph-ir","to":"tools","label":"Graph converted to and from the editor's Snarl model at load, save and preview."},{"from":"graph-ir","to":"evaluator","label":"`Graph`, `NodeKind`, the input-pin index."},{"from":"hotreload","to":"evaluator","label":"Blueprint and species templates filled into nodes; library kernels."},{"from":"hotreload","to":"door","label":"Writes `GraphChanged` onto the world event bus."},{"from":"door","to":"worldgen","label":"Event bus subscriber queues the edited `GraphSlot` for regeneration."},{"from":"voxel-core","to":"evaluator","label":"`ChunkBuffer<Voxel, 32>`, `MaterialId`."},{"from":"voxel-core","to":"world","label":"`Voxel`, coordinates, `MaterialRegistry`."},{"from":"features","to":"evaluator","label":"Stamped terrain, wood segments, canopy lobes, river beds."},{"from":"evaluator","to":"worldgen","label":"`ChunkEvaluation` in evaluation-domain containers."},{"from":"evaluator","to":"tools","label":"Column reports, zone/biome maps, probed node fields."},{"from":"streaming","to":"jobs","label":"Generate jobs, nearest first."},{"from":"jobs","to":"worldgen","label":"Runs `generate_chunk` on a worker."},{"from":"persistence","to":"streaming","label":"Saved overrides re-applied inside the generation job."},{"from":"worldgen","to":"streaming","label":"Finished `LoadedChunk` over the result channel."},{"from":"streaming","to":"door","label":"`InsertLoadedChunk`, `EvictChunk`."},{"from":"worldgen","to":"door","label":"`FinalizeSeam`, `SwapRegeneratedChunks`."},{"from":"door","to":"world","label":"Every write."},{"from":"world","to":"persistence","label":"Dirty overrides: autosave and save-on-evict."},{"from":"world","to":"meshing","label":"Dirty chunks; 34³ snapshots."},{"from":"meshing","to":"jobs","label":"Mesh jobs (interactive class after edits)."},{"from":"meshing","to":"rendering","label":"Terrain meshes; triggers per-chunk instance buffers."},{"from":"world","to":"rendering","label":"Water, grass density, scatter, wood and canopy per chunk."},{"from":"world","to":"simulation","label":"Voxels and fluid layers for the fluid sim and the room flood."},{"from":"world","to":"player","label":"`WorldView` solid intervals; voxels for picking."},{"from":"simulation","to":"rendering","label":"`FrameState`: camera, sun, wind; visibility mask; cloud shadow."},{"from":"simulation","to":"door","label":"`CommitFluidPlans`."},{"from":"player","to":"door","label":"Edits, scatter, pours (PlayTime origin)."},{"from":"player","to":"simulation","label":"Player position: camera follow, flood origin."},{"from":"tools","to":"door","label":"Blueprint stamps (Authoring origin)."},{"from":"runtime","to":"jobs","label":"`job_pump_system` dispatches each frame."},{"from":"runtime","to":"streaming","label":"Runs `streaming_tick_system` each frame."},{"from":"runtime","to":"meshing","label":"Runs `meshing_tick_system` each frame."},{"from":"runtime","to":"simulation","label":"Runs the Simulation-stage systems."},{"from":"runtime","to":"player","label":"Runs input gather, the player sim and picking."},{"from":"runtime","to":"rendering","label":"Runs `render_present_system`."}],"lenses":{"chunk":{"name":"Chunk lifecycle","blurb":"One chunk from 'the camera can see this spot' to pixels on screen, and back out of memory. Steps alternate between the main thread and worker threads; the chip on each step says which.","steps":[{"nodes":["streaming"],"where":"main","stage":"Meshing","title":"Decide it's wanted","text":"The camera's view rectangle is projected onto the ground and widened by a load margin. Each column is tested with its altitude span, so tall terrain at the near edge still loads. Missing chunks go into a heap keyed by squared distance.","code":[{"ref":"world/streaming.rs · ChunkStreamingManager::tick","path":"crates/voxulacrum-app/src/world/streaming.rs","ok":true},{"ref":"world/streaming.rs · CameraView::is_in_view_rect","path":"crates/voxulacrum-app/src/world/streaming.rs","ok":true}]},{"nodes":["streaming","jobs"],"where":"main","stage":"Meshing","title":"Request generation","text":"The nearest chunks are submitted as Generate jobs at streaming priority, up to the Generate submission limit minus what is already in flight. `job_pump_system` then dispatches by (class, distance) under the global running limit.","code":[{"ref":"world/streaming.rs · submit_generation","path":"crates/voxulacrum-app/src/world/streaming.rs","ok":true},{"ref":"jobs.rs · JobSystem::pump","path":"crates/voxulacrum-app/src/jobs.rs","ok":true}]},{"nodes":["evaluator"],"where":"worker","stage":"Generate job","title":"Resolve columns (stages 1-2)","text":"`WorldEvaluator::evaluate_chunk` evaluates the World graph per column (climate channels, zone id), then each zone's graph (biome id), then the border analysis: distance to the nearest different biome within a 10-column fade radius.","code":[{"ref":"nodegraph-eval/world_eval.rs · resolve_columns","path":"crates/nodegraph-eval/src/world_eval.rs","ok":true},{"ref":"nodegraph-eval/border.rs · analyze_borders","path":"crates/nodegraph-eval/src/border.rs","ok":true}]},{"nodes":["evaluator","features"],"where":"worker","stage":"Generate job","title":"Composite terrain (stages 3-5)","text":"Each biome present in the chunk evaluates its density. Near borders the densities blend by fade weight, and each biome's material rule is reapplied to the blended surface. Caves come from the StandardCaveNoise kernel. A river node lowers density along its channel here, before material is assigned.","code":[{"ref":"nodegraph-eval/world_eval.rs · composite_terrain","path":"crates/nodegraph-eval/src/world_eval.rs","ok":true},{"ref":"nodegraph-eval/river.rs · RiverNetwork","path":"crates/nodegraph-eval/src/river.rs","ok":true}]},{"nodes":["features"],"where":"worker","stage":"Generate job","title":"Derive features (stage 8)","text":"Feature cells inside the margin band are derived from a hash of world seed, cell and seed. Trees grow skeletons from (seed, species, age). Each feature is stamped by priority and clipped to this chunk, and the wood segments and canopy lobes rooted here are kept for rendering.","code":[{"ref":"nodegraph-eval/world_eval.rs · apply_structures","path":"crates/nodegraph-eval/src/world_eval.rs","ok":true},{"ref":"nodegraph-eval/feature.rs","path":"crates/nodegraph-eval/src/feature.rs","ok":true},{"ref":"nodegraph-eval/skeleton.rs","path":"crates/nodegraph-eval/src/skeleton.rs","ok":true}]},{"nodes":["evaluator"],"where":"worker","stage":"Generate job","title":"Fluid levels and foliage (stages 9-10, evaluation side)","text":"Biomes with a `FluidOutput` produce per-column pond levels. Each present biome's DetailGraph produces paint maps and scatter limited to its own columns, and tree canopies join the scatter.","code":[{"ref":"nodegraph-eval/world_eval.rs · composite_fluid","path":"crates/nodegraph-eval/src/world_eval.rs","ok":true},{"ref":"nodegraph-eval/world_eval.rs · evaluate_foliage","path":"crates/nodegraph-eval/src/world_eval.rs","ok":true}]},{"nodes":["worldgen"],"where":"worker","stage":"Generate job","title":"Cross into storage (stages 7, 9, 10)","text":"Back in `WorldGenerator::generate_chunk`: terrain becomes `ChunkStorage`, slab smoothing halves single-cube surface steps using each column's biome smoothing distance, tags record the zones and biomes present, ocean and pond water become the `FluidLayer`, and foliage that water would submerge is dropped.","code":[{"ref":"world/world_generator.rs · generate_chunk","path":"crates/voxulacrum-app/src/world/world_generator.rs","ok":true},{"ref":"world/storage_boundary.rs","path":"crates/voxulacrum-app/src/world/storage_boundary.rs","ok":true},{"ref":"world/slab_smoothing.rs · smooth_slabs","path":"crates/voxulacrum-app/src/world/slab_smoothing.rs","ok":true}]},{"nodes":["persistence"],"where":"worker","stage":"Generate job","title":"Re-apply saved edits (stage 12)","text":"The worker's cached read-only database handle looks the chunk up. If the player changed it, its overrides are applied on top of the fresh terrain. The finished `LoadedChunk` goes back over the streaming result channel.","code":[{"ref":"world/streaming.rs · with_worker_db","path":"crates/voxulacrum-app/src/world/streaming.rs","ok":true},{"ref":"world/persistence.rs · apply_persisted_record","path":"crates/voxulacrum-app/src/world/persistence.rs","ok":true}]},{"nodes":["streaming","door","world"],"where":"main","stage":"Meshing","title":"Insert into the world","text":"Finished chunks are drained up to a per-frame cap, halved above 64 pending meshes and quartered above 128. A chunk that has left the view is discarded. Otherwise `InsertLoadedChunk` goes through the door, which adds it and marks its six face neighbors mesh-dirty.","code":[{"ref":"world/streaming.rs · ChunkStreamingManager::tick (drain phase)","path":"crates/voxulacrum-app/src/world/streaming.rs","ok":true},{"ref":"world/mutation.rs · InsertLoadedChunk","path":"crates/voxulacrum-app/src/world/mutation.rs","ok":true}]},{"nodes":["worldgen","door"],"where":"main","stage":"Meshing","title":"Finalize seams","text":"Once all six face neighbors are resident, `seam.rs` derives the border slab demotions isolated smoothing could not see. `FinalizeSeam` writes them, records them as overrides, and sets `seam_finalized` so a reload neither redoes nor reverts them. At most 16 per frame, before meshing, so the first mesh already includes them.","code":[{"ref":"ecs/systems.rs · seam_smoothing_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"world/seam.rs · seam_demotions","path":"crates/voxulacrum-app/src/world/seam.rs","ok":true}]},{"nodes":["meshing"],"where":"main","stage":"Meshing","title":"Snapshot for meshing","text":"Dirty chunks whose face neighbors are resident are visited nearest-first. The main thread copies a 34³ snapshot (the chunk plus a one-voxel border), records `mesh_seq`, and submits a Mesh job, up to `max_mesh_per_frame`.","code":[{"ref":"meshing/mod.rs · drain_pending_submissions","path":"crates/voxulacrum-app/src/meshing/mod.rs","ok":true},{"ref":"world/chunk.rs · SNAP_SIZE","path":"crates/voxulacrum-app/src/world/chunk.rs","ok":true}]},{"nodes":["meshing"],"where":"worker","stage":"Mesh job","title":"Mesh on a worker","text":"The snapshot's content hash is looked up in the disk cache. On a miss the cube mesher emits one quad per solid face that borders air, skipping render-delegated materials, and writes the result back to the cache.","code":[{"ref":"meshing/mod.rs · mesh_chunk_task","path":"crates/voxulacrum-app/src/meshing/mod.rs","ok":true},{"ref":"meshing/cache.rs","path":"crates/voxulacrum-app/src/meshing/cache.rs","ok":true},{"ref":"meshing/cube_mesher.rs · generate_chunk_mesh","path":"crates/voxulacrum-app/src/meshing/cube_mesher.rs","ok":true}]},{"nodes":["meshing","rendering"],"where":"main","stage":"Meshing","title":"Upload and attach instances","text":"Completed meshes upload to the GPU unless `mesh_seq` shows the chunk changed in the meantime. The same frame builds the chunk's grass density, scatter, wood capsule and canopy buffers, and rebuilds water for it and its neighbors, because water welds across seams.","code":[{"ref":"ecs/systems.rs · meshing_tick_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"world/mod.rs · World::upload_mesh_result","path":"crates/voxulacrum-app/src/world/mod.rs","ok":true}]},{"nodes":["rendering"],"where":"main","stage":"Render","title":"Draw","text":"Chunks are culled against the camera frustum and the shadow frustum separately. Then the render graph runs: shadow, reflection, main scene, water, outline, post-process, palette, upscale.","code":[{"ref":"ecs/systems.rs · render_present_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"rendering/render_graph.rs · RenderGraph::execute","path":"crates/voxulacrum-app/src/rendering/render_graph.rs","ok":true}]},{"nodes":["streaming","persistence","door"],"where":"main","stage":"Meshing","title":"Evict","text":"When the chunk leaves the unload margin it is skipped if a mesh is in flight. Otherwise it is saved if `persist_dirty`, removed with `EvictChunk`, and its GPU buffers are dropped. Eviction stops when the frame's time budget runs out.","code":[{"ref":"world/streaming.rs · ChunkStreamingManager::tick (unload phase)","path":"crates/voxulacrum-app/src/world/streaming.rs","ok":true},{"ref":"world/persistence.rs · save_chunk_on_unload","path":"crates/voxulacrum-app/src/world/persistence.rs","ok":true}]}]},"frame":{"name":"One frame","blurb":"What the main thread does in one pass of the schedule, stage by stage. Anything slow is handed to the job system rather than done here.","steps":[{"nodes":["runtime","door"],"where":"main","stage":"Before Input","title":"Open the frame","text":"`world_event_update_system` swaps the event buffers and `frame_timings_begin` starts the stage clocks. Timing markers sit between every pair of stages.","code":[{"ref":"ecs/schedule.rs · build_frame_schedule","path":"crates/voxulacrum-app/src/ecs/schedule.rs","ok":true}]},{"nodes":["runtime","door","hotreload","player"],"where":"main","stage":"Input","title":"Input","text":"The door's event outbox from last frame is published. Raw input becomes actions, the UI toggle and F5 mode toggle are read, and the shader and graph watchers are polled. A saved graph becomes a `GraphChanged` event here.","code":[{"ref":"ecs/systems.rs · world_event_pump_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"input.rs · process_input_system","path":"crates/voxulacrum-app/src/input.rs","ok":true},{"ref":"ecs/systems.rs · graph_hot_reload_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true}]},{"nodes":["player","simulation","tools"],"where":"main","stage":"Simulation","title":"Simulation","text":"Player input is gathered and the player steps at 30 Hz. The room flood runs from the player's head, the camera, time of day and wind update `FrameState`, and picking finds the anchor voxel. Then climate and fluid tick, the player's tools act, and inspector panels run their queries.","code":[{"ref":"player/systems.rs · player_sim_system","path":"crates/voxulacrum-app/src/player/systems.rs","ok":true},{"ref":"ecs/systems.rs · simulation_tick_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"ecs/systems.rs · fluid_tick_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true}]},{"nodes":["streaming","worldgen","jobs","meshing","tools"],"where":"main","stage":"Meshing","title":"Meshing","text":"Streaming inserts finished chunks, submits new ones and evicts old ones. Seam finalization runs, the job pump dispatches this frame's submissions, and meshing submits snapshots, collects results and uploads. The field probe dispatches here too.","code":[{"ref":"ecs/systems.rs · streaming_tick_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"ecs/systems.rs · job_pump_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"ecs/systems.rs · meshing_tick_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true}]},{"nodes":["rendering","simulation"],"where":"main","stage":"UniformWrite","title":"Write uniforms","text":"The visibility mask from the room flood is uploaded (only when it changed), then uniforms, material colors and the player's render data. Stats for the panels are computed.","code":[{"ref":"ecs/systems.rs · visibility_mask_upload_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"ecs/systems.rs · write_uniforms_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true}]},{"nodes":["rendering","tools"],"where":"main","stage":"Render","title":"Render","text":"Resize targets if needed, acquire the swapchain (timed separately, because under vsync this is waiting rather than work), update debug lines and caps, cull, run the render graph, draw egui, submit and present.","code":[{"ref":"ecs/systems.rs · render_present_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true}]},{"nodes":["worldgen","persistence","door"],"where":"main","stage":"PostFrame","title":"After the frame","text":"Two independent event subscribers run: the event log, and the regenerator, which queues any edited graph slot and advances a background regen. Autosave writes dirty chunks on its timer.","code":[{"ref":"ecs/systems.rs · world_regen_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"ecs/systems.rs · persistence_autosave_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true},{"ref":"ecs/systems.rs · world_event_log_system","path":"crates/voxulacrum-app/src/ecs/systems.rs","ok":true}]}]}},"notes":[{"nodes":["worldgen","features"],"title":"Slab smoothing runs after features are stamped","text":"Design §5 orders slab smoothing (stage 7) before structures (stage 8), and the comment in `evaluate_chunk` repeats that order. In code, stage 8 runs inside `evaluate_chunk`, and `smooth_slabs` runs afterwards in `generate_chunk`. Stamped blueprints and tree wood are therefore smoothed like terrain. That may be fine, but it is worth deciding on purpose; for example, whether a wood cube at the top of a column should ever become a slab."},{"nodes":["worldgen"],"title":"Design §5 still describes a walkability pass","text":"Stages 6-7 in the design doc describe a per-voxel walkability computation with headroom checks that feeds smoothing. `slab_smoothing.rs` replaced that with a per-column surface-step comparison on top surfaces only, and says so in its own header."},{"nodes":["jobs"],"title":"jobs.rs describes an earlier version of itself","text":"The module doc says generation is the only consumer and no job waits on another. Meshing now submits Mesh jobs through the same scheduler. `JobKind::ChunkIo` is defined but nothing submits it, which matches design v1.9's choice to keep writes on the main thread."},{"nodes":["simulation"],"title":"'Not yet wired' allowances that are now wired","text":"`fluid_sim.rs` and `climate.rs` both carry a file-wide `#![allow(dead_code)]` with comments saying they are not scheduled yet. `fluid_tick_system` and `climate_tick_system` now run in the Simulation stage. A blanket allow also hides code that really is dead."},{"nodes":["world","worldgen","evaluator"],"title":"Phase 3 scaffolding comments","text":"`layers.rs` says the sidecar layers have no consumers, `tags.rs` says every chunk is tagged zone 0 and biome 0, and `column.rs` says no node populates a `ColumnField` yet. All three have since become real."}],"couplings":[{"user":"evaluator","used":"graph-ir","refs":141,"described":true},{"user":"tools","used":"graph-ir","refs":54,"described":true},{"user":"worldgen","used":"world","refs":50,"described":false},{"user":"runtime","used":"rendering","refs":36,"described":true},{"user":"hotreload","used":"graph-ir","refs":35,"described":false},{"user":"runtime","used":"player","refs":32,"described":true},{"user":"world","used":"voxel-core","refs":30,"described":true},{"user":"rendering","used":"world","refs":29,"described":true},{"user":"evaluator","used":"features","refs":22,"described":true},{"user":"worldgen","used":"evaluator","refs":22,"described":true},{"user":"tools","used":"runtime","refs":21,"described":false},{"user":"features","used":"evaluator","refs":20,"described":true},{"user":"worldgen","used":"voxel-core","refs":20,"described":false},{"user":"evaluator","used":"voxel-core","refs":19,"described":true},{"user":"persistence","used":"world","refs":19,"described":true},{"user":"tools","used":"voxel-core","refs":18,"described":false},{"user":"door","used":"voxel-core","refs":18,"described":false},{"user":"meshing","used":"world","refs":17,"described":true},{"user":"features","used":"voxel-core","refs":15,"described":false},{"user":"runtime","used":"world","refs":15,"described":false},{"user":"runtime","used":"door","refs":15,"described":false},{"user":"graph-ir","used":"voxel-core","refs":13,"described":false},{"user":"rendering","used":"runtime","refs":11,"described":true},{"user":"runtime","used":"simulation","refs":11,"described":true},{"user":"tools","used":"door","refs":11,"described":true},{"user":"simulation","used":"world","refs":10,"described":true},{"user":"tools","used":"worldgen","refs":10,"described":false},{"user":"worldgen","used":"graph-ir","refs":10,"described":false},{"user":"runtime","used":"voxel-core","refs":9,"described":false},{"user":"runtime","used":"tools","refs":8,"described":false},{"user":"runtime","used":"hotreload","refs":8,"described":false},{"user":"door","used":"world","refs":8,"described":true},{"user":"features","used":"graph-ir","refs":7,"described":false},{"user":"player","used":"world","refs":7,"described":true},{"user":"tools","used":"evaluator","refs":7,"described":true},{"user":"worldgen","used":"hotreload","refs":7,"described":false},{"user":"hotreload","used":"voxel-core","refs":6,"described":false},{"user":"meshing","used":"voxel-core","refs":6,"described":false},{"user":"simulation","used":"runtime","refs":6,"described":true},{"user":"world","used":"worldgen","refs":6,"described":false},{"user":"world","used":"door","refs":6,"described":true},{"user":"runtime","used":"worldgen","refs":5,"described":false},{"user":"meshing","used":"jobs","refs":5,"described":true},{"user":"simulation","used":"rendering","refs":5,"described":true},{"user":"tools","used":"hotreload","refs":5,"described":false},{"user":"tools","used":"jobs","refs":5,"described":false},{"user":"world","used":"runtime","refs":5,"described":false},{"user":"worldgen","used":"door","refs":5,"described":true},{"user":"streaming","used":"world","refs":5,"described":false},{"user":"player","used":"door","refs":4,"described":true},{"user":"meshing","used":"rendering","refs":4,"described":true},{"user":"rendering","used":"voxel-core","refs":4,"described":false},{"user":"persistence","used":"worldgen","refs":4,"described":false},{"user":"persistence","used":"voxel-core","refs":4,"described":false},{"user":"worldgen","used":"rendering","refs":4,"described":false},{"user":"hotreload","used":"evaluator","refs":3,"described":true},{"user":"rendering","used":"simulation","refs":3,"described":true},{"user":"player","used":"voxel-core","refs":3,"described":false},{"user":"player","used":"rendering","refs":3,"described":false},{"user":"player","used":"simulation","refs":3,"described":true},{"user":"rendering","used":"worldgen","refs":3,"described":false},{"user":"tools","used":"world","refs":3,"described":false},{"user":"door","used":"worldgen","refs":3,"described":true},{"user":"simulation","used":"voxel-core","refs":3,"described":false},{"user":"streaming","used":"jobs","refs":3,"described":true},{"user":"rendering","used":"player","refs":2,"described":false},{"user":"jobs","used":"runtime","refs":2,"described":true},{"user":"runtime","used":"jobs","refs":2,"described":true},{"user":"runtime","used":"streaming","refs":2,"described":true},{"user":"player","used":"tools","refs":2,"described":false},{"user":"player","used":"runtime","refs":2,"described":true},{"user":"hotreload","used":"runtime","refs":2,"described":false},{"user":"rendering","used":"hotreload","refs":2,"described":false},{"user":"tools","used":"rendering","refs":2,"described":false},{"user":"door","used":"hotreload","refs":2,"described":true},{"user":"world","used":"features","refs":2,"described":false},{"user":"simulation","used":"evaluator","refs":2,"described":false},{"user":"simulation","used":"worldgen","refs":2,"described":false},{"user":"world","used":"simulation","refs":2,"described":true},{"user":"persistence","used":"hotreload","refs":2,"described":false},{"user":"worldgen","used":"meshing","refs":2,"described":false},{"user":"streaming","used":"persistence","refs":2,"described":true},{"user":"streaming","used":"door","refs":2,"described":true},{"user":"worldgen","used":"features","refs":2,"described":false},{"user":"rendering","used":"evaluator","refs":1,"described":false},{"user":"runtime","used":"meshing","refs":1,"described":true},{"user":"runtime","used":"persistence","refs":1,"described":false},{"user":"runtime","used":"features","refs":1,"described":false},{"user":"jobs","used":"evaluator","refs":1,"described":false},{"user":"runtime","used":"evaluator","refs":1,"described":false},{"user":"meshing","used":"tools","refs":1,"described":false},{"user":"meshing","used":"runtime","refs":1,"described":true},{"user":"meshing","used":"hotreload","refs":1,"described":false},{"user":"hotreload","used":"world","refs":1,"described":false},{"user":"simulation","used":"player","refs":1,"described":true},{"user":"tools","used":"meshing","refs":1,"described":false},{"user":"tools","used":"streaming","refs":1,"described":false},{"user":"world","used":"rendering","refs":1,"described":true},{"user":"world","used":"evaluator","refs":1,"described":false},{"user":"door","used":"simulation","refs":1,"described":true},{"user":"persistence","used":"runtime","refs":1,"described":false},{"user":"persistence","used":"meshing","refs":1,"described":false},{"user":"worldgen","used":"tools","refs":1,"described":false},{"user":"worldgen","used":"persistence","refs":1,"described":false},{"user":"worldgen","used":"streaming","refs":1,"described":true},{"user":"streaming","used":"meshing","refs":1,"described":false},{"user":"streaming","used":"runtime","refs":1,"described":true},{"user":"streaming","used":"worldgen","refs":1,"described":true}],"health":{"errors":[],"warnings":[{"text":"`crates/voxulacrum-app/src/rendering/terrain_pass.rs` is empty.","nodes":["rendering"]}],"info":[{"text":"1 Rust files have neither a //! doc nor a module note: `crates/voxulacrum-app/src/rendering/terrain_pass.rs`","nodes":["rendering"]},{"text":"worldgen refers to world 50 times in code, but no connection between them is described.","nodes":["worldgen","world"]},{"text":"hotreload refers to graph-ir 35 times in code, but no connection between them is described.","nodes":["hotreload","graph-ir"]},{"text":"tools refers to runtime 21 times in code, but no connection between them is described.","nodes":["tools","runtime"]},{"text":"runtime refers to world 15 times in code, but no connection between them is described.","nodes":["runtime","world"]},{"text":"runtime refers to door 15 times in code, but no connection between them is described.","nodes":["runtime","door"]},{"text":"tools refers to worldgen 10 times in code, but no connection between them is described.","nodes":["tools","worldgen"]},{"text":"worldgen refers to graph-ir 10 times in code, but no connection between them is described.","nodes":["worldgen","graph-ir"]},{"text":"runtime refers to tools 8 times in code, but no connection between them is described.","nodes":["runtime","tools"]},{"text":"runtime refers to hotreload 8 times in code, but no connection between them is described.","nodes":["runtime","hotreload"]},{"text":"features refers to graph-ir 7 times in code, but no connection between them is described.","nodes":["features","graph-ir"]},{"text":"worldgen refers to hotreload 7 times in code, but no connection between them is described.","nodes":["worldgen","hotreload"]},{"text":"world refers to worldgen 6 times in code, but no connection between them is described.","nodes":["world","worldgen"]},{"text":"runtime refers to worldgen 5 times in code, but no connection between them is described.","nodes":["runtime","worldgen"]},{"text":"tools refers to hotreload 5 times in code, but no connection between them is described.","nodes":["tools","hotreload"]},{"text":"tools refers to jobs 5 times in code, but no connection between them is described.","nodes":["tools","jobs"]},{"text":"world refers to runtime 5 times in code, but no connection between them is described.","nodes":["world","runtime"]},{"text":"streaming refers to world 5 times in code, but no connection between them is described.","nodes":["streaming","world"]}]}}</script>
+
+<script>
+let DATA;
+try { DATA = JSON.parse(document.getElementById("map-data").textContent); }
+catch (e) {
+  document.getElementById("map").innerHTML = `<p class="empty-data">This is the template. Run <code>python docs/engine-map/extract.py</code> and open <code>engine-map.html</code>.</p>`;
+  throw e;
+}
+const { meta: META, regions: REGIONS, subs: SUBS, edges: EDGES, lenses: LENSES, notes: NOTES, couplings: COUPLINGS, health: HEALTH } = DATA;
+
+const subById = Object.fromEntries(SUBS.map(s => [s.id, s]));
+const regById = Object.fromEntries(REGIONS.map(r => [r.id, r]));
+
+/* Module display names: drop "crates/" and "/src/", then any directory shared by every module of the subsystem. */
+for (const s of SUBS) {
+  const shorts = s.modules.map(m => m.p.replace(/^crates\//, "").replace("/src/", "/"));
+  let common = shorts.length > 1 ? shorts[0].split("/").slice(0, -1) : [];
+  for (const sh of shorts) {
+    const parts = sh.split("/");
+    let i = 0;
+    while (i < common.length && i < parts.length - 1 && parts[i] === common[i]) i++;
+    common = common.slice(0, i);
+  }
+  s.modules.forEach((m, i) => { m.n = shorts[i].split("/").slice(common.length).join("/"); });
+  s.lines = s.modules.reduce((a, m) => a + (m.lang === "rs" ? (m.l || 0) : 0), 0);
+  s.wgsl = s.modules.reduce((a, m) => a + (m.lang === "wgsl" ? (m.l || 0) : 0), 0);
+  s.warnings = HEALTH.warnings.filter(w => w.nodes.includes(s.id)).length;
+}
+const maxLines = Math.max(...SUBS.map(s => s.lines));
+const driftCount = NOTES.length + HEALTH.errors.length + HEALTH.warnings.length;
+
+const STATUS = {
+  settled: { label: "Settled", desc: "Shape agreed and built. Changes are additions." },
+  interim: { label: "Interim", desc: "Works, with a recorded gap between code and target." },
+  active: { label: "In progress", desc: "Being built or reshaped in the current version." },
+};
+
+const state = { zoom: "subsystems", lens: null, step: 0, view: "home", sel: null, open: new Set(), hotEdge: -1 };
+try { const z = localStorage.getItem("vx-map-zoom"); if (z) state.zoom = z; } catch (e) {}
+
+const map = document.getElementById("map");
+const panel = document.getElementById("panel");
+const fmtNum = n => n.toLocaleString("en-US");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = s => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
+const cube = mat => `<svg class="cube" viewBox="0 0 24 24" aria-hidden="true" style="--m: var(--${mat})"><path class="t" d="M12 2 22 7.5 12 13 2 7.5Z"/><path class="l" d="M2 7.5 12 13v10L2 17.5Z"/><path class="r" d="M22 7.5 12 13v10l10-5.5Z"/></svg>`;
+const glyph = st => `<i class="st st-${st}" title="${STATUS[st].label}"></i>`;
+const modSize = m => m.l == null ? "" : fmtNum(m.l) + (m.lang === "wgsl" ? " wgsl" : "");
+
+function buildChrome() {
+  document.getElementById("meta-line").innerHTML =
+    `Branch <span class="mono">${esc(META.branch)}</span> · extracted at <span class="mono">${esc(META.commit)}</span>${META.dirty ? " with uncommitted changes" : ""} · ${esc(META.date)}`;
+  document.getElementById("lens-seg").innerHTML =
+    `<input type="radio" name="lens" id="l-off" value="" checked><label for="l-off">Off</label>` +
+    Object.entries(LENSES).map(([k, L]) => `<input type="radio" name="lens" id="l-${k}" value="${k}"><label for="l-${k}">${esc(L.name)}</label>`).join("");
+  document.getElementById("notes-count").textContent = driftCount;
+}
+
+function buildMap() {
+  let html = `<svg class="edges" id="edges" aria-hidden="true"><defs>
+    <marker id="m-out" class="m-out" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z"/></marker>
+    <marker id="m-in" class="m-in" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z"/></marker>
+  </defs><g id="edge-g"></g></svg>`;
+  for (const r of REGIONS) {
+    const subs = SUBS.filter(s => s.region === r.id);
+    const lines = subs.reduce((a, s) => a + s.lines, 0);
+    html += `<section class="band" data-region="${r.id}" style="--m: var(--${r.mat})">
+      <button class="band-head" data-act="region" data-id="${r.id}">
+        <span class="rtitle">${cube(r.mat)}<span class="rname">${esc(r.name)}</span></span>
+        <span class="rmat">${r.mat}</span>
+        <span class="rblurb">${fmt(r.blurb)}</span>
+        <span class="rstats">${subs.length} subsystems${lines ? " · " + fmtNum(lines) + " lines" : ""}</span>
+      </button>
+      <div class="cards">`;
+    for (const s of subs) {
+      const pct = s.lines ? Math.max(3, Math.round(s.lines / maxLines * 100)) : 0;
+      const locLabel = s.lines ? `${fmtNum(s.lines)} lines` : `${s.modules.length} files`;
+      html += `<div class="card" data-id="${s.id}">
+        <button class="card-main" data-act="sub" data-id="${s.id}" aria-label="${esc(s.name)}, ${STATUS[s.status].label}">
+          <span class="card-title">${glyph(s.status)}<span class="nm">${esc(s.name)}</span>${s.warnings ? `<span class="warn" title="${s.warnings} extraction warnings">${s.warnings}</span>` : ""}<span class="steps"></span></span>
+          <span class="crate">${esc(s.crate)}</span>
+          <span class="sum">${fmt(s.short)}</span>
+          <span class="loc"><span class="bar"><i style="width:${pct}%"></i></span><span class="num">${locLabel}</span></span>
+        </button>
+        <button class="mods-toggle" data-act="toggle" data-id="${s.id}" aria-expanded="false">Modules · ${s.modules.length}</button>
+        <ul class="mods">${s.modules.map((m, i) => `<li><button data-act="mod" data-id="${s.id}" data-i="${i}"><span class="mn">${esc(m.n)}</span><span class="ml">${modSize(m)}</span></button></li>`).join("")}</ul>
+      </div>`;
+    }
+    html += `</div></section>`;
+  }
+  map.innerHTML = html;
+}
+
+function lensNodesFor(lensKey) {
+  const out = {};
+  LENSES[lensKey].steps.forEach((st, i) => st.nodes.forEach(n => { (out[n] = out[n] || []).push(i); }));
+  return out;
+}
+function connectedTo(id) {
+  const ids = new Set();
+  EDGES.forEach(e => { if (e.from === id) ids.add(e.to); if (e.to === id) ids.add(e.from); });
+  return ids;
+}
+
+function apply() {
+  map.className = "map z-" + state.zoom;
+  document.getElementById("z-" + state.zoom).checked = true;
+  document.getElementById(state.lens ? "l-" + state.lens : "l-off").checked = true;
+  document.getElementById("notes-btn").setAttribute("aria-pressed", state.view === "notes" ? "true" : "false");
+
+  const selSub = state.sel && (state.sel.kind === "sub" || state.sel.kind === "mod") ? state.sel.id : null;
+  const linked = selSub && state.view === "detail" ? connectedTo(selSub) : new Set();
+  const lensMap = state.lens ? lensNodesFor(state.lens) : {};
+  const cur = state.lens ? LENSES[state.lens].steps[state.step] : null;
+  const curNodes = new Set(cur && state.view === "lens" ? cur.nodes : []);
+  const driftNodes = new Set(state.view === "notes" ? [...NOTES, ...HEALTH.errors, ...HEALTH.warnings].flatMap(n => n.nodes) : []);
+
+  if (state.view === "detail" && selSub) map.classList.add("focus");
+  if ((state.lens && state.view === "lens") || state.view === "notes") map.classList.add("lensing");
+
+  map.querySelectorAll(".card").forEach(card => {
+    const id = card.dataset.id;
+    card.classList.toggle("sel", id === selSub && state.view === "detail");
+    card.classList.toggle("linked", linked.has(id));
+    card.classList.toggle("now", curNodes.has(id));
+    card.classList.toggle("inlens", (!!lensMap[id] && state.view === "lens") || driftNodes.has(id));
+    card.classList.toggle("open", state.open.has(id));
+    card.querySelector(".mods-toggle").setAttribute("aria-expanded", state.open.has(id) ? "true" : "false");
+    const steps = card.querySelector(".steps");
+    steps.innerHTML = state.lens && lensMap[id]
+      ? lensMap[id].map(i => `<span class="${i === state.step ? "now" : ""}">${i + 1}</span>`).join("") : "";
+    card.querySelectorAll(".mods button").forEach(b => {
+      b.classList.toggle("sel", !!state.sel && state.sel.kind === "mod" && state.sel.id === id && +b.dataset.i === state.sel.i);
+    });
+  });
+  map.querySelectorAll(".band-head").forEach(h => h.classList.toggle("sel", !!state.sel && state.sel.kind === "region" && state.sel.id === h.dataset.id && state.view === "detail"));
+
+  renderPanel();
+  requestAnimationFrame(drawEdges);
+  writeHash();
+}
+
+/* ---------- Edges ---------- */
+function rectOf(id) {
+  const el = map.querySelector(`.card[data-id="${id}"]`);
+  if (!el) return null;
+  const m = map.getBoundingClientRect(), r = el.getBoundingClientRect();
+  return { x: r.left - m.left, y: r.top - m.top, w: r.width, h: r.height };
+}
+
+/* Route from card a to card b. Cards in the same row always connect with an arc
+   over the top: a straight line would run behind any card between them and end
+   in the 10px gap, where the arrowhead cannot be seen. Stacked cards closer than
+   CLOSE arc around the right side for the same reason. */
+function pathBetween(a, b, k, n) {
+  const CLOSE = 44, BULGE = 34;
+  const spread = (k - (n - 1) / 2) * 7;
+  const stacked = b.y >= a.y + a.h - 4 || a.y >= b.y + b.h - 4;
+  if (stacked) {
+    const down = b.y > a.y;
+    const gap = down ? b.y - (a.y + a.h) : a.y - (b.y + b.h);
+    const overlapX = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    if (gap < CLOSE && overlapX > 0) {
+      const x1 = a.x + a.w, y1 = a.y + a.h * (down ? 0.7 : 0.3) + spread;
+      const x2 = b.x + b.w, y2 = b.y + b.h * (down ? 0.3 : 0.7) + spread;
+      const xc = Math.max(x1, x2) + BULGE;
+      return `M${x1} ${y1} C${xc} ${y1} ${xc} ${y2} ${x2} ${y2}`;
+    }
+    const x1 = a.x + a.w / 2 + spread, y1 = down ? a.y + a.h : a.y;
+    const x2 = b.x + b.w / 2 + spread, y2 = down ? b.y : b.y + b.h;
+    const c = Math.max(30, Math.abs(y2 - y1) / 2) * (down ? 1 : -1);
+    return `M${x1} ${y1} C${x1} ${y1 + c} ${x2} ${y2 - c} ${x2} ${y2}`;
+  }
+  const right = b.x > a.x;
+  const x1 = a.x + a.w * (right ? 0.7 : 0.3) + spread, y1 = a.y;
+  const x2 = b.x + b.w * (right ? 0.3 : 0.7) + spread, y2 = b.y;
+  const rise = Math.min(70, Math.max(BULGE, Math.abs(x2 - x1) * 0.15));
+  const yc = Math.min(y1, y2) - rise;
+  return `M${x1} ${y1} C${x1} ${yc} ${x2} ${yc} ${x2} ${y2}`;
+}
+
+function drawEdges() {
+  const g = document.getElementById("edge-g");
+  if (!g) return;
+  const svg = document.getElementById("edges");
+  svg.setAttribute("width", map.scrollWidth); svg.setAttribute("height", map.scrollHeight);
+  let out = "";
+  if (state.view === "detail" && state.sel && (state.sel.kind === "sub" || state.sel.kind === "mod")) {
+    const id = state.sel.id;
+    const list = EDGES.map((e, i) => ({ e, i })).filter(x => x.e.from === id || x.e.to === id);
+    list.forEach((x, k) => {
+      const a = rectOf(x.e.from), b = rectOf(x.e.to);
+      if (!a || !b) return;
+      const isOut = x.e.from === id;
+      out += `<path class="e ${isOut ? "out" : "in"}${state.hotEdge === x.i ? " hot" : ""}" d="${pathBetween(a, b, k, list.length)}" marker-end="url(#${isOut ? "m-out" : "m-in"})"/>`;
+    });
+  } else if (state.view === "lens" && state.lens) {
+    const steps = LENSES[state.lens].steps;
+    const cur = steps[state.step], prev = steps[state.step - 1];
+    if (prev && prev.nodes[0] !== cur.nodes[0]) {
+      const a = rectOf(prev.nodes[0]), b = rectOf(cur.nodes[0]);
+      if (a && b) out += `<path class="e lens" d="${pathBetween(a, b, 0, 1)}" marker-end="url(#m-out)"/>`;
+    }
+  }
+  g.innerHTML = out;
+}
+
+/* ---------- Panel ---------- */
+function linkBtn(id, arrow, what, edgeIdx, dir) {
+  const s = subById[id];
+  return `<li><button class="lnk" data-act="sub" data-id="${id}" ${edgeIdx != null ? `data-edge="${edgeIdx}"` : ""}>
+    <span class="arr ${dir || ""}">${arrow}</span><span class="who">${esc(s.name)}</span>${what ? `<span class="what">${fmt(what)}</span>` : ""}</button></li>`;
+}
+function subLinks(ids) {
+  return ids.map(id => subById[id] ? `<button class="textbtn" data-act="sub" data-id="${id}">${esc(subById[id].name)}</button>` : "").join(" · ");
+}
+function backToLens() {
+  if (!state.lens) return "";
+  return `<div class="backbar"><button class="textbtn" data-act="tolens">← Back to ${esc(LENSES[state.lens].name)}, step ${state.step + 1}</button></div>`;
+}
+function foot() {
+  return `<p class="foot">Extracted from <span class="mono">${esc(META.commit)}</span> on <span class="mono">${esc(META.branch)}</span>. Module descriptions come from each file's <code>//!</code> doc, or from a note in <code>map.authored.json</code> where a file has none. Everything else is authored in that file; run <code>extract.py</code> after editing it.</p>`;
+}
+
+function renderHome() {
+  const legend = Object.entries(STATUS).map(([k, v]) => `${glyph(k)}<span><b>${v.label}.</b> ${v.desc}</span>`).join("");
+  return `<div class="eyebrow">Start here</div>
+  <h2>How to read this map</h2>
+  <p>Each band is a <b>region</b> of the engine, ordered roughly the way data flows: authored content at the top, pixels and play at the bottom. Each card inside is a <b>subsystem</b>, and its modules are the files that implement it.</p>
+  <p>Use <b>Zoom</b> to change how much each card shows. Select a card to see what it owns, when it runs, the rules it keeps, and what it connects to; lines appear on the map for those connections. Select a region name for an overview of that region.</p>
+  <p>A <b>lens</b> follows one process across the map step by step. Use the arrow keys or the buttons to move through it.</p>
+  <h3>Engine at a glance</h3>
+  <div class="stats">
+    <div class="stat"><b>${fmtNum(META.rust)}</b><span>lines of Rust</span></div>
+    <div class="stat"><b>${fmtNum(META.wgsl)}</b><span>lines of WGSL</span></div>
+    <div class="stat"><b>${SUBS.length}</b><span>subsystems in ${META.crates} crates</span></div>
+  </div>
+  <h3>Status</h3>
+  <div class="legend">${legend}</div>
+  <h3>Threads, in lens steps</h3>
+  <div class="legend"><span class="chip main">Main thread</span><span>Runs inside the frame schedule. Every millisecond here is frame time.</span><span class="chip">Worker</span><span>Runs on the job pool, off the frame.</span></div>
+  <h3>Lines on the map</h3>
+  <div class="legend"><svg width="34" height="10" aria-hidden="true"><path d="M1 5h28" stroke="var(--accent)" stroke-width="1.6"/><path d="M26 1l7 4-7 4z" fill="var(--accent)"/></svg><span>The selected part feeds this one.</span><svg width="34" height="10" aria-hidden="true"><path d="M1 5h28" stroke="var(--muted)" stroke-width="1.6" stroke-dasharray="5 4"/><path d="M26 1l7 4-7 4z" fill="var(--muted)"/></svg><span>This one feeds the selected part.</span><span class="warn">2</span><span>Extraction warnings on that part. Open Drift and checks to read them.</span></div>
+  ${foot()}`;
+}
+
+function renderSub(id) {
+  const s = subById[id], r = regById[s.region];
+  const outs = EDGES.map((e, i) => ({ e, i })).filter(x => x.e.from === id);
+  const ins = EDGES.map((e, i) => ({ e, i })).filter(x => x.e.to === id);
+  const inLens = state.lens ? (lensNodesFor(state.lens)[id] || []) : [];
+  const notes = NOTES.filter(n => n.nodes.includes(id));
+  const warns = [...HEALTH.errors, ...HEALTH.warnings].filter(w => w.nodes.includes(id));
+  const uses = COUPLINGS.filter(c => c.user === id);
+  const usedBy = COUPLINGS.filter(c => c.used === id);
+  const coup = (list, key) => list.map(c => `<li class="coupling"><button class="textbtn" data-act="sub" data-id="${c[key]}">${esc(subById[c[key]].name)}</button> · ${c.refs} refs${c.described ? "" : ` <span class="no">· no connection described</span>`}</li>`).join("");
+  return `${backToLens()}
+  <div class="eyebrow">${cube(r.mat)}<button class="textbtn" data-act="region" data-id="${r.id}">${esc(r.name)}</button></div>
+  <h2>${esc(s.name)}</h2>
+  <div class="chips"><span class="pill">${glyph(s.status)}${STATUS[s.status].label}</span><span class="chip stage">${esc(s.crate)}</span></div>
+  <p class="summary">${fmt(s.summary)}</p>
+  ${s.statusNote ? `<p class="status-note">${fmt(s.statusNote)}</p>` : ""}
+  <h3>Owns</h3><ul>${s.owns.map(o => `<li>${fmt(o)}</li>`).join("")}</ul>
+  <h3>When and where it runs</h3><p>${fmt(s.runs)}</p>
+  <h3>Rules it keeps</h3><ul>${s.rules.map(o => `<li>${fmt(o)}</li>`).join("")}</ul>
+  ${outs.length ? `<h3>Feeds into</h3><ul class="links">${outs.map(x => linkBtn(x.e.to, "→", x.e.label, x.i)).join("")}</ul>` : ""}
+  ${ins.length ? `<h3>Takes from</h3><ul class="links">${ins.map(x => linkBtn(x.e.from, "←", x.e.label, x.i, "in")).join("")}</ul>` : ""}
+  ${uses.length || usedBy.length ? `<h3>In the code</h3><p class="src-tag">Counted from <code>use</code> statements and paths, so a connection that is only data passed through a channel or a resource does not show here.</p>
+    ${uses.length ? `<p style="margin:6px 0 2px">Refers to</p><ul>${coup(uses, "used")}</ul>` : ""}
+    ${usedBy.length ? `<p style="margin:6px 0 2px">Referred to by</p><ul>${coup(usedBy, "user")}</ul>` : ""}` : ""}
+  ${inLens.length ? `<h3>In this lens</h3><p>${inLens.map(i => `<button class="textbtn" data-act="step" data-i="${i}">Step ${i + 1}: ${esc(LENSES[state.lens].steps[i].title)}</button>`).join("<br>")}</p>` : ""}
+  ${notes.length || warns.length ? `<h3>Drift</h3><ul>${notes.map(n => `<li><button class="textbtn" data-act="notes">${esc(n.title)}</button></li>`).join("")}${warns.map(w => `<li>${fmt(w.text)}</li>`).join("")}</ul>` : ""}
+  <h3>Modules</h3><ul class="paths">${s.modules.map((m, i) => `<li><button class="textbtn mono" data-act="mod" data-id="${id}" data-i="${i}">${esc(m.n)}</button><span>${modSize(m)}</span></li>`).join("")}</ul>
+  <h3>Read more</h3><ul>${s.refs.map(x => `<li>${fmt(x)}</li>`).join("")}</ul>`;
+}
+
+function renderModule(id, i) {
+  const s = subById[id], m = s.modules[i], r = regById[s.region];
+  const share = m.l && s.lines && m.lang === "rs" ? Math.round(m.l / s.lines * 100) : null;
+  const src = m.src === "doc" ? "From the file's <code>//!</code> doc." : m.src === "note" ? "From a module note in the map; the file has no <code>//!</code> doc." : "";
+  return `${backToLens()}
+  <div class="eyebrow">${cube(r.mat)}<button class="textbtn" data-act="sub" data-id="${id}">${esc(s.name)}</button></div>
+  <h2 style="font-family: var(--f-mono); font-size: 18px; overflow-wrap: anywhere;">${esc(m.n)}</h2>
+  ${m.d ? `<p>${fmt(m.d)}</p><p class="src-tag">${src}</p>` : `<p class="src-tag">No description: the file has no <code>//!</code> doc and the map has no note for it.</p>`}
+  <dl class="kv">
+    <dt>Path</dt><dd class="mono" style="overflow-wrap:anywhere">${esc(m.p)}</dd>
+    ${m.l != null ? `<dt>Size</dt><dd>${fmtNum(m.l)} lines${m.lang === "wgsl" ? " of WGSL" : ""}${share != null ? ` · ${share}% of ${esc(s.name)}` : ""}</dd>` : ""}
+  </dl>
+  <h3>Other modules in ${esc(s.name)}</h3>
+  <ul class="paths">${s.modules.map((mm, j) => j === i ? "" : `<li><button class="textbtn mono" data-act="mod" data-id="${id}" data-i="${j}">${esc(mm.n)}</button><span>${modSize(mm)}</span></li>`).join("")}</ul>`;
+}
+
+function renderRegion(id) {
+  const r = regById[id];
+  const subs = SUBS.filter(s => s.region === id);
+  const agg = {};
+  EDGES.forEach(e => {
+    const a = subById[e.from].region, b = subById[e.to].region;
+    if (a === id && b !== id) (agg["→" + b] = agg["→" + b] || []).push(e);
+    if (b === id && a !== id) (agg["←" + a] = agg["←" + a] || []).push(e);
+  });
+  const block = dir => Object.entries(agg).filter(([k]) => k[0] === dir).map(([k, es]) => {
+    const other = regById[k.slice(1)];
+    return `<li><b>${esc(other.name)}</b><ul>${es.map(e => `<li>${esc(subById[e.from].name)} → ${esc(subById[e.to].name)}: ${fmt(e.label)}</li>`).join("")}</ul></li>`;
+  }).join("");
+  const outB = block("→"), inB = block("←");
+  return `${backToLens()}
+  <div class="eyebrow">${cube(r.mat)}Region · ${r.mat}</div>
+  <h2>${esc(r.name)}</h2>
+  <p class="summary">${fmt(r.blurb)}</p>
+  <h3>Subsystems</h3><ul class="links">${subs.map(s => linkBtn(s.id, glyph(s.status), s.short)).join("")}</ul>
+  ${outB ? `<h3>Feeds other regions</h3><ul>${outB}</ul>` : ""}
+  ${inB ? `<h3>Takes from other regions</h3><ul>${inB}</ul>` : ""}`;
+}
+
+function renderLens() {
+  const L = LENSES[state.lens], st = L.steps[state.step], n = L.steps.length;
+  const where = st.code.map(c => {
+    const [file, sym] = c.ref.split(" · ");
+    return `<li><span class="wf">${esc(file)}</span>${sym ? `<span class="ws">${esc(sym)}</span>` : ""}${c.ok ? "" : `<span class="miss">Not found at the last extraction</span>`}</li>`;
+  }).join("");
+  return `<div class="eyebrow">Lens</div>
+  <h2>${esc(L.name)}</h2>
+  <p>${fmt(L.blurb)}</p>
+  <div class="stepper">
+    <button data-act="prev" ${state.step === 0 ? "disabled" : ""}>‹ Prev</button>
+    <span class="pos">Step ${state.step + 1} of ${n}</span>
+    <button data-act="next" ${state.step === n - 1 ? "disabled" : ""}>Next ›</button>
+  </div>
+  <div class="stepbox">
+    <h4>${esc(st.title)}</h4>
+    <div class="chips"><span class="chip ${st.where === "main" ? "main" : ""}">${st.where === "main" ? "Main thread" : "Worker"}</span><span class="chip stage">${esc(st.stage)}</span></div>
+    <p>${fmt(st.text)}</p>
+    <h3 style="margin-top:10px">Where to look</h3>
+    <ul class="where">${where}</ul>
+    <h3>Parts involved</h3>
+    <ul class="links">${st.nodes.map(id => linkBtn(id, "·", subById[id].short)).join("")}</ul>
+  </div>
+  <h3>All steps</h3>
+  <ol class="steplist">${L.steps.map((s, i) => `<li><button data-act="step" data-i="${i}" class="${i === state.step ? "cur" : ""}"><span class="n">${String(i + 1).padStart(2, "0")}</span><span>${esc(s.title)}</span><span class="w">${s.where === "main" ? "main" : "worker"}</span></button></li>`).join("")}</ol>`;
+}
+
+function renderNotes() {
+  const list = items => items.length ? `<ul>${items.map(it => `<li>${fmt(it.text)}${it.nodes.length ? `<br>${subLinks(it.nodes)}` : ""}</li>`).join("")}</ul>` : `<p class="src-tag">None.</p>`;
+  return `<div class="eyebrow">Drift</div>
+  <h2>Drift and checks</h2>
+  <p>Places where the code, its comments, the design doc and this map disagree. Affected parts are highlighted on the map.</p>
+  <h3>Written notes</h3>
+  ${NOTES.length ? NOTES.map(n => `<div class="note"><h4>${esc(n.title)}</h4><p>${fmt(n.text)}</p><p>${subLinks(n.nodes)}</p></div>`).join("") : `<p class="src-tag">None.</p>`}
+  <h3>From the last extraction</h3>
+  <div class="health">
+    <h4>Errors (${HEALTH.errors.length})</h4>${list(HEALTH.errors)}
+    <h4>Warnings (${HEALTH.warnings.length})</h4>${list(HEALTH.warnings)}
+    <h4>Information (${HEALTH.info.length})</h4>${list(HEALTH.info)}
+  </div>
+  ${foot()}`;
+}
+
+function renderPanel() {
+  let html;
+  if (state.view === "lens" && state.lens) html = renderLens();
+  else if (state.view === "notes") html = renderNotes();
+  else if (state.view === "detail" && state.sel) {
+    if (state.sel.kind === "sub") html = renderSub(state.sel.id);
+    else if (state.sel.kind === "mod") html = renderModule(state.sel.id, state.sel.i);
+    else html = renderRegion(state.sel.id);
+  } else html = renderHome();
+  panel.innerHTML = html;
+}
+
+/* ---------- Hash ---------- */
+function writeHash() {
+  let t = "";
+  if (state.view === "lens" && state.lens) t = state.lens;
+  else if (state.view === "notes") t = "drift";
+  else if (state.view === "detail" && state.sel) t = state.sel.id;
+  try { history.replaceState(null, "", t ? "#" + t : location.pathname + location.search); } catch (e) {}
+}
+function readHash() {
+  const t = (location.hash || "").slice(1);
+  if (!t) return;
+  if (LENSES[t]) { state.lens = t; state.view = "lens"; state.step = 0; }
+  else if (t === "drift") state.view = "notes";
+  else if (subById[t]) { state.sel = { kind: "sub", id: t }; state.view = "detail"; }
+  else if (regById[t]) { state.sel = { kind: "region", id: t }; state.view = "detail"; }
+}
+
+/* ---------- Events ---------- */
+const narrow = window.matchMedia("(max-width: 959px)");
+const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+function revealPanel() {
+  if (narrow.matches) panel.scrollIntoView({ behavior: reduced.matches ? "auto" : "smooth", block: "start" });
+  else panel.scrollTop = 0;
+}
+
+document.addEventListener("click", ev => {
+  const b = ev.target.closest("[data-act]");
+  if (!b) return;
+  const act = b.dataset.act;
+  state.hotEdge = -1;
+  if (act === "sub") { state.sel = { kind: "sub", id: b.dataset.id }; state.view = "detail"; revealPanel(); }
+  else if (act === "mod") { state.sel = { kind: "mod", id: b.dataset.id, i: +b.dataset.i }; state.view = "detail"; revealPanel(); }
+  else if (act === "region") { state.sel = { kind: "region", id: b.dataset.id }; state.view = "detail"; revealPanel(); }
+  else if (act === "toggle") { const id = b.dataset.id; state.open.has(id) ? state.open.delete(id) : state.open.add(id); }
+  else if (act === "prev") state.step = Math.max(0, state.step - 1);
+  else if (act === "next") state.step = Math.min(LENSES[state.lens].steps.length - 1, state.step + 1);
+  else if (act === "step") { state.step = +b.dataset.i; state.view = "lens"; revealPanel(); }
+  else if (act === "tolens") state.view = "lens";
+  else if (act === "notes") { state.view = "notes"; revealPanel(); }
+  apply();
+});
+
+document.getElementById("notes-btn").addEventListener("click", () => {
+  state.view = state.view === "notes" ? (state.lens ? "lens" : "home") : "notes";
+  apply();
+});
+
+document.addEventListener("change", ev => {
+  const inp = ev.target;
+  if (inp.name === "zoom") {
+    state.zoom = inp.value;
+    try { localStorage.setItem("vx-map-zoom", state.zoom); } catch (e) {}
+    apply();
+  } else if (inp.name === "lens") {
+    state.lens = inp.value || null;
+    state.step = 0;
+    state.view = state.lens ? "lens" : (state.sel ? "detail" : "home");
+    apply();
+  }
+});
+
+panel.addEventListener("mouseover", ev => {
+  const b = ev.target.closest("[data-edge]");
+  const idx = b ? +b.dataset.edge : -1;
+  if (idx !== state.hotEdge) { state.hotEdge = idx; drawEdges(); }
+});
+panel.addEventListener("mouseleave", () => { if (state.hotEdge !== -1) { state.hotEdge = -1; drawEdges(); } });
+
+document.addEventListener("keydown", ev => {
+  if (ev.target.matches("input, textarea")) return;
+  if (state.view === "lens" && state.lens) {
+    const n = LENSES[state.lens].steps.length;
+    if (ev.key === "ArrowRight" && state.step < n - 1) { state.step++; apply(); ev.preventDefault(); }
+    if (ev.key === "ArrowLeft" && state.step > 0) { state.step--; apply(); ev.preventDefault(); }
+  }
+  if (ev.key === "Escape" && state.view !== "home") { state.view = state.lens ? "lens" : "home"; state.sel = null; apply(); }
+});
+
+new ResizeObserver(() => requestAnimationFrame(drawEdges)).observe(map);
+
+buildChrome();
+buildMap();
+readHash();
+apply();
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => requestAnimationFrame(drawEdges));
+</script>
