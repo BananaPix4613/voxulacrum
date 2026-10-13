@@ -16,6 +16,119 @@ upgrade through 0.5.x.
 
 ---
 
+## [0.4.0] — Worldgen completeness & authoring
+
+Phase 11. The theme was making worldgen content authorable in-engine and making
+generation complete across chunk borders: structures that span chunks, worlds
+with more than one zone, and blueprints captured from the world rather than
+written by hand. Every new piece of content in this version was authored through
+the tools.
+
+0.4.0 also carried the first tree system, which grew past the theme. That drift
+is why this is the last version cut from a long-lived version branch; from here
+versions are cut on `master` when a milestone completes (`roadmap.md` v2.0).
+
+**Saves from 0.3.0 are wiped on first open** (voxel format 3 → 4, chunk blob
+v7 → v8). The generation hash anchor is now `0xed02babdf0f40420`, recorded in
+`docs/pre-phase-11-audit.md`.
+
+### Added
+
+- **Blueprints** — a format in `voxel-core` that names materials rather than
+  numbering them, with a blueprint-local shape vocabulary and a version field
+  from the first byte. Replaces `PrefabTemplate`, which is deleted.
+- **In-engine capture and stamping** through the mutation door as one command,
+  with an armed-tool model (a button arms, the next world click acts, Esc
+  cancels, Shift repeats), per-axis trim, quarter-turn rotation and an isometric
+  preview.
+- **Cross-chunk structures** — features are derived world-absolutely over a
+  margin band and each chunk stamps only its own window, so placement does not
+  depend on load order. Order independence and the seam property are asserted
+  in CI.
+- **Multi-zone worlds** — manifest schema v1 with a zones list and the seed on
+  the manifest; per-column zone selection.
+- **Trees** — skeletons as a pure function of seed, species and age; species
+  authored as `assets/species/*.species.json` and hot-reloaded; `PlaceTree` as a
+  zone declaration that rides the cross-chunk feature model. Wood is voxels in
+  the grid, drawn as analytic capsule impostors with true depth, shadows and
+  water reflections. Skeleton smoothing, and a skeleton debug view with live
+  species tuning, a species picker and a solid preview.
+- **Canopy cores** — canopy lobes carried out of generation and drawn as
+  ellipsoid cores, behind a debug toggle that is off by default.
+- **`WorldParam`** and a world-level parameter sidecar; the manifest declares
+  the world's `min_y` and `max_y`.
+- **`SurfaceToDensity`**, the one bridge from the column domain into a density
+  chain; arithmetic and curve nodes now evaluate per column.
+- **Authoring and inspection tools** — the hierarchy editor creates, renames and
+  reseeds zones and detail graphs; `LibraryRef` and `GraphRef` are menu-listed
+  and bound at insert; column inspector; biome and zone map; a world event bus
+  with eight typed events.
+- **`--validate-graphs`** — manifest resolution, graph kind against manifest
+  position, reference and material resolution, and assignment coverage. Runs
+  in CI.
+- **Release workflow** packaging Windows and Linux builds.
+- **Licensing** — the engine under MPL-2.0 and sample content under CC BY 4.0,
+  with a README, contributing guide and third-party notices.
+- Pointwise evaluation benchmark (`benches/pointwise.rs`).
+
+### Changed
+
+- **Graph inputs resolve through an edge index** instead of a linear scan:
+  −58 % at 129 edges, with a small regression below about 25 edges that is
+  negligible against a generate job.
+- `--verify-generation` samples 512 chunks rather than 64 and also checks order
+  independence against a fresh generator.
+- Every per-column evaluation goes through `WorldEvaluator::column_eval`, and
+  the upstream evaluator for cross-graph reads is built once at insert rather
+  than per sampled column.
+- `Graph::validate` rejects a non-column node kind in a World or Zone graph.
+- The frontier budget is instrumented to twelve spans; chunk unload is
+  time-budgeted rather than count-limited.
+- Materials can be render-delegated; the outline pass treats wood as its own
+  surface class.
+- CI's stale branch filter removed. rust-analyzer uses its own target directory,
+  so it no longer blocks `cargo build`.
+
+### Fixed
+
+- **Pointwise and bulk cross-graph reads disagreed** whenever a graph exposed
+  more than one boundary output (418 of 1,024 columns in the test case): a seam
+  defect waiting for content to trigger it.
+- **A `GraphRef` in a biome or detail graph** rendered, wired and saved in the
+  editor, then failed its chunk at generation.
+- Column-domain arithmetic (`SurfaceNoise → Add`, `Constant → WorldOutput`) was
+  rejected as a type mismatch.
+- Two hard-coded vertical extents that agreed only by coincidence are replaced
+  by the manifest's.
+- Capsule impostors discarded branches pointing at the camera, and returned the
+  back surface whenever a branch pointed toward or away from it.
+- The tree stamping test failed on joint spheres by one float rounding step.
+
+### Exit gates
+
+Theme met. Unmet gates are recorded rather than holding the version open (the
+closing record is in `roadmap.md` v2.0 §11):
+
+- **Rivers** — the network design and `River` node exist, but the first content
+  pass reads as ravines and no shipped graph uses it. River content moves to the
+  game backlog.
+- **Asset lint** does not exist yet; it moves to milestone M5.
+- **D8** (greedy meshing) is superseded by the decision to adopt binary greedy
+  meshing with 0.5 m voxels.
+
+### Known defects carried forward
+
+To be fixed in 0.4.1 (milestone M1):
+
+- Edits made after a chunk is promoted to a full save are lost on reload (#1).
+- In the session where a world first passes 200 saved chunks, the compression
+  dictionary is trained mid-session and streaming loads of edited chunks fail
+  (#2).
+- Fluid capacity can underflow when a block is placed into water, and fluid
+  mass is not conserved across chunk seams (#3).
+
+---
+
 ## [0.3.0] — Consolidation & Observability
 
 Phase 10. **No new player-visible features.** The theme was closing the gap
