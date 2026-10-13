@@ -366,6 +366,16 @@ impl World {
             }
             chunk.data.voxels = Arc::new(storage);
 
+            // An edit changes what a cell can hold, and the fluid layer is not
+            // told. Bring any cell the edit left over its new capacity back down
+            // to it, judged on the voxel each cell ended the batch with.
+            for &(pos, _) in &edits {
+                if let Some(cell) = chunk.data.fluids.cells.get_mut(&pos) {
+                    let held = chunk.data.voxels.voxel(pos.to_index());
+                    cell.mass = cell.mass.min(fluid_gen::fluid_capacity(held));
+                }
+            }
+
             // Recorded as one batch so promotion is decided once, after every
             // edit has landed. A promoted chunk records nothing: its storage is
             // already the canonical voxel state.
@@ -1586,6 +1596,46 @@ mod mutation_tests {
         assert_eq!(a.data.edit_state, b.data.edit_state, "and identical override buckets");
         assert!(a.persist_dirty && b.persist_dirty);
         assert!(a.mesh_dirty && b.mesh_dirty);
+    }
+
+    /// An edit changes what a cell can hold, and the fluid layer is not told, so
+    /// the handler must bring a cell the edit left over capacity back down to it.
+    #[test]
+    fn placing_a_slab_or_cube_into_water_clamps_the_cell_to_what_it_can_hold() {
+        use crate::world::fluid_gen::{FULL_MASS, SLAB_MASS};
+        use crate::world::layers::{FluidCell, FluidId};
+
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let slab_at = LocalPos::new_unchecked(5, 5, 5);
+        let cube_at = LocalPos::new_unchecked(6, 5, 5);
+        {
+            let chunk = world.get_chunk_mut(IVec3::ZERO).unwrap();
+            for p in [slab_at, cube_at] {
+                chunk.data.fluids.cells.insert(
+                    p,
+                    FluidCell {
+                        fluid_id: FluidId::WATER,
+                        mass: FULL_MASS,
+                        flags: FluidCell::FLAG_SETTLED,
+                    },
+                );
+            }
+        }
+        let slab = Voxel {
+            material: MaterialId(1),
+            shape: voxel_core::ShapeId::SlabBottom,
+            flags: 0,
+        };
+        world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxelBatch {
+                chunk: IVec3::ZERO,
+                edits: vec![(slab_at, slab), (cube_at, Voxel::cube(MaterialId(1)))],
+            }))
+            .expect("authoring edit accepted");
+
+        let cells = &world.get_chunk(IVec3::ZERO).unwrap().data.fluids.cells;
+        assert_eq!(cells[&slab_at].mass, SLAB_MASS, "a slab holds half a cell");
+        assert_eq!(cells[&cube_at].mass, 0, "a cube holds none");
     }
 
     #[test]
