@@ -34,12 +34,31 @@ pub fn write_all_uniforms(
     surface_height: u32,
 ) {
     // Shadow uniforms
+    // The shadow camera is orthographic, so a capsule impostor can be solved
+    // against it exactly as against the view camera - it just needs the light's
+    // basis. `sun_direction` points *at* the sun, so light travels the other way.
+    let light_dir = (-glam::Vec3::from(frame.sun_direction)).normalize_or_zero();
+    // Degenerate with the sun straight overhead, where cross(dir, Y) vanishes.
+    // Any perpendicular will do; the shadow of a round thing does not care which.
+    let light_right = if light_dir.cross(glam::Vec3::Y).length_squared() > 1e-6 {
+        light_dir.cross(glam::Vec3::Y).normalize()
+    } else {
+        glam::Vec3::X
+    };
+    let light_up = light_right.cross(light_dir);
+
     let shadow_uniforms = ShadowUniforms {
         light_space_matrix: frame.light_space.to_cols_array_2d(),
         clip_min: frame.clip_min,
         clip_enabled: frame.clip_enabled,
         clip_max: frame.clip_max,
         _pad: 0.0,
+        light_dir: light_dir.to_array(),
+        _pad_l0: 0.0,
+        light_right: light_right.to_array(),
+        _pad_l1: 0.0,
+        light_up: light_up.to_array(),
+        _pad_l2: 0.0,
     };
     ctx.queue.write_buffer(shadow_buf, 0, bytemuck::cast_slice(&[shadow_uniforms]));
 
@@ -92,6 +111,10 @@ pub fn write_all_uniforms(
         render_size: [render_targets.view_w, render_targets.view_h],
         volume_radius: frame.volume_radius,
         _pad6: 0.0,
+        view_right: frame.view_right,
+        _pad7: 0.0,
+        view_up: frame.view_up,
+        _pad8: 0.0,
     };
     ctx.queue.write_buffer(global_buf, 0, bytemuck::cast_slice(&[uniforms]));
 
@@ -108,6 +131,26 @@ pub fn write_all_uniforms(
     let mirrored_vp = glam::Mat4::from_cols_array_2d(&frame.view_proj) * reflect;
     let mut reflection_uniforms = uniforms;
     reflection_uniforms.view_proj = mirrored_vp.to_cols_array_2d();
+
+    // The camera basis has to be mirrored too, for anything that reconstructs a
+    // ray rather than transforming a vertex.
+    //
+    // A triangle only needs `view_proj`, because the mirror is applied to its
+    // world position. The capsule impostors build a world-space billboard from
+    // `view_right`/`view_up` and march along `view_dir`, none of which that
+    // matrix touches - leaving them, they would solve the trunk as the *real*
+    // camera sees it and then draw that at the mirrored position, which is the
+    // wrong silhouette for a round object and worsens with viewing angle.
+    //
+    // Reflecting the basis instead uses the standard identity: the mirrored
+    // world seen by this camera is the real world seen by the mirrored camera.
+    // A direction reflects by negating Y - the plane's offset moves points, not
+    // directions - and the hit point stays un-mirrored, so lighting and the
+    // below-water clip keep working exactly as they do for terrain.
+    reflection_uniforms.view_dir = [frame.view_dir[0], -frame.view_dir[1], frame.view_dir[2]];
+    reflection_uniforms.view_right =
+        [frame.view_right[0], -frame.view_right[1], frame.view_right[2]];
+    reflection_uniforms.view_up = [frame.view_up[0], -frame.view_up[1], frame.view_up[2]];
 
     // Clip geometry below the reflection plane. Without this, everything under the
     // water (banks, caves, terrain) mirrors UP over the water and occludes the real

@@ -61,6 +61,18 @@ impl ColumnField {
     pub fn data(&self) -> &[f32] {
         &self.data
     }
+    
+    /// New plane from an elementwise unary op.
+    pub fn map(&self, f: impl Fn(f32) -> f32) -> Self {
+        Self { data: self.data.iter().map(|&v| f(v)).collect() }
+    }
+    
+    /// New plane from an elementwise binary op over two planes.
+    pub fn zip_with(&self, other: &Self, f: impl Fn(f32, f32) -> f32) -> Self {
+        Self {
+            data: self.data.iter().zip(other.data.iter()).map(|(&a, &b)| f(a, b)).collect(),
+        }
+    }
 }
 
 /// Dense `CHUNK_DIM x CHUNK_DIM` plane of `u16`, one discrete id per `(x, z)`

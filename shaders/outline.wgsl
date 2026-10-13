@@ -61,6 +61,24 @@ fn owns_normal_edge(ny_c: f32, ny_n: f32, d_c: f32, d_n: f32) -> bool {
     return diff > 0.01 || (diff > -0.01 && d_c < d_n);
 }
 
+// Surface class, from the normal target's alpha: 0.0 sky, 0.5 vegetation,
+// 0.9 wood, 1.0 terrain.
+//
+// Wood is separated from terrain because both rules below assume a piecewise
+// flat, axis-aligned world. A trunk breaks both: `top_c` bars a vertical
+// surface from owning its own depth silhouette, and the larger-Y ownership test
+// hands the normal edge to the ground it stands on, so the outline came out in
+// grass colour. And a capsule's normal field is smooth rather than constant
+// within a face, so the normal-edge threshold - tuned for real creases - trips
+// on ordinary curvature and speckles the interior.
+fn is_terrain(a: f32) -> bool {
+    return a >= 0.95;
+}
+
+fn is_wood(a: f32) -> bool {
+    return a >= 0.75 && a < 0.95;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(scene_texture, point_sampler, in.uv);
@@ -116,8 +134,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let max_depth_diff = max(max(dd_u, dd_d), max(dd_l, dd_r));
     // Only a top-facing surface owns the dark depth silhouette, so the outline lands on
     // a top face's far edge where it drops off and never darkens vertical side faces.
+    //
+    // Wood is exempt: it is a vertical curved object standing on the world
+    // rather than part of it, so `top_c` would forbid a trunk from ever
+    // outlining itself and leave the job to the ground behind it. Depth is also
+    // the *only* rule wood uses - it gives a clean rim where the trunk is in
+    // front of what is behind it, and nothing at all across its own smooth
+    // interior.
     let top_c = step(0.5, n_c.y);
-    let depth_edge = step(params.depth_threshold, max_depth_diff) * top_c;
+    let owns_depth = select(top_c, 1.0, is_wood(n_c_raw.a));
+    let depth_edge = step(params.depth_threshold, max_depth_diff) * owns_depth;
 
     // ================================================================
     // NORMAL EDGE (convex ridges) — ownership via world-up Y-component.
@@ -128,15 +154,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Y-component, depth is used as a tiebreaker (closer pixel owns).
     // Only terrain-to-terrain edges count (a >= 0.75 on both sides).
     // ================================================================
+    // Terrain on *both* sides. Requiring it of the neighbour alone still let a
+    // grass pixel claim the edge against a trunk and paint the outline green.
     let ny_c = n_c.y;
+    let terrain_c = is_terrain(n_c_raw.a);
     let nc_u = select(0.0, length(cross(n_c, n_u)),
-        owns_normal_edge(ny_c, n_u.y, d_c, d_u) && n_u_raw.a >= 0.75);
+        terrain_c && is_terrain(n_u_raw.a) && owns_normal_edge(ny_c, n_u.y, d_c, d_u));
     let nc_d = select(0.0, length(cross(n_c, n_d)),
-        owns_normal_edge(ny_c, n_d.y, d_c, d_d) && n_d_raw.a >= 0.75);
+        terrain_c && is_terrain(n_d_raw.a) && owns_normal_edge(ny_c, n_d.y, d_c, d_d));
     let nc_l = select(0.0, length(cross(n_c, n_l)),
-        owns_normal_edge(ny_c, n_l.y, d_c, d_l) && n_l_raw.a >= 0.75);
+        terrain_c && is_terrain(n_l_raw.a) && owns_normal_edge(ny_c, n_l.y, d_c, d_l));
     let nc_r = select(0.0, length(cross(n_c, n_r)),
-        owns_normal_edge(ny_c, n_r.y, d_c, d_r) && n_r_raw.a >= 0.75);
+        terrain_c && is_terrain(n_r_raw.a) && owns_normal_edge(ny_c, n_r.y, d_c, d_r));
     let max_normal_diff = max(max(nc_u, nc_d), max(nc_l, nc_r));
     let normal_edge = step(params.normal_threshold, max_normal_diff);
 

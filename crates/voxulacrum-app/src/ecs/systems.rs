@@ -4,7 +4,7 @@ use crate::ecs::resources::*;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::params::ParamChangeKind;
 use crate::rendering::cap_pass::CapPass;
-use crate::rendering::debug_lines::DebugLinePass;
+use crate::rendering::debug_lines::{voxel_box_lines, DebugLinePass};
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::main_scene_pass::{CapConfig, MainScenePassNode};
@@ -18,20 +18,26 @@ use crate::rendering::shadow_pass::ShadowPassNode;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::scatter_pass::ScatterPass;
+use crate::rendering::capsule_pass::CapsulePass;
+use crate::rendering::canopy_pass::CanopyPass;
+use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
 use crate::rendering::water_pass::WaterPass;
 use crate::rendering::reflection_pass::ReflectionPassNode;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::frustum::Frustum;
 use crate::shader_reload::ShaderWatcher;
 use crate::graph_reload::GraphWatcherRes;
-use crate::input::InputState;
+use crate::input::{InputState, PointerState};
 use crate::interaction::PickState;
 use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui;
 use crate::ui::panels::UiState;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::{compute_render_dimensions, palette, FrameCounter};
-use crate::diagnostics::FrameTimings;
+use crate::diagnostics::{
+    FrameTimings, SUB_CLIMATE, SUB_DRAIN, SUB_FLUID, SUB_PARAMS, SUB_PUMP, SUB_SAVE, SUB_SCAN,
+    SUB_SEAM, SUB_STREAM, SUB_SUBMIT, SUB_UNLOAD, SUB_UPLOAD,
+};
 use crate::jobs::JobSystem;
 use crate::world::chunk::{LoadedChunk, CHUNK_WORLD_SIZE};
 use crate::world::streaming::{CameraView, ChunkStreamingManager};
@@ -60,6 +66,19 @@ pub fn frame_counter_system(
     ui.present_mean_ms = timings.present_mean_ms;
     ui.stage_mean_ms = timings.stage_mean_ms;
     ui.stage_max_ms = timings.stage_max_ms;
+    // Session-scoped, so unlike the rows above these change continuously rather
+    // than on the second boundary. Mirrored here anyway because the panel draws
+    // only from `UiState`; being one frame stale is immaterial for a maximum.
+    ui.frontier_cpu_max_ms = timings.frontier_cpu_max_ms;
+    ui.frontier_cpu_mean_ms = timings.frontier_cpu_mean_ms();
+    ui.frontier_frames = timings.frontier_frames;
+    ui.frontier_over_budget = timings.frontier_over_budget;
+    ui.frontier_worst_stages = timings.frontier_worst_stages;
+    ui.frontier_worst_sub = timings.frontier_worst_sub;
+    ui.frontier_sub_max = timings.frontier_sub_max;
+    for i in 0..crate::diagnostics::SUB_COUNT {
+        ui.frontier_sub_mean[i] = timings.frontier_sub_mean_ms(i);
+    }
 }
 
 // ==========================================================================
@@ -94,8 +113,64 @@ pub fn frame_timings_end_render(mut t: ResMut<FrameTimings>) {
     t.end_stage(4);
 }
 
-pub fn frame_timings_frame_end(mut t: ResMut<FrameTimings>) {
-    t.frame_end();
+pub fn frame_timings_frame_end(
+    mut t: ResMut<FrameTimings>,
+    mut ui: ResMut<UiState>,
+    streaming: Res<ChunkStreamingManager>,
+) {
+    // Before accumulating, so the frame the button was clicked on starts the
+    // fresh sample rather than being discarded by it.
+    if std::mem::take(&mut ui.reset_frontier_requested) {
+        t.reset_frontier();
+    }
+    // "At an active generation frontier" (roadmap §7.3) = the streamed set is
+    // not yet satisfied: chunks wanted but not resident, or generation jobs
+    // still outstanding. `missing` alone would miss the tail of a fill where
+    // the last results are landing; `in_flight` alone would miss frames where a
+    // deficit is open but backpressure has not submitted yet.
+    let s = streaming.stats();
+    t.frame_end(s.missing > 0 || s.in_flight > 0);
+}
+
+// ==========================================================================
+// World event bus (design §6.7)
+// ==========================================================================
+
+/// Swap `Events<WorldEvent>`'s double buffer once per frame.
+///
+/// A full Bevy `App` registers this automatically via `add_event`; this engine
+/// owns its own schedule, so it is explicit. Without it events are never aged
+/// out and every `EventReader` re-reads the whole history.
+pub fn world_event_update_system(mut events: ResMut<Events<crate::world::events::WorldEvent>>) {
+    events.update();
+}
+
+/// Publish the mutation door's outbox onto the box.
+///
+/// The door is a method on `World`, not a system, so it cannot hold an
+/// `EventWriter`. This runs unconditionally every frame, which is what makes the
+/// outbox bounded.
+pub fn world_event_pump_system(
+    mut world: ResMut<VoxelWorld>,
+    mut writer: EventWriter<crate::world::events::WorldEvent>,
+) {
+    for event in world.0.drain_events() {
+        writer.write(event);
+    }
+}
+
+/// **Bus subscriber #1**: the mutation-and-event log's event counts.
+///
+/// A genuine subscriber - it reads the stream and knows nothing about who
+/// emitted, which is the property the bus exists to provide.
+pub fn world_event_log_system(
+    mut events: EventReader<crate::world::events::WorldEvent>,
+    mut ui: ResMut<UiState>,
+) {
+    for event in events.read() {
+        ui.event_counts[event.index()] += 1;
+        ui.events_total += 1;
+    }
 }
 
 pub fn shader_hot_reload_system(
@@ -227,24 +302,15 @@ pub fn shader_hot_reload_system(
     }
 }
 
-/// A graph file changed on disk: regenerate the world from disk.
+/// Watch graph files and announce what changed.
 ///
-/// **This is the only trigger for worldgen hot-reload.** The editor's Save
-/// writes the file, so an editor save and an external text-editor change take
-/// the identical path, and there is no second source of truth to disagree with.
-///
-/// It previously ran on every dirty keystroke in the editor *and* on file
-/// changes, with regeneration reading the edited graph from memory and every
-/// other graph from disk - so editing one graph while another had unsaved
-/// changes produced a world matching neither. Higher-tier graphs suffered most,
-/// since a Zone graph's `GraphRef(World)` resolved against the on-disk World.
-///
-/// The editor's canvas is deliberately not refreshed here: the editor owns its
-/// canvas and disk owns the world. An external edit updates the world; re-select
-/// the slot to reload the view.
+/// It writes an event and stops there. Before the bus it pushed onto a queue in
+/// `UiState` that the regeneration coordinator drained - two systems reaching
+/// into a third's state to talk to each other. Now the watcher does not know
+/// regeneration exists.
 pub fn graph_hot_reload_system(
     graph_watcher: Res<GraphWatcherRes>,
-    mut ui_state: ResMut<UiState>,
+    mut events: EventWriter<crate::world::events::WorldEvent>
 ) {
     let changed = graph_watcher.0.poll_changes();
     if changed.is_empty() {
@@ -254,9 +320,7 @@ pub fn graph_hot_reload_system(
     for path in changed {
         match crate::world::world_generator::slot_for_graph_file(&manifest, &path) {
             Some(slot) => {
-                if !ui_state.pending_graph_reload.contains(&slot) {
-                    ui_state.pending_graph_reload.push(slot);
-                }
+                events.write(crate::world::events::WorldEvent::GraphChanged { slot });
                 log::info!("graph changed on disk: {} ({slot:?})", path.display());
             }
             // A `.json` in the graphs directory that the manifest does not
@@ -300,7 +364,11 @@ pub fn simulation_tick_system(
     commands.insert_resource(frame);
 }
 
-pub fn param_change_detection_system(mut ui: ResMut<UiState>) {
+pub fn param_change_detection_system(
+    mut ui: ResMut<UiState>,
+    mut timings: ResMut<FrameTimings>,
+) {
+    let _timer = timings.sub_timer(SUB_PARAMS);
     let kind = ui.change_detector.detect(&ui.params);
     if kind == ParamChangeKind::MeshInvalidating {
         ui.mesh_params_pending = true;
@@ -373,7 +441,9 @@ pub fn fluid_tick_system(
     mut world: ResMut<VoxelWorld>,
     mut water_pass: ResMut<WaterPass>,
     ctx: Res<RenderContext>,
+    mut timings: ResMut<FrameTimings>,
 ) {
+    let _timer = timings.sub_timer(SUB_FLUID);
     let mut changed: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
 
     // Debug disturbance (Authoring dev tool): press G with the cursor over terrain
@@ -478,7 +548,9 @@ pub fn climate_tick_system(
     world: Res<VoxelWorld>,
     ctx: Res<RenderContext>,
     mut clock: ResMut<ClimateClock>,
+    mut timings: ResMut<FrameTimings>,
 ) {
+    let _timer = timings.sub_timer(SUB_CLIMATE);
     let now = std::time::Instant::now();
     let dt = (now - clock.last_tick).as_secs_f32().min(0.25);
     clock.last_tick = now;
@@ -688,6 +760,616 @@ pub fn room_detection_system(
     );
 }
 
+/// Run a requested column inspection (roadmap §4.3).
+///
+/// Runs on the worker pool and blocks: the full pipeline is tens of
+/// milliseconds, and it runs only on an explicit Refresh.
+pub fn column_inspector_system(
+    mut ui: ResMut<UiState>,
+    world: Res<VoxelWorld>,
+    jobs: Res<JobSystem>,
+) {
+    let inspector = &mut ui.column_inspector;
+    if !inspector.open || !inspector.dirty {
+        return;
+    }
+    inspector.dirty = false;
+    // On the worker pool, blocking. The full pipeline runs `Evaluator::evaluate`,
+    // which `debug_assert`s it is not on the schedule thread - a guard that is
+    // right, and which `install` satisfies by handing the closure to a pool
+    // worker. This is the determinism checker's precedent: an explicit operator
+    // action that blocks until it finishes, rather than machinery to make a
+    // once-in-a-while query asynchronous.
+    let (wx, wz) = (inspector.world_x, inspector.world_z);
+    let y_range = world.0.min_chunk_y..world.0.max_chunk_y;
+    let generator = std::sync::Arc::clone(&world.0.generator);
+    let result = jobs.pool().install(move || generator.inspect_column(wx, wz, y_range));
+    match result {
+        Ok(report) => {
+            inspector.report = Some(report);
+            inspector.error = None;
+        }
+        Err(e) => {
+            inspector.report = None;
+            inspector.error = Some(e);
+        }
+    }
+}
+
+/// Service the blueprint panel (roadmap §4.2).
+///
+/// The panel arms a tool; this consumes the next in-world click and performs it
+/// at the picked voxel. `pick.anchor` is already `None` whenever the cursor is
+/// over egui, so the click that armed a tool can never also trigger it.
+pub fn blueprint_authoring_system(
+    mut ui: ResMut<UiState>,
+    mut world: ResMut<VoxelWorld>,
+    pick: Res<PickState>,
+    pointer: Res<PointerState>,
+    input: Res<InputState>,
+    sim: Res<SimulationManager>,
+    registry: Res<MaterialRegistryRes>,
+) {
+    use crate::input::GameAction;
+    use crate::ui::blueprint_panel::ArmedTool;
+
+    let state = &mut ui.blueprint_panel;
+    if !state.open {
+        return;
+    }
+    let dir = crate::world::blueprint::blueprint_dir();
+
+    if std::mem::take(&mut state.refresh_requested) {
+        match voxel_core::Blueprint::list(&dir) {
+            Ok(names) => {
+                state.selected = state.selected.min(names.len().saturating_sub(1));
+                state.library = names;
+            }
+            Err(e) => state.error = Some(e),
+        }
+    }
+
+    // Match the preview to the camera, so a blueprint pointing to the upper
+    // right in the preview points there in the world too. The camera orbits, so
+    // a fixed object appears to turn the *opposite* way - hence the negation.
+    // `target_rotation` rather than `rotation`: the preview should snap with the
+    // key, not spin through the camera's ease.
+    let base = std::f32::consts::FRAC_PI_4;
+    let camera_steps =
+        ((sim.camera.target_rotation - base) / std::f32::consts::FRAC_PI_2).round() as i32;
+    state.camera_yaw = voxel_core::Yaw::from_steps(-camera_steps);
+    
+    // Keep the preview in step with the selection. Loading and resolving is
+    // filesystem work, so it happens when the selection changes rather than
+    // every frame - and the cached cells stay unrotated, so changing the yaw
+    // redraws without touching disk.
+    let want = state.selected_name().map(str::to_string);
+    if state.preview_for != want {
+        state.preview_for = want.clone();
+        state.preview.clear();
+        if let Some(name) = want {
+            match voxel_core::Blueprint::load(&dir, &name).and_then(|bp| bp.resolve(&registry.0)) {
+                Ok(bp) => {
+                    let anchor = IVec3::from_array(bp.anchor);
+                    state.preview = bp
+                        .cells
+                        .iter()
+                        .map(|(at, voxel)| crate::ui::blueprint_panel::PreviewCell {
+                            at: (IVec3::from_array(*at) - anchor).to_array(),
+                            shape: voxel.shape,
+                            // Unreachable by construction: the id came from
+                            // `resolve` against this same registry. Magenta so a
+                            // future path that breaks that is obvious on sight.
+                            color: registry
+                                .0
+                                .get(voxel.material)
+                                .map(|d| d.color)
+                                .unwrap_or([1.0, 0.0, 1.0]),
+                        })
+                        .collect();
+                }
+                // A blueprint that will not load is worth knowing before you arm
+                // a stamp with it, rather than at the click.
+                Err(e) => state.error = Some(e),
+            }
+        }
+    }
+    
+    // Esc or right-click cancels whatever is armed, wherever the cursor is.
+    // The selection is deliberately kept: Clear is what discards it, so Esc is
+    // never a key that quietly throws work away.
+    if (pointer.right.just_pressed || input.just_pressed(GameAction::CancelTool))
+        && state.armed != ArmedTool::None
+    {
+        state.armed = ArmedTool::None;
+        state.status = Some("cancelled".to_string());
+        state.error = None;
+    }
+
+    // R rotates while a tool is armed - the point of a hotkey here is that your
+    // cursor is out in the world, not on the panel.
+    if input.just_pressed(GameAction::RotateTool) && state.armed == ArmedTool::Stamp {
+        state.yaw = state.yaw.next();
+    }
+    
+    if pointer.left.just_pressed && state.armed != ArmedTool::None {
+        if let Some(anchor) = pick.anchor {
+            state.error = None;
+            match state.armed {
+                ArmedTool::None => {}
+                ArmedTool::Region => {
+                    // A completed region starts a new one, so the tool stays
+                    // armed for repeated selections without re-pressing.
+                    if state.corner_a.is_none() || state.corner_b.is_some() {
+                        state.corner_a = Some(anchor);
+                        state.corner_b = None;
+                        state.status = Some("corner A set — click the opposite corner".to_string());
+                    } else {
+                        state.corner_b = Some(anchor);
+                        state.armed = ArmedTool::None;
+                        state.status = Some("region set".to_string());
+                    }
+                }
+                ArmedTool::Stamp => {
+                    // Held Shift keeps the tool armed so the same blueprint can
+                    // be placed repeatedly without re-arming between clicks.
+                    if !input.pressed(GameAction::RepeatTool) {
+                        state.armed = ArmedTool::None;
+                    }
+                    let Some(name) = state.selected_name().map(str::to_string) else {
+                        state.error = Some("no blueprint selected".to_string());
+                        return;
+                    };
+                    match voxel_core::Blueprint::load(&dir, &name)
+                        .and_then(|bp| bp.resolve(&registry.0))
+                    {
+                        Ok(blueprint) => {
+                            let cells = blueprint.cells.len();
+                            // One above the clicked surface voxel, matching the
+                            // rule `place_blueprints` uses on the generation side.
+                            let origin = anchor + IVec3::Y;
+                            // The outcome is discarded on purpose: a stamp fills
+                            // only `mesh_invalidated`, and `meshing_tick_system`
+                            // acts on the chunk's `mesh_dirty` flag every frame.
+                            let yaw = state.yaw;
+                            match world.0.execute(MutationCommand::authoring(
+                                WorldMutation::StampBlueprint { origin, blueprint, yaw },
+                            )) {
+                                Ok(_) => {
+                                    state.status = Some(format!(
+                                        "stamped {name} ({cells} cells) at {origin}, {}",
+                                        yaw.label()
+                                    ))
+                                }
+                                Err(e) => state.error = Some(e.to_string()),
+                            }
+                        }
+                        Err(e) => state.error = Some(e),
+                    }
+                }
+            }
+        }
+    }
+
+    if std::mem::take(&mut state.capture_requested) {
+        state.status = None;
+        state.error = None;
+        match (state.corner_a, state.corner_b) {
+            (Some(a), Some(b)) => {
+                let result = crate::world::blueprint::capture(
+                    &world.0,
+                    &state.name,
+                    a.min(b),
+                    a.max(b),
+                    &registry.0,
+                )
+                    .and_then(|bp| bp.save(&dir).map(|()| bp.cells.len()));
+                match result {
+                    Ok(cells) => {
+                        state.status = Some(format!(
+                            "captured {cells} solid cells to {}.blueprint.json",
+                            state.name
+                        ));
+                        state.refresh_requested = true;
+                    }
+                    Err(e) => state.error = Some(e),
+                }
+            }
+            _ => state.error = Some("set both corners first".to_string()),
+        }
+    }
+}
+
+/// Cyan, to stay distinct from the pick highlight's yellow.
+const SELECTION_COLOR: [f32; 3] = [0.2, 0.9, 1.0];
+
+/// Mirror the blueprint panel's capture region into the debug-line pass.
+/// 
+/// A separate system from `blueprint_authoring_system` because that one has
+/// early returns in its click handling, and a tail appended after them would be
+/// skipped on exactly the paths that change the selection.
+pub fn blueprint_selection_gizmo_system(
+    ui: Res<UiState>,
+    ctx: Res<RenderContext>,
+    mut debug_lines: ResMut<DebugLinePass>,
+) {
+    let state = &ui.blueprint_panel;
+    // A collapsed section shows no gizmo: the selection is still held, but
+    // there is nothing on screen claiming to explain the box.
+    let corners = if state.open {
+        match (state.corner_a, state.corner_b) {
+            (Some(a), Some(b)) => Some((a, b)),
+            // Mid-gesture: outline the single voxel already committed, so the
+            // first click has visible feedback rather than only a panel line.
+            (Some(a), None) => Some((a, a)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    debug_lines.set_selection(&ctx, corners, SELECTION_COLOR);
+}
+
+/// The heavy path, in the color the decomposition is supposed to find.
+const SKELETON_TRUNK_COLOR: [f32; 3] = [1.0, 0.55, 0.15];
+
+/// Canopy lobes, distinct from every branch color.
+const SKELETON_LOBE_COLOR: [f32; 3] = [0.35, 0.85, 0.40];
+
+/// Voxel cells the wood occupies - what collides and what can be mined.
+const SKELETON_WOOD_COLOR: [f32; 3] = [0.75, 0.55, 0.30];
+
+/// Outlines of the capsules the impostor pass actually draws.
+const SKELETON_CAPSULE_COLOR: [f32; 3] = [0.95, 0.85, 0.45];
+
+/// A per-chain color for everything that is not the trunk. Hashed rather than
+/// cycled through a table, so adjacent chain ids do not land on adjacent hues.
+fn skeleton_chain_color(chain: u32) -> [f32; 3] {
+    if chain == 0 {
+        return SKELETON_TRUNK_COLOR;
+    }
+    let h = (chain as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    [
+        0.30 + ((h >> 8) & 0xFF) as f32 / 365.0,
+        0.30 + ((h >> 24) & 0xFF) as f32 / 365.0,
+        0.30 + ((h >> 40) & 0xFF) as f32 / 365.0,
+    ]
+}
+
+/// Derive and draw the debug tree skeleton at its placed anchor.
+///
+/// **Armed placement.** A latch on the last picked voxel is not enough: it
+/// survives the pointer moving onto the panel, but the trip across the world to
+/// get there re-anchors it, so every reach for a slider moved the tree. A click
+/// places it and it stays. Same correction as 16b.
+pub fn skeleton_debug_system(
+    pick: Res<PickState>,
+    pointer: Res<PointerState>,
+    input: Res<InputState>,
+    ctx: Res<RenderContext>,
+    mut ui: ResMut<UiState>,
+    mut debug_lines: ResMut<DebugLinePass>,
+    mut preview: ResMut<SkeletonPreviewPass>,
+) {
+    use crate::input::GameAction;
+    use crate::rendering::debug_lines::DebugLineVertex;
+    use crate::rendering::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu};
+    use crate::ui::blueprint_panel::ArmedTool;
+    use crate::ui::skeleton_panel::PreviewRender;
+    use crate::world::chunk::VOXEL_SCALE;
+    use glam::Vec3;
+    use nodegraph_eval::skeleton::Skeleton;
+
+    // A blueprint tool owns the click while one is armed. Both systems read the
+    // same left press, and two tools acting on one click reads as a random
+    // extra action rather than as a mode error. Disarming rather than merely
+    // deferring keeps the HUD honest about what the next click will do.
+    let blueprint_armed = ui.blueprint_panel.armed != ArmedTool::None;
+
+    let state = &mut ui.skeleton_panel;
+    if blueprint_armed {
+        state.armed = false;
+    }
+
+    // Esc or right-click cancels the arming. The origin is deliberately kept -
+    // Clear is what discards it, so Esc is never a key that quietly throws
+    // placement away. Decision H3, applied to the second armed tool.
+    if state.armed && (pointer.right.just_pressed || input.just_pressed(GameAction::CancelTool)) {
+        state.armed = false;
+    }
+
+    if state.armed && pointer.left.just_pressed {
+        // `picking_system` clears the anchor while egui wants the pointer, so
+        // the click that armed this can never also place it.
+        if let Some(anchor) = pick.anchor {
+            state.origin = Some(anchor);
+            // Held Shift keeps the tool armed, so the preview can be walked
+            // around the world without re-arming between clicks.
+            if !input.pressed(GameAction::RepeatTool) {
+                state.armed = false;
+            }
+        }
+    }
+
+    if std::mem::take(&mut state.list_dirty) {
+        state.species_list =
+            nodegraph_hotreload::list_species(&crate::world::blueprint::species_dir());
+        state.selected_species = state.selected_species.min(state.species_list.len().saturating_sub(1));
+    }
+
+    if std::mem::take(&mut state.load_requested) {
+        // Disk is authoritative both ways: what loads here is exactly what a
+        // `PlaceTree` node resolves, so tuning starts from the shipped tree
+        // rather than from defaults that only resemble it.
+        if let Some(name) = state.species_list.get(state.selected_species).cloned() {
+            match nodegraph_hotreload::load_species(
+                &crate::world::blueprint::species_dir(),
+                &name,
+            ) {
+                Ok(species) => {
+                    state.species = species;
+                    state.name = name.clone();
+                    state.status = Some(format!("loaded {name}.species.json"));
+                    state.error = None;
+                }
+                Err(e) => state.error = Some(e.to_string()),
+            }
+        }
+    }
+
+    if std::mem::take(&mut state.save_requested) {
+        // Disk is authoritative, the rule hot reload already runs on (blueprint
+        // decision E2). There is no unsaved in-memory species to disagree with
+        // the file a `PlaceTree` node will resolve.
+        let file = nodegraph_hotreload::SpeciesFile {
+            version: nodegraph_hotreload::SPECIES_VERSION,
+            name: state.name.clone(),
+            species: state.species,
+        };
+        match file.save(&crate::world::blueprint::species_dir()) {
+            Ok(()) => {
+                state.status = Some(format!("saved {}.species.json", state.name));
+                state.error = None;
+                // A species saved here must appear in this panel's own picker.
+                state.list_dirty = true;
+            }
+            Err(e) => state.error = Some(e.to_string()),
+        }
+    }
+
+    let key = match (state.open, state.origin) {
+        (true, Some(v)) => Some((
+            v,
+            state.seed,
+            state.age,
+            state.species,
+            state.show_radii,
+            state.show_wood,
+            state.show_capsules,
+            state.render,
+        )),
+        _ => None,
+    };
+    if key == state.built {
+        return;
+    }
+    state.built = key;
+
+    let Some((origin, seed, age, species, show_radii, show_wood, show_capsules, render)) = key
+    else {
+        debug_lines.set_overlay(&ctx, None);
+        preview.clear();
+        state.nodes = 0;
+        state.lobes = 0;
+        state.wood = 0;
+        state.reach = 0.0;
+        state.height = 0.0;
+        return;
+    };
+
+    let skeleton = Skeleton::derive(seed as u64, &species, age);
+
+    // The root stands on top of the picked voxel, centered in it - matching
+    // where `place_blueprints` and the stamp tool put an anchored thing.
+    let base = Vec3::new(
+        (origin.x as f32 + 0.5) * VOXEL_SCALE,
+        (origin.y as f32 + 1.0) * VOXEL_SCALE,
+        (origin.z as f32 + 0.5) * VOXEL_SCALE,
+    );
+
+    // Occupancy is derived either way: it feeds the readout, and its outline is
+    // the one overlay that complements a solid render rather than restating it.
+    let root_voxels = origin.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
+    let mut wood: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
+    skeleton.voxelize(root_voxels, |c| {
+        wood.insert(c);
+    });
+
+    let mut lines: Vec<DebugLineVertex> = Vec::new();
+    if show_wood {
+        for cell in &wood {
+            lines.extend(voxel_box_lines(*cell, SKELETON_WOOD_COLOR));
+        }
+    }
+
+    if render == PreviewRender::Solid {
+        // The same two instance kinds `stamp_features` emits, built the same
+        // way: cones parent-to-child, then one sphere per node as a degenerate
+        // capsule. Reproducing the emission rather than the geometry is what
+        // makes this a preview of generation and not of a second renderer.
+        let mut capsules: Vec<CapsuleInstanceGpu> = Vec::new();
+        for seg in skeleton.segments() {
+            capsules.push(CapsuleInstanceGpu {
+                a: (base + seg.a * VOXEL_SCALE).to_array(),
+                ra: seg.ra * VOXEL_SCALE,
+                b: (base + seg.b * VOXEL_SCALE).to_array(),
+                rb: seg.rb * VOXEL_SCALE,
+            });
+        }
+        for node in &skeleton.nodes {
+            let p = (base + node.pos * VOXEL_SCALE).to_array();
+            let r = node.radius * VOXEL_SCALE;
+            capsules.push(CapsuleInstanceGpu { a: p, ra: r, b: p, rb: r });
+        }
+        let lobe_instances: Vec<LobeInstanceGpu> = skeleton
+            .lobes
+            .iter()
+            .map(|l| LobeInstanceGpu {
+                center: (base + l.center * VOXEL_SCALE).to_array(),
+                radii: (l.radii() * VOXEL_SCALE).to_array(),
+            })
+            .collect();
+        preview.set(&ctx, &capsules, &lobe_instances);
+
+        debug_lines.set_overlay(&ctx, Some(&lines));
+        state.wood = wood.len();
+        state.nodes = skeleton.nodes.len();
+        state.chains = skeleton.chains;
+        state.lobes = skeleton.lobes.len();
+        state.reach = skeleton.reach;
+        state.height = skeleton.height;
+        return;
+    }
+
+    preview.clear();
+    for seg in skeleton.segments() {
+        let color = skeleton_chain_color(seg.chain);
+        let a = base + seg.a * VOXEL_SCALE;
+        let b = base + seg.b * VOXEL_SCALE;
+        lines.push(DebugLineVertex { position: a.to_array(), color });
+        lines.push(DebugLineVertex { position: b.to_array(), color });
+        if show_radii {
+            // A cross at the child end, as wide as the branch is thick. A line
+            // drawing has no thickness, so this is the only way the pipe
+            // model's taper is visible at all.
+            for axis in [Vec3::X, Vec3::Z] {
+                let arm = axis * seg.rb * VOXEL_SCALE;
+                lines.push(DebugLineVertex { position: (b - arm).to_array(), color });
+                lines.push(DebugLineVertex { position: (b + arm).to_array(), color });
+            }
+        }
+        if show_capsules {
+            // A ring at each end plus four rails: the taper between them is the
+            // thing being judged, and a cross at one end cannot show it.
+            let axis = b - a;
+            let len = axis.length();
+            if len > 1e-5 {
+                let dir = axis / len;
+                let u = dir.any_orthonormal_vector();
+                let v = dir.cross(u);
+                const RING: usize = 12;
+                let step = std::f32::consts::TAU / RING as f32;
+                for (center, radius) in [(a, seg.ra * VOXEL_SCALE), (b, seg.rb * VOXEL_SCALE)] {
+                    for s in 0..RING {
+                        let at = |t: f32| center + (u * t.cos() + v * t.sin()) * radius;
+                        lines.push(DebugLineVertex {
+                            position: at(s as f32 * step).to_array(),
+                            color: SKELETON_CAPSULE_COLOR,
+                        });
+                        lines.push(DebugLineVertex {
+                            position: at((s + 1) as f32 * step).to_array(),
+                            color: SKELETON_CAPSULE_COLOR,
+                        });
+                    }
+                }
+                for k in 0..4 {
+                    let t = k as f32 * std::f32::consts::FRAC_PI_2;
+                    let off = u * t.cos() + v * t.sin();
+                    lines.push(DebugLineVertex {
+                        position: (a + off * (seg.ra * VOXEL_SCALE)).to_array(),
+                        color: SKELETON_CAPSULE_COLOR,
+                    });
+                    lines.push(DebugLineVertex {
+                        position: (b + off * (seg.rb * VOXEL_SCALE)).to_array(),
+                        color: SKELETON_CAPSULE_COLOR,
+                    });
+                }
+            }
+        }
+    }
+
+    // Three orthogonal rings per lobe, so an ellipsoid reads as a volume in a
+    // line drawing rather than as a circle.
+    for lobe in &skeleton.lobes {
+        let c = base + lobe.center * VOXEL_SCALE;
+        let r = lobe.radii() * VOXEL_SCALE;
+        const SEGS: usize = 20;
+        for axis in 0..3 {
+            let at = |t: f32| match axis {
+                0 => Vec3::new(r.x * t.cos(), r.y * t.sin(), 0.0),
+                1 => Vec3::new(0.0, r.y * t.cos(), r.z * t.sin()),
+                _ => Vec3::new(r.x * t.cos(), 0.0, r.z * t.sin()),
+            };
+            for s in 0..SEGS {
+                let step = std::f32::consts::TAU / SEGS as f32;
+                lines.push(DebugLineVertex {
+                    position: (c + at(s as f32 * step)).to_array(),
+                    color: SKELETON_LOBE_COLOR,
+                });
+                lines.push(DebugLineVertex {
+                    position: (c + at((s + 1) as f32 * step)).to_array(),
+                    color: SKELETON_LOBE_COLOR,
+                });
+            }
+        }
+    }
+    
+    debug_lines.set_overlay(&ctx, Some(&lines));
+    state.wood = wood.len();
+    state.nodes = skeleton.nodes.len();
+    state.chains = skeleton.chains;
+    state.lobes = skeleton.lobes.len();
+    state.reach = skeleton.reach;
+    state.height = skeleton.height;
+}
+
+/// Sample the biome/zone map when requested (roadmap §4.3).
+///
+/// On the pool and blocking, like the column inspector: a 128² grid is ~33k
+/// noise evaluations, and it runs on an explicit change rather than per frame.
+pub fn biome_map_system(
+    mut ui: ResMut<UiState>,
+    world: Res<VoxelWorld>,
+    sim: Res<SimulationManager>,
+    jobs: Res<JobSystem>,
+) {
+    // Mirrored every frame so "Camera" is current whenever it is pressed.
+    let cam = sim.camera.smooth_target;
+    ui.biome_map.camera_x = cam.x as i32;
+    ui.biome_map.camera_z = cam.z as i32;
+
+    let state = &mut ui.biome_map;
+    if !state.open {
+        return;
+    }
+    state.ensure_defaults();
+    if !state.dirty {
+        return;
+    }
+    state.dirty = false;
+
+    let (cx, cz, step) = (state.center_x, state.center_z, state.step);
+    let generator = std::sync::Arc::clone(&world.0.generator);
+    let dim = crate::ui::biome_map::MAP_DIM;
+    let result = jobs
+        .pool()
+        .install(move || generator.sample_id_map(cx, cz, step, dim));
+
+    match result {
+        Ok(map) => {
+            state.zone_legend = world.0.generator.zone_labels().to_vec();
+            state.biome_legend = world.0.generator.biome_labels().to_vec();
+            state.map = Some(map);
+            state.version = state.version.wrapping_add(1);
+            state.error = None;
+        }
+        Err(e) => {
+            state.map = None;
+            state.error = Some(e);
+        }
+    }
+}
+
 // ==========================================================================
 // Streaming stage
 // ==========================================================================
@@ -701,11 +1383,19 @@ pub fn streaming_tick_system(
     frame: Res<FrameState>,
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
+    mut capsules: ResMut<CapsulePass>,
+    mut canopy: ResMut<CanopyPass>,
     mut water_pass: ResMut<WaterPass>,
     mut ui: ResMut<UiState>,
     _ctx: Res<RenderContext>,
     persistence: Res<WorldPersistence>,
+    mut timings: ResMut<FrameTimings>,
 ) {
+    // Explicit start/stop rather than `sub_timer`: the guard would hold
+    // `timings` borrowed for the whole body, and the per-phase copy below needs
+    // it free. Safe here specifically because this system has one exit — the
+    // condition the guard exists to protect against does not apply.
+    let started = std::time::Instant::now();
     let cam_pos = sim.camera.smooth_target;
     let cam_cx = (cam_pos.x / CHUNK_WORLD_SIZE).floor() as i32;
     let cam_cz = (cam_pos.z / CHUNK_WORLD_SIZE).floor() as i32;
@@ -716,8 +1406,8 @@ pub fn streaming_tick_system(
         camera_chunk: IVec3::new(cam_cx, 0, cam_cz),
         camera_world_pos: cam_pos,
         world_y_range: (
-            streaming.params.min_chunk_y as f32 * CHUNK_WORLD_SIZE,
-            streaming.params.max_chunk_y as f32 * CHUNK_WORLD_SIZE,
+            world.min_chunk_y as f32 * CHUNK_WORLD_SIZE,
+            world.max_chunk_y as f32 * CHUNK_WORLD_SIZE,
         ),
     };
 
@@ -740,6 +1430,8 @@ pub fn streaming_tick_system(
     for pos in &tick_result.unloaded {
         detail_paint.remove_chunk(*pos);
         scatter.remove_chunk(*pos);
+        capsules.remove_chunk(*pos);
+        canopy.remove_chunk(*pos);
         water_pass.remove_chunk_water(*pos);
     }
 
@@ -750,12 +1442,27 @@ pub fn streaming_tick_system(
 
     // Update streaming stats for UI
     ui.streaming = streaming.stats();
+
+    // The four phases `tick` reported, named here (see `SUB_DRAIN`), plus the
+    // whole-system span so the inner split can be checked against it.
+    for (slot, ms) in [SUB_DRAIN, SUB_SUBMIT, SUB_SCAN, SUB_UNLOAD]
+        .into_iter()
+        .zip(tick_result.phase_ms)
+    {
+        timings.add_sub(slot, ms);
+    }
+    timings.add_sub(SUB_STREAM, started.elapsed().as_secs_f32() * 1000.0);
 }
 
 /// Dispatch queued jobs onto the shared pool (P14). Runs after every consumer
 /// has submitted for this frame and before meshing consumes results, so a job
 /// submitted this frame starts this frame.
-pub fn job_pump_system(mut jobs: ResMut<JobSystem>, mut ui: ResMut<UiState>) {
+pub fn job_pump_system(
+    mut jobs: ResMut<JobSystem>,
+    mut ui: ResMut<UiState>,
+    mut timings: ResMut<FrameTimings>,
+) {
+    let _timer = timings.sub_timer(SUB_PUMP);
     jobs.pump();
     // Snapshot after pumping, so the panel shows the dispatch this frame
     // produced rather than the state that led to it.
@@ -779,8 +1486,12 @@ pub fn meshing_tick_system(
     mut ui: ResMut<UiState>,
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
+    mut capsules: ResMut<CapsulePass>,
+    mut canopy: ResMut<CanopyPass>,
     mut water_pass: ResMut<WaterPass>,
+    mut timings: ResMut<FrameTimings>,
 ) {
+    let _timer = timings.sub_timer(SUB_UPLOAD);
     // Phase 1: tick meshing with &mut world - collects meshed positions.
     let cam = sim.camera.smooth_target;
     let camera_chunk = IVec3::new(
@@ -805,6 +1516,8 @@ pub fn meshing_tick_system(
         for pos in &meshed {
             detail_paint.add_chunk(*pos, &world.0, &ctx.device);
             scatter.add_chunk(*pos, &world.0, &ctx.device);
+            capsules.add_chunk(*pos, &world.0, &ctx.device);
+            canopy.add_chunk(*pos, &world.0, &ctx.device);
         }
         // Water welds across seams, so also refresh newly-meshed chunks' neighbors
         // (detail/scatter are per-chunk and don't need this).
@@ -823,7 +1536,11 @@ pub fn meshing_tick_system(
 /// write goes through the mutation door as `FinalizeSeam` (P5 - this was the
 /// largest remaining bypass, audit §7.1 E-1). It is `System` origin: generation
 /// finalization, not an actor edit.
-pub fn seam_smoothing_system(mut world: ResMut<VoxelWorld>) {
+pub fn seam_smoothing_system(
+    mut world: ResMut<VoxelWorld>,
+    mut timings: ResMut<FrameTimings>,
+) {
+    let _timer = timings.sub_timer(SUB_SEAM);
     const MAX_PER_FRAME: usize = 16;
 
     let mut candidates: Vec<IVec3> = Vec::new();
@@ -990,7 +1707,11 @@ pub fn compute_stats_system(
     let mut total_tris: u64 = 0;
     let mut chunks_visible: u32 = 0;
     let mut chunks_total: u32 = 0;
+    let mut branch_segments: u64 = 0;
+    let mut canopy_lobes: u64 = 0;
     for chunk in world.0.chunks.values() {
+        branch_segments += chunk.segments.len() as u64;
+        canopy_lobes += chunk.lobes.len() as u64;
         if chunk.mesh.is_some() {
             chunks_total += 1;
             if sim.frustum.is_chunk_visible(chunk.data.coord.into()) {
@@ -1002,6 +1723,8 @@ pub fn compute_stats_system(
     ui.total_triangles = total_tris;
     ui.chunks_visible = chunks_visible;
     ui.chunks_total = chunks_total;
+    ui.branch_segments = branch_segments;
+    ui.canopy_lobes = canopy_lobes;
 
     ui.mutation_log = world.0.mutation_log();
 
@@ -1187,6 +1910,9 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let render_targets = ecs.resource::<RenderTargets>();
         let detail_paint_pass = ecs.resource::<DetailPaintPass>();
         let scatter_pass = ecs.resource::<ScatterPass>();
+        let capsule_pass = ecs.resource::<CapsulePass>();
+        let canopy_pass = ecs.resource::<CanopyPass>();
+        let skeleton_preview_pass = ecs.resource::<SkeletonPreviewPass>();
         let water_pass = ecs.resource::<WaterPass>();
         let debug_line_pass = ecs.resource::<DebugLinePass>();
         let cap_pass = ecs.resource::<CapPass>();
@@ -1220,6 +1946,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             bind_group: &shadow_bind_group.0,
             shadow_depth_view: &shadow_depth_view.0,
             chunks: &shadow_chunks,
+            capsule_pass: ecs.resource::<CapsulePass>(),
+            capsule_shadow_pipeline: &pipeline_registry.capsule_shadow_pipeline,
         };
         
         let player_pass = ecs.resource::<PlayerPass>();
@@ -1256,9 +1984,15 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
             scatter_pass: &scatter_pass,
             scatter_pipeline: &pipeline_registry.scatter_pipeline,
+            capsule_pass: &capsule_pass,
+            capsule_pipeline: &pipeline_registry.capsule_pipeline,
+            canopy_pass: &canopy_pass,
+            canopy_pipeline: &pipeline_registry.canopy_core_pipeline,
+            skeleton_preview_pass: &skeleton_preview_pass,
+            show_canopy_cores: ui.params.debug.show_canopy_cores,
             debug_line_pass: &debug_line_pass,
             show_debug_lines: ui.params.debug.show_chunk_boundaries,
-            hide_foliage: ui.params.debug.hide_foliage || room_enclosed,
+            hide_foliage: ui.params.debug.hide_foliage,
             player_pass: &player_pass,
         };
 
@@ -1276,8 +2010,10 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
             scatter_pass: &scatter_pass,
             scatter_pipeline: &pipeline_registry.scatter_pipeline,
+            capsule_pass: &capsule_pass,
+            capsule_pipeline: &pipeline_registry.capsule_pipeline,
             player_pass: &player_pass,
-            hide_foliage: ui.params.debug.hide_foliage || room_enclosed,
+            hide_foliage: ui.params.debug.hide_foliage,
             enabled: !ui.params.debug.hide_water && !water_pass.chunk_meshes.is_empty(),
         };
 
@@ -1286,7 +2022,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             global_bind_group: &uniform_bind_group.0,
             water_pass: &water_pass,
             frustum: &sim.frustum,
-            hide_water: ui.params.debug.hide_water || room_enclosed,
+            hide_water: ui.params.debug.hide_water,
             scene_tex: &render_targets.scene,
             scene_copy_tex: &render_targets.scene_copy,
             tex_size: wgpu::Extent3d {
@@ -1383,7 +2119,17 @@ pub fn world_regen_system(
     ctx: Res<RenderContext>,
     persistence: Res<WorldPersistence>,
     mut streaming: ResMut<ChunkStreamingManager>,
+    mut events: EventReader<crate::world::events::WorldEvent>,
 ) {
+    // **Bus subscriber #2**, independent of the log: it reads the same stream,
+    // filters for what is cares about, and neither subscriber knows the other
+    // exists. Queued rather than acted on directly, because an edit arriving
+    // mid-regeneration must wait for the next idle tick.
+    for event in events.read() {
+        if let crate::world::events::WorldEvent::GraphChanged { slot } = event {
+            regen.queue_slot(*slot);
+        }
+    }
     regen.tick(
         &mut world.0,
         &mut meshing,
@@ -1401,6 +2147,8 @@ pub fn persistence_autosave_system(
     mut persistence: ResMut<WorldPersistence>,
     mut world: ResMut<VoxelWorld>,
     frame: Res<FrameState>,
+    mut timings: ResMut<FrameTimings>,
 ) {
+    let _timer = timings.sub_timer(SUB_SAVE);
     persistence.tick_autosave(frame.dt, &mut world.0);
 }

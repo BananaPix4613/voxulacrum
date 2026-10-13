@@ -222,7 +222,11 @@ impl MeshingPipeline {
 
             let neighbors = world.build_neighbors(pos);
             let snapshot = ChunkSnapshot::extract(
-                chunk, &neighbors, world.min_chunk_y, world.max_chunk_y,
+                chunk,
+                &neighbors,
+                world.min_chunk_y,
+                world.max_chunk_y,
+                world.materials.render_delegated_mask(),
             );
             let mesh_seq = chunk.mesh_seq;
 

@@ -1,0 +1,5 @@
+# Give rust-analyzer's background `cargo check` its own target directory
+# (target/rust-analyzer) so it never holds the lock on target/ while a
+# `cargo build` or `cargo run` is waiting for it.
+[cargo]
+targetDir = true

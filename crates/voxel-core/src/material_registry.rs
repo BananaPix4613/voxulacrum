@@ -26,13 +26,27 @@ pub struct MaterialDef {
     pub permeable: bool,
     /// Whether flora can root on top.
     pub supports_flora: bool,
+    /// Another render pass owns this material's appearance, so the terrain
+    /// mesher must not emit faces for it.
+    ///
+    /// Occupancy and rendering are separate: a render-delegated material still
+    /// collides, is still mined, and still occludes - it is simply drawn by
+    /// something that knows its real shape. Wood is the case this exists for,
+    /// because a tree drawn as cubes is the exact failure the tapered-capsule
+    /// impostor pass was chosen to avoid.
+    pub render_delegated: bool,
 }
 
 /// Ordered material table. The index into `entries` is the numeric
-/// [`MaterialId`]; ids are stable across runs (Air=0 … Gravel=8).
+/// [`MaterialId`]; ids are stable across runs (Air=0 … Leaves=10).
 pub struct MaterialRegistry {
     entries: Vec<MaterialDef>,
     by_id_name: HashMap<String, MaterialId>,
+    /// `render_delegated` per id, indexed by [`MaterialId`]. Built once here so
+    /// the mesher can test a material with one slice index rather than a
+    /// registry lookup per voxel - a 34^3 snapshot is 39,304 of them, up to 32
+    /// times a frame.
+    delegated: Vec<bool>,
 }
 
 impl MaterialRegistry {
@@ -41,23 +55,27 @@ impl MaterialRegistry {
     pub fn load_initial() -> Self {
         let entries = vec![
             MaterialDef { id_name: "air".into(), display_name: "Air".into(),
-                color: [0.0, 0.0, 0.0], sharpness: 0.0, hardness: 0.0, permeable: true, supports_flora: false },
+                color: [0.0, 0.0, 0.0], sharpness: 0.0, hardness: 0.0, permeable: true, supports_flora: false, render_delegated: false },
             MaterialDef { id_name: "limestone".into(), display_name: "Limestone".into(),
-                color: [0.95, 0.90, 0.82], sharpness: 0.9, hardness: 0.9, permeable: false, supports_flora: false },
+                color: [0.95, 0.90, 0.82], sharpness: 0.9, hardness: 0.9, permeable: false, supports_flora: false, render_delegated: false },
             MaterialDef { id_name: "granite".into(), display_name: "Granite".into(),
-                color: [0.50, 0.50, 0.53], sharpness: 0.85, hardness: 0.95, permeable: false, supports_flora: false },
+                color: [0.50, 0.50, 0.53], sharpness: 0.85, hardness: 0.95, permeable: false, supports_flora: false, render_delegated: false },
             MaterialDef { id_name: "soil".into(), display_name: "Soil".into(),
-                color: [0.40, 0.22, 0.10], sharpness: 0.3, hardness: 0.2, permeable: false, supports_flora: true },
+                color: [0.40, 0.22, 0.10], sharpness: 0.3, hardness: 0.2, permeable: false, supports_flora: true, render_delegated: false },
             MaterialDef { id_name: "clay".into(), display_name: "Clay".into(),
-                color: [0.62, 0.36, 0.20], sharpness: 0.4, hardness: 0.4, permeable: false, supports_flora: false },
+                color: [0.62, 0.36, 0.20], sharpness: 0.4, hardness: 0.4, permeable: false, supports_flora: false, render_delegated: false },
             MaterialDef { id_name: "sand".into(), display_name: "Sand".into(),
-                color: [0.90, 0.82, 0.55], sharpness: 0.15, hardness: 0.1, permeable: true, supports_flora: false },
+                color: [0.90, 0.82, 0.55], sharpness: 0.15, hardness: 0.1, permeable: true, supports_flora: false, render_delegated: false },
             MaterialDef { id_name: "grass_soil".into(), display_name: "Grass Soil".into(),
-                color: [0.30, 0.55, 0.18], sharpness: 0.35, hardness: 0.2, permeable: false, supports_flora: true },
+                color: [0.30, 0.55, 0.18], sharpness: 0.35, hardness: 0.2, permeable: false, supports_flora: true, render_delegated: false },
             MaterialDef { id_name: "water".into(), display_name: "Water".into(),
-                color: [0.2, 0.35, 0.6], sharpness: 0.0, hardness: 0.0, permeable: true, supports_flora: false },
+                color: [0.2, 0.35, 0.6], sharpness: 0.0, hardness: 0.0, permeable: true, supports_flora: false, render_delegated: false },
             MaterialDef { id_name: "gravel".into(), display_name: "Gravel".into(),
-                color: [0.52, 0.49, 0.45], sharpness: 0.6, hardness: 0.5, permeable: true, supports_flora: false },
+                color: [0.52, 0.49, 0.45], sharpness: 0.6, hardness: 0.5, permeable: true, supports_flora: false, render_delegated: false },
+            MaterialDef { id_name: "wood".into(), display_name: "Wood".into(),
+                color: [0.55, 0.44, 0.30], sharpness: 0.5, hardness: 0.6, permeable: false, supports_flora: false, render_delegated: true },
+            MaterialDef { id_name: "leaves".into(), display_name: "Leaves".into(),
+                color: [0.24, 0.46, 0.18], sharpness: 0.2, hardness: 0.1, permeable: true, supports_flora: false, render_delegated: false },
         ];
         Self::from_entries(entries)
     }
@@ -70,7 +88,16 @@ impl MaterialRegistry {
                 panic!("duplicate material id_name: {:?}", def.id_name);
             }
         }
-        Self { entries, by_id_name }
+        let delegated = entries.iter().map(|d| d.render_delegated).collect();
+        Self { entries, by_id_name, delegated }
+    }
+
+    /// `render_delegated` per material id, for the snapshot extractor.
+    ///
+    /// Derived from `entries` rather than stored alongside them, so there is one
+    /// copy of the fact, and it cannot drift from the table it describes.
+    pub fn render_delegated_mask(&self) -> &[bool] {
+        &self.delegated
     }
 
     /// Resolve a snake_case `id_name` to its stable numeric id.
@@ -151,6 +178,7 @@ impl MaterialRegistry {
                 hardness: e.hardness,
                 permeable: e.permeable,
                 supports_flora: e.supports_flora,
+                render_delegated: e.render_delegated,
             })
             .collect();
 
@@ -180,6 +208,10 @@ struct MaterialEntryRon {
     hardness: f32,
     permeable: bool,
     supports_flora: bool,
+    /// Optional so the overwhelming majority of entries - everything the mesher
+    /// draws normally - say nothing at all.
+    #[serde(default)]
+    render_delegated: bool,
 }
 
 /// Top-level schema of `materials.ron`.
@@ -209,6 +241,33 @@ mod ron_tests {
             from_ron.entries, initial.entries,
             "materials.ron drifted from load_initial(); they must stay byte-equivalent"
         );
+    }
+
+    #[test]
+    fn the_delegated_mask_tracks_the_table() {
+        let r = MaterialRegistry::load_initial();
+        let mask = r.render_delegated_mask();
+        assert_eq!(mask.len(), r.len(), "mask and table must be the same length");
+        for (i, def) in r.entries.iter().enumerate() {
+            assert_eq!(mask[i], def.render_delegated, "mask disagrees at id {i}");
+        }
+    }
+
+    #[test]
+    fn wood_is_render_delegated_and_terrain_is_not() {
+        // The invariant the tree work rests on: wood occupies voxels but is
+        // drawn by the capsule impostor pass, never by the terrain mesher.
+        let r = MaterialRegistry::load_initial();
+        let wood = r.resolve("wood").expect("wood is registered");
+        assert!(r.render_delegated_mask()[wood.0 as usize], "wood must be delegated");
+        for name in ["granite", "soil", "grass_soil", "sand", "gravel"] {
+            if let Some(id) = r.resolve(name) {
+                assert!(
+                    !r.render_delegated_mask()[id.0 as usize],
+                    "{name} must be drawn by the mesher",
+                );
+            }
+        }
     }
 
     #[test]

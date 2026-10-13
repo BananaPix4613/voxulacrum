@@ -12,14 +12,13 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use bevy_ecs::prelude::{NonSendMut, Res, ResMut, Resource};
+use bevy_ecs::prelude::{NonSendMut, ResMut, Resource};
 use glam::IVec3;
 use nodegraph_eval::{CachedOutput, EvalContext, Evaluator, ScalarField};
 use nodegraph_ir::{Graph, NodeId};
 use voxel_core::{ChunkBuffer, MaterialRegistry, Voxel};
 
 use crate::ui::colormap::Colormap;
-use crate::ui::panels::UiState;
 use crate::ui::EguiRenderer;
 
 /// A captured node output, ready for the panel to render. The variant follows
@@ -145,7 +144,6 @@ impl FieldProbe {
 pub fn field_probe_system(
     mut probe: ResMut<FieldProbe>,
     egui: NonSendMut<EguiRenderer>,
-    ui_state: Res<UiState>,
 ) {
     // 1. Drain a completed evaluation, if one finished.
     let received = probe.result_rx.get_mut().unwrap().try_recv().ok();
@@ -194,7 +192,7 @@ pub fn field_probe_system(
             probe.error = Some("select a node in the editor to inspect".to_string());
             return;
         };
-        let seed = ui_state.params.terrain_gen.seed as u64;
+        let seed = egui.graph_editor.world_seed();
         let chunk = probe.chunk;
         let tx = probe.result_tx.clone();
         probe.in_flight = true;

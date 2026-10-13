@@ -49,6 +49,7 @@ struct GlobalUniforms {
 @group(0) @binding(2) var cloud_sampler: sampler;
 @group(0) @binding(3) var shadow_map: texture_depth_2d;
 @group(0) @binding(4) var shadow_sampler: sampler_comparison;
+@group(0) @binding(6) var visibility_mask: texture_3d<u32>;
 @group(0) @binding(7) var cloud_env_texture: texture_2d<f32>;
 @group(0) @binding(8) var cloud_env_sampler: sampler;
 
@@ -116,6 +117,51 @@ fn base_color_for(species: u32) -> vec3<f32> {
     }
 }
 
+/// Flood cost past which a cell is outside the readable pocket. Must match
+/// `terrain.wgsl` - the two passes disagreeing means foliage survives where the
+/// ground under it went dark, or the reverse.
+const CLARITY_RADIUS: u32 = 24u;
+
+/// Whether the cell containing `sample_pos` is inside the player's visible
+/// volume, read from the same 64-cube mask the terrain pass reads.
+///
+/// True whenever the mask is off, so nothing changes above ground. A position
+/// outside the window is not visible: the window is centered on the player, so
+/// anything beyond it is far enough to be occluded by definition.
+fn in_visible_volume(sample_pos: vec3<f32>) -> bool {
+    if globals.mask_enabled != 1u {
+        return true;
+    }
+    let cell = floor(sample_pos);
+    let ai = vec3<i32>(cell) - vec3<i32>(globals.mask_origin);
+    if ai.x < 0 || ai.x >= 64 || ai.y < 0 || ai.y >= 64 || ai.z < 0 || ai.z >= 64 {
+        return false;
+    }
+    let s = textureLoad(visibility_mask, ai, 0).r & 0x7Fu;
+    if s == 0u || s > CLARITY_RADIUS + 1u {
+        return false;
+    }
+
+    // Cost-priority march.
+    let base = cell + vec3<f32>(0.5, 0.5, 0.5);
+    for (var i = 1; i <= 64; i = i + 1) {
+        let p = base + globals.view_dir * (f32(i) * 0.5);
+        let c = vec3<i32>(floor(p)) - vec3<i32>(globals.mask_origin);
+        if c.x < 0 || c.x >= 64 || c.y < 0 || c.y >= 64 || c.z < 0 || c.z >= 64 {
+            break;
+        }
+        let raw = textureLoad(visibility_mask, c, 0).r;
+        if (raw & 0x80u) != 0u {
+            continue;
+        }
+        let behind = raw & 0x7Fu;
+        if behind != 0u && behind < s {
+            return false;
+        }
+    }
+    return true;
+}
+
 @vertex
 fn vs_main(vertex: VertexInput, @builtin(instance_index) inst: u32) -> VertexOutput {
     var out: VertexOutput;
@@ -155,6 +201,24 @@ fn vs_main(vertex: VertexInput, @builtin(instance_index) inst: u32) -> VertexOut
     let vs = chunk.voxel_scale;
     let base_vx = i32(round(chunk.origin.x / vs)) + i32(lx);
     let base_vz = i32(round(chunk.origin.z / vs)) + i32(lz);
+
+    // Cull against the air cell the blades stand in, at the column center rather
+    // than per blade: a column has to cull as a unit, or half a tuft vanishes
+    // and reads as a glitch. The 0.25 lifts the sample off the exact top face,
+    // which lands on a cell boundary for a full cube.
+    let surface_cell = chunk.origin + vec3<f32>(
+        (f32(lx) + 0.5) * vs,
+        col.surface_top * vs + 0.25,
+        (f32(lz) + 0.5) * vs,
+    );
+    if !in_visible_volume(surface_cell) {
+        out.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.world_position = vec3<f32>(0.0);
+        out.normal = vec3<f32>(0.0, 1.0, 0.0);
+        out.height = 0.0;
+        out.color = vec3<f32>(0.0);
+        return out;
+    }
 
     // Per-blade deterministic variation from world column + blade index.
     let h1 = hash_pos(base_vx, base_vz, blade_index * 3u + 1u);

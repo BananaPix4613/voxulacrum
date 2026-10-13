@@ -1,7 +1,11 @@
 pub mod panels;
 pub mod colormap;
+pub mod column_inspector;
 pub mod field_probe;
 pub mod hierarchy_editor;
+pub mod biome_map;
+pub mod blueprint_panel;
+pub mod skeleton_panel;
 
 use egui_wgpu::ScreenDescriptor;
 
@@ -38,6 +42,8 @@ pub struct EguiRenderer {
     pub editor_visible: bool,
     /// Cached field-probe slice texture; re-uploaded only on key change.
     probe_texture: Option<ProbeTexture>,
+    /// Cached biome-map texture, keyed on the map's version counter.
+    map_texture: Option<(u64, egui::TextureHandle)>,
 }
 
 impl EguiRenderer {
@@ -72,6 +78,7 @@ impl EguiRenderer {
             graph_editor: HierarchyEditor::new(),
             editor_visible: false,
             probe_texture: None,
+            map_texture: None,
         }
     }
     
@@ -128,6 +135,23 @@ impl EguiRenderer {
         self.probe_texture = Some(ProbeTexture { key, handle });
     }
 
+
+    /// Rebuild the biome-map texture when its version changes.
+    fn refresh_map_texture(&mut self, state: &biome_map::BiomeMapState) {
+        let Some(map) = &state.map else {
+            self.map_texture = None;
+            return;
+        };
+        if self.map_texture.as_ref().map(|(v, _)| *v) == Some(state.version) {
+            return;
+        }
+        let image = biome_map::build_image(map, state.show_zones);
+        let handle =
+            self.ctx
+                .load_texture("biome_map", image, egui::TextureOptions::NEAREST);
+        self.map_texture = Some((state.version, handle));
+    }
+
     /// Run the egui UI and render it onto the given surface view.
     /// The surface view should already contain the post-processed scene.
     pub fn draw(
@@ -157,6 +181,9 @@ impl EguiRenderer {
         if probe.enabled {
             self.refresh_probe_texture(probe, registry);
         }
+        if ui_state.biome_map.open {
+            self.refresh_map_texture(&ui_state.biome_map);
+        }
         
         let raw_input = self.winit_state.take_egui_input(window);
         let full_output = self.ctx.run(raw_input, |ctx| {
@@ -166,9 +193,23 @@ impl EguiRenderer {
                 }
                 panels::draw_engine_panel(ctx, ui_state);
             }
+            // At most one tool is armed at a time - `skeleton_debug_system`
+            // disarms itself while a blueprint tool holds the click - so these
+            // chain rather than stacking two HUD lines in the same place.
+            if let Some(label) = ui_state
+                .blueprint_panel
+                .armed_hud_label()
+                .or_else(|| ui_state.skeleton_panel.armed_hud_label())
+            {
+                panels::draw_armed_hud(ctx, &label);
+            }
             if probe.enabled {
                 let tex = self.probe_texture.as_ref().map(|t| &t.handle);
                 field_probe::draw_field_probe_window(ctx, probe, registry, tex);
+            }
+            if ui_state.biome_map.open {
+                let tex = self.map_texture.as_ref().map(|(_, h)| h);
+                biome_map::draw_window(ctx, &mut ui_state.biome_map, tex);
             }
             if mode == crate::world::mutation::EngineMode::Play {
                 panels::draw_play_hud(ctx, material_name, material_color);

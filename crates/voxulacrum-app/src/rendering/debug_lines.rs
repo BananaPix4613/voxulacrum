@@ -109,7 +109,7 @@ fn box_edges(min: Vec3, max: Vec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
 }
 
 /// Wireframe box hugging a single world voxel, slightly outset to avoid z-fighting.
-fn voxel_box_lines(v: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
+pub fn voxel_box_lines(v: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
     let s = VOXEL_SCALE;
     let eps = s * 0.03;
     let min = Vec3::new(v.x as f32 * s - eps, v.y as f32 * s - eps, v.z as f32 * s - eps);
@@ -117,6 +117,22 @@ fn voxel_box_lines(v: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
         (v.x as f32 + 1.0) * s + eps,
         (v.y as f32 + 1.0) * s + eps,
         (v.z as f32 + 1.0) * s + eps,
+    );
+    box_edges(min, max, color)
+}
+
+/// Inclusive world-voxel box outline, expanded to cover `max`'s full cell.
+fn region_box_lines(a: IVec3, b: IVec3, color: [f32; 3]) -> Vec<DebugLineVertex> {
+    let s = VOXEL_SCALE;
+    // Slightly larger than the pick highlight's epsilon, so a one-voxel
+    // selection reads as a distinct box rather than z-fighting with it.
+    let eps = s * 0.06;
+    let (lo, hi) = (a.min(b), a.max(b));
+    let min = Vec3::new(lo.x as f32 * s - eps, lo.y as f32 * s - eps, lo.z as f32 * s - eps);
+    let max = Vec3::new(
+        (hi.x as f32 + 1.0) * s + eps,
+        (hi.y as f32 + 1.0) * s + eps,
+        (hi.z as f32 + 1.0) * s + eps,
     );
     box_edges(min, max, color)
 }
@@ -130,6 +146,16 @@ pub struct DebugLinePass {
     /// boundary lines (and of `show_debug_lines`).
     pub highlight_buffer: Option<wgpu::Buffer>,
     pub highlight_count: u32,
+    /// Optional authoring-region outline (blueprint capture selection).
+    pub selection_buffer: Option<wgpu::Buffer>,
+    pub selection_count: u32,
+    /// The corners the current `selection_buffer` was built from, so a frame
+    /// that changes nothing rebuilds nothing. Unlike the pick highlight, which
+    /// moves with the cursor, a selection changes on a click.
+    selection_key: Option<(IVec3, IVec3)>,
+    /// Optional free-form line overlay for debug views, in world space.
+    pub overlay_buffer: Option<wgpu::Buffer>,
+    pub overlay_count: u32,
 }
 
 impl DebugLinePass {
@@ -206,6 +232,11 @@ impl DebugLinePass {
             vertex_count: 0,
             highlight_buffer: None,
             highlight_count: 0,
+            selection_buffer: None,
+            selection_count: 0,
+            selection_key: None,
+            overlay_buffer: None,
+            overlay_count: 0,
         }
     }
 
@@ -249,6 +280,63 @@ impl DebugLinePass {
             None => {
                 self.highlight_buffer = None;
                 self.highlight_count = 0;
+            }
+        }
+    }
+
+    /// Set (or clear) the authoring-region outline spanning two world voxels,
+    /// inclusive. A no-op when the corners are unchanged since the last call.
+    pub fn set_selection(
+        &mut self,
+        ctx: &RenderContext,
+        corners: Option<(IVec3, IVec3)>,
+        color: [f32; 3],
+    ) {
+        if self.selection_key == corners {
+            return;
+        }
+        self.selection_key = corners;
+        match corners {
+            Some((a, b)) => {
+                let lines = region_box_lines(a, b, color);
+                self.selection_count = lines.len() as u32;
+                self.selection_buffer = Some(ctx.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("selection_region_vertex_buffer"),
+                        contents: bytemuck::cast_slice(&lines),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+            None => {
+                self.selection_buffer = None;
+                self.selection_count = 0;
+            }
+        }
+    }
+
+    /// Set (or clear) a free-form world-space line overlay.
+    ///
+    /// Unlike `set_selection` this holds no key and rebuilds on every call:
+    /// the geometry is a whole vertex list rather than two corners, so
+    /// comparing it would cost more than rebuilding it. **The caller owns the
+    /// change detection** and is expected to call only when its own inputs
+    /// moved.
+    pub fn set_overlay(&mut self, ctx: &RenderContext, lines: Option<&[DebugLineVertex]>) {
+        match lines {
+            Some(lines) if !lines.is_empty() => {
+                self.overlay_count = lines.len() as u32;
+                self.overlay_buffer = Some(ctx.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("debug_overlay_vertex_buffer"),
+                        contents: bytemuck::cast_slice(lines),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    },
+                ));
+            }
+            _ => {
+                self.overlay_buffer = None;
+                self.overlay_count = 0;
             }
         }
     }

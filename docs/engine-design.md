@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.9
+**Status:** Baseline reference, v1.11
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -16,6 +16,9 @@
 - v1.8 — Incorporated the settled conclusions of an external architecture review (`engine-architecture-reference.md`; full disposition in `roadmap.md` §21). Added two foundational principles to §1: **visibility is queryable world state, not a rendering effect** (occlusion decisions must live where the renderer, the interaction system, and the simulation all read the same classification), and **one scheduler, one clock family** (all deferred work on a single job system; all periodic simulation on one tick framework). Added §12 subsections for the **region graph** (enclosure/connectivity promoted from a per-frame rendering computation to persistent multi-consumer world state), the **gameplay/render lighting split** with render light sampled from a per-chunk 3D texture rather than baked into vertex attributes, the **tick and scheduling framework**, **registry identity and save-embedded name mapping** (recording a latent correctness defect in the current numeric-ID persistence), and **per-region generation parameters** as the storage precondition for world-scale change. Noted §10's `light_level_index` as an interim shape pending that lighting decision. Recorded the open architectural decisions the review surfaced — octant shape encoding, grid-handle abstraction, 4-way camera rotation, colored light — as dated decisions in `roadmap.md` §8 rather than settling them here.
 
 - v1.9 — Folded in 0.3.0's settled outcomes. §1's "one scheduler" principle became real: a **job system** subsection in §12 records the single scheduler, its `(class, distance)` priority, its one global concurrency budget, and — with named triggers — the two things it deliberately omits (declared job-to-job dependencies, which have no consumer until the staged cross-chunk generation pass; chunk I/O *writes*, which are sub-millisecond and whose relocation would introduce a save/load ordering hazard). §4 gained the constraint that **tag matching is backward-looking**, which bounds the invalidation table: a ZoneGraph edit changes biome *assignment*, so tags predating it cannot identify the affected chunks. §4 and §12 record that **hot reload is save-triggered** and that disk is authoritative for the world while the editor is authoritative for its canvas — closing a defect where regeneration mixed an in-memory graph with on-disk siblings. §5 documents that stage 9's fluid reaches stage 10's foliage as a downstream filter at the storage boundary rather than a `SurfaceFilter` input, with the migration trigger. §10 records the mesh cache key as **content-addressed** (an interim shape stronger than the documented input-addressed target) and specifies that it must exclude the snapshot's edge and corner border cells. §12's performance budgets are restated **against CPU work rather than frame time**, with release-only measurement and read-at-rest as architectural requirements — learned from a "recurring frame hitch" that proved to be a debug build measured with a metric that inverts under vsync. §12 streaming records the **altitude-aware view test**. Recorded figures now live in the companion `perf-baseline.md`.
+
+- v1.10 — Designed **cross-chunk feature generation** in §5 ahead of building it, per the 0.4.0 sequencing rule. Structures and anything else straddling chunk boundaries are derived **world-absolutely over a margin band** — a generalization of the shipped scatter model — rather than by a staged pipeline pass: every chunk that can see a feature re-derives it identically and stamps only the part inside its own window, so generation-order independence is a property of the construction rather than a claim defended afterward. Records priority resolution by a world-absolute key, the **protected-volume flag** region transformation must respect, memoization as an optimisation that must never change output, and the cost ceiling that follows from margin-band scaling. **Rivers are explicitly excluded from that model**: a river modifies the density field at stages 3–4 rather than stamping voxels at stage 8, which is what keeps it clear of the multi-distance-smoothing tensions §5 records. §12's job system records that the **predicted trigger for declared job dependencies did not arrive** — the feature model has no cross-chunk stage — and revises the trigger to the region graph, whose cross-border summary joins are a genuine job-to-job edge. §5's fourth smoothing tension is corrected to note that the feature model does not supply what cross-chunk staircases need, since those are a function of generated terrain on both sides rather than of world position.
+- v1.11 — Designed **river networks** in §5 ahead of building them, per the 0.4.0 sequencing rule. A coarse world grid of hash-jittered nodes, each linking to the lowest-potential neighbour, forming a forest whose **acyclicity is structural** (every link strictly decreases potential). Flow direction comes from a dedicated **elevation-potential field** rather than the generated surface, because a river network - unlike a structure source, whose density roll gates its probes - has no gate and every chunk would otherwise pay a column probe per nearby node. The channel **floor is the network's, interpolated from node elevations**, not carved into the terrain, which avoids the same pointwise-surface cost; the stated consequence is that a river cannot follow terrain it did not shape. Width derives from potential rather than Strahler order, which would need an unbounded upstream traversal. The channel authors its own per-column pond level through the existing `FluidOutput` mechanism, so a river above `sea_level` holds water. The pass **resolves the network once per chunk** and tests distance per column, which is what bounds the cost; that memoization holds no cross-chunk state and so does not engage §5's rule that memoization must never change output.
 
 ---
 
@@ -392,8 +395,12 @@ Chunk generation runs in **strict pipeline order**. Each stage reads from previo
      what protects player edits near borders from being overwritten by seam re-derivation).
 
 8. ZoneGraph structures
-   - Deferred placement; may straddle chunks
-   - Cross-chunk template stamping with priority resolution
+   - Features derived world-absolutely over a margin band; each chunk stamps the
+     part inside its own window, with priority resolution (see "Cross-chunk
+     feature generation" below). No neighbour output is read, so placement is
+     order-independent by construction.
+   - Rivers are *not* here: they modify density at stages 3–4, before material,
+     walkability and smoothing. Same subsection.
 
 9. Fluid initialization
    - All empty voxels ≤ sea_level → ocean fill mode
@@ -455,6 +462,45 @@ This keeps biomes self-contained, supports floating-island and arch biomes witho
 - **Material selection**: smooth threshold (max/min composite) between biome materials.
 - **RNG derivation at fade boundaries**: seeded from `(world_seed, biome_id, x, z, purpose)` only. Never from chunk coordinates alone. This guarantees two chunks sharing a fade boundary blend identically regardless of generation order.
 
+### Cross-chunk feature generation (added v1.10)
+
+Structures, and anything else whose footprint straddles chunk boundaries, are generated by **world-absolute derivation with margin-band ownership** — a generalization of the scatter model the engine already ships (§6, `PROP_MARGIN`), not a new pipeline phase.
+
+**The mechanism.**
+
+- A **feature** carries a world-absolute anchor, a bounded extent, a priority key, and a payload (a blueprint reference; later, other placeable kinds).
+- Features are derived per **feature cell** — a coarse world-space grid — from `hash(world_seed, cell_x, cell_z, purpose)`, exactly as `world_cell_seed` derives scatter. A feature cell's contents are a pure function of world position and the seed.
+- A chunk being generated enumerates the feature cells whose extent can reach its window, collects the candidates, orders them by priority key, and **stamps only the part of each that falls inside its own window**.
+- **No chunk reads another chunk's output.** Every chunk that can see a feature re-derives it identically. Generation-order independence is therefore a property of the construction, not a claim to be defended after the fact — the same reason `JitteredGrid` is seam-continuous while `PoissonDisk` is not.
+
+**Why not a staged pipeline pass.** The obvious alternative — per-chunk evaluation, then a cross-chunk pass over a staging set, then finalization — requires the participating chunks to be co-resident, and reintroduces exactly the order sensitivity P1 forbids, to be argued away case by case afterward. Margin-band derivation has neither problem and has a working precedent in the engine today. It also means there is no cross-chunk *stage*, and therefore no job-to-job dependency edge (see §12, the job system).
+
+**Priority resolution.** Overlapping features are ordered by a key derived world-absolutely from the feature's identity, and applied in that order. Because the key does not depend on which chunk is asking, every chunk resolves an overlap the same way. A feature may mark the cells it occupies as a **protected volume**, which later features do not overwrite and which region transformation (§12) must respect — the mechanism that lets an authored vault survive a self-modifying world.
+
+**Memoization is an optimisation, never a correctness mechanism.** Per-cell derivation may be cached so that the many chunks sharing a cell derive it once. Dropping the cache must change speed and nothing else. Stating this explicitly is deliberate: a cache whose presence changes output is how a pure function becomes load-order dependent, which §10's mesh-cache key learned the hard way.
+
+**The cost ceiling, and what falls outside it.** Per-chunk work scales with the number of feature cells in the margin band, i.e. `((extent + chunk_dim) / cell_dim)²`. This is comfortable for features spanning a few chunks and does not scale to a feature spanning hundreds. **Rivers are therefore not features.** A river is a modification to the *density field*, not a stamped template, and it belongs to the density stages (3–4) rather than to stage 8: carving before material (5), walkability (6) and slab smoothing (7) means every downstream stage sees the carved surface. That ordering is what keeps rivers clear of the multi-distance-smoothing tensions recorded below — in particular that scatter anchors to pre-smoothing surfaces, so a channel lowered after placement would leave props hanging over it. A river network is derived per column from a coarse node graph and sampled pointwise like any other density source.
+
+### River networks (added v1.11)
+
+Rivers are **not features** (see above): the margin-band cost ceiling does not survive a feature spanning hundreds of chunks. A river is a modification to the *density field* at stages 3-4, carved before material (5), walkability (6) and slab smoothing (7) so every downstream stage sees the carved surface.
+
+**The network.** A coarse world grid, one **node** per cell at a hash-jittered position. Each node samples an **elevation potential** - a dedicated low-frequency 2D field, not the terrain surface - and links to whichever of its eight neighbouring cells' nodes has the lowest potential. A node with no lower neighbour is a terminus. The links form a forest of paths, and **acyclicity is structural**: every link strictly decreases potential, so a cycle would require a node lower than itself.
+
+**Why a potential field rather than the terrain surface.** Flowing downhill on the actual generated surface is the honest ideal and is unaffordable at stage 3. A structure source pays a column probe only for cells that survive its density roll, so a chunk typically probes none; a river network has no such gate and every chunk would pay a probe per nearby node, every time. A potential sample costs what `SurfaceNoise` costs. The discrepancy this introduces - a river's downhill is the potential's downhill, not the terrain's - is closed by *content* rather than by luck: author the world graph's elevation channel from the same potential and the two agree by construction.
+
+**The bed is the network's, not the terrain's.** Carving a channel "into the surface" would reintroduce the pointwise-surface cost the potential field exists to avoid. Instead the channel **floor** is interpolated along a segment from its two endpoint node elevations, and density is subtracted above that floor within the width profile. The river is self-consistent: its bed is where the network says it is. The consequence is worth stating plainly - **a river cannot follow terrain it did not shape** - which reads as rivers cutting through hills rather than winding around them. That suits a stylized voxel world; it would not suit a realistic one.
+
+**Width** derives from a node's potential rather than from a Strahler order, because computing stream order requires an unbounded upstream traversal. Lower potential means further downstream means wider, monotonically, at bounded cost and with no traversal at all.
+
+**Water.** The channel authors a per-column pond level from the same interpolated elevation the floor came from, through the existing `FluidOutput` mechanism. Stage 9's ocean fill handles everything at or below `sea_level`; a river above it holds water because it authored a level, not because the ocean reached it.
+
+**Cost, and the shape that makes it bounded.** Resolving a cell's segment requires that cell's node plus the nine potential samples that pick its downstream link. Doing that per column would be ~81 samples per column and is not affordable. The pass therefore **resolves the network once per chunk** - a 32-voxel chunk touches at most a 4x4 block of coarse cells - and then each column tests distance against the handful of resolved segments near it. That is roughly 150 potential samples and 9 distance tests per column, per chunk.
+
+This per-chunk resolution is memoization *within a single chunk's derivation*: it holds no cross-chunk state, so it does not engage the rule that memoization must never change output. Every chunk resolves the cells it touches identically because the network is a pure function of world position and seed - the same construction that makes feature derivation order-independent.
+
+**Not in 0.4.0:** meanders, deltas, waterfalls, erosion, variable flow, and any coupling to the fluid simulation. Each is a separate decision; none is blocked by this model.
+
 ### Walkability (revised v1.6)
 
 Walkability — "the player can stand on top of this voxel" — is a **worldgen-internal, transient computation**, not a resident per-chunk artifact. Earlier revisions specified a persistent `WalkabilityMask` shared by slab smoothing, AI pathfinding, and player movement. Phase 9 implemented that shape and then removed it: the resident mask produced a chunk-Y seam defect, a streaming performance regression, and a poor fit for continuous collision (tunneling at speed, drift). The settled model:
@@ -487,7 +533,7 @@ The parameter influences whether the smoother demotes cube voxels adjacent to wa
 1. **Correct multi-distance smoothing is terrain morphology, not step insertion.** Producing gradual slopes over distances greater than one cube requires lowering surfaces (min-cone erosion or similar), which contradicts the engine's "cliff faces stay sharp" principle from §1 unless erosion is scoped precisely enough to skip cliffs — a per-region decision the smoothing pass alone can't make.
 2. **Bounded radius produces mid-slope artifacts.** A distance-N pass applied to a height difference of N+K cubes produces an unsmoothed segment somewhere on the slope. There is no non-arbitrary place to put it.
 3. **Scatter placement runs before smoothing.** Foliage instances (§6) anchor to pre-smoothing surface positions. Multi-distance smoothing that actually lowers the surface would leave props floating above the new surface. Fixing this requires reordering scatter after smoothing, which couples the two systems tightly.
-4. **Cross-chunk seam smoothing.** Multi-cube staircases that straddle chunk boundaries need cross-chunk generation infrastructure (see §12 Cross-Cutting Concerns) which is deferred with rivers and structures.
+4. **Cross-chunk seam smoothing.** Multi-cube staircases that straddle chunk boundaries need neighbour context that per-chunk generation does not have. Note that the cross-chunk feature model above does *not* supply it: that model works because a feature is derived world-absolutely and never reads a neighbour's output, whereas a staircase spanning a border is a function of the *generated terrain* on both sides. The existing seam finalization pass (§5 stage 7) is the shape that fits — residency-gated, idempotent, order-independent — and multi-distance smoothing would extend it rather than the feature model.
 
 Multi-distance smoothing is a design decision that couples across four subsystems and depends on infrastructure the engine doesn't yet have. It is reserved as future work; the parameter type and per-biome sourcing infrastructure are in place so that when the four tensions are resolved, the behavior can activate without renaming or re-plumbing.
 
@@ -952,7 +998,11 @@ The realization of §1's "one scheduler" principle. One scheduler owns *when* an
 
 **What it deliberately is not, with triggers:**
 
-- **No declared job-to-job dependencies.** The edge everyone reaches for — "a chunk may not mesh until its six face neighbours exist" — is a *world-state readiness predicate*, not a job edge: a neighbour can be resident without any generation job having run this session. The first genuine job-to-job edge arrives with the staged cross-chunk generation pass that structures and rivers require, where a cross-chunk stage must complete between per-chunk evaluation and finalization.
+- **No declared job-to-job dependencies.** The edge everyone reaches for — "a chunk may not mesh until its six face neighbours exist" — is a *world-state readiness predicate*, not a job edge: a neighbour can be resident without any generation job having run this session.
+
+  **The predicted trigger did not arrive** (revised v1.10). v1.9 named "the staged cross-chunk generation pass that structures and rivers require" as the first genuine edge. §5's cross-chunk feature model has no such stage: features are derived world-absolutely and stamped per chunk, and rivers modify density in place, so every chunk remains a pure function of `(seed, graphs, coords)` with nothing to wait on. Building the machinery anyway would be designing against an imagined consumer, which is what the original omission avoided.
+
+  **Revised trigger: the region graph.** Per-chunk connectivity summaries joined across chunk borders is a genuine "B consumes A's output" edge rather than a readiness predicate, and it is the first one on the ladder. Until then the omission stands.
 - **Chunk I/O writes remain on the main thread.** Reads already run inside generation jobs. Writes measure well under a millisecond per chunk, and moving them would require the database behind a shared handle plus a per-chunk ordering rule to stop a reload reading a record whose save has not landed — a correctness hazard introduced in order to move work that is not on any hot path. Trigger: per-layer save versioning, or any measurement showing writes above ~1 ms.
 
 ### Determinism

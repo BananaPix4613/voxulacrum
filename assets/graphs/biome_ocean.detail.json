@@ -1,0 +1,30 @@
+{
+  "kind": "Detail",
+  "boundary": {
+    "inputs": [],
+    "outputs": []
+  },
+  "nodes": [
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "PaintDensity",
+          "layer_id": 0,
+          "species": 1,
+          "density": 40,
+          "tint": 0
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    }
+  ],
+  "edges": []
+}

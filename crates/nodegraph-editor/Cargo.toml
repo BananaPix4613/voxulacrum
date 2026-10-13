@@ -1,5 +1,3 @@
-private = { ignore = true }
-
 [package]
 name = "nodegraph-editor"
 version.workspace = true

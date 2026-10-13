@@ -1,3 +1,4 @@
+use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::world::chunk::LoadedChunk;
 
@@ -7,6 +8,8 @@ pub struct ShadowPassNode<'a> {
     pub bind_group: &'a wgpu::BindGroup,
     pub shadow_depth_view: &'a wgpu::TextureView,
     pub chunks: &'a [&'a LoadedChunk],
+    pub capsule_pass: &'a CapsulePass,
+    pub capsule_shadow_pipeline: &'a wgpu::RenderPipeline,
 }
 
 impl<'a> RenderPassNode for ShadowPassNode<'a> {
@@ -40,6 +43,19 @@ impl<'a> RenderPassNode for ShadowPassNode<'a> {
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+        }
+
+        // Wood casts too. Not view-frustum culled: the shadow frustum is the
+        // light's, and an occluder behind the camera still darkens what is in
+        // front of it - the same reason the chunk loop above draws everything
+        // it is handed.
+        if !self.capsule_pass.chunks.is_empty() {
+            pass.set_pipeline(self.capsule_shadow_pipeline);
+            pass.set_bind_group(0, self.bind_group, &[]);
+            for caps in self.capsule_pass.chunks.values() {
+                pass.set_vertex_buffer(0, caps.instance_buffer.slice(..));
+                pass.draw(0..6, 0..caps.instance_count);
             }
         }
     }

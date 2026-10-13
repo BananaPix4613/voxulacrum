@@ -13,7 +13,7 @@
 //!
 //! It does not evaluate graphs (that is the evaluator crate) and performs no
 //! filesystem I/O. It embeds `voxel-core` value types (`MaterialId`, `Voxel`)
-//! so that prefab templates can round-trip, but references no chunk buffer for
+//! so that resolved blueprints can round-trip, but references no chunk buffer for
 //! [`PinType::Terrain`] — that is a bare tag here. The IR is purely structure
 //! + validation + serialization.
 //!
@@ -46,10 +46,10 @@ mod diagnostic;
 mod edge;
 mod error;
 mod graph;
+mod index;
 mod library;
 mod node;
 mod pin;
-mod prefab;
 
 pub use boundary::{BoundaryPort, EffectivePin, GraphBoundary, ResolvedBoundary, ResolvedPin};
 pub use crossgraph::{detect_graph_ref_cycle, GraphRefTarget};
@@ -57,18 +57,20 @@ pub use diagnostic::{Diagnostic, Severity};
 pub use edge::{Edge, PinRef};
 pub use error::{GraphError, GraphResult};
 pub use graph::{Graph, GraphKind};
+pub use index::EdgeIndex;
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
 pub use node::{
-    AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams, ConstantParams,
-    CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,
+    AbsParams, AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams,
+    ConstantParams, CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,
     FluidOutputParams, FractalType, GraphOutputParams, GraphRefParams, IntersectParams, LayerParams,
     LerpParams, LibraryRefParams, MaskParams, MaxParams, MinParams, MixParams, MultiplyParams, Node,
     NodeCategory, NodeDescriptor, NodeId, NodeKind, NoiseParams, OutputParams, Perlin2DParams,
     PinSpec, QueueParams, RemapParams, SubtractParams, TerrainOutputParams, ThresholdParams,
     UnionParams, WorldAxisParams, WorldPosParams, BuildTerrainParams, JitteredGridParams,
-    PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlacePrefabParams, WorldOutputParams,
-    ZoneOutputParams, YBandParams, PoissonDistributionParams, SurfaceFilterParams,
+    PoissonDiskParams, FindFlatParams, PlaceTreeParams, PlaceBlueprintParams, PlaceStructureParams,
+    ResolvedTree, RiverParams, TreeSpecies, WorldOutputParams, WorldParamParams, ZoneOutputParams,
+    YBandParams, PoissonDistributionParams, SurfaceFilterParams, SurfaceToDensityParams,
     BiomeContextMaskParams, SpeciesPickerParams, PaintDensityParams, ScatterPlaceParams,
+    StructureCanopy,
 };
 pub use pin::PinType;
-pub use prefab::{PrefabTemplate, PrefabVoxel};

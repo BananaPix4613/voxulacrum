@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "rock",
+  "anchor": [1, 0, 1],
+  "cells": [
+    { "at": [0, 0, 0], "shape": "cube", "material": "granite" },
+    { "at": [1, 0, 0], "shape": "cube", "material": "granite" },
+    { "at": [2, 0, 0], "shape": "cube", "material": "granite" },
+    { "at": [0, 0, 1], "shape": "cube", "material": "granite" },
+    { "at": [1, 0, 1], "shape": "cube", "material": "granite" },
+    { "at": [2, 0, 1], "shape": "cube", "material": "granite" },
+    { "at": [0, 0, 2], "shape": "cube", "material": "granite" },
+    { "at": [1, 0, 2], "shape": "cube", "material": "granite" },
+    { "at": [2, 0, 2], "shape": "cube", "material": "granite" },
+    { "at": [1, 1, 1], "shape": "cube", "material": "granite" }
+  ],
+  "destruction": "destroy",
+  "protected_volume": false
+}

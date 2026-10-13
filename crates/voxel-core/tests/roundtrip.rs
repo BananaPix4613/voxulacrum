@@ -72,7 +72,7 @@ fn shape_discriminants_are_stable() {
 #[test]
 fn material_registry_load_initial() {
     let reg = MaterialRegistry::load_initial();
-    assert_eq!(reg.len(), 9);
+    assert_eq!(reg.len(), 11);
     let grass = reg.resolve("grass_soil").expect("grass_soil resolves");
     assert_eq!(grass, MaterialId(6));
     assert_eq!(reg.get(grass).unwrap().display_name, "Grass Soil");

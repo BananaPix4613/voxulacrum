@@ -39,6 +39,7 @@ struct WaterUniforms {
 @group(0) @binding(2) var cloud_sampler: sampler;
 @group(0) @binding(3) var shadow_map: texture_depth_2d;
 @group(0) @binding(4) var shadow_sampler: sampler_comparison;
+@group(0) @binding(6) var visibility_mask: texture_3d<u32>;
 @group(0) @binding(7) var cloud_env_texture: texture_2d<f32>;
 @group(0) @binding(8) var cloud_env_sampler: sampler;
 
@@ -165,6 +166,35 @@ struct FragmentOutput {
     @location(1) normal: vec4<f32>,
 };
 
+/// The shell colour and tri-tonal axis ramp, matching `terrain.wgsl`. Water
+/// outside the readable volume is part of the same dark shell the terrain draws
+/// there, so it has to use the same numbers.
+const VOID_MATERIAL: vec3<f32> = vec3<f32>(0.032, 0.032, 0.042);
+const AXIS_TOP: f32 = 1.0;
+const AXIS_SIDE_X: f32 = 0.75;
+const AXIS_SIDE_Z: f32 = 0.60;
+const AXIS_BOTTOM: f32 = 0.40;
+
+/// Flood cost past which a cell is outside the readable pocket. Must match
+/// `terrain.wgsl`, `detail_paint.wgsl` and `scatter.wgsl` - four copies, because
+/// these shaders have no include mechanism. The passes disagreeing shows up as
+/// water surviving where the ground under it went dark.
+const CLARITY_RADIUS: u32 = 24u;
+
+/// Whether the cell containing `sample_pos` is inside the player's readable
+/// pocket. True whenever the mask is off, so nothing changes above ground.
+fn in_visible_volume(sample_pos: vec3<f32>) -> bool {
+    if globals.mask_enabled != 1u {
+        return true;
+    }
+    let ai = vec3<i32>(floor(sample_pos)) - vec3<i32>(globals.mask_origin);
+    if ai.x < 0 || ai.x >= 64 || ai.y < 0 || ai.y >= 64 || ai.z < 0 || ai.z >= 64 {
+        return false;
+    }
+    let s = textureLoad(visibility_mask, ai, 0).r & 0x7Fu;
+    return s != 0u && s <= CLARITY_RADIUS + 1u;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> FragmentOutput {
     if globals.clip_enabled != 0u {
@@ -173,6 +203,27 @@ fn fs_main(in: VertexOutput) -> FragmentOutput {
         || wp.x < globals.clip_min.x || wp.y < globals.clip_min.y || wp.z < globals.clip_min.z {
             discard;
         }
+    }
+
+    // The air cell in front of the surface, which for water is the one above it.
+    // Per fragment, not per mesh: a water surface spans many cells and only some
+    // of them are in the pocket.
+    //
+    // Outside the pocket water joins the dark shell rather than disappearing -
+    // a lake that vanished while the ground under it stayed read as a hole in
+    // the world.
+    if !in_visible_volume(in.world_position + normalize(in.normal) * 0.5) {
+        let n = normalize(in.normal);
+        var axis_shade = AXIS_TOP;
+        if abs(n.y) < 0.5 {
+            axis_shade = select(AXIS_SIDE_Z, AXIS_SIDE_X, abs(n.x) > abs(n.z));
+        } else if n.y < 0.0 {
+            axis_shade = AXIS_BOTTOM;
+        }
+        let shade = 0.45 + 0.55 * axis_shade;
+        // Alpha 1.0, not water's usual 0.25: this is shell, and anything reading
+        // the normal target should treat it the way it treats shell terrain.
+        return FragmentOutput(vec4<f32>(VOID_MATERIAL * shade, 1.0), vec4<f32>(n, 1.0));
     }
 
     // Sample the copied scene by this fragment's own pixel. The scene renders into

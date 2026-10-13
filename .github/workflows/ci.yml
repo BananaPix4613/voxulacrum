@@ -38,9 +38,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # P1 end-to-end: generate chunks twice through the full pipeline - graph
-      # eval, storage boundary, slab smoothing, fluid, foliage - and require
-      # bit-identical output. Runs in parallel on rayon's global pool, which is
-      # what actually exercises "no thread-order-dependent generation".
+      # Content validation: manifest resolution, graph kinds, reference targets,
+      # and assignment coverage. Errors fail; warnings report. `--strict` is
+      # deliberately not used yet - `biome_test` is registered and unassigned,
+      # which is a true finding about shipped content that Substep 11 resolves.
+      - name: Validate graphs
+        run: cargo run -p voxulacrum --bin voxulacrum-app -- --validate-graphs
+
       - name: Verify generation determinism
-        run: cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 64
+        run: cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 512

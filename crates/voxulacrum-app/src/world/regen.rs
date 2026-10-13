@@ -18,12 +18,32 @@ use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 #[derive(Resource)]
 pub struct WorldRegenCoordinator {
     pub manager: WorldManager,
+    /// Slots awaiting regeneration, accumulated from `WorldEvent::GraphChanged`.
+    ///
+    /// Owned here rather than on `UiState`, where it used to sit: it is
+    /// regeneration state, and parking it on a UI struct is what made the
+    /// watcher and the coordinator reach into each other instead of one
+    /// announcing and the other listening.
+    ///
+    /// Accumulates rather than being consumed on read, because an edit arriving
+    /// mid-regeneration must survive until the next idle tick - latest wins, and
+    /// nothing is lost.
+    pending_slots: Vec<GraphSlot>,
 }
 
 impl WorldRegenCoordinator {
     pub fn new(pool: std::sync::Arc<rayon::ThreadPool>) -> Self {
         Self {
             manager: WorldManager::new(pool),
+            pending_slots: Vec::new(),
+        }
+    }
+
+    /// Record a slot to regenerate. Idempotent - a slot saved twice before the
+    /// next idle tick regenerates once.
+    pub fn queue_slot(&mut self, slot: GraphSlot) {
+        if !self.pending_slots.contains(&slot) {
+            self.pending_slots.push(slot);
         }
     }
     
@@ -107,7 +127,7 @@ impl WorldRegenCoordinator {
                 // If terrain params changed during regen, restart
                 if regen_params != ui_state.params.terrain_gen {
                     log::info!("Terrain params changed during regeneration, restarting");
-                    match crate::world::world_generator::load_default(&ui_state.params.terrain_gen) {
+                    match crate::world::world_generator::load_default() {
                         Ok(gen) => {
                             let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
                             self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
@@ -122,7 +142,7 @@ impl WorldRegenCoordinator {
         if ui_state.regenerate_requested {
             ui_state.regenerate_requested = false;
             if !self.manager.is_regenerating() {
-                match crate::world::world_generator::load_default(&ui_state.params.terrain_gen) {
+                match crate::world::world_generator::load_default() {
                     Ok(gen) => {
                         let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
                         self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
@@ -139,14 +159,14 @@ impl WorldRegenCoordinator {
         // (latest wins) and fire on the next tick after completion, so the
         // final edit is never lost. If reassembling from the manifest fails
         // (e.g. a missing file), we log and keep the old world.
-        if !self.manager.is_regenerating() && !ui_state.pending_graph_reload.is_empty() {
-            let slots = std::mem::take(&mut ui_state.pending_graph_reload);
-            let seed = ui_state.params.terrain_gen.seed as u64;
-            // The whole hierarchy reloads from disk. There is no edited-graph
-            // override, so a mix of in-editor and on-disk state cannot occur.
+        if !self.manager.is_regenerating() && !self.pending_slots.is_empty() {
+            let slots = std::mem::take(&mut self.pending_slots);
+            // The whole hierarchy reloads from disk, seed included. There is no
+            // edited-graph override, so a mix of in-editor and on-disk state
+            // cannot occur - and since a seed edit is a manifest edit, changing
+            // it invalidates every chunk through the same path.
             match crate::world::world_generator::WorldGenerator::from_manifest(
                 &crate::world::world_generator::world_manifest_path(),
-                seed,
             ) {
                 Ok(gen) => {
                     let positions = select_invalidated(world, &slots);
@@ -172,14 +192,14 @@ impl WorldRegenCoordinator {
 enum InvalidationTarget {
     /// Every loaded chunk (a WorldGraph edit, or a conservative fallback).
     AllChunks,
-    /// Chunks tagged with a specific zone.
+    /// Chunks any of whose columns belong to a specific zone.
     ///
-    /// Unreachable today: with one Zone graph governing the whole world, a Zone
-    /// edit can move any column's biome, so `classify_edit` returns `AllChunks`.
-    /// This becomes correct - and is design §4's intended shape - once multiple
-    /// Zone graphs exist and a zone assignment is stable across a Zone-graph
-    /// edit, since then only the edited zone's chunks are affected.
-    #[allow(dead_code)]
+    /// **Now reachable**, and sound, because the condition the deferral named is
+    /// met: a ZoneGraph edit changes which *biome* each column in that zone is
+    /// assigned, never which *zone* the column is in. Zone assignment moves only
+    /// on a World-graph or manifest edit, and both of those are `AllChunks`. So a
+    /// chunk's zone tags still describe it after a zone-body edit, which is
+    /// exactly the property backward-looking tag matching requires.
     Zone(ZoneId),
     /// Chunks tagged with a specific biome.
     Biome(BiomeId),
@@ -190,7 +210,7 @@ impl InvalidationTarget {
     fn matches(&self, tags: &ChunkTags) -> bool {
         match self {
             InvalidationTarget::AllChunks => true,
-            InvalidationTarget::Zone(z) => tags.zone == *z,
+            InvalidationTarget::Zone(z) => tags.zones.contains(z),
             InvalidationTarget::Biome(b) => tags.biomes.contains(b),
         }
     }
@@ -213,9 +233,18 @@ impl InvalidationTarget {
 /// - A **World** edit changes climate, hence zone assignment, hence everything.
 fn classify_edit(slot: GraphSlot) -> InvalidationTarget {
     match slot {
+        // Sea level, seed, and graph registrations all change what every chunk
+        // generates from, so there is no narrower correct answer.
+        GraphSlot::Manifest => InvalidationTarget::AllChunks,
         GraphSlot::World => InvalidationTarget::AllChunks,
-        GraphSlot::Zone => InvalidationTarget::AllChunks,
+        GraphSlot::Zone(id) => InvalidationTarget::Zone(ZoneId(id)),
         GraphSlot::Biome(id) => InvalidationTarget::Biome(BiomeId(id)),
+        // Same target as the biome it belongs to. Design §4 specifies a
+        // *detail-only* re-pass leaving voxel data untouched, but generation is
+        // whole-chunk today, so this regenerates more than it needs to -
+        // correct, and coarser than the doc. **Trigger:** a detail-only
+        // regeneration path, which wants the per-layer work at 0.6.0.
+        GraphSlot::Detail(id) => InvalidationTarget::Biome(BiomeId(id)),
     }
 }
 
@@ -236,9 +265,9 @@ fn select_invalidated(world: &World, slots: &[GraphSlot]) -> Vec<IVec3> {
 mod tests {
     use super::*;
 
-    fn tags(zone: u16, biomes: &[u16]) -> ChunkTags {
+    fn tags(zones: &[u16], biomes: &[u16]) -> ChunkTags {
         ChunkTags {
-            zone: ZoneId(zone),
+            zones: zones.iter().map(|&z| ZoneId(z)).collect(),
             biomes: biomes.iter().map(|&b| BiomeId(b)).collect(),
             library_refs: Default::default(),
         }
@@ -247,31 +276,53 @@ mod tests {
     #[test]
     fn all_chunks_matches_everything() {
         let t = InvalidationTarget::AllChunks;
-        assert!(t.matches(&tags(0, &[0])));
-        assert!(t.matches(&tags(3, &[7, 9])));
+        assert!(t.matches(&tags(&[0], &[0])));
+        assert!(t.matches(&tags(&[3], &[7, 9])));
     }
 
     #[test]
-    fn zone_target_matches_by_zone() {
+    fn zone_target_matches_membership() {
         let t = InvalidationTarget::Zone(ZoneId(2));
-        assert!(t.matches(&tags(2, &[0])));
-        assert!(!t.matches(&tags(1, &[0])));
+        assert!(t.matches(&tags(&[2], &[0])));
+        assert!(!t.matches(&tags(&[1], &[0])));
+    }
+
+    #[test]
+    fn zone_target_reaches_a_chunk_straddling_the_border() {
+        // The defect this substep fixes: a border chunk used to record only its
+        // first zone, so an edit to the other one skipped it — and skipped it
+        // silently, because the chunk still matched a tag it did carry.
+        let border = tags(&[0, 1], &[3, 4]);
+        assert!(InvalidationTarget::Zone(ZoneId(0)).matches(&border));
+        assert!(
+            InvalidationTarget::Zone(ZoneId(1)).matches(&border),
+            "editing either zone must reach a chunk that belongs to both",
+        );
+        assert!(!InvalidationTarget::Zone(ZoneId(2)).matches(&border));
     }
 
     #[test]
     fn biome_target_matches_membership() {
         let t = InvalidationTarget::Biome(BiomeId(5));
-        assert!(t.matches(&tags(0, &[1, 5])));
-        assert!(!t.matches(&tags(0, &[1, 2])));
+        assert!(t.matches(&tags(&[0], &[1, 5])));
+        assert!(!t.matches(&tags(&[0], &[1, 2])));
     }
 
     #[test]
     fn edits_classify_by_graph_kind() {
+        assert!(matches!(classify_edit(GraphSlot::Manifest), InvalidationTarget::AllChunks));
         assert!(matches!(classify_edit(GraphSlot::World), InvalidationTarget::AllChunks));
-        assert!(matches!(classify_edit(GraphSlot::Zone), InvalidationTarget::AllChunks));
+        assert!(matches!(
+            classify_edit(GraphSlot::Zone(1)),
+            InvalidationTarget::Zone(ZoneId(1))
+        ));
         assert!(matches!(
             classify_edit(GraphSlot::Biome(1)),
             InvalidationTarget::Biome(BiomeId(1))
+        ));
+        assert!(matches!(
+            classify_edit(GraphSlot::Detail(2)),
+            InvalidationTarget::Biome(BiomeId(2))
         ));
     }
 }

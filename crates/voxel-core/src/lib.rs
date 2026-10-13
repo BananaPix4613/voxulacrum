@@ -46,6 +46,7 @@
 
 #![warn(missing_docs)]
 
+mod blueprint;
 mod buffer;
 mod coord;
 mod error;
@@ -56,6 +57,10 @@ mod palette;
 mod shape;
 mod voxel;
 
+pub use blueprint::{
+    Blueprint, BlueprintCell, BlueprintShape, DestructionPolicy, ResolvedBlueprint, Yaw,
+    BLUEPRINT_VERSION,
+};
 pub use buffer::{ChunkBuffer, StorageKind};
 pub use coord::{ChunkCoord, FaceAxis, LocalPos};
 pub use error::{VoxelCoreError, VoxelCoreResult};

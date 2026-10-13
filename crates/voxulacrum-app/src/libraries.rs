@@ -39,9 +39,28 @@ struct LibraryAsset {
 pub struct LoadedLibraries {
     registry: LibraryGraphRegistry,
     kernels: HashMap<LibraryGraphId, LibraryKernel>,
+    /// `(id, stable string handle)` in id order, for menus and diagnostics. The
+    /// registry carries boundaries and the kernel map carries computations;
+    /// neither carries a name, and a menu of numeric ids is not a menu.
+    entries: Vec<(LibraryGraphId, String)>,
 }
 
 impl LoadedLibraries {
+    /// The boundary registry, for resolving `LibraryRef` pins.
+    pub fn registry(&self) -> &LibraryGraphRegistry {
+        &self.registry
+    }
+
+    /// The native kernel bindings, for evaluating `LibraryRef` nodes.
+    pub fn kernels(&self) -> &HashMap<LibraryGraphId, LibraryKernel> {
+        &self.kernels
+    }
+
+    /// `(id, name)` for every loaded library, in id order.
+    pub fn entries(&self) -> &[(LibraryGraphId, String)] {
+        &self.entries
+    }
+
     /// Build from parsed assets: validate contiguous ids, project each boundary
     /// into a Library `Graph` (for pin resolution) and resolve its kernel name.
     /// Fails on an empty set, a non-contiguous id, or an unknown kernel name.
@@ -52,6 +71,7 @@ impl LoadedLibraries {
         }
         let mut registry = LibraryGraphRegistry::new();
         let mut kernels = HashMap::new();
+        let mut entries = Vec::new();
         for (i, a) in assets.into_iter().enumerate() {
             if a.id as usize != i {
                 return Err(format!(
@@ -67,8 +87,11 @@ impl LoadedLibraries {
             graph.boundary = a.boundary;
             registry.insert(id, graph);
             kernels.insert(id, kernel);
+            // After the kernel lookup, which borrows `id_name` for its error
+            // message; moving it here needs no clone.
+            entries.push((id, a.id_name));
         }
-        Ok(Self { registry, kernels })
+        Ok(Self { registry, kernels, entries })
     }
 
     /// Load every `*.library.json` in `dir`, ordered by filename for determinism.

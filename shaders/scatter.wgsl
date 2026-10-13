@@ -49,6 +49,7 @@ struct GlobalUniforms {
 @group(0) @binding(2) var cloud_sampler: sampler;
 @group(0) @binding(3) var shadow_map: texture_depth_2d;
 @group(0) @binding(4) var shadow_sampler: sampler_comparison;
+@group(0) @binding(6) var visibility_mask: texture_3d<u32>;
 @group(0) @binding(7) var cloud_env_texture: texture_2d<f32>;
 @group(0) @binding(8) var cloud_env_sampler: sampler;
 
@@ -71,6 +72,49 @@ struct VertexOutput {
     @location(2) color: vec3<f32>,
 };
 
+/// Flood cost past which a cell is outside the readable pocket. Must match
+/// `terrain.wgsl` and `detail_paint.wgsl` - three copies because these shaders
+/// have no include mechanism, and the passes disagreeing shows up as props
+/// surviving where their ground went dark.
+const CLARITY_RADIUS: u32 = 24u;
+
+/// Whether the cell containing `sample_pos` is inside the player's visible
+/// volume, read from the same 64-cube mask the terrain pass reads. True whenever
+/// the mask is off, so nothing changes above ground.
+fn in_visible_volume(sample_pos: vec3<f32>) -> bool {
+    if globals.mask_enabled != 1u {
+        return true;
+    }
+    let cell = floor(sample_pos);
+    let ai = vec3<i32>(cell) - vec3<i32>(globals.mask_origin);
+    if ai.x < 0 || ai.x >= 64 || ai.y < 0 || ai.y >= 64 || ai.z < 0 || ai.z >= 64 {
+        return false;
+    }
+    let s = textureLoad(visibility_mask, ai, 0).r & 0x7Fu;
+    if s == 0u || s > CLARITY_RADIUS + 1u {
+        return false;
+    }
+
+    // Cost-priority march.
+    let base = cell + vec3<f32>(0.5, 0.5, 0.5);
+    for (var i = 1; i <= 64; i = i + 1) {
+        let p = base + globals.view_dir * (f32(i) * 0.5);
+        let c = vec3<i32>(floor(p)) - vec3<i32>(globals.mask_origin);
+        if c.x < 0 || c.x >= 64 || c.y < 0 || c.y >= 64 || c.z < 0 || c.z >= 64 {
+            break;
+        }
+        let raw = textureLoad(visibility_mask, c, 0).r;
+        if (raw & 0x80u) != 0u {
+            continue;
+        }
+        let behind = raw & 0x7Fu;
+        if behind != 0u && behind < s {
+            return false;
+        }
+    }
+    return true;
+}
+
 @vertex
 fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     var out: VertexOutput;
@@ -84,6 +128,16 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
         scaled.x * sin_r + scaled.z * cos_r,
     );
     let world_pos = instance.inst_position + rotated;
+
+    // Cull at the anchor, not the vertex: a prop culls as a whole thing, and its
+    // anchor is the cell the design (§ 8) says owns it.
+    if !in_visible_volume(instance.inst_position + vec3<f32>(0.0, 0.25, 0.0)) {
+        out.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.world_position = vec3<f32>(0.0);
+        out.normal = vec3<f32>(0.0, 1.0, 0.0);
+        out.color = vec3<f32>(0.0);
+        return out;
+    }
 
     // Uniform scale -> normal only needs the same Y rotation.
     let rnormal = vec3<f32>(

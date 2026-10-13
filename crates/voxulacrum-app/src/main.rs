@@ -20,6 +20,7 @@ mod core_budget;
 mod player;
 mod diagnostics;
 mod jobs;
+mod validate;
 mod verify;
 
 use std::path::PathBuf;
@@ -42,6 +43,8 @@ use rendering::debug_lines::DebugLinePass;
 use rendering::upscale_pass::UpscalePass;
 use rendering::detail_paint_pass::DetailPaintPass;
 use rendering::scatter_pass::ScatterPass;
+use rendering::capsule_pass::CapsulePass;
+use rendering::canopy_pass::CanopyPass;
 use rendering::water_pass::WaterPass;
 use rendering::post_process::PostProcessPass;
 use rendering::outline_pass::OutlinePass;
@@ -145,8 +148,8 @@ pub fn compute_render_dimensions(
 // ECS initialization
 // ---------------------------------------------------------------------------
 
-fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
-    let mut ecs = bevy_ecs::world::World::new();
+fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
+    let mut ecs = World::new();
 
     // --- wgpu initialization ---
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -254,7 +257,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("global_uniform_buffer"),
-        size: std::mem::size_of::<GlobalUniforms>() as u64,
+        size: size_of::<GlobalUniforms>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -301,7 +304,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     let reflection_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("reflection_uniform_buffer"),
-        size: std::mem::size_of::<GlobalUniforms>() as u64,
+        size: size_of::<GlobalUniforms>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -325,7 +328,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         uniforms::create_shadow_bind_group_layout(&ctx.device);
     let shadow_uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("shadow_uniform_buffer"),
-        size: std::mem::size_of::<ShadowUniforms>() as u64,
+        size: size_of::<ShadowUniforms>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -388,14 +391,17 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 
     // World
     let gen_start = std::time::Instant::now();
-
-    let min_y = initial_params.streaming.min_chunk_y;
-    let max_y = initial_params.streaming.max_chunk_y;
-
+    
     // The single graph-backed generator, shared (via Arc) by the World, the
     // streaming workers, and background regeneration.
-    let generator = world::world_generator::load_default(&initial_params.terrain_gen)
+    let generator = world::world_generator::load_default()
         .expect("Failed to load default_biome graph generator");
+    
+    // The manifest owns the world's height. Reading it off the generator keeps
+    // streaming and generation on one number rather than two that agree by
+    // habit.
+    let y_range = generator.chunk_y_range();
+    let (min_y, max_y) = (y_range.start, y_range.end);
     
     // Data-driven material registry (RON primary, built-in fallback). Shared by
     // the foliage passes and any system needing material metadata.
@@ -419,7 +425,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // spawn-area edits were discarded and then overwritten on the next save),
     // and `open` performs the VOXEL_FORMAT_VERSION save wipe, which must happen
     // before anything reads a record.
-    let persistence = match WorldPersistence::open("default", initial_params.terrain_gen.seed) {
+    let persistence = match WorldPersistence::open("default", generator.world_seed()) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("Persistence init failed: {e}. Running without saves.");
@@ -431,13 +437,17 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // the generation pipeline grew (graphs, slabs, foliage), so cached chunks
     // loaded without grass/scatter. Always regenerate - the generate path
     // produces slabs + foliage identical to streamed reloads.
-    let world = world::World::generate(generator.clone(), &gen_pool, min_y, max_y, &persistence);
+    let world = world::World::generate(
+        generator.clone(), &gen_pool, min_y, max_y, &persistence, material_registry.clone(),
+    );
     log::info!("World generated in {:.2?}", gen_start.elapsed());
     world.print_debug_stats(&material_registry);
 
     // Tier-1 detail paint + Tier-2/3 scatter + water
     let detail_paint_pass = DetailPaintPass::new(&ctx, &world);
     let scatter_pass = ScatterPass::new(&ctx, &world, &prefab_registry);
+    let capsule_pass = CapsulePass::new(&ctx, &world);
+    let canopy_pass = CanopyPass::new(&ctx, &world);
     let water_pass = WaterPass::new(
         &ctx.device,
         &pipeline_resources.water_bind_group_layout,
@@ -539,6 +549,9 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     ecs.insert_resource(upscale_pass);
     ecs.insert_resource(detail_paint_pass);
     ecs.insert_resource(scatter_pass);
+    ecs.insert_resource(capsule_pass);
+    ecs.insert_resource(canopy_pass);
+    ecs.insert_resource(rendering::skeleton_preview_pass::SkeletonPreviewPass::default());
     ecs.insert_resource(water_pass);
     ecs.insert_resource(post_process);
     ecs.insert_resource(outline_pass);
@@ -595,6 +608,8 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
         mask_enabled: 0,
         volume_radius: 0.0,
         view_dir: [0.0, -1.0, 0.0],
+        view_right: [1.0, 0.0, 0.0],
+        view_up: [0.0, 1.0, 0.0],
         debug_mode: 0,
         sky_color: [0.5, 0.7, 1.0],
         warm_tint_color: [1.0; 3],
@@ -606,6 +621,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
     // Initialize event queues
     ecs.init_resource::<Events<RegenerateWorld>>();
     ecs.init_resource::<Events<RemeshAll>>();
+    ecs.init_resource::<Events<world::events::WorldEvent>>();
     ecs.init_resource::<Events<ClearMeshCache>>();
     ecs.init_resource::<Events<LoadPaletteRequest>>();
 
@@ -623,7 +639,7 @@ fn init_ecs(window: Arc<Window>) -> (bevy_ecs::world::World, Schedule) {
 // ---------------------------------------------------------------------------
 
 struct App {
-    ecs_world: Option<bevy_ecs::world::World>,
+    ecs_world: Option<World>,
     schedule: Option<Schedule>,
     exiting: bool,
 }
@@ -853,6 +869,9 @@ fn main() {
     // `nodegraph_eval`'s schedule-thread evaluation guard for the same reason
     // the startup world fill is.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = validate::run_from_args(&args) {
+        std::process::exit(code);
+    }
     if let Some(code) = verify::run_from_args(&args) {
         std::process::exit(code);
     }

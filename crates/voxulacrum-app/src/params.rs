@@ -59,6 +59,8 @@ impl Default for MaterialParams {
                 MaterialEntry { name: "Grass Soil".into(), color: [0.30, 0.55, 0.18],  sharpness: 0.35, hardness: 0.2,  permeable: false, supports_flora: true  },
                 MaterialEntry { name: "Water".into(),      color: [0.2, 0.35, 0.6],    sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false },
                 MaterialEntry { name: "Gravel".into(),     color: [0.52, 0.49, 0.45],  sharpness: 0.6,  hardness: 0.5,  permeable: true,  supports_flora: false },
+                MaterialEntry { name: "Wood".into(),       color: [0.55, 0.44, 0.30],  sharpness: 0.5,  hardness: 0.6,  permeable: false, supports_flora: false },
+                MaterialEntry { name: "Leaves".into(),     color: [0.24, 0.46, 0.18],  sharpness: 0.2,  hardness: 0.1,  permeable: true,  supports_flora: false },
             ],
         }
     }
@@ -467,7 +469,6 @@ pub struct TerrainGenParams {
     pub cave_surface_margin: f32,      // Depth below surface before caves begin (default: 4.0)
     pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
     pub water_level: f32,
-    pub seed: i32,
 }
 
 impl Default for TerrainGenParams {
@@ -492,7 +493,6 @@ impl Default for TerrainGenParams {
             cave_surface_margin: 2.0,
             cave_y_squash: 0.5,
             water_level: 30.0,
-            seed: 54321,
         }
     }
 }
@@ -502,6 +502,7 @@ impl Default for TerrainGenParams {
 // ============================================================================
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct DebugParams {
     pub show_wireframe: bool,
     pub show_chunk_boundaries: bool,
@@ -514,6 +515,7 @@ pub struct DebugParams {
     pub freeze_culling: bool,
     pub hide_water: bool,
     pub hide_foliage: bool,
+    pub show_canopy_cores: bool,
 }
 
 impl Default for DebugParams {
@@ -530,6 +532,7 @@ impl Default for DebugParams {
             freeze_culling: false,
             hide_water: false,
             hide_foliage: false,
+            show_canopy_cores: false,
         }
     }
 }
@@ -582,14 +585,35 @@ pub struct StreamingParams {
     /// chunks are unloaded. Should be larger than load_margin to prevent
     /// load/unload thrashing (hysteresis).
     pub unload_margin: f32,
-    pub min_chunk_y: i32,
-    pub max_chunk_y: i32,
     /// Completed generation results inserted into the world per frame.
     pub max_gen_per_frame: u32,
     /// Chunk snapshots extracted for meshing per frame. This is a *main-thread*
     /// budget - each submission copies a 34^3 voxel snapshot - and is separate
     /// from how many mesh jobs may run concurrently, which the scheduler owns.
     pub max_mesh_per_frame: u32,
+    /// Main-thread time budget for the unload phase, in milliseconds.
+    ///
+    /// Eviction runs `save_chunk_on_unload` (zstd + SQLite) for every
+    /// persist-dirty chunk leaving the view, and `FinalizeSeam` writes demotions
+    /// into nearly every chunk's override bucket - so nearly every eviction is a
+    /// write. Unbounded, that phase measured **103 ms on a single frame** during
+    /// a pan at maximum supported zoom (`perf-baseline.md` §0.4.0).
+    ///
+    /// A *time* budget rather than a chunk count, because per-chunk cost scales
+    /// with override-bucket size - exactly what differed between regions in that
+    /// measurement - so a count calibrated against one region is wrong in the
+    /// next. The default is §7.3's "no recurring hitch > 4 ms" line.
+    ///
+    /// Chunks not evicted this frame are reconsidered next frame; nothing is
+    /// lost, they stay resident slightly longer. The trade is residency: if
+    /// evictions cannot keep pace with a sustained pan, the resident set grows.
+    #[serde(default = "default_unload_budget_ms")]
+    pub unload_budget_ms: f32,
+}
+
+/// Serde default so presets written before this field load unchanged.
+fn default_unload_budget_ms() -> f32 {
+    4.0
 }
 
 impl Default for StreamingParams {
@@ -597,10 +621,9 @@ impl Default for StreamingParams {
         Self {
             load_margin: 0.40,
             unload_margin: 0.55,
-            min_chunk_y: 0,
-            max_chunk_y: 4,
             max_gen_per_frame: 64,
             max_mesh_per_frame: 32,
+            unload_budget_ms: default_unload_budget_ms(),
         }
     }
 }

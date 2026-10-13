@@ -6,9 +6,10 @@ use slotmap::new_key_type;
 
 use crate::boundary::{EffectivePin, ResolvedBoundary, ResolvedPin};
 use crate::crossgraph::GraphRefTarget;
+use crate::graph::GraphKind;
 use crate::library::LibraryGraphId;
 use crate::pin::PinType;
-use crate::prefab::PrefabTemplate;
+use voxel_core::ResolvedBlueprint;
 
 new_key_type! {
     /// Stable identifier for a node. Survives edits and serialization;
@@ -41,10 +42,35 @@ pub enum NodeCategory {
     Biome,
     /// Library graph references.
     Library,
+    /// Cross-graph references into the hierarchy.
+    Graph,
     /// Foliage placement (DetailGraph).
     Foliage,
     /// Terminal output.
     Output,
+}
+
+impl NodeCategory {
+    /// Every category, in menu order. The editor's node menu iterates this
+    /// rather than a list of its own, so a new category cannot be added without
+    /// appearing there - the previous handwritten list has already gone stale
+    /// and omitted `Library`, which would have hidden every reference node.
+    pub const ALL: [NodeCategory; 14] = [
+        NodeCategory::Source,
+        NodeCategory::Math,
+        NodeCategory::Curves,
+        NodeCategory::Domain,
+        NodeCategory::Density,
+        NodeCategory::Material,
+        NodeCategory::Positions,
+        NodeCategory::Scanners,
+        NodeCategory::Props,
+        NodeCategory::Biome,
+        NodeCategory::Library,
+        NodeCategory::Graph,
+        NodeCategory::Foliage,
+        NodeCategory::Output,
+    ];
 }
 
 /// Specification of a single pin on a node. Static metadata, not per-instance.
@@ -284,6 +310,10 @@ impl Default for LayerParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct MaxParams {}
 /// Parameters for [`NodeKind::Lerp`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct LerpParams {}
+/// Parameters for [`NodeKind::Abs`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct AbsParams {}
+/// Parameters for [`NodeKind::SurfaceToDensity`] (no parameters yet).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct SurfaceToDensityParams {}
 /// Parameters for [`NodeKind::Union`] (no parameters yet).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)] pub struct UnionParams {}
 /// Parameters for [`NodeKind::Intersect`] (no parameters yet).
@@ -352,48 +382,341 @@ impl Default for FindFlatParams {
     fn default() -> Self { Self { max_step: 1, on_materials: Vec::new() } }
 }
 
-/// Parameters for [`NodeKind::PlaceTree`]: procedural trunk + spherical canopy.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct PlaceTreeParams {
-    /// Per-node seed, mixed with each point's seed for height variation.
-    pub seed: u32,
-    /// Minimum trunk height (voxels above the surface).
-    pub trunk_min: u32,
-    /// Maximum trunk height (inclusive).
-    pub trunk_max: u32,
-    /// Canopy sphere radius in voxels.
-    pub canopy_radius: u32,
-    /// Trunk material.
-    pub trunk_material: voxel_core::MaterialId,
-    /// Leaf material.
-    pub leaf_material: voxel_core::MaterialId,
+/// Per-species shape parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+// Every field defaults, so a species file declares only what differs from a
+// generic broadleaf - and adding a field later cannot break one already on
+// disk, which is the half of versioning a version number does not cover.
+#[serde(default)]
+pub struct TreeSpecies {
+    /// Radius of the trunk at the ground, in voxels. **Authored, not derived.**
+    ///
+    /// The pipe model inverts exactly - root area is the sum over every tip, so
+    /// `trunk = tip * tips^(1/PIPE_EXP)` and therefore
+    /// `tip = trunk / tips^(1/PIPE_EXP)`. Reading it this way makes trunk
+    /// thickness a species property instead of a side effect of how many twigs
+    /// a species happens to generate, which is what it was: changing the branch
+    /// structure moved the trunk by nearly 4x and nothing said so.
+    ///
+    /// It is also the only radius that interacts with the voxel grid, so it is
+    /// what decides whether a tree collides at all.
+    pub trunk_radius: f32,
+    /// Radius of a branch tip, in voxels. **Also authored**, and the reason the
+    /// profile exponent is solved rather than fixed.
+    ///
+    /// Deriving this from `trunk_radius` and the tip count - as an area-
+    /// conserving pipe model must - gives `trunk / tips^(1/PIPE_EXP)`. A real
+    /// tree has on the order of 10^5 twigs, so that ratio is large. A skeleton
+    /// with 25 terminals gets a ratio of 4, and every branch ends in a club.
+    /// Author both ends and let the exponent absorb the difference.
+    pub tip_radius: f32,
+    /// Between-tree variation, as a fraction, applied to internode length and
+    /// branch angle. On top of the root yaw and phyllotactic phase, which are
+    /// always randomized per tree.
+    pub variance: f32,
+    /// Length of the first internode, in voxels.
+    pub internode: f32,
+    /// Length multiplier at each successive step along one axis.
+    pub taper: f32,
+    /// Length multiplier applied when a lateral leaves its parent axis.
+    pub child_scale: f32,
+    /// Internodes an axis extends by before it terminates.
+    pub axis_steps: u8,
+    /// Deepest branching order. 0 is a bare trunk.
+    pub max_order: u8,
+    /// Laterals emitted per internode.
+    pub laterals: u8,
+    /// Angle a lateral leaves its parent axis at, in radians.
+    pub branch_angle: f32,
+    /// Per-step bend toward world up (positive) or away from it (negative), as
+    /// a fraction of the full correction. Gravitropism.
+    pub gravitropism: f32,
+    /// Random angular wobble per internode, in radians.
+    pub wobble: f32,
+    /// Corner-cutting strength, `0..=1`. 0 leaves the raw polyline; 0.5 is one
+    /// Chaikin-equivalent pass.
+    ///
+    /// Literal Chaikin inserts two vertices per segment and drops the original,
+    /// which would blow the node budget, invalidate every lateral's parent
+    /// index, and move the points laterals attach at. This is its effect with
+    /// the node set fixed: each interior node slides toward the midpoint of its
+    /// neighbors, which is what a single Chaikin pass does to an interior
+    /// vertex.
+    pub smoothing: f32,
+    /// Attraction points scattered through the crown. 0 disables colonization
+    /// entirely, leaving the turtle skeleton alone.
+    pub crown_attractors: u16,
+    /// Crown ellipsoid center height, as a fraction of the turtle's own height.
+    pub crown_center: f32,
+    /// Crown ellipsoid horizontal radius, in voxels.
+    pub crown_radius: f32,
+    /// Crown ellipsoid vertical radius, in voxels.
+    pub crown_height: f32,
+    /// How far a node can see an attractor. Larger fills faster and straighter.
+    pub influence: f32,
+    /// Attractors this close to a node are consumed. Sized against
+    /// `colonize_step` and measured rather than reasoned: at ~1.5x the step the
+    /// crown exhausts its attractors at about half the node cap, so every age
+    /// above 0.5 produces the identical tree. Below ~0.8x the step the budget
+    /// is the binding constraint at every age, which is what makes the age
+    /// range live end to end.
+    pub kill_radius: f32,
+    /// Length of one colonization growth, in voxels.
+    pub colonize_step: f32,
+    /// Most lobes a canopy may carry. 0 disables the canopy entirely.
+    pub max_lobes: u8,
+    /// Lobe radius per unit of supplying cross-section.
+    pub lobe_scale: f32,
+    /// Per-lobe random size variation, as a fraction.
+    pub lobe_size_jitter: f32,
+    /// Per-axis random stretch, as a fraction, making a lobe an ellipsoid.
+    pub lobe_anisotropy: f32,
+    /// Lobes closer than this fraction of their summed radii are merged.
+    pub lobe_separation: f32,
+    /// Lobes smaller than this are dropped, in voxels.
+    pub lobe_min_radius: f32,
+    /// Declared upper bound on horizontal crown reach, in voxels. A **bound,
+    /// not a target**: the margin band is sized from it before generation runs,
+    /// so it cannot be derived from the tree it bounds.
+    ///
+    /// Nothing checks it yet. The check belongs to the feature source that
+    /// sizes the band, and asserting here would panic the app while sliders are
+    /// being dragged in the debug panel.
+    pub max_crown_reach: f32,
 }
-impl Default for PlaceTreeParams {
+
+impl Default for TreeSpecies {
+    /// A generic broadleaf. Tuning is content work, not a code default.
+    ///
+    /// `axis_steps` and `max_order` are deliberately modest: the turtle's job
+    /// is the trunk and primary limbs, and a turtle that spends the whole node
+    /// budget leaves the crown with nothing. These terminate at 56 nodes.
     fn default() -> Self {
         Self {
-            seed: 0,
-            trunk_min: 4,
-            trunk_max: 6,
-            canopy_radius: 3,
-            trunk_material: voxel_core::MaterialId(9), // Wood
-            leaf_material: voxel_core::MaterialId(10), // Leaves
+            trunk_radius: 1.0,
+            tip_radius: 0.06,
+            variance: 0.25,
+            internode: 1.2,
+            taper: 0.88,
+            child_scale: 0.7,
+            axis_steps: 5,
+            max_order: 2,
+            laterals: 1,
+            branch_angle: 0.9,
+            gravitropism: 0.25,
+            wobble: 0.18,
+            smoothing: 0.5,
+            crown_attractors: 0,
+            crown_center: 0.85,
+            crown_radius: 3.5,
+            crown_height: 2.5,
+            influence: 4.0,
+            kill_radius: 0.35,
+            colonize_step: 0.45,
+            max_lobes: 6,
+            lobe_scale: 1.6,
+            lobe_size_jitter: 0.28,
+            lobe_anisotropy: 0.22,
+            lobe_separation: 0.75,
+            lobe_min_radius: 0.4,
+            max_crown_reach: 8.0,
         }
     }
 }
 
-/// Parameters for [`NodeKind::PlacePrefab`]: stamp a named voxel template.
-/// `template` is resolved from disk at the hot-reload boundary and is not
-/// serialized (the `prefab` name is the source of truth on disk).
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct PlacePrefabParams {
-    /// Prefab name; resolves to `<name>.prefab.json` in the prefab dir.
-    pub prefab: String,
-    /// Resolved template (filled by `resolve_prefabs`; `None` until then).
-    #[serde(skip)]
-    pub template: Option<PrefabTemplate>,
+/// A species and its wood material, resolved at the hot-reload boundary.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ResolvedTree {
+    /// Shape parameters, loaded from `<species>.species.json`.
+    pub species: TreeSpecies,
+    /// Wood material id, resolved from the node's material name.
+    pub wood: voxel_core::MaterialId,
 }
-impl Default for PlacePrefabParams {
-    fn default() -> Self { Self { prefab: "rock".to_string(), template: None } }
+
+/// Parameters for [`NodeKind::PlaceTree`]: a rule producing trees on a coarse
+/// world grid, in a ZoneGraph.
+///
+/// A declaration rather than a dataflow node, exactly like
+/// [`NodeKind::PlaceStructure`] - generation scans the zone graph for these
+/// rather than evaluating them in a chain, so it carries no pins.
+///
+/// The grid fields deliberately mirror `PlaceStructureParams`, because both
+/// become a `FeatureSource` and the cell grid, density roll and ordering are
+/// one implementation shared by both payloads. Folding the two nodes into one
+/// with a payload enum is the tidier end state and is **deferred**: it would be
+/// a wire-format change to a node that ships in live content, and the trigger
+/// for paying that is a third payload kind.
+///
+/// Two fields `PlaceStructureParams` has are deliberately absent. `random_yaw`
+/// buys nothing when every seed already grows a differently-shaped tree, and
+/// `surface_offset` is fixed at 0 because a trunk stands *on* its anchor voxel
+/// where a blueprint's first cell replaces it - a field whose only correct
+/// value is one is a field that only makes wrong worlds reachable.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlaceTreeParams {
+    /// Species name; resolves to `<name>.species.json` in the species dir.
+    pub species: String,
+    /// Wood material, **by name**. Numeric ids in assets are what D5 exists to
+    /// undo, and a new node should not add another one.
+    pub wood: String,
+    /// Edge length of a feature cell, in voxels. One candidate per cell.
+    pub cell_size: i32,
+    /// Chance a cell produces a tree, `0..=1`.
+    pub density: f32,
+    /// Node-local seed, mixed with the world seed and the cell coordinates.
+    pub seed: u32,
+    /// Maturity, `0..=1`. A node budget rather than a scale - see `TreeSpecies`.
+    pub age: f32,
+    /// Biomes this source appears in. Empty means every biome in the zone.
+    #[serde(default)]
+    pub biomes: Vec<u16>,
+    /// Resolved species + wood (filled by `resolve_species`; `None` until then).
+    #[serde(skip)]
+    pub resolved: Option<ResolvedTree>,
+}
+
+impl Default for PlaceTreeParams {
+    fn default() -> Self {
+        Self {
+            species: "oak".to_string(),
+            wood: "wood".to_string(),
+            cell_size: 24,
+            density: 0.35,
+            seed: 1,
+            age: 1.0,
+            biomes: Vec::new(),
+            resolved: None,
+        }
+    }
+}
+
+/// Parameters for [`NodeKind::PlaceBlueprint`]: stamp a named voxel template.
+/// `resolved` is loaded from disk and material-resolved at the hot-reload
+/// boundary and is not serialized (the `blueprint` name is the source of truth
+/// on disk).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlaceBlueprintParams {
+    /// Blueprint name; resolves to `<name>.blueprint.json` in the blueprint dir.
+    pub blueprint: String,
+    /// Resolved template (filled by `resolve_blueprints`; `None` until then).
+    #[serde(skip)]
+    pub resolved: Option<ResolvedBlueprint>,
+}
+impl Default for PlaceBlueprintParams {
+    fn default() -> Self { Self { blueprint: "rock".to_string(), resolved: None } }
+}
+
+/// Foliage a structure occurrence anchors, in addition to the voxels it stamps.
+/// 
+/// A tree is the case this exists for: the trunk is a blueprint that occupies
+/// the voxel grid - so it collides and can be broken - and the canopy is foliage
+/// that does not. Declaring both on one node is what keeps them at the same
+/// place; two independent placements would have to agree, and eventually would
+/// not.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct StructureCanopy {
+    /// Scatter type bucket the instance lands in.
+    pub type_id: u16,
+    /// Prefab instanced at the anchor.
+    pub prefab_id: u32,
+    /// Voxels above the structure's anchor the canopy sits at - normally the
+    /// trunk's height, so the canopy crowns it.
+    pub y_offset: i32,
+}
+
+impl Default for StructureCanopy {
+    fn default() -> Self {
+        Self { type_id: 0, prefab_id: 0, y_offset: 4 }
+    }
+}
+
+/// Parameters for [`NodeKind::PlaceStructure`]: a rule producing structure
+/// occurrences on a coarse world grid (design §5, cross-chunk features).
+///
+/// There is deliberately no zone field. Structures live on the ZoneGraph, so
+/// the zone is the graph the node sits in - which makes it impossible to author
+/// a structure whose declared zone disagrees with where it was written.
+///
+/// `resolved` is filled at the hot-reload boundary and is not serialized, the
+/// same arrangement [`PlaceBlueprintParams`] uses.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PlaceStructureParams {
+    /// Blueprint name; resolves to `<name>.blueprint.json`.
+    pub blueprint: String,
+    /// Edge length of a feature cell, in voxels. One candidate per cell.
+    pub cell_size: i32,
+    /// Chance a cell produces an occurrence, `0..=1`.
+    pub density: f32,
+    /// Node-local seed, mixed with the world seed and cell coordinates.
+    pub seed: u32,
+    /// Whether each occurrence takes a random quarter turn.
+    pub random_yaw: bool,
+    /// How far above the surface the anchor lands.
+    pub surface_offset: i32,
+    /// Biomes this source appears in. Empty means every biome in the zone.
+    #[serde(default)]
+    pub biomes: Vec<u16>,
+    /// Foliage each occurrence anchors, if any. `None` is a plain structure.
+    #[serde(skip)]
+    pub canopy: Option<StructureCanopy>,
+    /// Resolved template (filled by `resolve_blueprints`; `None` until then).
+    #[serde(skip)]
+    pub resolved: Option<ResolvedBlueprint>,
+}
+impl Default for PlaceStructureParams {
+    fn default() -> Self {
+        Self {
+            blueprint: "rock".to_string(),
+            cell_size: 48,
+            density: 0.25,
+            seed: 1,
+            random_yaw: true,
+            surface_offset: 1,
+            biomes: Vec::new(),
+            canopy: None,
+            resolved: None,
+        }
+    }
+}
+
+/// Parameters of a river network (design §5, "River networks").
+///
+/// Lives here rather than in the evaluator for the same reason [`NoiseParams`]
+/// does: a node's parameters are IR, serialized and edited and diffed, while the
+/// field they describe is evaluation.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct RiverParams {
+    /// Edge length of a network cell, in voxels. One node per cell.
+    pub cell_size: f32,
+    /// Node-local seed, mixed with the world seed.
+    pub seed: u32,
+    /// Frequency of the elevation-potential field.
+    pub potential_frequency: f32,
+    /// World-Y the potential maps onto at potential -1.
+    pub bed_low: f32,
+    /// World-Y the potential maps onto at potential +1.
+    pub bed_high: f32,
+    /// Half-width at the headwaters, in voxels.
+    pub min_width: f32,
+    /// Half-width at the mouth, in voxels.
+    pub max_width: f32,
+    /// How far below the bank the channel center cuts.
+    pub depth: f32,
+}
+
+impl Default for RiverParams {
+    fn default() -> Self {
+        Self {
+            cell_size: 128.0,
+            seed: 1,
+            potential_frequency: 0.004,
+            bed_low: 14.0,
+            bed_high: 46.0,
+            min_width: 3.0,
+            max_width: 9.0,
+            depth: 4.0,
+        }
+    }
 }
 
 /// Parameters for [`NodeKind::LibraryRef`]: a reference to a reusable library
@@ -594,6 +917,21 @@ pub struct BiomeParamParams {
     pub default: f32,
 }
 
+/// Parameters for [`NodeKind::WorldParam`]: read a named world-level scalar from
+/// the world-param sidecar, or `default` when the world declares no such entry
+/// (or no sidecar is threaded).
+/// 
+/// The world analogue of [`BiomeParamParams`]. Separate rather than shared
+/// because the two read different sidecars, and a node whose meaning depends on
+/// which evaluator happens to hold it is not a node an author can reason about.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct WorldParamParams {
+    /// The parameter name to read.
+    pub name: String,
+    /// Fallback value when the parameter is absent.
+    pub default: f32,
+}
+
 /// Polymorphic node kind. Each variant carries its parameter struct.
 /// Serialized internally-tagged via the `"type"` field.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -641,7 +979,13 @@ pub enum NodeKind {
     // --- Domain ---
     /// XZ domain-warp: displaces an input position field by a noise offset.
     DomainWarp(DomainWarpParams),
+    /// Absolute value (`|v|`).
+    Abs(AbsParams),
     // --- Density combinators ---
+    /// Lift a per-column [`SurfaceField`](crate::PinType::SurfaceField) into a
+    /// density field, constant down each column. The one door from the column
+    /// domain into a density chain; nothing coerces between the two.
+    SurfaceToDensity(SurfaceToDensityParams),
     /// CSG union (`max(a, b)`).
     Union(UnionParams),
     /// CSG intersection (`min(a, b)`).
@@ -684,8 +1028,13 @@ pub enum NodeKind {
     // --- Props ---
     /// Stamp a procedural tree (trunk + canopy) at each point.
     PlaceTree(PlaceTreeParams),
-    /// Stamp a named prefab template at each point.
-    PlacePrefab(PlacePrefabParams),
+    /// Stamp a named blueprint at each point.
+    PlaceBlueprint(PlaceBlueprintParams),
+    /// Carve a river network out of a density field.
+    River(RiverParams),
+    /// Declare a structure source on the owning ZoneGraph. Carries no pins: the
+    /// evaluator scans for these rather than pulling a value through them.
+    PlaceStructure(PlaceStructureParams),
     // --- Per-column (World/Zone graphs) ---
     /// 2D world-space noise emitting a per-column `SurfaceField` (a climate
     /// channel). Evaluated by the column evaluator, not the voxel evaluator.
@@ -722,6 +1071,8 @@ pub enum NodeKind {
     /// Reads a named per-biome scalar parameter (the biome-param sidecar) as a
     /// uniform scalar field, falling back to a node default when unset.
     BiomeParam(BiomeParamParams),
+    /// Read a named scalar from the world-param sidecar.
+    WorldParam(WorldParamParams),
 }
 
 // Static pin layouts, shared by all instances of a kind.
@@ -789,6 +1140,8 @@ const PLACE_IN: &[PinSpec] = &[
 ];
 const SURFACE_OUT: &[PinSpec] =
     &[PinSpec { name: "surface", ty: PinType::SurfaceField, required: false }];
+const SURFACE_IN_ANY: &[PinSpec] =
+    &[PinSpec { name: "surface", ty: PinType::SurfaceField, required: true }];
 const SURFACE_IN_REQUIRED: &[PinSpec] =
     &[PinSpec { name: "zone field", ty: PinType::SurfaceField, required: true }];
 const SURFACE_IN_BIOME: &[PinSpec] =
@@ -926,7 +1279,28 @@ impl NodeKind {
                 inputs: DENSITY_IN,
                 outputs: DENSITY_OUT
             },
+            NodeKind::Abs(_) => NodeDescriptor {
+                display_name: "Abs",
+                category: NodeCategory::Math,
+                color: MATH,
+                inputs: DENSITY_IN,
+                outputs: DENSITY_OUT
+            },
+            NodeKind::SurfaceToDensity(_) => NodeDescriptor {
+                display_name: "Surface To Density",
+                category: NodeCategory::Density,
+                color: DENS,
+                inputs: SURFACE_IN_ANY,
+                outputs: DENSITY_OUT
+            },
             // Curves
+            NodeKind::River(_) => NodeDescriptor {
+                display_name: "River",
+                category: NodeCategory::Density,
+                color: DENS,
+                inputs: DENSITY_IN,
+                outputs: DENSITY_OUT
+            },
             NodeKind::Threshold(_) => NodeDescriptor {
                 display_name: "Threshold",
                 category: NodeCategory::Curves,
@@ -1059,16 +1433,25 @@ impl NodeKind {
             NodeKind::PlaceTree(_) => NodeDescriptor {
                 display_name: "Place Tree",
                 category: NodeCategory::Props,
+                // No pins: a declaration scanned out of a ZoneGraph, not a
+                // stage in a density chain. Same shape as Place Structure.
+                inputs: NO_PINS,
+                outputs: NO_PINS,
                 color: [0xc8, 0x90, 0x60],
-                inputs: PLACE_IN,
-                outputs: TERRAIN_OUT,
             },
-            NodeKind::PlacePrefab(_) => NodeDescriptor {
-                display_name: "Place Prefab",
+            NodeKind::PlaceBlueprint(_) => NodeDescriptor {
+                display_name: "Place Blueprint",
                 category: NodeCategory::Props,
                 color: [0xc8, 0x90, 0x60],
                 inputs: PLACE_IN,
                 outputs: TERRAIN_OUT,
+            },
+            NodeKind::PlaceStructure(_) => NodeDescriptor {
+                display_name: "Place Structure",
+                category: NodeCategory::Props,
+                color: [0xc8, 0x90, 0x60],
+                inputs: NO_PINS,
+                outputs: NO_PINS,
             },
             NodeKind::TerrainOutput(_) => NodeDescriptor {
                 display_name: "Terrain Output",
@@ -1086,7 +1469,7 @@ impl NodeKind {
             },
             NodeKind::GraphRef(_) => NodeDescriptor {
                 display_name: "Graph Ref",
-                category: NodeCategory::Library,
+                category: NodeCategory::Graph,
                 color: [0x80, 0xa0, 0xff],
                 inputs: NO_PINS,  // GraphRef has no inputs; outputs via effective_outputs()
                 outputs: NO_PINS,
@@ -1175,6 +1558,13 @@ impl NodeKind {
                 inputs: NO_PINS,
                 outputs: SCALAR_OUT,
             },
+            NodeKind::WorldParam(_) => NodeDescriptor {
+                display_name: "World Param",
+                category: NodeCategory::Source,
+                color: SRC,
+                inputs: NO_PINS,
+                outputs: SCALAR_OUT,
+            },
         }
     }
     
@@ -1198,6 +1588,91 @@ impl NodeKind {
             None => self.descriptor().outputs.iter().map(spec_to_effective).collect(),
         }
     }
+
+    /// Whether this kind means the same thing one dimension down: elementwise
+    /// arithmetic and curves, which read a field and write a field without
+    /// caring how many dimensions it has, plus the uniform sources that fill
+    /// one.
+    ///
+    /// These are the kinds whose declared `Density` / `Scalar` pins carry
+    /// [`SurfaceField`](PinType::SurfaceField) in a per-column graph, and the
+    /// set must be exactly what `ColumnEvaluator` implements - a kind that
+    /// type-checks into a World graph and then has no per-column evaluation
+    /// fails the chunk at generation instead of failing the author at edit time.
+    /// `nodegraph-eval` asserts the two agree.
+    ///
+    /// Deliberately excluded: `Perlin2D` and the other noise sources, which are
+    /// 2D and *look* domain-agnostic. The column domain's noise is
+    /// `SurfaceNoise`, and admitting a second spelling would mean two ways to
+    /// write the same field with different seeds.
+    pub fn is_domain_agnostic(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::Constant(_)
+                | NodeKind::WorldParam(_)
+                | NodeKind::Add(_)
+                | NodeKind::Subtract(_)
+                | NodeKind::Multiply(_)
+                | NodeKind::Min(_)
+                | NodeKind::Max(_)
+                | NodeKind::Clamp(_)
+                | NodeKind::Lerp(_)
+                | NodeKind::Remap(_)
+                | NodeKind::Abs(_)
+                | NodeKind::Threshold(_)
+                | NodeKind::CurveMapper(_)
+        )
+    }
+
+    /// Whether this kind has a per-column evaluation at all, and so may appear
+    /// in a World or Zone graph.
+    ///
+    /// `PlaceStructure` and `PlaceTree` qualify without being evaluated: each
+    /// declares a feature source on the owning ZoneGraph and carries no pins,
+    /// so the column evaluator skips it rather than filling it.
+    pub fn is_column_kind(&self) -> bool {
+        self.is_domain_agnostic()
+            || matches!(
+                self,
+                NodeKind::SurfaceNoise(_)
+                    | NodeKind::WorldOutput(_)
+                    | NodeKind::ZoneOutput(_)
+                    | NodeKind::GraphOutput(_)
+                    | NodeKind::GraphRef(_)
+                    | NodeKind::PlaceStructure(_)
+                    | NodeKind::PlaceTree(_)
+            )
+    }
+
+    /// This node's input pins as they read in a graph of `kind` - the pin set
+    /// `connect`, `validate` and the editor operate on.
+    pub fn effective_inputs_in(&self, kind: GraphKind) -> Vec<EffectivePin<'_>> {
+        let mut pins = self.effective_inputs();
+        self.apply_domain(kind, &mut pins);
+        pins
+    }
+
+    /// The output analogue of
+    /// [`effective_inputs_in`](NodeKind::effective_inputs_in).
+    pub fn effective_outputs_in(&self, kind: GraphKind) -> Vec<EffectivePin<'_>> {
+        let mut pins = self.effective_outputs();
+        self.apply_domain(kind, &mut pins);
+        pins
+    }
+    
+    /// Rewrite field pins into the domain `kind` evaluates in. Only the
+    /// domain-agnostic kinds move; everything else declares the one domain it
+    /// belongs to and keeps it.
+    fn apply_domain(&self, kind: GraphKind, pins: &mut [EffectivePin<'_>]) {
+        if !(kind.is_per_column() && self.is_domain_agnostic()) {
+            return;
+        }
+        for pin in pins {
+            if matches!(pin.ty, PinType::Density | PinType::Scalar) {
+                pin.ty = PinType::SurfaceField;
+            }
+        }
+    }
     
     /// The resolved boundary cached on this node, if it is a reference node
     /// (`LibraryRef`) whose pins have been resolved.
@@ -1209,6 +1684,31 @@ impl NodeKind {
         }
     }
 
+    /// Every `MaterialId` this node's parameters reference.
+    /// 
+    /// Here rather than in the validator, so the knowledge lives with the node
+    /// definitions that own it.
+    /// 
+    /// **Maintenance obligation:** a new material-carrying node kind must be
+    /// added below. The wildcard arm means the compiler will not remind you, and
+    /// a missing arm is a silent gap in the lint rather than a build failure -
+    /// spelling out all fifty variants to buy that guarantee is not worth what
+    /// it costs to read.
+    pub fn material_refs(&self) -> Vec<voxel_core::MaterialId> {
+        match self {
+            NodeKind::ConstantMaterial(p) => vec![p.material],
+            NodeKind::Layer(p) => {
+                let mut out: Vec<voxel_core::MaterialId> =
+                    p.bands.iter().map(|(m, _)| *m).collect();
+                out.push(p.fill);
+                out
+            }
+            NodeKind::FindFlat(p) => p.on_materials.clone(),
+            NodeKind::SurfaceFilter(p) => p.materials.clone(),
+            _ => Vec::new(),
+        }
+    }
+    
     /// Stable string identifier matching the serde `"type"` tag.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -1247,7 +1747,11 @@ impl NodeKind {
             NodeKind::PoissonDisk(_)         => "PoissonDisk",
             NodeKind::FindFlat(_)            => "FindFlat",
             NodeKind::PlaceTree(_)           => "PlaceTree",
-            NodeKind::PlacePrefab(_)         => "PlacePrefab",
+            NodeKind::PlaceBlueprint(_)      => "PlaceBlueprint",
+            NodeKind::PlaceStructure(_)      => "PlaceStructure",
+            NodeKind::River(_)               => "River",
+            NodeKind::Abs(_)                 => "Abs",
+            NodeKind::SurfaceToDensity(_)    => "SurfaceToDensity",
             NodeKind::LibraryRef(_)          => "LibraryRef",
             NodeKind::GraphRef(_)            => "GraphRef",
             NodeKind::GraphOutput(_)         => "GraphOutput",
@@ -1262,6 +1766,7 @@ impl NodeKind {
             NodeKind::PaintDensity(_)        => "PaintDensity",
             NodeKind::ScatterPlace(_)        => "ScatterPlace",
             NodeKind::BiomeParam(_)          => "BiomeParam",
+            NodeKind::WorldParam(_)          => "WorldParam",
         }
     }
 }

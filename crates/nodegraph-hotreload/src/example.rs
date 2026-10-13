@@ -7,10 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams,
-                   DomainWarpParams, FindFlatParams, FractalType, Graph, JitteredGridParams, LayerParams,
-                   MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef,
-                   PlaceTreeParams, TerrainOutputParams, WorldPosParams};
+use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams, DomainWarpParams, FindFlatParams, FractalType, Graph, JitteredGridParams, LayerParams, MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef, PlaceBlueprintParams, TerrainOutputParams, WorldPosParams};
 use voxel_core::MaterialId;
 
 use crate::error::HotReloadResult;
@@ -142,14 +139,10 @@ pub fn build_example_graph() -> Graph {
     g.connect(PinRef::new(scatter, 0), PinRef::new(find, 1))
         .expect("scatter -> find.points");
 
-    let trees = g.add_node(NodeKind::PlaceTree(PlaceTreeParams {
-        seed: 13,
-        trunk_min: 4,
-        trunk_max: 6,
-        canopy_radius: 3,
-        trunk_material: MaterialId(9),  // Wood
-        leaf_material: MaterialId(10),  // Leaves
-    }));
+    // A blueprint rather than a tree: `PlaceTree` became a ZoneGraph
+    // declaration with no pins, so it can no longer sit in a chain. The example
+    // keeps the same shape - scatter, find a flat spot, stamp something.
+    let trees = g.add_node(NodeKind::PlaceBlueprint(PlaceBlueprintParams::default()));
     g.connect(PinRef::new(build, 0), PinRef::new(trees, 0))
         .expect("build -> trees.terrain");
     g.connect(PinRef::new(find, 0), PinRef::new(trees, 1))

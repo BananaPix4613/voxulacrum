@@ -33,8 +33,8 @@
           "type": "Remap",
           "src_lo": -1.0,
           "src_hi": 1.0,
-          "dst_lo": 24.0,
-          "dst_hi": 56.0
+          "dst_lo": 4.0,
+          "dst_hi": 18.0
         },
         "position": [
           240.0,
@@ -50,8 +50,8 @@
           "axis": "Y"
         },
         "position": [
-          240.0,
-          160.0
+          183.09949,
+          191.86429
         ]
       },
       "version": 1
@@ -74,12 +74,12 @@
           "type": "Layer",
           "bands": [
             [
-              6,
+              5,
               1
             ],
             [
-              3,
-              3
+              8,
+              2
             ]
           ],
           "fill": 1
@@ -108,14 +108,30 @@
     {
       "from": {
         "node": {
-          "idx": 4,
+          "idx": 2,
           "version": 1
         },
         "pin": 0
       },
       "to": {
         "node": {
-          "idx": 6,
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 2,
           "version": 1
         },
         "pin": 0
@@ -135,6 +151,22 @@
           "version": 1
         },
         "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 6,
+          "version": 1
+        },
+        "pin": 0
       }
     },
     {
@@ -164,38 +196,6 @@
       "to": {
         "node": {
           "idx": 5,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 2,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 4,
-          "version": 1
-        },
-        "pin": 0
-      }
-    },
-    {
-      "from": {
-        "node": {
-          "idx": 1,
-          "version": 1
-        },
-        "pin": 0
-      },
-      "to": {
-        "node": {
-          "idx": 2,
           "version": 1
         },
         "pin": 0

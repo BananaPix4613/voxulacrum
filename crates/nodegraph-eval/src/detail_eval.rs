@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 
 use nodegraph_ir::{
-    Graph, NodeId, NodeKind, PoissonDistributionParams, SpeciesPickerParams, SurfaceFilterParams,
-    Severity,
+    EdgeIndex, Graph, NodeId, NodeKind, PoissonDistributionParams, SpeciesPickerParams,
+    SurfaceFilterParams, Severity,
 };
 use voxel_core::{ChunkBuffer, Voxel};
 
@@ -40,6 +40,8 @@ enum DetailValue {
 /// Evaluates a DetailGraph for one chunk against its terrain.
 pub struct DetailEvaluator<'a> {
     graph: &'a Graph,
+    /// `(node, pin) -> source` over `graph.edges`, built once. See [`EdgeIndex`].
+    edges: EdgeIndex,
     ctx: EvalContext,
     terrain: &'a ChunkBuffer<Voxel, 32>,
     /// Per-column biome assignment; `None` = uniform single biome.
@@ -58,7 +60,7 @@ impl<'a> DetailEvaluator<'a> {
         biome_column: Option<&'a IdColumn>,
         target_biome: u16,
     ) -> Self {
-        Self { graph, ctx, terrain, biome_column, target_biome, cache: HashMap::new() }
+        Self { graph, edges: EdgeIndex::build(graph), ctx, terrain, biome_column, target_biome, cache: HashMap::new() }
     }
 
     /// Validate + evaluate the DetailGraph, returning the chunk's foliage.
@@ -323,15 +325,8 @@ impl<'a> DetailEvaluator<'a> {
     }
 
     fn input_value(&self, node: NodeId, pin: u16) -> EvalResult<&DetailValue> {
-        let edge = self
-            .graph
-            .edges
-            .iter()
-            .find(|e| e.to.node == node && e.to.pin == pin)
-            .ok_or(EvalError::MissingInput { node, pin })?;
-        self.cache
-            .get(&edge.from.node)
-            .ok_or(EvalError::MissingOutput(edge.from.node))
+        let from = self.edges.source(node, pin).ok_or(EvalError::MissingInput { node, pin })?;
+        self.cache.get(&from.node).ok_or(EvalError::MissingOutput(from.node))
     }
 }
 
@@ -347,7 +342,14 @@ fn frac_to_i8(frac: f32) -> i8 {
 
 /// Stable instance id (design doc §9): deterministic from generation context,
 /// not persisted. `seq` disambiguates instances sharing an anchor cell.
-fn stable_instance_id(world_seed: u64, wx: i32, wy: i32, wz: i32, prefab_id: u32, seq: u32) -> u64 {
+pub(crate) fn stable_instance_id(
+    world_seed: u64,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    prefab_id: u32,
+    seq: u32,
+) -> u64 {
     let mut h = world_seed;
     h = mix64(h ^ (wx as i64 as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
     h = mix64(h ^ (wy as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));

@@ -41,6 +41,15 @@ pub enum GameAction {
     ToggleCutaway,
     /// Explicit Authoring <-> Play mode toggle (spawns/despawns the player).
     TogglePlayMode,
+    // --- Armed authoring tools ---
+    /// Disarm whatever tool is waiting on an in-world click. Named for the
+    /// mechanism, not for any one tool: every armed tool answers to it.
+    CancelTool,
+    /// Held while an armed tool fires: keep it armed instead of disarming, so
+    /// the same action can be repeated without re-arming between clicks.
+    RepeatTool,
+    /// Cycle the armed tool's orientation.
+    RotateTool,
 }
 
 // ============================================================================
@@ -247,6 +256,10 @@ impl Default for InputMap {
                 InputBinding { trigger: InputTrigger::Key(KeyCode::BracketRight.into()), action: CycleTargetLayer(1), mode: EdgeTriggered },
                 InputBinding { trigger: InputTrigger::Key(KeyCode::BracketLeft.into()), action: CycleTargetLayer(-1), mode: EdgeTriggered },
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyC.into()), action: ToggleCutaway, mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::Escape.into()),     action: CancelTool, mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::ShiftLeft.into()),  action: RepeatTool, mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::ShiftRight.into()), action: RepeatTool, mode: Held },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyR.into()),       action: RotateTool, mode: EdgeTriggered },
             ],
         }
     }

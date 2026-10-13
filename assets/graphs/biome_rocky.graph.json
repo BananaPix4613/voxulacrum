@@ -1,26 +1,466 @@
 {
   "kind": "Biome",
+  "boundary": {
+    "inputs": [],
+    "outputs": []
+  },
   "nodes": [
-    { "value": null, "version": 0 },
-    { "value": { "kind": { "type": "Simplex2D", "seed": 1, "frequency": 0.0025, "octaves": 5, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "FBm" }, "position": [0.0, 0.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": -1.0, "src_hi": 1.0, "dst_lo": 20.0, "dst_hi": 80.0 }, "position": [220.0, 0.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Simplex2D", "seed": 2, "frequency": 0.012, "octaves": 4, "lacunarity": 2.0, "gain": 0.5, "fractal_type": "Ridged" }, "position": [0.0, 160.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Remap", "src_lo": -1.0, "src_hi": 1.0, "dst_lo": -16.0, "dst_hi": 16.0 }, "position": [220.0, 160.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Add" }, "position": [440.0, 80.0] }, "version": 1 },
-    { "value": { "kind": { "type": "WorldAxis", "axis": "Y" }, "position": [440.0, 240.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Subtract" }, "position": [660.0, 120.0] }, "version": 1 },
-    { "value": { "kind": { "type": "Layer", "bands": [[1, 1]], "fill": 1 }, "position": [880.0, 240.0] }, "version": 1 },
-    { "value": { "kind": { "type": "DensityOutput" }, "position": [1100.0, 120.0] }, "version": 1 }
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Simplex2D",
+          "seed": 1,
+          "frequency": 0.0025,
+          "octaves": 5,
+          "lacunarity": 2.0,
+          "gain": 0.5,
+          "fractal_type": "FBm"
+        },
+        "position": [
+          0.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Remap",
+          "src_lo": -1.0,
+          "src_hi": 1.0,
+          "dst_lo": 20.0,
+          "dst_hi": 80.0
+        },
+        "position": [
+          220.0,
+          0.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Simplex2D",
+          "seed": 2,
+          "frequency": 0.012,
+          "octaves": 4,
+          "lacunarity": 2.0,
+          "gain": 0.5,
+          "fractal_type": "Ridged"
+        },
+        "position": [
+          -118.353264,
+          233.97083
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Remap",
+          "src_lo": -1.0,
+          "src_hi": 1.0,
+          "dst_lo": -16.0,
+          "dst_hi": 16.0
+        },
+        "position": [
+          220.0,
+          160.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Add"
+        },
+        "position": [
+          440.0,
+          80.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "WorldAxis",
+          "axis": "Y"
+        },
+        "position": [
+          440.0,
+          240.0
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Subtract"
+        },
+        "position": [
+          743.0748,
+          137.0702
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Layer",
+          "bands": [
+            [
+              1,
+              1
+            ]
+          ],
+          "fill": 1
+        },
+        "position": [
+          909.58856,
+          156.92513
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "DensityOutput"
+        },
+        "position": [
+          1243.3893,
+          18.71696
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "WorldPos"
+        },
+        "position": [
+          25.369217,
+          -191.0364
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "LibraryRef",
+          "library": 1
+        },
+        "position": [
+          246.10802,
+          -220.61583
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Threshold",
+          "threshold": 0.8
+        },
+        "position": [
+          509.00653,
+          -220.60693
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Constant",
+          "value": 200.0
+        },
+        "position": [
+          507.8863,
+          -95.44333
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Multiply"
+        },
+        "position": [
+          677.45,
+          -184.17284
+        ]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": {
+          "type": "Subtract"
+        },
+        "position": [
+          917.5348,
+          -72.647606
+        ]
+      },
+      "version": 1
+    }
   ],
   "edges": [
-    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 2, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 3, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 4, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 2, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 4, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 5, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 7, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 6, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 7, "version": 1 }, "pin": 1 } },
-    { "from": { "node": { "idx": 7, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 8, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 7, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 9, "version": 1 }, "pin": 0 } },
-    { "from": { "node": { "idx": 8, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 9, "version": 1 }, "pin": 1 } }
+    {
+      "from": {
+        "node": {
+          "idx": 15,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 9,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 14,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 15,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 13,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 14,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 15,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 3,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 10,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 11,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 9,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 11,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 12,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 8,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 4,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 5,
+          "version": 1
+        },
+        "pin": 1
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 12,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 14,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 1,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 2,
+          "version": 1
+        },
+        "pin": 0
+      }
+    },
+    {
+      "from": {
+        "node": {
+          "idx": 6,
+          "version": 1
+        },
+        "pin": 0
+      },
+      "to": {
+        "node": {
+          "idx": 7,
+          "version": 1
+        },
+        "pin": 1
+      }
+    }
   ]
 }
