@@ -34,6 +34,26 @@ upgrade through 0.5.x.
   skipped with the other edited chunks.
 - Scatter removed or placed on a chunk now stays that way for the session after
   the chunk is promoted. Promotion used to discard it.
+- **Streaming loads failed in the session where a world first passed 200 saved
+  chunks** (F2, #2). Autosave trained the compression dictionary mid-session and
+  later rows were written with it, but the streaming workers capture the
+  dictionary once, when they are built, so loads of those rows failed with
+  `flags=3 but no dictionary`. The chunk then loaded without its edits and its
+  next save overwrote the row. The dictionary is now trained only when a world
+  opens, before the workers exist. A world that crosses 200 chunks mid-session
+  keeps writing plain zstd rows, fully readable, until its next open. No
+  save-format change.
+- **Fluid mass was created or lost three ways** (F3, #3). A slab placed into a
+  full cell left it holding more than the slab can, and the simulation
+  subtracted that from the capacity as `u16`: a panic in dev builds, a wrapped
+  value in release. A cell that drained in a chunk wholly under the sea was
+  removed, and an absent cell there reads back as full, so draining created
+  water. At chunk seams each side capped its half of a transfer differently, so
+  water appeared or vanished crossing a border. Cells are now clamped to their
+  capacity when an edit lands and whenever they are simulated, a drained
+  submerged cell is stored explicitly empty, and both sides of a seam apply the
+  same amount, computed from the same snapshot. Cells on a chunk edge or corner
+  move water across a seam more slowly as a result. No save-format change.
 
 ---
 
