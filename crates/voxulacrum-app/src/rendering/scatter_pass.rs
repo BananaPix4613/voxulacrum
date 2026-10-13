@@ -149,7 +149,7 @@ fn group_instances_by_prefab(
 
     let generated = &chunk.data.scatter_instances;
     let no_overrides = ChunkOverrides::default();
-    let overrides = chunk.data.overrides.as_ref().unwrap_or(&no_overrides);
+    let overrides = chunk.data.edit_state.bucket().unwrap_or(&no_overrides);
     let c = chunk.data.coord;
     let span = CHUNK_SIZE as f32 * VOXEL_SCALE;
     let origin = [c.x as f32 * span, c.y as f32 * span, c.z as f32 * span];

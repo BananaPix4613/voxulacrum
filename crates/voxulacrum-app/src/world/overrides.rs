@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use voxel_core::{FaceAxis, LocalPos, Voxel};
 
+use super::chunk::DELTA_THRESHOLD;
 use super::layers::{
     DecalEntry, DetailLayerId, DetailTexel, FluidCell, ScatterInstance, ScatterStore,
     StableInstanceId,
@@ -81,6 +82,80 @@ impl ChunkOverrides {
     }
 }
 
+/// How a loaded chunk's player edits are tracked, and therefore how it saves.
+///
+/// An explicit state rather than `Option<ChunkOverrides>` because `None` had to
+/// mean three different things: never edited, promoted past [`DELTA_THRESHOLD`],
+/// and loaded from a Full record. Collapsing them let the next edit start a
+/// nearly empty bucket that replaced the Full record on disk.
+#[derive(Clone, PartialEq, Debug)]
+pub enum EditState {
+    /// Exactly what generation produces. Nothing to persist.
+    Untouched,
+    /// Sparse edits over generated terrain. Saves as a delta record.
+    Delta(ChunkOverrides),
+    /// Edited past the delta threshold, or loaded from a Full record. Saves the
+    /// whole storage and keeps doing so whatever touches the chunk afterwards.
+    /// The storage is the canonical voxel state, so the bucket holds no
+    /// `voxel_diffs`; it carries only the layers a Full record has no slot for
+    /// (scatter, fluid), which live for the session but are not persisted.
+    Promoted(ChunkOverrides),
+}
+
+impl EditState {
+    /// True when no edit of any kind has touched the chunk.
+    pub fn is_untouched(&self) -> bool {
+        matches!(self, EditState::Untouched)
+    }
+
+    /// The bucket, if this state carries one. `None` only for `Untouched`.
+    pub fn bucket(&self) -> Option<&ChunkOverrides> {
+        match self {
+            EditState::Untouched => None,
+            EditState::Delta(ovr) | EditState::Promoted(ovr) => Some(ovr),
+        }
+    }
+
+    /// The bucket to record a non-voxel edit into. An untouched chunk becomes
+    /// `Delta` here; a promoted one stays promoted.
+    pub fn bucket_mut(&mut self) -> &mut ChunkOverrides {
+        if self.is_untouched() {
+            *self = EditState::Delta(ChunkOverrides::default());
+        }
+        match self {
+            EditState::Delta(ovr) | EditState::Promoted(ovr) => ovr,
+            EditState::Untouched => unreachable!("an untouched chunk was just made Delta"),
+        }
+    }
+
+    /// Record a batch of voxel edits (flat chunk index, new voxel). Promotion is
+    /// decided once, after the whole batch. A promoted chunk records nothing:
+    /// its storage is already the canonical voxel state.
+    pub fn record_voxels(&mut self, edits: impl IntoIterator<Item = (usize, Voxel)>) {
+        if matches!(self, EditState::Promoted(_)) {
+            return;
+        }
+        let ovr = self.bucket_mut();
+        for (index, voxel) in edits {
+            ovr.set_voxel(index, voxel);
+        }
+        if ovr.voxel_override_count() >= DELTA_THRESHOLD {
+            self.promote();
+        }
+    }
+
+    fn promote(&mut self) {
+        let mut ovr = match std::mem::replace(self, EditState::Untouched) {
+            EditState::Untouched => ChunkOverrides::default(),
+            EditState::Delta(ovr) | EditState::Promoted(ovr) => ovr,
+        };
+        // The storage now holds every voxel, so the diffs are dead weight.
+        // Replaced rather than cleared so the allocation is released.
+        ovr.voxel_diffs = HashMap::new();
+        *self = EditState::Promoted(ovr);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +187,58 @@ mod tests {
         assert!(ids.contains(&10) && ids.contains(&30));  // survivors
         assert!(!ids.contains(&20));                         // removed
         assert!(ids.contains(&99));                          // player-added
+    }
+
+    fn cube(material: u16) -> Voxel {
+        Voxel::cube(voxel_core::MaterialId(material))
+    }
+
+    #[test]
+    fn bucket_mut_makes_untouched_delta_and_leaves_promoted_alone() {
+        let mut state = EditState::Untouched;
+        assert!(state.bucket().is_none());
+        state.bucket_mut();
+        assert!(matches!(state, EditState::Delta(_)));
+
+        let mut promoted = EditState::Promoted(ChunkOverrides::default());
+        promoted.bucket_mut();
+        assert!(matches!(promoted, EditState::Promoted(_)));
+    }
+
+    #[test]
+    fn reaching_the_threshold_promotes_and_releases_the_diffs() {
+        let mut state = EditState::Untouched;
+        state.record_voxels((0..DELTA_THRESHOLD - 1).map(|i| (i, cube(1))));
+        assert!(matches!(state, EditState::Delta(_)), "one short of the threshold stays Delta");
+
+        state.record_voxels([(DELTA_THRESHOLD, cube(1))]);
+        match &state {
+            EditState::Promoted(ovr) => assert!(ovr.voxel_diffs.is_empty()),
+            _ => panic!("expected Promoted at the threshold"),
+        }
+    }
+
+    #[test]
+    fn a_promoted_chunk_stays_promoted_and_records_no_voxel_diffs() {
+        let mut state = EditState::Promoted(ChunkOverrides::default());
+        state.record_voxels([(5, cube(2))]);
+        match &state {
+            EditState::Promoted(ovr) => assert!(ovr.voxel_diffs.is_empty()),
+            _ => panic!("a later edit must not undo promotion"),
+        }
+    }
+
+    #[test]
+    fn promotion_keeps_the_layers_a_full_record_cannot_hold() {
+        let mut ovr = ChunkOverrides::default();
+        ovr.scatter_removed.insert(StableInstanceId(7));
+        let mut state = EditState::Delta(ovr);
+        state.record_voxels((0..DELTA_THRESHOLD).map(|i| (i, cube(1))));
+        match &state {
+            EditState::Promoted(ovr) => {
+                assert!(ovr.scatter_removed.contains(&StableInstanceId(7)));
+            }
+            _ => panic!("expected Promoted"),
+        }
     }
 }

@@ -27,8 +27,7 @@ use std::sync::mpsc;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
-use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_SIZE, CHUNK_VOLUME, DELTA_THRESHOLD};
-use overrides::ChunkOverrides;
+use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_SIZE, CHUNK_VOLUME};
 use layers::{DetailTexel, PrefabId, ScatterFlags, ScatterInstance, StableInstanceId};
 use world_generator::WorldGenerator;
 use mutation::{
@@ -362,18 +361,18 @@ impl World {
         if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
             // One storage clone for the whole batch.
             let mut storage = (*chunk.data.voxels).clone();
-            let ovr = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
             for &(pos, voxel) in &edits {
-                let index = pos.to_index();
-                storage.set_voxel(index, voxel);
-                ovr.set_voxel(index, voxel);
+                storage.set_voxel(pos.to_index(), voxel);
             }
             chunk.data.voxels = Arc::new(storage);
 
-            // Promotion decided once, after every edit has landed.
-            if ovr.voxel_override_count() >= DELTA_THRESHOLD {
-                chunk.data.overrides = None;
-            }
+            // Recorded as one batch so promotion is decided once, after every
+            // edit has landed. A promoted chunk records nothing: its storage is
+            // already the canonical voxel state.
+            chunk
+                .data
+                .edit_state
+                .record_voxels(edits.iter().map(|&(pos, voxel)| (pos.to_index(), voxel)));
 
             chunk.persist_dirty = true;
             chunk.mark_mesh_dirty_from_edit();
@@ -466,8 +465,8 @@ impl World {
             // re-applies as settled and re-flows on load.
             chunk
                 .data
-                .overrides
-                .get_or_insert_with(ChunkOverrides::default)
+                .edit_state
+                .bucket_mut()
                 .fluid_diffs
                 .insert(lp, cell);
             chunk.persist_dirty = true;
@@ -521,7 +520,7 @@ impl World {
         for pos in changed {
             if let Some(c) = self.chunks.get_mut(&ChunkCoord::from(pos)) {
                 c.persist_dirty = true;
-                c.data.overrides.get_or_insert_with(ChunkOverrides::default);
+                c.data.edit_state.bucket_mut();
             }
             outcome.water_rebuild.push(pos);
         }
@@ -588,7 +587,7 @@ impl World {
             let applied: Vec<(usize, Voxel)> = demotions
                 .iter()
                 .filter(|(index, _)| {
-                    !chunk.data.overrides.as_ref().is_some_and(|ovr| {
+                    !chunk.data.edit_state.bucket().is_some_and(|ovr| {
                         ovr.voxel_diffs.contains_key(&LocalPos::from_index(*index))
                     })
                 })
@@ -660,13 +659,10 @@ impl World {
                 // worldgen-finalization entries, not player edits, but the
                 // override guard above treats "present in voxel_diffs" as
                 // "already decided" either way, so sharing the bucket is safe.
-                let ovr = chunk
+                chunk
                     .data
-                    .overrides
-                    .get_or_insert_with(ChunkOverrides::default);
-                for (index, voxel) in &applied {
-                    ovr.set_voxel(*index, *voxel);
-                }
+                    .edit_state
+                    .record_voxels(applied.iter().copied());
                 chunk.persist_dirty = true;
             }
             chunk.seam_finalized = true;
@@ -881,7 +877,7 @@ impl World {
                 + f.stable_ticks.len() * (size_of::<LocalPos>() + size_of::<u16>()))
                 as u64;
 
-            if let Some(ovr) = &chunk.data.overrides {
+            if let Some(ovr) = chunk.data.edit_state.bucket() {
                 s.override_bytes += (ovr.voxel_diffs.len()
                     * (size_of::<LocalPos>() + size_of::<Voxel>())
                     + ovr.fluid_diffs.len() * (size_of::<LocalPos>() + size_of::<FluidCell>())
@@ -933,7 +929,7 @@ impl World {
         let mut candidates: Vec<IVec3> = Vec::new();
         for (coord, chunk) in &self.chunks {
             let pos: IVec3 = (*coord).into();
-            if chunk.data.overrides.is_some() {
+            if !chunk.data.edit_state.is_untouched() {
                 report.skipped += 1;
                 continue;
             }
@@ -1239,7 +1235,7 @@ fn remove_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos) -> bool {
         .map(|si| si.stable_id)
         .collect();
 
-    let overrides = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
+    let overrides = chunk.data.edit_state.bucket_mut();
     let mut changed = false;
     for id in generated_ids {
         if overrides.scatter_removed.insert(id) {
@@ -1258,7 +1254,7 @@ fn remove_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos) -> bool {
 fn place_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos, world_voxel: IVec3) -> bool {
     let seq = effective_count_at(chunk, anchor);
     let h = player_stable_id(world_voxel, seq);
-    let overrides = chunk.data.overrides.get_or_insert_with(ChunkOverrides::default);
+    let overrides = chunk.data.edit_state.bucket_mut();
     overrides.scatter_added.push(ScatterInstance {
         anchor,
         sub_offset: [(h & 0xFF) as u8 as i8, 0, ((h >> 8) & 0xFF) as u8 as i8],
@@ -1273,7 +1269,7 @@ fn place_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos, world_voxel: IVec
 
 /// Count affective instances at `anchor` (generated-minus-removed + added).
 fn effective_count_at(chunk: &LoadedChunk, anchor: LocalPos) -> u32 {
-    let ovr = chunk.data.overrides.as_ref();
+    let ovr = chunk.data.edit_state.bucket();
     let gen = chunk
         .data
         .scatter_instances
@@ -1318,6 +1314,8 @@ mod mutation_tests {
     use crate::world::mutation::{EngineMode, MutationCommand, MutationError, MutationOrigin, WorldMutation};
     use glam::IVec3;
     use voxel_core::{ChunkCoord, MaterialId, Voxel};
+    use crate::world::chunk::DELTA_THRESHOLD;
+    use crate::world::overrides::EditState;
 
     /// A minimal world holding a single air chunk at the origin, in `mode`.
     fn world_with_air_chunk(mode: EngineMode) -> World {
@@ -1419,7 +1417,7 @@ mod mutation_tests {
         assert!(outcome.scatter_rebuild.contains(&IVec3::ZERO));
         let chunk = world.get_chunk(IVec3::ZERO).unwrap();
         assert!(chunk.persist_dirty);
-        let ovr = chunk.data.overrides.as_ref().expect("bucket created");
+        let ovr = chunk.data.edit_state.bucket().expect("bucket created");
         assert_eq!(ovr.scatter_added.len(), 1);
         assert_eq!(ovr.scatter_added[0].anchor, anchor);
     }
@@ -1439,7 +1437,7 @@ mod mutation_tests {
         // 8 cells poured above the anchor (all air), each an override + active.
         assert_eq!(chunk.data.fluids.cells.len(), 8);
         assert_eq!(chunk.data.fluids.active.len(), 8);
-        let ovr = chunk.data.overrides.as_ref().expect("bucket created");
+        let ovr = chunk.data.edit_state.bucket().expect("bucket created");
         assert_eq!(ovr.fluid_diffs.len(), 8);
         let top = LocalPos::new_unchecked(5, 1, 5);
         assert_eq!(ovr.fluid_diffs[&top].fluid_id, FluidId::WATER);
@@ -1498,7 +1496,7 @@ mod mutation_tests {
         let chunk = world.get_chunk(IVec3::ZERO).unwrap();
         assert!(chunk.persist_dirty, "a committed change marks the chunk for save");
         assert!(
-            chunk.data.overrides.is_some(),
+            matches!(chunk.data.edit_state, EditState::Delta(_)),
             "bucket ensured so the delta save path snapshots the fluid field",
         );
         assert_eq!(outcome.water_rebuild.as_slice(), &[IVec3::ZERO]);
@@ -1585,7 +1583,7 @@ mod mutation_tests {
             .filter(|&i| a.data.voxels.voxel(i) != b.data.voxels.voxel(i))
             .count();
         assert_eq!(diffs, 0, "batch and sequential singles produce identical storage");
-        assert_eq!(a.data.overrides, b.data.overrides, "and identical override buckets");
+        assert_eq!(a.data.edit_state, b.data.edit_state, "and identical override buckets");
         assert!(a.persist_dirty && b.persist_dirty);
         assert!(a.mesh_dirty && b.mesh_dirty);
     }
@@ -1612,5 +1610,208 @@ mod mutation_tests {
                 .execute(MutationCommand::system(WorldMutation::InsertLoadedChunk { chunk }))
                 .expect("system command accepted regardless of mode");
         }
+    }
+
+    // ---- A chunk promoted to a Full save keeps saving Full (F1, #1) ----------
+
+    /// A world database in a throwaway directory, removed on drop.
+    struct ScratchDb {
+        dir: std::path::PathBuf,
+        db: Option<persistence::WorldDatabase>,
+    }
+
+    impl ScratchDb {
+        fn open(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("voxulacrum_promotion_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let db = persistence::WorldDatabase::open(&dir.join("world.vxdb"))
+                .expect("scratch database opens");
+            Self { dir, db: Some(db) }
+        }
+
+        fn db(&self) -> &persistence::WorldDatabase {
+            self.db.as_ref().expect("database open until drop")
+        }
+    }
+
+    impl Drop for ScratchDb {
+        fn drop(&mut self) {
+            // Close the connection first: Windows will not delete an open file.
+            self.db = None;
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// One batch of `DELTA_THRESHOLD` distinct cells (local z 0..8): exactly
+    /// enough to promote the chunk to a Full save.
+    fn promoting_batch() -> Vec<(LocalPos, Voxel)> {
+        (0..DELTA_THRESHOLD)
+            .map(|i| (LocalPos::from_index(i), Voxel::cube(MaterialId(1))))
+            .collect()
+    }
+
+    fn promote(world: &mut World) {
+        world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxelBatch {
+                chunk: IVec3::ZERO,
+                edits: promoting_batch(),
+            }))
+            .expect("promoting batch accepted");
+    }
+
+    /// Set one cell outside the promoted slab (index 9000 is local z = 8).
+    fn edit_one_cell(world: &mut World) {
+        world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                chunk: IVec3::ZERO,
+                index: 9000,
+                voxel: Voxel::cube(MaterialId(2)),
+            }))
+            .expect("edit accepted");
+    }
+
+    /// Save as autosave does: build the record, write it, clear the dirty flag.
+    fn save(scratch: &ScratchDb, chunk: &mut LoadedChunk) {
+        let record = persistence::build_chunk_record(chunk).expect("dirty chunk has a record");
+        scratch.db().save_chunk(IVec3::ZERO, &record).expect("save");
+        chunk.persist_dirty = false;
+    }
+
+    /// Load the stored record onto a freshly generated chunk (all air here)
+    /// through the single override-application path.
+    fn reload(scratch: &ScratchDb) -> LoadedChunk {
+        let mut chunk = LoadedChunk::new_air(IVec3::ZERO);
+        persistence::apply_persisted_record(&mut chunk, scratch.db());
+        chunk
+    }
+
+    /// Every voxel of `reloaded` must equal `live`. Reports the count and the
+    /// first mismatch, because "earlier edits vanished" is the failure under test.
+    fn assert_voxels_survive(what: &str, live: &LoadedChunk, reloaded: &LoadedChunk) {
+        assert_ne!(
+            live.data.voxels.voxel(0),
+            Voxel::EMPTY,
+            "{what}: vacuous comparison, the live chunk lost its promoted cells",
+        );
+        let lost: Vec<usize> = (0..CHUNK_VOLUME)
+            .filter(|&i| live.data.voxels.voxel(i) != reloaded.data.voxels.voxel(i))
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "{what}: {} of {CHUNK_VOLUME} voxels differ after reload; first at index {} \
+             (live {:?}, reloaded {:?})",
+            lost.len(),
+            lost[0],
+            live.data.voxels.voxel(lost[0]),
+            reloaded.data.voxels.voxel(lost[0]),
+        );
+    }
+
+    /// Control: promotion on its own already round-trips. Passes before and
+    /// after the fix, and shows the harness itself is sound.
+    #[test]
+    fn promoted_chunk_round_trips_through_a_save() {
+        let scratch = ScratchDb::open("control");
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        promote(&mut world);
+
+        let chunk = world.get_chunk_mut(IVec3::ZERO).unwrap();
+        let record = persistence::build_chunk_record(chunk).expect("promoted chunk has a record");
+        assert!(
+            matches!(record.edits, persistence::ChunkEdits::Full(_)),
+            "a promoted chunk saves as Full",
+        );
+        save(&scratch, chunk);
+
+        let reloaded = reload(&scratch);
+        assert_voxels_survive("promotion alone", world.get_chunk(IVec3::ZERO).unwrap(), &reloaded);
+    }
+
+    /// promote -> save -> edit again -> save -> reload.
+    #[test]
+    fn edit_after_promotion_survives_reload() {
+        let scratch = ScratchDb::open("edit");
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        promote(&mut world);
+        save(&scratch, world.get_chunk_mut(IVec3::ZERO).unwrap());
+
+        edit_one_cell(&mut world);
+        save(&scratch, world.get_chunk_mut(IVec3::ZERO).unwrap());
+
+        let reloaded = reload(&scratch);
+        assert_voxels_survive("edit after promotion", world.get_chunk(IVec3::ZERO).unwrap(), &reloaded);
+    }
+
+    /// promote -> save -> water flows in -> save -> reload. Fluid itself is not
+    /// persisted on a Full save (documented, M4); the voxels must be.
+    #[test]
+    fn fluid_flowing_into_a_promoted_chunk_does_not_displace_its_full_save() {
+        use crate::world::fluid_sim::{plan_chunk, NeighborSample};
+        use crate::world::layers::{FluidCell, FluidId};
+
+        let scratch = ScratchDb::open("fluid");
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        promote(&mut world);
+        save(&scratch, world.get_chunk_mut(IVec3::ZERO).unwrap());
+
+        // A suspended water cell over open air (z = 20 is outside the promoted
+        // slab), so it must fall.
+        let cell = LocalPos::new_unchecked(4, 10, 20);
+        {
+            let chunk = world.get_chunk_mut(IVec3::ZERO).unwrap();
+            chunk.data.fluids.cells.insert(
+                cell,
+                FluidCell {
+                    fluid_id: FluidId::WATER,
+                    mass: fluid_gen::FULL_MASS,
+                    flags: 0,
+                },
+            );
+            chunk.data.fluids.activate(cell);
+        }
+
+        let plan = {
+            let chunk = world.get_chunk(IVec3::ZERO).unwrap();
+            let sample = NeighborSample::new(
+                &chunk.data.fluids,
+                chunk.data.voxels.as_ref(),
+                [None, None, None, None, None, None],
+            );
+            plan_chunk(&chunk.data.fluids, &sample)
+        };
+        assert!(!plan.is_empty(), "suspended water must plan a move");
+
+        world
+            .execute(MutationCommand::system(WorldMutation::CommitFluidPlans {
+                plans: vec![(ChunkCoord::from(IVec3::ZERO), plan)],
+            }))
+            .expect("system fluid commit accepted in any mode");
+
+        let chunk = world.get_chunk_mut(IVec3::ZERO).unwrap();
+        assert!(chunk.persist_dirty, "the committed flow marks the chunk for save");
+        save(&scratch, chunk);
+
+        let reloaded = reload(&scratch);
+        assert_voxels_survive("fluid after promotion", world.get_chunk(IVec3::ZERO).unwrap(), &reloaded);
+    }
+
+    /// promote -> save -> reload -> edit -> save -> reload. The chunk that comes
+    /// back from a Full record must keep saving Full.
+    #[test]
+    fn first_edit_after_reloading_a_full_save_is_not_lost() {
+        let scratch = ScratchDb::open("reload");
+        let mut first = world_with_air_chunk(EngineMode::Authoring);
+        promote(&mut first);
+        save(&scratch, first.get_chunk_mut(IVec3::ZERO).unwrap());
+
+        // A new session: the chunk comes back from the Full record.
+        let mut second = world_with_air_chunk(EngineMode::Authoring);
+        second.chunks.insert(ChunkCoord::from(IVec3::ZERO), reload(&scratch));
+        edit_one_cell(&mut second);
+        save(&scratch, second.get_chunk_mut(IVec3::ZERO).unwrap());
+
+        let reloaded = reload(&scratch);
+        assert_voxels_survive("first edit after reload", second.get_chunk(IVec3::ZERO).unwrap(), &reloaded);
     }
 }

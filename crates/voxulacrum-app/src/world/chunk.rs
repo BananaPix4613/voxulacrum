@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 use std::time::Instant;
 
 use super::layers::{DecalLayer, DetailLayers, FluidLayer, LightData, ScatterStore};
-use super::overrides::ChunkOverrides;
+use super::overrides::EditState;
 use super::tags::{BiomeId, ChunkTags, ZoneId};
 use super::storage::ChunkStorage;
 use super::world_generator::GeneratedChunk;
@@ -19,7 +19,8 @@ pub const SNAP_PAD: usize = 1;
 /// Padded snapshot size: CHUNK_SIZE + 2*SNAP_PAD
 pub const SNAP_SIZE: usize = CHUNK_SIZE + 2 * SNAP_PAD;
 pub const SNAP_VOLUME: usize = SNAP_SIZE * SNAP_SIZE * SNAP_SIZE;
-/// When edit count exceeds this, store full chunk instead of delta.
+/// When the voxel edit count reaches this, the chunk is promoted and saves as a
+/// full snapshot instead of a delta.
 pub const DELTA_THRESHOLD: usize = CHUNK_VOLUME / 4; // 8192
 
 pub struct ChunkMesh {
@@ -52,11 +53,11 @@ pub struct Chunk {
     /// Zone / biome / library identity for targeted invalidation. Phase 3 tags
     /// every chunk `ZoneId(0)` + `[BiomeId(0)]`; see [`super::tags::ChunkTags`].
     pub tags: ChunkTags,
-    /// Player edits layered on top of generated terrain, or `None` when the
-    /// chunk is persisted as a full-storage snapshot (after promotion past
-    /// `DELTA_THRESHOLD`, or when loaded from a `Full` save). Canonical edit
-    /// model; see [`super::overrides::ChunkOverrides`].
-    pub overrides: Option<ChunkOverrides>,
+    /// Player edits layered on top of generated terrain, and so how the chunk
+    /// saves: untouched, a sparse delta, or promoted to a full-storage snapshot
+    /// (past `DELTA_THRESHOLD`, or when loaded from a `Full` save). Canonical
+    /// edit model; see [`super::overrides::EditState`].
+    pub edit_state: EditState,
 }
 
 impl Chunk {
@@ -71,7 +72,7 @@ impl Chunk {
             decals: DecalLayer::default(),
             lighting: LightData::default(),
             tags: ChunkTags::single_biome(ZoneId(0), BiomeId(0)),
-            overrides: None,
+            edit_state: EditState::Untouched,
         }
     }
 

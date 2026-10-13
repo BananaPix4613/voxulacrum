@@ -16,6 +16,27 @@ upgrade through 0.5.x.
 
 ---
 
+## [0.4.1] — Clean slate
+
+### Fixed
+
+- **Edits were lost after a chunk was promoted to a full save** (F1, #1). Past
+  8,192 voxel edits a chunk saves whole, but its edit state was an `Option` whose
+  `None` meant both "never edited" and "promoted", so the next edit, or water
+  flowing in, started a near-empty delta that replaced the full record on disk. A
+  chunk reloaded from a full record came back the same way, so the first edit
+  after a reload did the same. The edit state is now an explicit `EditState`
+  (untouched, delta, promoted) and a promoted chunk keeps saving full. As before,
+  fluid and scatter edits on a promoted chunk are not persisted: a full record
+  has no slot for them, and adding one is a format change (M4). No save-format
+  change; 0.4.0 saves open as they are.
+- The determinism checker no longer reports promoted chunks as diverged. They are
+  skipped with the other edited chunks.
+- Scatter removed or placed on a chunk now stays that way for the session after
+  the chunk is promoted. Promotion used to discard it.
+
+---
+
 ## [0.4.0] — Worldgen completeness & authoring
 
 Phase 11. The theme was making worldgen content authorable in-engine and making
