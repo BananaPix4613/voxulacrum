@@ -434,6 +434,9 @@ pub struct ResidencyStats {
     pub scatter_bytes: u64,
     pub fluid_bytes: u64,
     pub override_bytes: u64,
+    /// Chunks whose saved record failed to load. They stay playable but are not
+    /// saved, so an edit made in one is lost when it unloads.
+    pub blocked_chunks: usize,
     /// Vertex + index buffers of resident chunk meshes.
     pub gpu_mesh_bytes: u64,
     /// Highest CPU-side total seen this session.
