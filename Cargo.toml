@@ -42,7 +42,6 @@ image = "0.25"
 bytemuck = { version = "1", features = ["derive"] }
 notify = "7"
 fastnoise-lite = "1"
-fastnoise2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zstd = "0.13"
 lz4_flex = "0.11"

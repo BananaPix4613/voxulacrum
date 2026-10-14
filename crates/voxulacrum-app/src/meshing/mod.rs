@@ -67,6 +67,9 @@ struct CacheConfig {
     lru: Arc<Mutex<cache::MeshCacheLru>>,
     max_cache_bytes: u64,
     eviction_batch_size: usize,
+    /// `MeshCacheParams::enabled`: when false the task meshes every time and
+    /// never touches the cache.
+    enabled: bool,
 }
 
 // ============================================================================
@@ -114,6 +117,7 @@ impl MeshingPipeline {
             lru: cache_lru.clone(),
             max_cache_bytes: mesh_cache.max_size_bytes,
             eviction_batch_size: mesh_cache.eviction_batch_size,
+            enabled: mesh_cache.enabled,
         });
 
         let (res_tx, res_rx) = mpsc::channel::<MeshResult>();
@@ -121,7 +125,11 @@ impl MeshingPipeline {
         // Concurrency is the scheduler's to decide now; this is only the stat the
         // Performance panel shows.
         let worker_count = CoreBudget::detect().pool_threads;
-        log::info!("MeshingPipeline: scheduler-backed meshing, cache at {cache_dir:?}");
+        if mesh_cache.enabled {
+            log::info!("MeshingPipeline: scheduler-backed meshing, cache at {cache_dir:?}");
+        } else {
+            log::info!("MeshingPipeline: scheduler-backed meshing, mesh cache bypassed by params");
+        }
 
         Self {
             result_tx: Mutex::new(res_tx),
@@ -360,6 +368,14 @@ fn mesh_chunk_task(
     res_tx: Sender<MeshResult>,
     cache_config: Arc<CacheConfig>,
 ) {
+    // Bypassed: mesh and return. Nothing is looked up or written, and the key (a
+    // hash of the whole 34^3 snapshot) is not computed either.
+    if !cache_config.enabled {
+        let (vertices, indices) = generate_chunk_mesh(&snapshot);
+        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+        return;
+    }
+
     let cache_key = cache::compute_cache_key(&snapshot);
 
     let cache_path = cache::cache_file_path(
@@ -424,4 +440,75 @@ fn mesh_chunk_task(
     }
 
     let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::chunk::{SNAP_PAD, SNAP_VOLUME};
+    use voxel_core::{MaterialId, Voxel};
+
+    /// A snapshot holding one cube, so the mesher has faces to emit.
+    fn snapshot_with_a_cube() -> ChunkSnapshot {
+        let materials: Box<[Voxel; SNAP_VOLUME]> =
+            vec![Voxel::EMPTY; SNAP_VOLUME].into_boxed_slice().try_into().unwrap();
+        let mut snap = ChunkSnapshot {
+            position: IVec3::new(1, 0, 2),
+            materials,
+            border_min: [false; 3],
+        };
+        let at = ChunkSnapshot::snap_index(4 + SNAP_PAD, 4 + SNAP_PAD, 4 + SNAP_PAD);
+        snap.materials[at] = Voxel::cube(MaterialId(1));
+        snap
+    }
+
+    /// Run one mesh task against a cache directory of its own. Returns
+    /// `(files left in the directory, hits, misses, vertices produced)`.
+    fn run_task(enabled: bool, tag: &str) -> (usize, u64, u64, usize) {
+        let dir = std::env::temp_dir()
+            .join(format!("voxulacrum_mesh_enabled_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch cache directory");
+
+        let stats = Arc::new(AtomicCacheStats::new());
+        let config = Arc::new(CacheConfig {
+            cache_dir: dir.clone(),
+            stats: stats.clone(),
+            lru: Arc::new(Mutex::new(cache::MeshCacheLru::from_scan(&dir))),
+            max_cache_bytes: 1 << 20,
+            eviction_batch_size: 8,
+            enabled,
+        });
+        let (tx, rx) = mpsc::channel::<MeshResult>();
+        mesh_chunk_task(IVec3::ZERO, snapshot_with_a_cube(), 1, tx, config);
+        let result = rx.recv().expect("the task always sends a result");
+
+        let files = std::fs::read_dir(&dir).expect("cache directory").count();
+        let _ = std::fs::remove_dir_all(&dir);
+        (
+            files,
+            stats.hits.load(Ordering::Relaxed),
+            stats.misses.load(Ordering::Relaxed),
+            result.vertices.len(),
+        )
+    }
+
+    /// Control: with the cache on, a cold chunk is a miss and leaves one file.
+    #[test]
+    fn an_enabled_cache_records_a_miss_and_writes_the_mesh() {
+        let (files, hits, misses, vertices) = run_task(true, "on");
+        assert_eq!((files, hits, misses), (1, 0, 1));
+        assert!(vertices > 0, "the cube meshes to faces");
+    }
+
+    /// `MeshCacheParams::enabled = false` was never read, so a preset asking for
+    /// no cache still got one. Disabled, the chunk meshes identically and the
+    /// cache is neither read nor written.
+    #[test]
+    fn a_disabled_cache_is_neither_read_nor_written() {
+        let (_, _, _, enabled_vertices) = run_task(true, "same");
+        let (files, hits, misses, vertices) = run_task(false, "off");
+        assert_eq!((files, hits, misses), (0, 0, 0));
+        assert_eq!(vertices, enabled_vertices, "the same mesh, just not cached");
+    }
 }

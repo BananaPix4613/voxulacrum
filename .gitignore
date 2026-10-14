@@ -1,6 +1,7 @@
 /target/
 /cache/
 /saves/
+/params/
 /.claude/
 /.idea/
 *.log
