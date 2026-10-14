@@ -8,7 +8,8 @@
 //! - `promote_to_palette` - first divergent write cost
 //! - `try_collapse`    - collapse pass on a uniform-able buffer
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 use voxel_core::{ChunkBuffer, MaterialId, Voxel};
 
 type Buf32 = ChunkBuffer<Voxel, 32>;

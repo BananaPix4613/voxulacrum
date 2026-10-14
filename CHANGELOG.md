@@ -16,7 +16,10 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ---
 
-## [Unreleased]
+## [0.4.2] — Clean slate follow-up
+
+One more way a world could lose saved edits, found while closing M1. No
+save-format change, and the generation hash is unchanged.
 
 ### Fixed
 

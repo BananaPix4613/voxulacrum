@@ -333,3 +333,17 @@ Release steps are complete.
 6. Tick the M1 gate boxes in `docs/roadmap.md` §12.
 7. Optionally run `release.yml` via `workflow_dispatch`, then push the annotated
    tag on `master`.
+
+## 9. Addendum: F7 (0.4.2)
+
+**F7 #60, a saved record that failed to load was overwritten** (PR #61, commit
+`375a8e4`). Found as open finding 1 in section 7. A chunk whose record could not
+be read came back looking untouched, and its next save replaced the record. The
+chunk is now marked `persist_blocked`: it stays playable, nothing is saved over
+its record, a warning names it, and the Performance panel counts blocked chunks.
+Two regression tests cover four ways a record can fail to load and both save
+paths, and both failed before the fix; two controls and one mechanism test pass.
+No save-format change; generation hash unchanged. Released as 0.4.2.
+
+Noted for D7 (#30): regenerating terrain and the format-version wipe delete all
+saved rows, unreadable ones included.

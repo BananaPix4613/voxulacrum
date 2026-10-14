@@ -8379,12 +8379,12 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 ## Mozilla Public License 2.0
 
 Used by:
-- nodegraph-editor 0.4.1
-- nodegraph-eval 0.4.1
-- nodegraph-hotreload 0.4.1
-- nodegraph-ir 0.4.1
-- voxel-core 0.4.1
-- voxulacrum 0.4.1
+- nodegraph-editor 0.4.2
+- nodegraph-eval 0.4.2
+- nodegraph-hotreload 0.4.2
+- nodegraph-ir 0.4.2
+- voxel-core 0.4.2
+- voxulacrum 0.4.2
 
 ```
 Mozilla Public License Version 2.0

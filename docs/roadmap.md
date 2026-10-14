@@ -560,8 +560,8 @@ Keys are never reused. The D workstream's work items (D1–D11) are a separate s
 **Index**
 
 | Milestone | Items | Issues |
-|---|---|---|
-| M1 Clean slate | F1–F6 | #1–#6 |
+|---|-------|--------|
+| M1 Clean slate | F1–F7 | #1–#6, #60 |
 | M2 Engine/game boundary | B1–B7 | #7–#13 |
 | M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6 | #14–#22 |
 | M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11 | #23–#36 |
