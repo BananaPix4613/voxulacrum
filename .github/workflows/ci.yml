@@ -43,7 +43,7 @@ jobs:
       # deliberately not used yet - `biome_test` is registered and unassigned,
       # which is a true finding about shipped content that Substep 11 resolves.
       - name: Validate graphs
-        run: cargo run -p voxulacrum --bin voxulacrum-app -- --validate-graphs
+        run: cargo run -p voxulacrum-app --bin voxulacrum-app -- --validate-graphs
 
       - name: Verify generation determinism
-        run: cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 512
+        run: cargo run -p voxulacrum-app --bin voxulacrum-app -- --verify-generation 512

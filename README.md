@@ -24,7 +24,7 @@ so `Program Files` or `/opt` will not work. Linux needs a Vulkan driver
 From source:
 
 ```
-cargo run -p voxulacrum --bin voxulacrum-app --release
+cargo run -p voxulacrum-app --bin voxulacrum-app --release
 ```
 
 Use `--release` for anything you intend to measure. The dev profile runs roughly
@@ -33,7 +33,7 @@ Use `--release` for anything you intend to measure. The dev profile runs roughly
 Headless determinism check:
 
 ```
-cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 64
+cargo run -p voxulacrum-app --bin voxulacrum-app -- --verify-generation 64
 ```
 
 ## Documentation
