@@ -4,7 +4,8 @@ Contributions are welcome. Two things to know before you open a pull request.
 
 ## Sign your commits (DCO)
 
-Every commit needs a `Signed-off-by` line. Git adds it for you:
+If you are contributing from outside the project, every commit in your pull
+request needs a `Signed-off-by` line. Git adds it for you:
 
 ```
 git commit -s -m "your message"
@@ -16,11 +17,12 @@ submit it under this project's license. It is not a copyright assignment: you
 keep the copyright to your contribution, and it is licensed to the project under
 MPL-2.0, the same terms as the rest of the engine.
 
-Commits without a sign-off cannot be merged.
+Pull requests from outside contributors with unsigned commits cannot be merged.
+The maintainer's own commits do not need a sign-off.
 
 ## What goes where
 
-The repository is an **engine**. `docs/roadmap.md` §3.11 draws the line: engine
+The repository is an **engine**. `docs/roadmap.md` §3 draws the line: engine
 concerns are the capability surface in §6 — world queries, mutation, streaming,
 rendering, persistence, entities, tooling. Game concerns are progression,
 crafting recipes, combat balance, specific creature behaviours, narrative, and
@@ -36,7 +38,7 @@ is a defect regardless of whether the code works.
 
 - `cargo build --workspace` and `cargo test --workspace` both clean, with no new
   warnings.
-- `cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 64` passes
+- `cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 512` passes
   if you touched anything in the generation path. Determinism is pillar P1;
   generation must be bit-identical across runs and independent of thread order.
 - Performance claims come with measurements from a **release** build. See
