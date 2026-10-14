@@ -23,7 +23,6 @@ mod jobs;
 mod validate;
 mod verify;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use bevy_ecs::event::Events;
@@ -209,8 +208,9 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
         surface_config,
     };
 
-    // Params
-    let presets_dir = PathBuf::from("params");
+    // Params. The presets directory is anchored like the other asset paths, not
+    // to the working directory.
+    let presets_dir = paths::presets_dir();
     let initial_params = EngineParams::load(&presets_dir.join("default.json"))
         .unwrap_or_default();
 

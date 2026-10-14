@@ -40,4 +40,3 @@ lz4_flex.workspace = true
 rusqlite.workspace = true
 zstd.workspace = true
 smallvec.workspace = true
-fastnoise2.workspace = true

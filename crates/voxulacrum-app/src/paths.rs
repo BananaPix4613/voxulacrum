@@ -20,3 +20,23 @@ pub fn asset_root() -> PathBuf {
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
+
+/// Directory holding saved engine-parameter presets; `default.json` in it is
+/// loaded at startup. Anchored like every other asset path: a relative `params`
+/// followed the working directory, so one install saw different presets
+/// depending on how it was launched.
+pub fn presets_dir() -> PathBuf {
+    asset_root().join("params")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn the_presets_directory_does_not_depend_on_the_working_directory() {
+        let dir = presets_dir();
+        assert!(dir.is_absolute(), "{dir:?} is relative, so it follows the working directory");
+        assert!(dir.starts_with(asset_root()), "{dir:?} is not under the asset root");
+    }
+}

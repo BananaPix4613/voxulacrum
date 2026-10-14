@@ -91,7 +91,7 @@
             mode: EdgeTriggered,
         ),
         (
-            trigger: Key("KeyR"),
+            trigger: Key("KeyV"),
             action: PrimaryAction,
             mode: EdgeTriggered,
         ),

@@ -54,6 +54,18 @@ upgrade through 0.5.x.
   submerged cell is stored explicitly empty, and both sides of a seam apply the
   same amount, computed from the same snapshot. Cells on a chunk edge or corner
   move water across a seam more slowly as a result. No save-format change.
+- **`R` was bound to two actions** (F6, #6). `PrimaryAction` (break a voxel in
+  Play mode) and `RotateTool` (rotate an armed blueprint stamp) were both on
+  `R`, so one press did both. `R` keeps rotating, as the stamp HUD says;
+  `PrimaryAction` moves to `V`. An `assets/input.ron` of your own keeps whatever
+  it says.
+- **The presets directory followed the working directory.** `params/` was a
+  relative path, so one install saw different presets depending on how it was
+  launched. It now resolves through the asset root, like shaders and input
+  bindings. Presets saved from another working directory need moving.
+- **`MeshCacheParams.enabled` was never read**, so a preset asking for no mesh
+  cache still got one. It is now honored: when false, meshing neither reads nor
+  writes the cache. It is read once, at startup.
 
 ### Changed
 
@@ -67,6 +79,10 @@ upgrade through 0.5.x.
   the old copy: the Materials panel is a read-only listing (its color,
   sharpness, permeable and flora edits are gone; only color was ever read), and a
   saved preset's `materials` block is ignored on load. No save-format change.
+- **Dropped the unused `fastnoise2` dependency** (F6, #6). Nothing referenced
+  it, but it pulled in `bindgen`, `cmake` and libclang to build. The workspace
+  and the release workflow no longer need them. The pure-Rust `fastnoise-lite`
+  is unaffected.
 
 ---
 

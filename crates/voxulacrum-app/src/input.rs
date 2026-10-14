@@ -247,9 +247,10 @@ impl Default for InputMap {
                 InputBinding { trigger: InputTrigger::Key(KeyCode::F5.into()), action: TogglePlayMode, mode: EdgeTriggered },
                 // Debug: pour watch at the cursor - edge triggered
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyG.into()), action: PourWater, mode: EdgeTriggered },
-                // Player-semantic actions (provisional keys; rebind in input.ron)
+                // Player-semantic actions (provisional keys; rebind in input.ron).
+                // R is not among them: it rotates an armed tool (RotateTool below).
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyF.into()), action: Interact, mode: EdgeTriggered },
-                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyR.into()), action: PrimaryAction, mode: EdgeTriggered },
+                InputBinding { trigger: InputTrigger::Key(KeyCode::KeyV.into()), action: PrimaryAction, mode: EdgeTriggered },
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyT.into()), action: SecondaryAction, mode: EdgeTriggered },
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyX.into()), action: CycleTool(1), mode: EdgeTriggered },
                 InputBinding { trigger: InputTrigger::Key(KeyCode::KeyZ.into()), action: CycleTool(-1), mode: EdgeTriggered },
@@ -604,5 +605,43 @@ pub fn toggle_ui_system(
     }
     if state.just_pressed(GameAction::ToggleFieldProbe) {
         probe.enabled = !probe.enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every trigger a map binds to more than one distinct action. One press of
+    /// such a key fires all of them, which is never intended: `KeyR` once broke a
+    /// voxel and rotated an armed stamp in the same press.
+    fn conflicts(map: &InputMap) -> Vec<String> {
+        let mut by_trigger: HashMap<&InputTrigger, Vec<GameAction>> = HashMap::new();
+        for binding in &map.bindings {
+            let actions = by_trigger.entry(&binding.trigger).or_default();
+            if !actions.contains(&binding.action) {
+                actions.push(binding.action);
+            }
+        }
+        let mut out: Vec<String> = by_trigger
+            .into_iter()
+            .filter(|(_, actions)| actions.len() > 1)
+            .map(|(trigger, actions)| format!("{trigger:?} -> {actions:?}"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn no_key_in_the_default_bindings_triggers_two_actions() {
+        assert_eq!(conflicts(&InputMap::default()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn no_key_in_the_shipped_input_ron_triggers_two_actions() {
+        let path = crate::paths::asset_root().join("assets").join("input.ron");
+        let text = std::fs::read_to_string(&path).expect("assets/input.ron is readable");
+        let map: InputMap = ron::from_str(&text).expect("assets/input.ron parses");
+        assert_eq!(conflicts(&map), Vec::<String>::new());
     }
 }

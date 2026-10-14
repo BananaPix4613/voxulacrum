@@ -571,6 +571,8 @@ impl Default for StreamingParams {
 pub struct MeshCacheParams {
     pub max_size_bytes: u64,
     pub eviction_batch_size: usize,
+    /// Bypass the mesh cache entirely: no lookup, no write. Read once, when the
+    /// meshing pipeline is built, so a change needs a relaunch.
     pub enabled: bool,
 }
 

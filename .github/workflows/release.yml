@@ -42,15 +42,14 @@ jobs:
         with:
           key: release-${{ matrix.label }}
 
-      # winit needs X11/Wayland development headers, wgpu wants the Vulkan
-      # loader, and fastnoise2 builds a C++ library through CMake. Windows
-      # runners have equivalents preinstalled; Linux does not.
+      # winit needs X11/Wayland development headers and wgpu wants the Vulkan
+      # loader. Windows runners have equivalents preinstalled; Linux does not.
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake \
+            pkg-config \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
             libxkbcommon-dev libwayland-dev wayland-protocols \
             libvulkan-dev
