@@ -2,9 +2,9 @@
 
 All notable changes to the voxulacrum engine.
 
-Pre-1.0 versioning follows `roadmap.md` §7.1: a minor version is a completed arc
-shipped when its exit gates pass; patches are fixes only. Saves may be wiped on
-upgrade through 0.5.x.
+Pre-1.0 versioning follows `roadmap.md` §7.1: a version is cut when a milestone
+completes or compatibility changes, and patches are fixes only. Saves may be
+wiped on upgrade until milestone M4, the format freeze.
 
 > **Entries for 0.1.0 through 0.2.0 were reconstructed at 0.3.0** from the commit
 > history and the phase audits in `docs/`, because no CHANGELOG entries or git
@@ -17,6 +17,13 @@ upgrade through 0.5.x.
 ---
 
 ## [0.4.1] — Clean slate
+
+Milestone M1. Fixes only: three ways a world could lose data or water, one
+material table instead of three, and four small cleanups. Every fix to saving or
+fluids came with a regression test that failed before the fix. **There is no
+save-format change**, so 0.4.0 saves open as they are, and the generation hash
+is unchanged at `0xed02babdf0f40420`. The close-of-milestone audit is
+`docs/m1-audit.md`.
 
 ### Fixed
 
@@ -83,6 +90,21 @@ upgrade through 0.5.x.
   it, but it pulled in `bindgen`, `cmake` and libclang to build. The workspace
   and the release workflow no longer need them. The pure-Rust `fastnoise-lite`
   is unaffected.
+- `THIRD-PARTY-NOTICES.md` regenerated: the crates `fastnoise2` pulled in are
+  gone, and the workspace crates are listed at their current version under
+  MPL-2.0.
+
+### Known limits carried forward
+
+- **Performance baselines were not recorded for this release.** Frame timing is
+  currently too inconsistent for a comparison to mean anything, and F3 changed
+  how much work the fluid simulation does per tick. Both are measured together
+  later.
+- **A chunk whose saved record fails to load comes back looking untouched**, and
+  its next save overwrites the unreadable record. This is what made F2 lose
+  edits rather than just fail a load. Tracked for a follow-up patch.
+- **Voxel edits do not wake nearby water.** Digging beside a pond does not make
+  it flow, and a drained cell in a chunk under the sea is never refilled.
 
 ---
 

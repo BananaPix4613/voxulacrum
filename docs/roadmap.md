@@ -673,9 +673,9 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 ### M1 — Clean slate
 **Contains:** the 0.4.0 close-out and F1–F6. **Needs:** nothing.
 **Non-goals:** new features of any kind.
-- [ ] Regression tests for F1, F2 and F3, each failing before its fix
-- [ ] CI green, including the tree taper test
-- [ ] 0.4.0 tagged on `master`; fixes released as a patch
+- [x] Regression tests for F1, F2 and F3, each failing before its fix
+- [x] CI green, including the tree taper test
+- [x] 0.4.0 tagged on `master`; fixes released as a patch
 
 ### M2 — Engine/game boundary
 **Contains:** B1–B7. **Needs:** nothing.
