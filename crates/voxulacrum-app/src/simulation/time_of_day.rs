@@ -186,7 +186,7 @@ impl TimeOfDay {
         
         // Texel-snap: anchor the world origin to a shadow-map texel so shadow edges
         // don't shimmer as the camera-following light frustum slides.
-        let half_size = 0.5 * crate::SHADOW_MAP_SIZE as f32;
+        let half_size = 0.5 * crate::app::SHADOW_MAP_SIZE as f32;
         let o = vp.project_point3(Vec3::ZERO);
         let dx = (o.x * half_size).round() / half_size - o.x;
         let dy = (o.y * half_size).round() / half_size - o.y;

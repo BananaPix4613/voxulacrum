@@ -33,7 +33,8 @@ use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui;
 use crate::ui::panels::UiState;
 use crate::world::regen::WorldRegenCoordinator;
-use crate::{compute_render_dimensions, palette, FrameCounter};
+use crate::app::{compute_render_dimensions, FrameCounter};
+use crate::palette;
 use crate::diagnostics::{
     FrameTimings, SUB_CLIMATE, SUB_DRAIN, SUB_FLUID, SUB_PARAMS, SUB_PUMP, SUB_SAVE, SUB_SCAN,
     SUB_SEAM, SUB_STREAM, SUB_SUBMIT, SUB_UNLOAD, SUB_UPLOAD,

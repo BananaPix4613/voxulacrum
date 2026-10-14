@@ -38,7 +38,7 @@ is a defect regardless of whether the code works.
 
 - `cargo build --workspace` and `cargo test --workspace` both clean, with no new
   warnings.
-- `cargo run -p voxulacrum --bin voxulacrum-app -- --verify-generation 512` passes
+- `cargo run -p voxulacrum-app --bin voxulacrum-app -- --verify-generation 512` passes
   if you touched anything in the generation path. Determinism is pillar P1;
   generation must be bit-identical across runs and independent of thread order.
 - Performance claims come with measurements from a **release** build. See

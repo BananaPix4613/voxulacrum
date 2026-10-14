@@ -72,7 +72,7 @@ pub struct RenderTargets {
 }
 
 impl RenderTargets {
-    pub fn new(ctx: &RenderContext, dims: &crate::RenderDims) -> Self {
+    pub fn new(ctx: &RenderContext, dims: &crate::app::RenderDims) -> Self {
         let tex_width = dims.alloc_w.max(1);
         let tex_height = dims.alloc_h.max(1);
 
@@ -202,13 +202,13 @@ impl RenderTargets {
         })
     }
 
-    pub fn needs_recreate(&self, dims: &crate::RenderDims) -> bool {
+    pub fn needs_recreate(&self, dims: &crate::app::RenderDims) -> bool {
         self.alloc_w != dims.alloc_w || self.alloc_h != dims.alloc_h
     }
 
     /// Zoom changes `view`/`k`/`s` continuously without reallocating; keep the
     /// fields current every frame so uniforms and the camera snap read them.
-    pub fn update_view(&mut self, dims: &crate::RenderDims) {
+    pub fn update_view(&mut self, dims: &crate::app::RenderDims) {
         self.view_w = dims.view_w;
         self.view_h = dims.view_h;
         self.k = dims.k;

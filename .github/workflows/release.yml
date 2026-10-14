@@ -55,7 +55,7 @@ jobs:
             libvulkan-dev
 
       - name: Build
-        run: cargo build --release -p voxulacrum --bin voxulacrum-app
+        run: cargo build --release -p voxulacrum-app --bin voxulacrum-app
 
       # The version in the archive name comes from Cargo.toml, not the tag, so a
       # workflow_dispatch build is named correctly too. §7.4 requires the two to

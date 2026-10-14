@@ -13,7 +13,7 @@ baselines recorded and compared").
 Getting this wrong invalidates the numbers, and it did once during 0.3.0 — see
 "Measurement hazards" below.
 
-1. **Release build only.** `cargo run -p voxulacrum --bin voxulacrum-app --release`.
+1. **Release build only.** `cargo run -p voxulacrum-app --bin voxulacrum-app --release`.
    The dev profile runs roughly 7× slower (0.3.0 measured 22 ms/frame against
    ~3 ms), so a debug reading is not a slow version of the truth, it is a
    different number entirely.
