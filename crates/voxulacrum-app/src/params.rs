@@ -2,71 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 // ============================================================================
-// Material parameters
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct MaterialEntry {
-    pub name: String,
-    pub color: [f32; 3],
-    pub sharpness: f32,
-    pub hardness: f32,
-    pub permeable: bool,
-    pub supports_flora: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct MaterialParams {
-    pub entries: Vec<MaterialEntry>,
-}
-
-impl MaterialParams {
-    #[allow(dead_code)] // material-change detector; used when remesh-on-edit lands
-    pub fn sharpness_changed(&self, other: &MaterialParams) -> bool {
-        if self.entries.len() != other.entries.len() {
-            return true;
-        }
-        self.entries
-            .iter()
-            .zip(other.entries.iter())
-            .any(|(a, b)| (a.sharpness - b.sharpness).abs() > f32::EPSILON)
-    }
-
-    pub fn materials_changed(&self, other: &MaterialParams) -> bool {
-        if self.entries.len() != other.entries.len() {
-            return true;
-        }
-        self.entries
-            .iter()
-            .zip(other.entries.iter())
-            .any(|(a, b)| {
-            (a.sharpness - b.sharpness).abs() > f32::EPSILON
-                || a.color != b.color
-            })
-    }
-}
-
-impl Default for MaterialParams {
-    fn default() -> Self {
-        Self {
-            entries: vec![
-                MaterialEntry { name: "Air".into(),        color: [0.0, 0.0, 0.0],     sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false },
-                MaterialEntry { name: "Limestone".into(),  color: [0.95, 0.90, 0.82],  sharpness: 0.9,  hardness: 0.9,  permeable: false, supports_flora: false },
-                MaterialEntry { name: "Granite".into(),    color: [0.50, 0.50, 0.53],  sharpness: 0.85, hardness: 0.95, permeable: false, supports_flora: false },
-                MaterialEntry { name: "Soil".into(),       color: [0.40, 0.22, 0.10],  sharpness: 0.3,  hardness: 0.2,  permeable: false, supports_flora: true  },
-                MaterialEntry { name: "Clay".into(),       color: [0.62, 0.36, 0.20],  sharpness: 0.4,  hardness: 0.4,  permeable: false, supports_flora: false },
-                MaterialEntry { name: "Sand".into(),       color: [0.90, 0.82, 0.55],  sharpness: 0.15, hardness: 0.1,  permeable: true,  supports_flora: false },
-                MaterialEntry { name: "Grass Soil".into(), color: [0.30, 0.55, 0.18],  sharpness: 0.35, hardness: 0.2,  permeable: false, supports_flora: true  },
-                MaterialEntry { name: "Water".into(),      color: [0.2, 0.35, 0.6],    sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false },
-                MaterialEntry { name: "Gravel".into(),     color: [0.52, 0.49, 0.45],  sharpness: 0.6,  hardness: 0.5,  permeable: true,  supports_flora: false },
-                MaterialEntry { name: "Wood".into(),       color: [0.55, 0.44, 0.30],  sharpness: 0.5,  hardness: 0.6,  permeable: false, supports_flora: false },
-                MaterialEntry { name: "Leaves".into(),     color: [0.24, 0.46, 0.18],  sharpness: 0.2,  hardness: 0.1,  permeable: true,  supports_flora: false },
-            ],
-        }
-    }
-}
-
-// ============================================================================
 // Lighting parameters
 // ============================================================================
 
@@ -656,7 +591,6 @@ impl Default for MeshCacheParams {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct EngineParams {
-    pub materials: MaterialParams,
     pub lighting: LightingParams,
     pub wind: WindParams,
     pub cloud: CloudParams,
@@ -678,7 +612,6 @@ pub struct EngineParams {
 impl Default for EngineParams {
     fn default() -> Self {
         Self {
-            materials: MaterialParams::default(),
             lighting: LightingParams::default(),
             wind: WindParams::default(),
             cloud: CloudParams::default(),
@@ -744,6 +677,9 @@ impl EngineParams {
 pub enum ParamChangeKind {
     None,
     UniformOnly,
+    /// No parameter needs a remesh today: the material table, its only
+    /// producer, left `EngineParams`. Kept for the remesh-on-edit work.
+    #[allow(dead_code)]
     MeshInvalidating,
     RegenerationRequired,
 }
@@ -763,9 +699,6 @@ impl ParamChangeDetector {
         if current.terrain_gen != self.previous.terrain_gen {
             return ParamChangeKind::RegenerationRequired;
         }
-        if current.materials.materials_changed(&self.previous.materials) {
-            return ParamChangeKind::MeshInvalidating;
-        }
         if (current.render_pipeline.world_pixel_density
             - self.previous.render_pipeline.world_pixel_density).abs() > f32::EPSILON {
             return ParamChangeKind::UniformOnly;
@@ -778,5 +711,25 @@ impl ParamChangeDetector {
     
     pub fn snapshot(&mut self, current: &EngineParams) {
         self.previous = current.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    /// Presets written before the material table left `EngineParams` carry a
+    /// `materials` block. They must still load, with that block ignored: the
+    /// registry owns the table now, so a preset must not be able to recolor it.
+    #[test]
+    fn a_preset_with_a_materials_block_still_loads_and_the_block_is_ignored() {
+        let json = r#"{
+            "materials": { "entries": [
+                { "name": "Air", "color": [0.0, 0.0, 0.0], "sharpness": 0.0,
+                  "hardness": 0.0, "permeable": true, "supports_flora": false }
+            ] }
+        }"#;
+        let params: EngineParams = serde_json::from_str(json).expect("an old preset loads");
+        assert_eq!(params, EngineParams::default());
     }
 }

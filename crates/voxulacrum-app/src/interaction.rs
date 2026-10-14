@@ -210,8 +210,8 @@ pub struct TargetState {
 }
 
 /// The player's currently selected build material (Substep 12), cycled by
-/// `CycleTool`. Index is 1-based onto `MaterialParams.entries` (index 0, Air,
-/// is skipped - it isn't a placeable tool).
+/// `CycleTool`. It is a `MaterialId` into the material registry (id 0, Air, is
+/// skipped - it isn't a placeable tool).
 #[derive(Resource)]
 pub struct PlayerToolState {
     pub material_index: usize,
@@ -266,14 +266,14 @@ pub fn player_targeting_system(
 /// non-Air registered material. Play-mode only.
 pub fn player_tool_system(
     input: Res<InputState>,
-    ui: Res<crate::ui::panels::UiState>,
+    registry: Res<crate::materials::MaterialRegistryRes>,
     world: Res<VoxelWorld>,
     mut tool: ResMut<PlayerToolState>,
 ) {
     if world.0.mode != EngineMode::Play {
         return;
     }
-    let count = ui.params.materials.entries.len();
+    let count = registry.len();
     if count <= 1 {
         return; // only Air registered - nothing to cycle
     }

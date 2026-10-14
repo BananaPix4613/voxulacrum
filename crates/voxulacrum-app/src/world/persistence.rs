@@ -1321,7 +1321,7 @@ mod tests {
             chunks,
             generator: crate::world::world_generator::load_default()
                 .expect("default generator loads"),
-            materials: Arc::new(voxel_core::MaterialRegistry::load_initial()),
+            materials: Arc::new(crate::materials::embedded_registry()),
             min_chunk_y: 0,
             max_chunk_y: 4,
             mode: EngineMode::Authoring,

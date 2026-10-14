@@ -37,8 +37,9 @@ impl DerefMut for GlobalUniformBuffer {
 
 /// GPU storage buffer holding the per-material color table (group 0, binding 5).
 /// The terrain fragment shader indexes it by `material_id` to compose color at
-/// draw time, replacing the baked per-vertex color. Re-uploaded each frame from
-/// `MaterialParams` so live color edits show without a re-mesh.
+/// draw time, replacing the baked per-vertex color. Written once at startup from
+/// the material registry; kept as a resource so a reload of `materials.ron` has
+/// the buffer to rewrite.
 #[derive(Resource)]
 pub struct MaterialColorBuffer(pub wgpu::Buffer);
 

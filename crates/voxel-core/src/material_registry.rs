@@ -1,7 +1,7 @@
 //! Stable material registry: numeric [`MaterialId`]s plus snake_case name
-//! resolution. The table is data-driven — authored in `assets/materials.ron`
-//! and loaded via [`MaterialRegistry::load_from_ron`] — with
-//! [`MaterialRegistry::load_initial`] kept as a built-in fallback.
+//! resolution. The table is data-driven: `assets/materials.ron` is its only
+//! source, loaded via [`MaterialRegistry::load_from_ron`] or
+//! [`MaterialRegistry::from_ron_str`]. This crate keeps no copy of it.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -50,36 +50,6 @@ pub struct MaterialRegistry {
 }
 
 impl MaterialRegistry {
-    /// Hand-authored Phase 0 registry (moved from the engine's old
-    /// `MATERIAL_TABLE`). Panics if two entries share an `id_name`.
-    pub fn load_initial() -> Self {
-        let entries = vec![
-            MaterialDef { id_name: "air".into(), display_name: "Air".into(),
-                color: [0.0, 0.0, 0.0], sharpness: 0.0, hardness: 0.0, permeable: true, supports_flora: false, render_delegated: false },
-            MaterialDef { id_name: "limestone".into(), display_name: "Limestone".into(),
-                color: [0.95, 0.90, 0.82], sharpness: 0.9, hardness: 0.9, permeable: false, supports_flora: false, render_delegated: false },
-            MaterialDef { id_name: "granite".into(), display_name: "Granite".into(),
-                color: [0.50, 0.50, 0.53], sharpness: 0.85, hardness: 0.95, permeable: false, supports_flora: false, render_delegated: false },
-            MaterialDef { id_name: "soil".into(), display_name: "Soil".into(),
-                color: [0.40, 0.22, 0.10], sharpness: 0.3, hardness: 0.2, permeable: false, supports_flora: true, render_delegated: false },
-            MaterialDef { id_name: "clay".into(), display_name: "Clay".into(),
-                color: [0.62, 0.36, 0.20], sharpness: 0.4, hardness: 0.4, permeable: false, supports_flora: false, render_delegated: false },
-            MaterialDef { id_name: "sand".into(), display_name: "Sand".into(),
-                color: [0.90, 0.82, 0.55], sharpness: 0.15, hardness: 0.1, permeable: true, supports_flora: false, render_delegated: false },
-            MaterialDef { id_name: "grass_soil".into(), display_name: "Grass Soil".into(),
-                color: [0.30, 0.55, 0.18], sharpness: 0.35, hardness: 0.2, permeable: false, supports_flora: true, render_delegated: false },
-            MaterialDef { id_name: "water".into(), display_name: "Water".into(),
-                color: [0.2, 0.35, 0.6], sharpness: 0.0, hardness: 0.0, permeable: true, supports_flora: false, render_delegated: false },
-            MaterialDef { id_name: "gravel".into(), display_name: "Gravel".into(),
-                color: [0.52, 0.49, 0.45], sharpness: 0.6, hardness: 0.5, permeable: true, supports_flora: false, render_delegated: false },
-            MaterialDef { id_name: "wood".into(), display_name: "Wood".into(),
-                color: [0.55, 0.44, 0.30], sharpness: 0.5, hardness: 0.6, permeable: false, supports_flora: false, render_delegated: true },
-            MaterialDef { id_name: "leaves".into(), display_name: "Leaves".into(),
-                color: [0.24, 0.46, 0.18], sharpness: 0.2, hardness: 0.1, permeable: true, supports_flora: false, render_delegated: false },
-        ];
-        Self::from_entries(entries)
-    }
-
     fn from_entries(entries: Vec<MaterialDef>) -> Self {
         let mut by_id_name = HashMap::with_capacity(entries.len());
         for (i, def) in entries.iter().enumerate() {
@@ -135,9 +105,9 @@ impl MaterialRegistry {
 
     /// Parse + validate a RON document already in memory. Factored out of
     /// [`Self::load_from_ron`] so validation is unit-testable without the
-    /// filesystem.
+    /// filesystem, and so a build can hold a copy of the shipped file.
     #[cfg(feature = "serde")]
-    pub(crate) fn from_ron_str(text: &str) -> VoxelCoreResult<Self> {
+    pub fn from_ron_str(text: &str) -> VoxelCoreResult<Self> {
         let file: MaterialFileRon = ron::from_str(text)
             .map_err(|e| VoxelCoreError::MaterialRonParse(e.to_string()))?;
 
@@ -221,31 +191,28 @@ struct MaterialFileRon {
     materials: Vec<MaterialEntryRon>,
 }
 
+/// The shipped table, for this crate's tests. `assets/materials.ron` is the only
+/// source of the table, so tests read it rather than keeping a copy of their own.
+#[cfg(all(test, feature = "serde"))]
+pub(crate) fn shipped_for_tests() -> MaterialRegistry {
+    MaterialRegistry::from_ron_str(include_str!("../../../assets/materials.ron"))
+        .expect("the shipped assets/materials.ron is valid")
+}
+
 #[cfg(all(test, feature = "serde"))]
 mod ron_tests {
     use super::*;
 
-    /// `assets/materials.ron` lives at the workspace root; this crate dir is
-    /// `<workspace>/crates/voxel-core`.
-    fn materials_ron_path() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..").join("..").join("assets").join("materials.ron")
-    }
-
     #[test]
-    fn ron_matches_load_initial() {
-        let from_ron = MaterialRegistry::load_from_ron(&materials_ron_path())
-            .expect("assets/materials.ron must load");
-        let initial = MaterialRegistry::load_initial();
-        assert_eq!(
-            from_ron.entries, initial.entries,
-            "materials.ron drifted from load_initial(); they must stay byte-equivalent"
-        );
+    fn the_shipped_table_loads_and_air_is_id_zero() {
+        let r = shipped_for_tests();
+        assert!(!r.is_empty(), "the shipped table has materials");
+        assert_eq!(r.resolve("air"), Some(MaterialId(0)), "id 0 is reserved for air");
     }
 
     #[test]
     fn the_delegated_mask_tracks_the_table() {
-        let r = MaterialRegistry::load_initial();
+        let r = shipped_for_tests();
         let mask = r.render_delegated_mask();
         assert_eq!(mask.len(), r.len(), "mask and table must be the same length");
         for (i, def) in r.entries.iter().enumerate() {
@@ -257,7 +224,7 @@ mod ron_tests {
     fn wood_is_render_delegated_and_terrain_is_not() {
         // The invariant the tree work rests on: wood occupies voxels but is
         // drawn by the capsule impostor pass, never by the terrain mesher.
-        let r = MaterialRegistry::load_initial();
+        let r = shipped_for_tests();
         let wood = r.resolve("wood").expect("wood is registered");
         assert!(r.render_delegated_mask()[wood.0 as usize], "wood must be delegated");
         for name in ["granite", "soil", "grass_soil", "sand", "gravel"] {

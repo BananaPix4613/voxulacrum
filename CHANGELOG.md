@@ -55,6 +55,19 @@ upgrade through 0.5.x.
   same amount, computed from the same snapshot. Cells on a chunk edge or corner
   move water across a seam more slowly as a result. No save-format change.
 
+### Changed
+
+- **One material table** (F5, #5). The table existed three times:
+  `assets/materials.ron`, a built-in copy in `voxel-core`, and a third in the
+  engine's UI parameters, which the play HUD, tool cycling and the terrain color
+  table read. `assets/materials.ron` is now the only source. The built-in copy is
+  gone; a copy of the file itself is compiled into the binary and used only if
+  the file is missing or invalid at startup. The HUD, tool cycling and the color
+  table read the registry, and rendered colors are unchanged. Two things go with
+  the old copy: the Materials panel is a read-only listing (its color,
+  sharpness, permeable and flora edits are gone; only color was ever read), and a
+  saved preset's `materials` block is ignored on load. No save-format change.
+
 ---
 
 ## [0.4.0] — Worldgen completeness & authoring

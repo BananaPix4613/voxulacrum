@@ -368,14 +368,13 @@ pub fn border_dirty_neighbors(index: u16) -> SmallVec<[IVec3; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxel_core::MaterialRegistry;
 
     #[test]
     fn the_mesher_never_sees_a_render_delegated_material() {
         // The §2.1a invariant, at the one seam that enforces it. Wood occupies
         // the cell; the snapshot the mesher reads must not contain it, or every
         // tree in the world renders as blocks.
-        let reg = MaterialRegistry::load_initial();
+        let reg = crate::materials::embedded_registry();
         let mask = reg.render_delegated_mask();
         let wood = reg.resolve("wood").expect("wood is registered");
         let stone = reg.resolve("granite").expect("granite is registered");
