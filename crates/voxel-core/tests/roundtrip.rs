@@ -69,10 +69,13 @@ fn shape_discriminants_are_stable() {
     assert_eq!(ShapeId::MAX_DISCRIMINANT, 3);
 }
 
+/// Saved worlds store raw material ids, so the ids of shipped materials are a
+/// contract: authoring may add materials, but must not renumber these.
 #[test]
-fn material_registry_load_initial() {
-    let reg = MaterialRegistry::load_initial();
-    assert_eq!(reg.len(), 11);
+fn the_shipped_material_ids_are_stable() {
+    let reg = MaterialRegistry::from_ron_str(include_str!("../../../assets/materials.ron"))
+        .expect("assets/materials.ron is valid");
+    assert!(reg.len() >= 11);
     let grass = reg.resolve("grass_soil").expect("grass_soil resolves");
     assert_eq!(grass, MaterialId(6));
     assert_eq!(reg.get(grass).unwrap().display_name, "Grass Soil");

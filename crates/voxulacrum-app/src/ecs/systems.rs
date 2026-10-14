@@ -1683,19 +1683,6 @@ pub fn visibility_mask_upload_system(
     );
 }
 
-/// Re-upload the material color table each frame so live material-color edits in
-/// the UI recolor terrain immediately (the color is composed in the shader from
-/// this table, not baked into the mesh). The table is `MATERIAL_COLOR_SLOTS`
-/// `vec4`s (~4 KB) - cheap enough to write unconditionally.
-pub fn material_color_upload_system(
-    ctx: Res<RenderContext>,
-    ui: Res<UiState>,
-    buffer: Res<MaterialColorBuffer>,
-) {
-    let table = crate::rendering::uniforms::material_color_table(&ui.params.materials);
-    ctx.queue.write_buffer(&buffer.0, 0, bytemuck::cast_slice(&table));
-}
-
 pub fn compute_stats_system(
     world: Res<VoxelWorld>,
     sim: Res<SimulationManager>,
@@ -2075,8 +2062,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             let mode = ecs.resource::<VoxelWorld>().0.mode;
             let material_idx = ecs.resource::<crate::interaction::PlayerToolState>().material_index;
             let (material_name, material_color): (String, [f32; 3]) =
-                match ui_state.params.materials.entries.get(material_idx) {
-                    Some(e) => (e.name.clone(), e.color),
+                match registry.get(voxel_core::MaterialId(material_idx as u16)) {
+                    Some(def) => (def.display_name.clone(), def.color),
                     None => ("-".to_string(), [0.6, 0.6, 0.6]),
                 };
 

@@ -146,7 +146,6 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::UniformWrite)
             .before(systems::write_uniforms_system),
         systems::write_uniforms_system.in_set(FrameStage::UniformWrite),
-        systems::material_color_upload_system.in_set(FrameStage::UniformWrite),
         systems::player_render_prep_system.in_set(FrameStage::UniformWrite),
         systems::compute_stats_system.in_set(FrameStage::UniformWrite),
     ));

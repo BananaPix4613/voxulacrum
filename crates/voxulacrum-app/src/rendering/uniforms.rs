@@ -1,19 +1,22 @@
 use bytemuck::{Pod, Zeroable};
-use crate::params::MaterialParams;
+use voxel_core::{MaterialId, MaterialRegistry};
 
 /// Number of material slots the fragment-shader color table holds. Sized
 /// generously so the storage buffer never reallocates when the registry grows
 /// (mods add materials); ids past the registry length read the magenta pad.
 pub const MATERIAL_COLOR_SLOTS: usize = 256;
 
-/// Pack `MaterialParams` colors into a fixed-size table of `vec4<f32>` (rgb + 1.0
-/// pad). `array<vec4>` sidesteps WGSL's 16-byte stride rule for `vec3`, so the
-/// CPU array and the shader's `array<vec4<f32>>` agree byte-for-byte. Unfilled
-/// slots stay magenta so an out-of-range `material_id` is visibly wrong.
-pub fn material_color_table(materials: &MaterialParams) -> [[f32; 4]; MATERIAL_COLOR_SLOTS] {
+/// Pack the registry's colors into a fixed-size table of `vec4<f32>` (rgb + 1.0
+/// pad), each at the slot of its `MaterialId`. `array<vec4>` sidesteps WGSL's
+/// 16-byte stride rule for `vec3`, so the CPU array and the shader's
+/// `array<vec4<f32>>` agree byte-for-byte. Unfilled slots stay magenta so an
+/// out-of-range `material_id` is visibly wrong.
+pub fn material_color_table(registry: &MaterialRegistry) -> [[f32; 4]; MATERIAL_COLOR_SLOTS] {
     let mut table = [[1.0, 0.0, 1.0, 1.0]; MATERIAL_COLOR_SLOTS];
-    for (i, e) in materials.entries.iter().enumerate().take(MATERIAL_COLOR_SLOTS) {
-        table[i] = [e.color[0], e.color[1], e.color[2], 1.0];
+    for (i, slot) in table.iter_mut().enumerate().take(registry.len()) {
+        if let Some(def) = registry.get(MaterialId(i as u16)) {
+            *slot = [def.color[0], def.color[1], def.color[2], 1.0];
+        }
     }
     table
 }
@@ -574,4 +577,46 @@ pub fn create_post_process_bind_group(
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped table, read strictly: no fallback, so a broken file fails here
+    /// instead of quietly comparing the built-in copy to itself.
+    fn shipped_registry() -> MaterialRegistry {
+        MaterialRegistry::load_from_ron(&crate::materials::materials_path())
+            .expect("assets/materials.ron loads")
+    }
+
+    /// The table the shader should see for `registry`: each material's color in
+    /// its own slot with alpha 1, and magenta in every slot past the end.
+    fn expected_table(registry: &MaterialRegistry) -> [[f32; 4]; MATERIAL_COLOR_SLOTS] {
+        let mut table = [[1.0, 0.0, 1.0, 1.0]; MATERIAL_COLOR_SLOTS];
+        for i in 0..registry.len().min(MATERIAL_COLOR_SLOTS) {
+            let color = registry.get(MaterialId(i as u16)).expect("id in range").color;
+            table[i] = [color[0], color[1], color[2], 1.0];
+        }
+        table
+    }
+
+    /// The uploaded table is the registry laid out by id: each material's color
+    /// in its own slot with alpha 1, and magenta in every slot past the end.
+    /// Substep 1 showed the old `params.rs` copy produced `expected_table`
+    /// exactly, so this is the proof that no color moved.
+    #[test]
+    fn the_color_table_is_the_registry_laid_out_by_id() {
+        let registry = shipped_registry();
+        let table = material_color_table(&registry);
+
+        assert_eq!(table, expected_table(&registry), "slot for slot");
+        // The padding is visibly wrong on purpose.
+        assert_eq!(table[registry.len()], [1.0, 0.0, 1.0, 1.0], "first slot past the registry");
+        assert_eq!(table[MATERIAL_COLOR_SLOTS - 1], [1.0, 0.0, 1.0, 1.0], "last slot");
+        // One material by name rather than by position.
+        let grass = registry.resolve("grass_soil").expect("grass_soil is registered");
+        let color = registry.get(grass).expect("grass_soil resolves to a definition").color;
+        assert_eq!(table[grass.0 as usize], [color[0], color[1], color[2], 1.0]);
+    }
 }

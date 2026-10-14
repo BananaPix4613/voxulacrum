@@ -20,7 +20,6 @@ pub struct UiState {
     pub preset_list: Vec<String>,
     pub selected_preset: usize,
     pub save_name: String,
-    pub selected_material: usize,
     pub selected_keyframe: usize,
     pub fps: f32,
     pub frame_time_ms: f32,
@@ -110,7 +109,6 @@ impl UiState {
             preset_list,
             selected_preset: 0,
             save_name: "default".into(),
-            selected_material: 1,
             selected_keyframe: 0,
             fps: 0.0,
             frame_time_ms: 0.0,
@@ -193,15 +191,15 @@ fn dot_green(ui: &mut egui::Ui) {
     change_dot(ui, egui::Color32::from_rgb(80, 200, 80), "Instant (uniform-only)");
 }
 
-fn dot_yellow(ui: &mut egui::Ui) {
-    change_dot(ui, egui::Color32::from_rgb(220, 200, 60), "Requires remeshing");
-}
-
 fn dot_red(ui: &mut egui::Ui) {
     change_dot(ui, egui::Color32::from_rgb(220, 60, 60), "Requires world regeneration");
 }
 
-pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
+pub fn draw_engine_panel(
+    ctx: &egui::Context,
+    state: &mut UiState,
+    registry: &voxel_core::MaterialRegistry,
+) {
     egui::SidePanel::right("engine_params_panel")
         .default_width(320.0)
         .resizable(true)
@@ -213,7 +211,7 @@ pub fn draw_engine_panel(ctx: &egui::Context, state: &mut UiState) {
                 ui.separator();
                 draw_lighting(ui, &mut state.params.lighting, &mut state.selected_keyframe);
                 ui.separator();
-                draw_materials(ui, &mut state.params.materials, &mut state.selected_material, state.remeshing, state.mesh_params_pending);
+                draw_materials(ui, registry);
                 ui.separator();
                 draw_wind(ui, &mut state.params.wind);
                 ui.separator();
@@ -529,30 +527,35 @@ fn draw_lighting(ui: &mut egui::Ui, p: &mut LightingParams, selected: &mut usize
     });
 }
 
-fn draw_materials(ui: &mut egui::Ui, p: &mut MaterialParams, selected: &mut usize, remeshing: bool, mesh_params_pending: bool) {
+/// The material table, read-only: `assets/materials.ron` is its only source, so
+/// there is nothing here to edit.
+fn draw_materials(ui: &mut egui::Ui, registry: &voxel_core::MaterialRegistry) {
     ui.collapsing("Materials", |ui| {
-        let names: Vec<String> = p.entries.iter().map(|e| e.name.clone()).collect();
-
-        egui::ComboBox::from_id_salt("material_select")
-            .selected_text(names.get(*selected).cloned().unwrap_or_default())
-            .show_ui(ui, |ui| {
-                for (i, name) in names.iter().enumerate() {
-                    ui.selectable_value(selected, i, name);
-                }
+        ui.label("Authored in assets/materials.ron");
+        for i in 0..registry.len() {
+            let Some(def) = registry.get(voxel_core::MaterialId(i as u16)) else { continue };
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    rect,
+                    2.0,
+                    egui::Color32::from_rgb(
+                        (def.color[0] * 255.0) as u8,
+                        (def.color[1] * 255.0) as u8,
+                        (def.color[2] * 255.0) as u8,
+                    ),
+                );
+                ui.label(format!("{i}  {}", def.display_name)).on_hover_text(format!(
+                    "{}\nhardness {:.2}, sharpness {:.2}\n{}{}{}",
+                    def.id_name,
+                    def.hardness,
+                    def.sharpness,
+                    if def.permeable { "permeable " } else { "" },
+                    if def.supports_flora { "supports flora " } else { "" },
+                    if def.render_delegated { "render delegated" } else { "" },
+                ));
             });
-
-        if let Some(mat) = p.entries.get_mut(*selected) {
-            ui.add_enabled_ui(!remeshing, |ui| {
-                ui.horizontal(|ui| { dot_yellow(ui); ui.label("Color:"); ui.color_edit_button_rgb(&mut mat.color); });
-                ui.horizontal(|ui| { dot_yellow(ui); ui.label("Sharpness:"); ui.add(egui::Slider::new(&mut mat.sharpness, 0.0..=1.0)); });
-            });
-            // Green-dot params stay always-enabled
-            ui.horizontal(|ui| { dot_green(ui); ui.label("Hardness:"); 0.0..=1.0 });
-            ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut mat.permeable, "Permeable"); });
-            ui.horizontal(|ui| { dot_green(ui); ui.checkbox(&mut mat.supports_flora, "Supports flora"); });
-        }
-        if mesh_params_pending {
-            ui.colored_label(egui::Color32::from_rgb(220, 200, 60), "Remesh required.");
         }
     });
 }

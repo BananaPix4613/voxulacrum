@@ -144,7 +144,7 @@ mod tests {
         World {
             chunks,
             generator,
-            materials: Arc::new(MaterialRegistry::load_initial()),
+            materials: Arc::new(crate::materials::embedded_registry()),
             min_chunk_y: 0,
             max_chunk_y: 4,
             mode: EngineMode::Authoring,
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn capture_then_stamp_reproduces_the_solids_and_is_one_command() {
-        let registry = MaterialRegistry::load_initial();
+        let registry = crate::materials::embedded_registry();
         let mut world = world_with_two_air_chunks();
         let granite = Voxel::cube(registry.resolve("granite").unwrap());
         let soil = Voxel { shape: ShapeId::SlabTop, material: registry.resolve("soil").unwrap(), flags: 0 };
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn capture_refuses_a_region_that_leaves_the_resident_set() {
-        let registry = MaterialRegistry::load_initial();
+        let registry = crate::materials::embedded_registry();
         let world = world_with_two_air_chunks();
         // Chunk (2,0,0) is not resident. A truncated blueprint would look like a
         // successful capture, which is the failure this error exists to prevent.

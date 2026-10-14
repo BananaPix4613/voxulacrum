@@ -262,9 +262,14 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
         mapped_at_creation: false,
     });
     
-    // Material color table (group 0, binding 5). Populated from the initial
-    // material params; re-uploaded each frame by `material_color_upload_system`.
-    let material_color_data = uniforms::material_color_table(&initial_params.materials);
+    // Data-driven material registry: `assets/materials.ron` is the only source
+    // of material identity and color. Loaded here because the color table below
+    // is built from it; shared with the foliage passes and any system needing
+    // material metadata.
+    let material_registry = materials::load_registry();
+    
+    // Material color table (group 0, binding 5), written once from the registry.
+    let material_color_data = uniforms::material_color_table(&material_registry);
     let material_color_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("material_color_buffer"),
         contents: bytemuck::cast_slice(&material_color_data),
@@ -403,9 +408,6 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
     let y_range = generator.chunk_y_range();
     let (min_y, max_y) = (y_range.start, y_range.end);
     
-    // Data-driven material registry (RON primary, built-in fallback). Shared by
-    // the foliage passes and any system needing material metadata.
-    let material_registry = materials::load_registry();
     let prefab_registry = prefabs::load_prefab_registry();
     let libraries = libraries::load_libraries();
     

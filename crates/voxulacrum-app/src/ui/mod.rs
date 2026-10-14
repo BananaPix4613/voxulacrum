@@ -191,7 +191,7 @@ impl EguiRenderer {
                 if self.editor_visible {
                     panels::draw_graph_editor_panel(ctx, &mut self.graph_editor);
                 }
-                panels::draw_engine_panel(ctx, ui_state);
+                panels::draw_engine_panel(ctx, ui_state, registry);
             }
             // At most one tool is armed at a time - `skeleton_debug_system`
             // disarms itself while a blueprint tool holds the click - so these

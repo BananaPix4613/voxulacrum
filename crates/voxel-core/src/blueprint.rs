@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn resolves_names_to_ids_and_shapes_to_the_runtime_vocabulary() {
-        let registry = MaterialRegistry::load_initial();
+        let registry = crate::material_registry::shipped_for_tests();
         assert!(
             registry.resolve("limestone").is_some(),
             "test fixture assumes the built-in registry defines limestone",
@@ -418,7 +418,7 @@ mod tests {
         let bad = SAMPLE.replace("\"limestone\"", "\"unobtainium\"");
         let err = Blueprint::from_json(&bad)
             .unwrap()
-            .resolve(&MaterialRegistry::load_initial())
+            .resolve(&crate::material_registry::shipped_for_tests())
             .expect_err("must refuse");
         assert!(err.contains("unobtainium"), "the error should name it: {err}");
     }
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn horizontal_reach_is_the_same_at_every_rotation() {
-        let bp = Blueprint::from_json(SAMPLE).unwrap().resolve(&MaterialRegistry::load_initial()).unwrap();
+        let bp = Blueprint::from_json(SAMPLE).unwrap().resolve(&crate::material_registry::shipped_for_tests()).unwrap();
         let reach = bp.horizontal_reach();
         for yaw in Yaw::ALL {
             let rotated: i32 = bp
@@ -495,7 +495,7 @@ mod tests {
         const ROCK: &str = include_str!("../../../assets/blueprints/rock.blueprint.json");
         Blueprint::from_json(ROCK)
             .expect("shipped blueprint parses")
-            .resolve(&MaterialRegistry::load_initial())
+            .resolve(&crate::material_registry::shipped_for_tests())
             .expect("shipped blueprint resolves");
     }
 }

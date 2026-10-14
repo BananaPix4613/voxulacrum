@@ -1,7 +1,8 @@
 // Material registry - the single data-driven source of material identity.
 // `id` is the stable numeric MaterialId (must be a contiguous range from 0).
 // Reordering entries does not renumber them; `id` is authoritative.
-// Keep in sync with MaterialRegistry::load_initial() (locked by a unit test).
+// This file is the only source of the material table. A copy is also compiled
+// into the binary, used only if this file is missing or invalid at startup.
 (
     materials: [
         (id: 0, id_name: "air",        display_name: "Air",        color: (0.0, 0.0, 0.0),    sharpness: 0.0,  hardness: 0.0,  permeable: true,  supports_flora: false),

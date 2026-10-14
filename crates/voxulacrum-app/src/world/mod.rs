@@ -1335,7 +1335,7 @@ mod mutation_tests {
         World {
             chunks,
             generator,
-            materials: Arc::new(MaterialRegistry::load_initial()),
+            materials: Arc::new(crate::materials::embedded_registry()),
             min_chunk_y: 0,
             max_chunk_y: 4,
             mode,
