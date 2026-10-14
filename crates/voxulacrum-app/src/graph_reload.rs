@@ -3,7 +3,7 @@
 //! The hotreload crate is ECS-agnostic; this newtype gives the watcher a
 //! bevy_ecs `Resource` identity and a panic-on-failure constructor matching
 //! `ShaderWatcher::new`. The polling + reload logic lives in
-//! `ecs::systems::graph_hot_reload_system`.
+//! `ecs::systems::hot_reload::graph_hot_reload_system`.
 
 use std::path::Path;
 
