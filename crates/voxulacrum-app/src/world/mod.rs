@@ -865,6 +865,9 @@ impl World {
             if chunk.data.voxels.is_uniform() {
                 s.uniform_chunks += 1;
             }
+            if chunk.persist_blocked {
+                s.blocked_chunks += 1;
+            }
             s.voxel_bytes += chunk.data.voxels.memory_bytes() as u64;
 
             // Tier-1 paint: one boxed texel map per active layer.

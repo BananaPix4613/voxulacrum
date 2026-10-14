@@ -725,7 +725,9 @@ pub fn apply_overrides_to_storage(base: &ChunkStorage, overrides: &ChunkOverride
 /// drift-review 1.2 fix: a chunk water merely *flowed into* has an empty bucket
 /// but real fluid cells, and must still save.
 pub fn build_chunk_edits(chunk: &LoadedChunk) -> Option<ChunkEdits> {
-    if !chunk.persist_dirty { return None; }
+    // A blocked chunk's record failed to load, so it only looks untouched. Its
+    // row on disk is the one real copy and is never replaced from here.
+    if !chunk.persist_dirty || chunk.persist_blocked { return None; }
 
     let has_fluid = !chunk.data.fluids.cells.is_empty();
 
@@ -965,12 +967,24 @@ fn overlay_record(chunk: &mut LoadedChunk, record: ChunkRecord) {
 /// can never again exist on one loader and not the other - the divergence that
 /// made startup-radius chunks silently discard player edits across sessions,
 /// and then overwrite the saved record on the next edit made in them.
+///
+/// A record that fails to load must not be treated as "no record": the chunk is
+/// left generated-fresh, which is not what is on disk, and the first save would
+/// replace the unreadable row with a near-empty delta. So the chunk is marked
+/// `persist_blocked`. It stays playable; its record is left exactly as it was.
 pub fn apply_persisted_record(chunk: &mut LoadedChunk, db: &WorldDatabase) {
     let pos: IVec3 = chunk.data.coord.into();
     match db.load_chunk_record(pos) {
         Ok(Some(record)) => overlay_record(chunk, record),
         Ok(None) => {}
-        Err(e) => log::warn!("load record for {pos:?} failed: {e}"),
+        Err(e) => {
+            chunk.persist_blocked = true;
+            log::warn!(
+                "chunk {pos:?}: its saved record failed to load ({e}). The record is \
+                 left untouched, and edits made in this chunk are not saved while it \
+                 stays loaded."
+            );
+        }
     }
 }
 
@@ -1432,6 +1446,285 @@ mod tests {
                 ovr.voxel_diffs.contains_key(&LocalPos::from_index(30_000)),
                 "the later edit is in the row",
             ),
+            _ => panic!("expected a Delta record"),
+        }
+    }
+
+    // ---- A record that failed to load is never overwritten (F7, #60) ---------
+
+    /// Raw `chunks` rows that cannot be decoded, each failing at a different stage
+    /// of loading: `(what is wrong, flags column, data column)`.
+    fn unreadable_rows() -> Vec<(&'static str, i64, Vec<u8>)> {
+        let plain = |raw: &[u8]| zstd::encode_all(raw, 3).expect("zstd encodes");
+        vec![
+            (
+                "written by a newer blob version",
+                FLAG_ZSTD_PLAIN,
+                plain(&[BLOB_VERSION + 1, TAG_DELTA, 0, 0, 0, 0]),
+            ),
+            ("truncated", FLAG_ZSTD_PLAIN, plain(&[BLOB_VERSION, TAG_DELTA])),
+            ("not a zstd frame", FLAG_ZSTD_PLAIN, vec![1, 2, 3, 4, 5]),
+            ("unknown compression flag", 99, vec![1, 2, 3, 4, 5]),
+        ]
+    }
+
+    fn insert_raw_row(db: &WorldDatabase, pos: IVec3, flags: i64, data: &[u8]) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO chunks (cx,cy,cz,flags,modified,data) \
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                params![pos.x, pos.y, pos.z, flags, 1_700_000_000_i64, data],
+            )
+            .expect("raw row inserted");
+    }
+
+    /// The stored row exactly as it sits on disk: `(flags, modified, data)`.
+    fn raw_row(db: &WorldDatabase, pos: IVec3) -> Option<(i64, i64, Vec<u8>)> {
+        use rusqlite::OptionalExtension;
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT flags, modified, data FROM chunks WHERE cx = ?1 AND cy = ?2 AND cz = ?3",
+                params![pos.x, pos.y, pos.z],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .expect("row query runs")
+    }
+
+    /// A database with `row` stored at `pos` (or nothing, for `None`) and the chunk
+    /// there loaded from it the way both loaders load one.
+    fn load_chunk_over(
+        dir: &ScratchDir,
+        pos: IVec3,
+        row: Option<(i64, &[u8])>,
+    ) -> (WorldPersistence, crate::world::World) {
+        let db = WorldDatabase::open(&dir.db_path()).expect("open");
+        if let Some((flags, data)) = row {
+            insert_raw_row(&db, pos, flags, data);
+        }
+        let persistence = WorldPersistence {
+            db: Some(db),
+            db_path: Some(dir.db_path()),
+            autosave_timer: 0.0,
+            autosave_enabled: true,
+        };
+        let mut chunk = LoadedChunk::new_air(pos);
+        apply_persisted_record(&mut chunk, persistence.db().expect("database is open"));
+        (persistence, world_holding(chunk))
+    }
+
+    /// An edit in a chunk whose record failed to load must not be saved over that
+    /// record. The chunk comes back looking untouched, so on `master` the next
+    /// save wrote a small delta over the row and every edit it held was gone.
+    #[test]
+    fn an_edit_never_replaces_a_record_that_failed_to_load() {
+        use crate::world::mutation::{MutationCommand, WorldMutation};
+
+        let mut failures: Vec<String> = Vec::new();
+        for (i, (what, flags, data)) in unreadable_rows().into_iter().enumerate() {
+            let dir = ScratchDir::new(&format!("keep_edit_{i}"));
+            let pos = IVec3::new(3, 1, 2);
+            let (persistence, mut world) = load_chunk_over(&dir, pos, Some((flags, &data)));
+            let db = persistence.db().expect("database is open");
+            let before = raw_row(db, pos).expect("the row was stored");
+
+            world
+                .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                    chunk: pos,
+                    index: 5,
+                    voxel: vox(3),
+                }))
+                .expect("authoring edit accepted");
+
+            persistence.save_dirty_chunks(&mut world).expect("autosave runs");
+            if raw_row(db, pos).as_ref() != Some(&before) {
+                failures.push(format!("{what}: the autosave replaced the unreadable record"));
+                continue;
+            }
+
+            // The unload path is a separate saver; it must keep the row too.
+            let chunk = world.get_chunk_mut(pos).expect("chunk resident");
+            chunk.persist_dirty = true;
+            persistence.save_chunk_on_unload(chunk).expect("unload save runs");
+            if raw_row(db, pos).as_ref() != Some(&before) {
+                failures.push(format!("{what}: the unload save replaced the unreadable record"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The same, for water flowing into the chunk: that path marks the chunk for
+    /// save without any player edit.
+    #[test]
+    fn fluid_flowing_in_never_replaces_a_record_that_failed_to_load() {
+        use crate::world::fluid_sim::{plan_chunk, NeighborSample};
+        use crate::world::mutation::{MutationCommand, WorldMutation};
+
+        let mut failures: Vec<String> = Vec::new();
+        for (i, (what, flags, data)) in unreadable_rows().into_iter().enumerate() {
+            let dir = ScratchDir::new(&format!("keep_fluid_{i}"));
+            let pos = IVec3::new(3, 1, 2);
+            let (persistence, mut world) = load_chunk_over(&dir, pos, Some((flags, &data)));
+            let db = persistence.db().expect("database is open");
+            let before = raw_row(db, pos).expect("the row was stored");
+
+            // One suspended, active water cell over open air: it must fall.
+            let cell = LocalPos::new_unchecked(4, 10, 4);
+            {
+                let chunk = world.get_chunk_mut(pos).expect("chunk resident");
+                chunk.data.fluids.cells.insert(
+                    cell,
+                    FluidCell {
+                        fluid_id: FluidId::WATER,
+                        mass: crate::world::fluid_gen::FULL_MASS,
+                        flags: 0,
+                    },
+                );
+                chunk.data.fluids.activate(cell);
+            }
+            let plan = {
+                let chunk = world.get_chunk(pos).expect("chunk resident");
+                let sample = NeighborSample::new(
+                    &chunk.data.fluids,
+                    chunk.data.voxels.as_ref(),
+                    [None, None, None, None, None, None],
+                );
+                plan_chunk(&chunk.data.fluids, &sample)
+            };
+            assert!(!plan.is_empty(), "suspended water must plan a move");
+            world
+                .execute(MutationCommand::system(WorldMutation::CommitFluidPlans {
+                    plans: vec![(voxel_core::ChunkCoord::from(pos), plan)],
+                }))
+                .expect("system fluid commit accepted");
+            assert!(
+                world.get_chunk(pos).expect("chunk resident").persist_dirty,
+                "the flow marks the chunk for save, so the saver has something to write",
+            );
+
+            persistence.save_dirty_chunks(&mut world).expect("autosave runs");
+            if raw_row(db, pos).as_ref() != Some(&before) {
+                failures.push(format!("{what}: flowing water replaced the unreadable record"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// Control: a chunk with no saved record at all (`Ok(None)`) is not blocked;
+    /// its first edit saves as it always did.
+    #[test]
+    fn a_chunk_with_no_record_still_saves_normally() {
+        use crate::world::mutation::{MutationCommand, WorldMutation};
+
+        let dir = ScratchDir::new("keep_control");
+        let pos = IVec3::new(3, 1, 2);
+        let (persistence, mut world) = load_chunk_over(&dir, pos, None);
+        let db = persistence.db().expect("database is open");
+        assert!(raw_row(db, pos).is_none(), "nothing stored yet");
+
+        world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                chunk: pos,
+                index: 5,
+                voxel: vox(3),
+            }))
+            .expect("authoring edit accepted");
+        persistence.save_dirty_chunks(&mut world).expect("autosave runs");
+
+        let record = db
+            .load_chunk_record(pos)
+            .expect("the row is readable")
+            .expect("the edit was saved");
+        match record.edits {
+            ChunkEdits::Delta(ovr) => assert_eq!(
+                ovr.voxel_diffs.get(&LocalPos::from_index(5)),
+                Some(&vox(3)),
+            ),
+            _ => panic!("expected a Delta record"),
+        }
+    }
+
+    /// The mechanism, not just the outcome: a failed load blocks the chunk and
+    /// is counted for the diagnostics panel, but the chunk stays playable, so
+    /// the edit is visible in memory and only the save is refused.
+    #[test]
+    fn a_chunk_whose_record_failed_to_load_is_blocked_but_stays_playable() {
+        use crate::world::mutation::{MutationCommand, WorldMutation};
+
+        for (i, (what, flags, data)) in unreadable_rows().into_iter().enumerate() {
+            let dir = ScratchDir::new(&format!("blocked_{i}"));
+            let pos = IVec3::new(3, 1, 2);
+            let (_persistence, mut world) = load_chunk_over(&dir, pos, Some((flags, &data)));
+
+            assert!(world.get_chunk(pos).unwrap().persist_blocked, "{what}: not blocked");
+            assert_eq!(
+                world.sample_residency(Default::default()).blocked_chunks,
+                1,
+                "{what}: not counted",
+            );
+
+            world
+                .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                    chunk: pos,
+                    index: 5,
+                    voxel: vox(3),
+                }))
+                .expect("an edit still applies to a blocked chunk");
+            let chunk = world.get_chunk(pos).unwrap();
+            assert_eq!(chunk.data.voxels.voxel(5), vox(3), "{what}: edit not visible");
+            assert!(chunk.persist_dirty, "{what}: the edit is still unsaved work");
+            assert!(build_chunk_record(chunk).is_none(), "{what}: a record was built");
+        }
+    }
+
+    /// Control: a readable record loads unblocked, and an edit on top of it
+    /// saves, keeping what the record already held.
+    #[test]
+    fn a_chunk_with_a_readable_record_is_not_blocked_and_saves_its_edits() {
+        use crate::world::mutation::{MutationCommand, WorldMutation};
+
+        let dir = ScratchDir::new("blocked_control");
+        let pos = IVec3::new(3, 1, 2);
+        let mut held = ChunkOverrides::default();
+        held.voxel_diffs.insert(LocalPos::from_index(7), vox(9));
+        let record = ChunkRecord {
+            edits: ChunkEdits::Delta(held),
+            tags: ChunkTags::default(),
+            seam_finalized: false,
+        };
+        let raw = serialize_chunk_record_raw(&record).expect("record serializes");
+        let blob = zstd::encode_all(&raw[..], 3).expect("zstd encodes");
+
+        let (persistence, mut world) =
+            load_chunk_over(&dir, pos, Some((FLAG_ZSTD_PLAIN, &blob)));
+        let chunk = world.get_chunk(pos).unwrap();
+        assert!(!chunk.persist_blocked, "a readable record must not block the chunk");
+        assert_eq!(chunk.data.voxels.voxel(7), vox(9), "the stored edit was applied");
+
+        world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                chunk: pos,
+                index: 5,
+                voxel: vox(3),
+            }))
+            .expect("authoring edit accepted");
+        persistence.save_dirty_chunks(&mut world).expect("autosave runs");
+
+        let saved = persistence
+            .db()
+            .expect("database is open")
+            .load_chunk_record(pos)
+            .expect("the row is readable")
+            .expect("the edit was saved");
+        match saved.edits {
+            ChunkEdits::Delta(ovr) => {
+                assert_eq!(ovr.voxel_diffs.get(&LocalPos::from_index(5)), Some(&vox(3)));
+                assert_eq!(ovr.voxel_diffs.get(&LocalPos::from_index(7)), Some(&vox(9)));
+            }
             _ => panic!("expected a Delta record"),
         }
     }

@@ -16,6 +16,23 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **A chunk whose saved record failed to load no longer overwrites it** (F7,
+  #60). When a record could not be decoded (a corrupt blob, an unknown
+  compression flag, a SQLite error), the chunk came back looking untouched, and
+  its next save, or water flowing into it, replaced the unreadable row with a
+  small delta and lost every edit the row held. This is what turned F2 from a
+  failed load into lost edits. Such a chunk is now blocked from saving while it
+  stays loaded: it remains playable, the record is left exactly as it was, a
+  warning names its coordinates, and the Performance panel counts blocked
+  chunks. Edits made in a blocked chunk are not saved. Unloading and reloading
+  the chunk tries the load again. No save-format change.
+
+---
+
 ## [0.4.1] — Clean slate
 
 Milestone M1. Fixes only: three ways a world could lose data or water, one

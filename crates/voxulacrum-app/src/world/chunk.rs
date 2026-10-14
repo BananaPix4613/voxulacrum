@@ -94,6 +94,11 @@ pub struct LoadedChunk {
     pub mesh_seq: u64,
     pub mesh: Option<ChunkMesh>,
     pub persist_dirty: bool,
+    /// The chunk's saved record failed to load, so what is in memory is not the
+    /// whole story and saving it would replace that record on disk with a smaller
+    /// one. Set by `apply_persisted_record`; `build_chunk_edits` then builds
+    /// nothing for the chunk for as long as it stays loaded.
+    pub persist_blocked: bool,
     /// When the last edit occurred. None = generation-triggered dirty (no debounce).
     pub mesh_debounce: Option<Instant>,
     /// True once the cross-chunk seam pass (`world::seam`) has finalized this
@@ -119,6 +124,7 @@ impl LoadedChunk {
             mesh_seq: 0,
             mesh: None,
             persist_dirty: false,
+            persist_blocked: false,
             mesh_debounce: None,
             seam_finalized: false,
             smoothing_distances: None,

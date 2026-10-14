@@ -1231,6 +1231,15 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
             mb(r.peak_cpu_bytes),
             mb(r.peak_gpu_bytes),
         ));
+        if r.blocked_chunks > 0 {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 60, 60),
+                format!(
+                    "  {} chunk(s) not saving: saved record unreadable (see log)",
+                    r.blocked_chunks
+                ),
+            );
+        }
 
         ui.separator();
         if ui.button("Verify determinism (32 chunks)").clicked() {
