@@ -7,6 +7,17 @@ members = [
     "crates/nodegraph-hotreload",
     "crates/nodegraph-editor",
     "crates/voxulacrum-app",
+    "crates/voxulacrum",
+    "crates/boundary-check",
+]
+
+# Engine crates. Every other workspace member is a consumer (the testbed now,
+# games later) and may depend on `voxulacrum` only. Checked in CI by
+# `cargo run -p boundary-check`.
+[workspace.metadata.voxulacrum]
+engine-crates = [
+    "voxel-core", "nodegraph-ir", "nodegraph-eval", "nodegraph-hotreload",
+    "nodegraph-editor", "voxulacrum-app", "voxulacrum", "boundary-check",
 ]
 
 [workspace.package]
