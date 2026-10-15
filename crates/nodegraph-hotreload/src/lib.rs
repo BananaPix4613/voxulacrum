@@ -21,6 +21,7 @@ mod blueprint;
 mod species;
 mod error;
 mod example;
+mod names;
 mod watcher;
 
 pub use error::{HotReloadError, HotReloadResult};

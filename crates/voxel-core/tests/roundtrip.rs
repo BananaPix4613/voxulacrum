@@ -1,6 +1,8 @@
 //! Integration tests for voxel-core.
 
-use voxel_core::{ChunkBuffer, MaterialId, MaterialRegistry, ShapeId, StorageKind, Voxel};
+use voxel_core::{
+    ChunkBuffer, MaterialId, MaterialRegistry, ShapeId, StorageKind, Voxel, ENGINE_NAMESPACE,
+};
 
 #[test]
 fn voxel_pack_unpack_full_field_sweep() {
@@ -73,11 +75,14 @@ fn shape_discriminants_are_stable() {
 /// contract: authoring may add materials, but must not renumber these.
 #[test]
 fn the_shipped_material_ids_are_stable() {
-    let reg = MaterialRegistry::from_ron_str(include_str!("../../../assets/materials.ron"))
-        .expect("assets/materials.ron is valid");
+    let reg = MaterialRegistry::from_ron_str(
+        include_str!("../../../assets/materials.ron"),
+        ENGINE_NAMESPACE,
+    )
+    .expect("assets/materials.ron is valid");
     assert!(reg.len() >= 11);
-    let grass = reg.resolve("grass_soil").expect("grass_soil resolves");
+    let grass = reg.resolve_str("grass_soil", ENGINE_NAMESPACE).expect("grass_soil resolves");
     assert_eq!(grass, MaterialId(6));
     assert_eq!(reg.get(grass).unwrap().display_name, "Grass Soil");
-    assert!(reg.resolve("nonexistent").is_none());
+    assert!(reg.resolve_str("nonexistent", ENGINE_NAMESPACE).is_err());
 }

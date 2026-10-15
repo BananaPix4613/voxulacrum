@@ -9,15 +9,20 @@ use nodegraph_ir::{Graph, NodeKind};
 use voxel_core::{Blueprint, MaterialRegistry, ResolvedBlueprint};
 
 use crate::error::{HotReloadError, HotReloadResult};
+use crate::names::local_name;
 
-/// Load and resolve `<dir>/<name>.blueprint.json`.
+/// Load and resolve the blueprint `name` names, for content that loads under
+/// `namespace`: `<dir>/<file>.blueprint.json`, with its materials resolved in
+/// that namespace.
 pub fn load_blueprint(
     dir: &Path,
     name: &str,
     registry: &MaterialRegistry,
+    namespace: &str,
 ) -> HotReloadResult<ResolvedBlueprint> {
-    Blueprint::load(dir, name)
-        .and_then(|bp| bp.resolve(registry))
+    let file = local_name(name, namespace, "blueprint")?;
+    Blueprint::load(dir, &file)
+        .and_then(|bp| bp.resolve(registry, namespace))
         .map_err(HotReloadError::Blueprint)
 }
 
@@ -28,17 +33,18 @@ pub fn resolve_blueprints(
     graph: &mut Graph,
     dir: &Path,
     registry: &MaterialRegistry,
+    namespace: &str,
 ) -> HotReloadResult<()> {
     for (_, node) in graph.nodes.iter_mut() {
         match &mut node.kind {
             NodeKind::PlaceBlueprint(p) => {
                 if p.resolved.is_none() {
-                    p.resolved = Some(load_blueprint(dir, &p.blueprint, registry)?);
+                    p.resolved = Some(load_blueprint(dir, &p.blueprint, registry, namespace)?);
                 }
             }
             NodeKind::PlaceStructure(p) => {
                 if p.resolved.is_none() {
-                    p.resolved = Some(load_blueprint(dir, &p.blueprint, registry)?);
+                    p.resolved = Some(load_blueprint(dir, &p.blueprint, registry, namespace)?);
                 }
             }
             _ => {}

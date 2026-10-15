@@ -19,6 +19,7 @@ use nodegraph_ir::{
     BoundaryPort, Graph, GraphBoundary, GraphKind, LibraryGraphId, LibraryGraphRegistry, PinType,
 };
 use serde::Deserialize;
+use voxel_core::QualifiedName;
 
 /// One authored library asset (`*.library.json`).
 #[derive(Deserialize)]
@@ -39,10 +40,10 @@ struct LibraryAsset {
 pub struct LoadedLibraries {
     registry: LibraryGraphRegistry,
     kernels: HashMap<LibraryGraphId, LibraryKernel>,
-    /// `(id, stable string handle)` in id order, for menus and diagnostics. The
-    /// registry carries boundaries and the kernel map carries computations;
-    /// neither carries a name, and a menu of numeric ids is not a menu.
-    entries: Vec<(LibraryGraphId, String)>,
+    /// `(id, name)` in id order, for menus and diagnostics. The registry carries
+    /// boundaries and the kernel map carries computations; neither carries a
+    /// name, and a menu of numeric ids is not a menu.
+    entries: Vec<(LibraryGraphId, QualifiedName)>,
 }
 
 impl LoadedLibraries {
@@ -57,21 +58,22 @@ impl LoadedLibraries {
     }
 
     /// `(id, name)` for every loaded library, in id order.
-    pub fn entries(&self) -> &[(LibraryGraphId, String)] {
+    pub fn entries(&self) -> &[(LibraryGraphId, QualifiedName)] {
         &self.entries
     }
 
-    /// Build from parsed assets: validate contiguous ids, project each boundary
-    /// into a Library `Graph` (for pin resolution) and resolve its kernel name.
-    /// Fails on an empty set, a non-contiguous id, or an unknown kernel name.
-    fn from_assets(mut assets: Vec<LibraryAsset>) -> Result<Self, String> {
+    /// Build from parsed assets, naming them in `namespace`: validate contiguous
+    /// ids and valid, unique names, project each boundary into a Library `Graph`
+    /// (for pin resolution) and resolve its kernel name. Fails on an empty set,
+    /// a non-contiguous id, a bad or duplicate name, or an unknown kernel name.
+    fn from_assets(mut assets: Vec<LibraryAsset>, namespace: &str) -> Result<Self, String> {
         assets.sort_by_key(|a| a.id);
         if assets.is_empty() {
             return Err("library registry must have at least one entry".into());
         }
         let mut registry = LibraryGraphRegistry::new();
         let mut kernels = HashMap::new();
-        let mut entries = Vec::new();
+        let mut entries: Vec<(LibraryGraphId, QualifiedName)> = Vec::new();
         for (i, a) in assets.into_iter().enumerate() {
             if a.id as usize != i {
                 return Err(format!(
@@ -80,22 +82,26 @@ impl LoadedLibraries {
                 ));
             }
             let id = LibraryGraphId(a.id);
+            let name = QualifiedName::new(namespace, &a.id_name)
+                .map_err(|e| format!("library id {}: {e}", a.id))?;
+            if entries.iter().any(|(_, existing)| *existing == name) {
+                return Err(format!("duplicate library id_name: {:?}", a.id_name));
+            }
             let kernel = LibraryKernel::from_name(&a.kernel).ok_or_else(|| {
-                format!("library '{}' names unknown kernel '{}'", a.id_name, a.kernel)
+                format!("library {name} names unknown kernel '{}'", a.kernel)
             })?;
             let mut graph = Graph::of_kind(GraphKind::Library);
             graph.boundary = a.boundary;
             registry.insert(id, graph);
             kernels.insert(id, kernel);
-            // After the kernel lookup, which borrows `id_name` for its error
-            // message; moving it here needs no clone.
-            entries.push((id, a.id_name));
+            entries.push((id, name));
         }
         Ok(Self { registry, kernels, entries })
     }
 
-    /// Load every `*.library.json` in `dir`, ordered by filename for determinism.
-    pub fn load_from_dir(dir: &std::path::Path) -> Result<Self, String> {
+    /// Load every `*.library.json` in `dir`, ordered by filename for
+    /// determinism, naming them in `namespace`.
+    pub fn load_from_dir(dir: &std::path::Path, namespace: &str) -> Result<Self, String> {
         let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let mut paths: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -110,11 +116,12 @@ impl LoadedLibraries {
                 serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
             assets.push(asset);
         }
-        Self::from_assets(assets)
+        Self::from_assets(assets, namespace)
     }
 
-    /// Hand-authored fallback, kept in sync with the shipped assets (locked by a test).
-    pub fn load_initial() -> Self {
+    /// Hand-authored fallback, kept in sync with the shipped assets (locked by a
+    /// test), named in `namespace` like a loaded set.
+    pub fn load_initial(namespace: &str) -> Self {
         let assets = vec![
             LibraryAsset {
                 id: 0,
@@ -170,7 +177,7 @@ impl LoadedLibraries {
                 kernel: "poisson_placement".into(),
             },
         ];
-        Self::from_assets(assets).expect("built-in library set is valid")
+        Self::from_assets(assets, namespace).expect("built-in library set is valid")
     }
 }
 
@@ -185,7 +192,8 @@ pub fn libraries_dir() -> PathBuf {
 /// and the hand-authored fallback set is used instead.
 pub fn load_libraries() -> Arc<LoadedLibraries> {
     let dir = libraries_dir();
-    match LoadedLibraries::load_from_dir(&dir) {
+    let namespace = crate::paths::namespace();
+    match LoadedLibraries::load_from_dir(&dir, namespace) {
         Ok(libs) => {
             log::info!(
                 "Loaded {} libraries ({} kernels) from {}",
@@ -200,7 +208,7 @@ pub fn load_libraries() -> Arc<LoadedLibraries> {
                 "Failed to load libraries from {}: {e}. Falling back to built-in set.",
                 dir.display()
             );
-            Arc::new(LoadedLibraries::load_initial())
+            Arc::new(LoadedLibraries::load_initial(namespace))
         }
     }
 }
@@ -220,10 +228,20 @@ impl std::ops::Deref for LibrariesRes {
 mod tests {
     use super::*;
     use nodegraph_ir::{LibraryRefParams, NodeKind};
+    use voxel_core::ENGINE_NAMESPACE;
+
+    fn asset(id: u32, id_name: &str, kernel: &str) -> LibraryAsset {
+        LibraryAsset {
+            id,
+            id_name: id_name.into(),
+            boundary: GraphBoundary::default(),
+            kernel: kernel.into(),
+        }
+    }
 
     #[test]
     fn loads_and_binds_kernel() {
-        let libs = LoadedLibraries::load_initial();
+        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
         assert_eq!(libs.kernels.len(), 5);
         let id = LibraryGraphId(0);
         assert_eq!(libs.kernels.get(&id), Some(&LibraryKernel::BiomeBorderFade));
@@ -231,11 +249,12 @@ mod tests {
         let g = libs.registry.get(id).expect("library graph present");
         assert_eq!(g.boundary.inputs.len(), 2);
         assert_eq!(g.boundary.output("weight").unwrap().ty, PinType::SurfaceField);
+        assert_eq!(libs.entries[0].1.to_string(), "voxulacrum:biome_border_fade");
     }
 
     #[test]
     fn library_ref_resolves_against_loaded_registry() {
-        let libs = LoadedLibraries::load_initial();
+        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
         let mut g = Graph::new();
         let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
             library: LibraryGraphId(0),
@@ -253,24 +272,30 @@ mod tests {
 
     #[test]
     fn non_contiguous_ids_rejected() {
-        let a0 = LibraryAsset {
-            id: 0, id_name: "a".into(), boundary: GraphBoundary::default(),
-            kernel: "biome_border_fade".into(),
-        };
-        let a2 = LibraryAsset {
-            id: 2, id_name: "b".into(), boundary: GraphBoundary::default(),
-            kernel: "biome_border_fade".into(),
-        };
-        assert!(LoadedLibraries::from_assets(vec![a0, a2]).is_err());
+        let assets = vec![asset(0, "a", "biome_border_fade"), asset(2, "b", "biome_border_fade")];
+        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        assert!(err.contains("contiguous"), "{err}");
     }
 
     #[test]
     fn unknown_kernel_rejected() {
-        let a = LibraryAsset {
-            id: 0, id_name: "x".into(), boundary: GraphBoundary::default(),
-            kernel: "does_not_exist".into(),
-        };
-        assert!(LoadedLibraries::from_assets(vec![a]).is_err());
+        let assets = vec![asset(0, "x", "does_not_exist")];
+        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        assert!(err.contains("does_not_exist"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_names_rejected() {
+        let assets = vec![asset(0, "a", "biome_border_fade"), asset(1, "a", "biome_border_fade")];
+        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_name_is_rejected() {
+        let assets = vec![asset(0, "Cave Noise", "standard_cave_noise")];
+        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        assert!(err.contains("Cave Noise"), "{err}");
     }
 
     #[test]
@@ -287,9 +312,11 @@ mod tests {
             .iter()
             .map(|s| serde_json::from_str(s).expect("asset JSON valid"))
             .collect();
-        let from_files = LoadedLibraries::from_assets(assets).expect("assets valid");
-        let initial = LoadedLibraries::load_initial();
+        let from_files =
+            LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect("assets valid");
+        let initial = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
         assert_eq!(from_files.kernels, initial.kernels);
+        assert_eq!(from_files.entries, initial.entries, "names drifted");
         for id in 0u32..5 {
             let gid = LibraryGraphId(id);
             assert_eq!(

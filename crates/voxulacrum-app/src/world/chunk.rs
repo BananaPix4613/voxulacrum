@@ -382,8 +382,8 @@ mod tests {
         // tree in the world renders as blocks.
         let reg = crate::materials::embedded_registry();
         let mask = reg.render_delegated_mask();
-        let wood = reg.resolve("wood").expect("wood is registered");
-        let stone = reg.resolve("granite").expect("granite is registered");
+        let wood = reg.resolve_str("wood", crate::paths::namespace()).expect("wood is registered");
+        let stone = reg.resolve_str("granite", crate::paths::namespace()).expect("granite is registered");
 
         assert_eq!(
             visible_to_mesher(Voxel::cube(wood), mask),

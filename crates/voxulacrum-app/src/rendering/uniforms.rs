@@ -586,7 +586,7 @@ mod tests {
     /// The shipped table, read strictly: no fallback, so a broken file fails here
     /// instead of quietly comparing the built-in copy to itself.
     fn shipped_registry() -> MaterialRegistry {
-        MaterialRegistry::load_from_ron(&crate::materials::materials_path())
+        MaterialRegistry::load_from_ron(&crate::materials::materials_path(), crate::paths::namespace())
             .expect("assets/materials.ron loads")
     }
 
@@ -615,7 +615,9 @@ mod tests {
         assert_eq!(table[registry.len()], [1.0, 0.0, 1.0, 1.0], "first slot past the registry");
         assert_eq!(table[MATERIAL_COLOR_SLOTS - 1], [1.0, 0.0, 1.0, 1.0], "last slot");
         // One material by name rather than by position.
-        let grass = registry.resolve("grass_soil").expect("grass_soil is registered");
+        let grass = registry
+            .resolve_str("grass_soil", crate::paths::namespace())
+            .expect("grass_soil is registered");
         let color = registry.get(grass).expect("grass_soil resolves to a definition").color;
         assert_eq!(table[grass.0 as usize], [color[0], color[1], color[2], 1.0]);
     }

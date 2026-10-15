@@ -548,7 +548,7 @@ fn draw_materials(ui: &mut egui::Ui, registry: &voxel_core::MaterialRegistry) {
                 );
                 ui.label(format!("{i}  {}", def.display_name)).on_hover_text(format!(
                     "{}\nhardness {:.2}, sharpness {:.2}\n{}{}{}",
-                    def.id_name,
+                    def.name,
                     def.hardness,
                     def.sharpness,
                     if def.permeable { "permeable " } else { "" },

@@ -180,7 +180,8 @@ pub struct BlueprintCell {
     pub at: [i32; 3],
     /// Cell geometry, in the blueprint vocabulary.
     pub shape: BlueprintShape,
-    /// Material `id_name`, resolved through the registry at load.
+    /// Material name, bare or `namespace:name`, resolved through the registry
+    /// at load. Bare names resolve in the namespace of the blueprint's content.
     pub material: String,
 }
 
@@ -250,14 +251,10 @@ impl Blueprint {
     /// a string an author typed into a text field, and a path separator or `..`
     /// in it would write outside the blueprint library.
     pub fn save(&self, dir: &Path) -> Result<(), String> {
-        if self.name.is_empty()
-            || !self.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(format!(
-                "blueprint name '{}' must be non-empty and use only letters, digits, '_' and '-' — it becomes a filename",
-                self.name
-            ));
-        }
+        // The same rule as every other content name, so a captured blueprint can
+        // always be referenced from a graph.
+        crate::name::validate_part(&self.name, "blueprint name")
+            .map_err(|e| format!("{e} (it becomes a filename)"))?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = dir.join(format!("{}.blueprint.json", self.name));
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
@@ -286,15 +283,19 @@ impl Blueprint {
     /// An unknown material is an error, not a fallback: silently substituting
     /// would put a wrong block in the world with nothing to notice it, which is
     /// the failure mode named material references exist to prevent.
-    pub fn resolve(&self, registry: &MaterialRegistry) -> Result<ResolvedBlueprint, String> {
+    /// 
+    /// `namespace` is the namespace of the content this blueprint belongs to,
+    /// which bare material names resolve in.
+    pub fn resolve(
+        &self,
+        registry: &MaterialRegistry,
+        namespace: &str,
+    ) -> Result<ResolvedBlueprint, String> {
         let mut cells = Vec::with_capacity(self.cells.len());
         for cell in &self.cells {
-            let material = registry.resolve(&cell.material).ok_or_else(|| {
-                format!(
-                    "blueprint '{}': material '{}' is not in the registry",
-                    self.name, cell.material
-                )
-            })?;
+            let material = registry
+                .resolve_str(&cell.material, namespace)
+                .map_err(|e| format!("blueprint '{}': {e}", self.name))?;
             cells.push((
                 cell.at,
                 Voxel { shape: cell.shape.to_shape_id(), material, flags: 0 },
@@ -358,6 +359,7 @@ impl ResolvedBlueprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::name::ENGINE_NAMESPACE;
 
     const SAMPLE: &str = r#"{
         "version": 1,
@@ -397,17 +399,16 @@ mod tests {
     #[test]
     fn resolves_names_to_ids_and_shapes_to_the_runtime_vocabulary() {
         let registry = crate::material_registry::shipped_for_tests();
-        assert!(
-            registry.resolve("limestone").is_some(),
-            "test fixture assumes the built-in registry defines limestone",
-        );
+        let limestone = registry
+            .resolve_str("limestone", ENGINE_NAMESPACE)
+            .expect("test fixture assumes the built-in registry defines limestone");
         let resolved = Blueprint::from_json(SAMPLE)
             .unwrap()
-            .resolve(&registry)
+            .resolve(&registry, ENGINE_NAMESPACE)
             .expect("resolves");
 
         assert_eq!(resolved.cells[0].1.shape, ShapeId::Cube);
-        assert_eq!(resolved.cells[0].1.material, registry.resolve("limestone").unwrap());
+        assert_eq!(resolved.cells[0].1.material, limestone);
         assert_eq!(resolved.cells[1].1.shape, ShapeId::SlabBottom);
         assert_eq!(resolved.extent(), Some(([0, 0, 0], [1, 2, 1])));
         assert_eq!(resolved.footprint().count(), 2);
@@ -418,7 +419,7 @@ mod tests {
         let bad = SAMPLE.replace("\"limestone\"", "\"unobtainium\"");
         let err = Blueprint::from_json(&bad)
             .unwrap()
-            .resolve(&crate::material_registry::shipped_for_tests())
+            .resolve(&crate::material_registry::shipped_for_tests(), ENGINE_NAMESPACE)
             .expect_err("must refuse");
         assert!(err.contains("unobtainium"), "the error should name it: {err}");
     }
@@ -452,7 +453,10 @@ mod tests {
 
     #[test]
     fn horizontal_reach_is_the_same_at_every_rotation() {
-        let bp = Blueprint::from_json(SAMPLE).unwrap().resolve(&crate::material_registry::shipped_for_tests()).unwrap();
+        let bp = Blueprint::from_json(SAMPLE)
+            .unwrap()
+            .resolve(&crate::material_registry::shipped_for_tests(), ENGINE_NAMESPACE)
+            .unwrap();
         let reach = bp.horizontal_reach();
         for yaw in Yaw::ALL {
             let rotated: i32 = bp
@@ -495,7 +499,15 @@ mod tests {
         const ROCK: &str = include_str!("../../../assets/blueprints/rock.blueprint.json");
         Blueprint::from_json(ROCK)
             .expect("shipped blueprint parses")
-            .resolve(&crate::material_registry::shipped_for_tests())
+            .resolve(&crate::material_registry::shipped_for_tests(), ENGINE_NAMESPACE)
             .expect("shipped blueprint resolves");
+    }
+    
+    #[test]
+    fn a_name_no_graph_could_reference_is_refused() {
+        let mut bp = Blueprint::from_json(SAMPLE).unwrap();
+        bp.name = "My Rock".to_string();
+        let err = bp.save(Path::new(".")).expect_err("must refuse");
+        assert!(err.contains("filename"), "the error should say why: {err}");
     }
 }

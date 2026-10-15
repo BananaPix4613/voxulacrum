@@ -64,6 +64,13 @@ pub fn save_name() -> &'static str {
     CONTENT.get().map_or("default", |content| content.name.as_str())
 }
 
+/// Namespace this world's registry entries are known by, and the one bare names
+/// in its content resolve in: the engine's own for the reference world, the
+/// content name otherwise.
+pub fn namespace() -> &'static str {
+    CONTENT.get().map_or(voxel_core::ENGINE_NAMESPACE, |content| content.name.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +88,6 @@ mod tests {
     fn unset_content_is_the_reference_world() {
         assert_eq!(content_root(), asset_root().join("assets"));
         assert_eq!(save_name(), "default");
+        assert_eq!(namespace(), voxel_core::ENGINE_NAMESPACE);
     }
 }

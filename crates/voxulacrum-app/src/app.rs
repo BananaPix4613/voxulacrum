@@ -861,21 +861,20 @@ impl RunOptions {
     /// input bindings and parameter presets still come from the engine.
     /// 
     /// A relative `root` is resolved against the working directory.
-    /// 
+    ///
+    /// `name` is also the namespace this content's registry entries are known
+    /// by (`testbed:test_light`), so it follows the namespace rule: one or more
+    /// of `a-z`, `0-9`, `_` and `-`. That also keeps it a single directory
+    /// name under `saves/`.
+    ///
     /// # Panics
     /// 
-    /// If `name` is not a single directory name: empty, `.` or `..`, or
-    /// containing a path separator.
+    /// If `name` is not a valid namespace.
     pub fn content(mut self, name: impl Into<String>, root: impl Into<PathBuf>) -> Self {
         let name = name.into();
-        let mut parts = std::path::Path::new(&name).components();
-        assert!(
-            matches!(
-                (parts.next(), parts.next()),
-                (Some(std::path::Component::Normal(_)), None)
-            ),
-            "content name {name:?} must be a single directory name"
-        );
+        if let Err(e) = voxel_core::QualifiedName::validate_namespace(&name) {
+            panic!("content name {name:?} must be a valid namespace: {e}");
+        }
         self.content = Some((name, root.into()));
         self
     }
@@ -926,22 +925,28 @@ mod tests {
     fn content_accepts_a_directory_name() {
         let _ = RunOptions::new().content("testbed", "content");
     }
-    
+
     #[test]
-    #[should_panic(expected = "single directory name")]
+    #[should_panic(expected = "must be a valid namespace")]
     fn content_rejects_a_path() {
         let _ = RunOptions::new().content("a/b", "content");
     }
-    
+
     #[test]
-    #[should_panic(expected = "single directory name")]
+    #[should_panic(expected = "must be a valid namespace")]
     fn content_rejects_a_parent_reference() {
         let _ = RunOptions::new().content("..", "content");
     }
-    
+
     #[test]
-    #[should_panic(expected = "single directory name")]
+    #[should_panic(expected = "must be a valid namespace")]
     fn content_rejects_an_empty_name() {
         let _ = RunOptions::new().content("", "content");
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a valid namespace")]
+    fn content_rejects_a_name_that_is_not_a_namespace() {
+        let _ = RunOptions::new().content("My World", "content");
     }
 }
