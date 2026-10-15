@@ -8,7 +8,9 @@
 //!
 //! | Path | Contents |
 //! |---|---|
-//! | [`run`] | Engine entry point: opens the window and runs the frame loop |
+//! | [`run`] | Engine entry point: runs the shipped reference world |
+//! | [`run_with`] | Engine entry point with [`RunOptions`] |
+//! | [`RunOptions`] | How the engine starts: where world content comes from and where its saves go |
 //!
 //! A subsystem's API arrives as a module named for that subsystem when a
 //! consumer first needs it, not before.
@@ -20,11 +22,12 @@
 //! exported here follow three rules:
 //!
 //! - No third-party types (`glam`, `wgpu`, `winit`, `bevy_ecs`) in signatures.
-//! - Public structs and enums are `#[non_exhaustive]`.
+//! - Public structs and enums are `#[non_exhaustive]`, or have only private
+//!   fields, so adding to them is not a breaking change.
 //! - Identifiers are newtypes, not bare integers.
 //!
-//! Everything else in the engine in internal and may change without notice.
+//! Everything else in the engine is internal and may change without notice.
 
 #![warn(missing_docs)]
 
-pub use voxulacrum_app::run;
+pub use voxulacrum_app::{run, run_with, RunOptions};

@@ -25,15 +25,15 @@ use super::{split_world_voxel, World};
 
 /// The authored blueprint library on disk.
 pub fn blueprint_dir() -> PathBuf {
-    crate::paths::asset_root().join("assets").join("blueprints")
+    crate::paths::content_root().join("blueprints")
 }
 
 /// Where authored species live. Beside `blueprint_dir` rather than in its own
 /// module because both answer "where does authored content sit", and two
 /// open-coded copies of the `assets/` prefix is how the species dir was wrong
-/// the first time. A shared home for content directories is owned.
+/// the first time. Both now resolve through `paths::content_root`.
 pub fn species_dir() -> PathBuf {
-    crate::paths::asset_root().join("assets").join("species")
+    crate::paths::content_root().join("species")
 }
 
 /// Capture the solid voxels in the inclusive world-space box `[min, max]` into a

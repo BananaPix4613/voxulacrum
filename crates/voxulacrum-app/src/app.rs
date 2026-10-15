@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use bevy_ecs::event::Events;
@@ -405,8 +406,8 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
     // startup fill needs the DB to overlay persisted player edits (without it,
     // spawn-area edits were discarded and then overwritten on the next save),
     // and `open` performs the VOXEL_FORMAT_VERSION save wipe, which must happen
-    // before anything reads a record.
-    let persistence = match WorldPersistence::open("default", generator.world_seed()) {
+    // before anything reads a record. The save name follows the content root.
+    let persistence = match WorldPersistence::open(paths::save_name(), generator.world_seed()) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("Persistence init failed: {e}. Running without saves.");
@@ -841,10 +842,61 @@ impl ApplicationHandler for App {
 // run
 // ---------------------------------------------------------------------------
 
+/// How [`run_with`] starts the engine. The default runs the shipped reference
+/// world from the engine's `assets/` directory.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    content: Option<(String, PathBuf)>,
+}
+
+impl RunOptions {
+    /// The defaults: the shipped reference world.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Load world content (graphs, materials, prefabs, libraries, blueprints
+    /// and species) from `root` instead of the engine's `assets/` directory,
+    /// and keep this world's saves in `saves/<name>/`. Shaders, palettes,
+    /// input bindings and parameter presets still come from the engine.
+    /// 
+    /// A relative `root` is resolved against the working directory.
+    /// 
+    /// # Panics
+    /// 
+    /// If `name` is not a single directory name: empty, `.` or `..`, or
+    /// containing a path separator.
+    pub fn content(mut self, name: impl Into<String>, root: impl Into<PathBuf>) -> Self {
+        let name = name.into();
+        let mut parts = std::path::Path::new(&name).components();
+        assert!(
+            matches!(
+                (parts.next(), parts.next()),
+                (Some(std::path::Component::Normal(_)), None)
+            ),
+            "content name {name:?} must be a single directory name"
+        );
+        self.content = Some((name, root.into()));
+        self
+    }
+}
+
+/// Runs the engine with the default [`RunOptions`]: the shipped reference world.
+pub fn run() {
+    run_with(RunOptions::default());
+}
+
 /// Runs the engine. `--validate-graphs` and `--verify-generation` run headless
 /// and exit; otherwise this opens the window and enters the event loop.
-pub fn run() {
+pub fn run_with(options: RunOptions) {
     env_logger::init();
+    
+    // Before anything reads content, including the headless checks below, so
+    // `--verify-generation` checks whichever world this run loads.
+    if let Some((name, root)) = options.content {
+        log::info!("Content: {} (saves/{name})", root.display());
+        paths::set_content(name, root);
+    }
     
     // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
     // Handled before the event loop exists, so this path never creates a window
@@ -864,4 +916,32 @@ pub fn run() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("Event loop failed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunOptions;
+    
+    #[test]
+    fn content_accepts_a_directory_name() {
+        let _ = RunOptions::new().content("testbed", "content");
+    }
+    
+    #[test]
+    #[should_panic(expected = "single directory name")]
+    fn content_rejects_a_path() {
+        let _ = RunOptions::new().content("a/b", "content");
+    }
+    
+    #[test]
+    #[should_panic(expected = "single directory name")]
+    fn content_rejects_a_parent_reference() {
+        let _ = RunOptions::new().content("..", "content");
+    }
+    
+    #[test]
+    #[should_panic(expected = "single directory name")]
+    fn content_rejects_an_empty_name() {
+        let _ = RunOptions::new().content("", "content");
+    }
 }

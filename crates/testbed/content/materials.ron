@@ -1,0 +1,13 @@
+// Testbed material table. Ids are contiguous from 0, and 0 is air. Neutral
+// greys for terrain, plus three saturated colors so placed blocks stand out.
+(
+    materials: [
+        (id: 0, id_name: "air",        display_name: "Air",        color: (0.0, 0.0, 0.0),    sharpness: 0.0, hardness: 0.0, permeable: true,  supports_flora: false),
+        (id: 1, id_name: "test_light", display_name: "Test Light", color: (0.85, 0.85, 0.85), sharpness: 0.5, hardness: 0.5, permeable: false, supports_flora: false),
+        (id: 2, id_name: "test_mid",   display_name: "Test Mid",   color: (0.55, 0.55, 0.55), sharpness: 0.5, hardness: 0.5, permeable: false, supports_flora: false),
+        (id: 3, id_name: "test_dark",  display_name: "Test Dark",  color: (0.25, 0.25, 0.25), sharpness: 0.5, hardness: 0.5, permeable: false, supports_flora: false),
+        (id: 4, id_name: "test_red",   display_name: "Test Red",   color: (0.80, 0.25, 0.20), sharpness: 0.5, hardness: 0.5, permeable: false, supports_flora: false),
+        (id: 5, id_name: "test_green", display_name: "Test Green", color: (0.25, 0.65, 0.30), sharpness: 0.5, hardness: 0.5, permeable: false, supports_flora: false),
+        (id: 6, id_name: "test_blue",  display_name: "Test Blue",  color: (0.25, 0.40, 0.80), sharpness: 0.5, hardness: 0.5, permeable: false, supports_flora: false),
+    ],
+)

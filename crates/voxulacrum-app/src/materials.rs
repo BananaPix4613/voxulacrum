@@ -19,7 +19,7 @@ const SHIPPED_MATERIALS: &str = include_str!("../../../assets/materials.ron");
 
 /// Path to the authored material table.
 pub fn materials_path() -> PathBuf {
-    crate::paths::asset_root().join("assets").join("materials.ron")
+    crate::paths::content_root().join("materials.ron")
 }
 
 /// The registry built from the copy of `assets/materials.ron` compiled into this

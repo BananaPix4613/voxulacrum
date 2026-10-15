@@ -1,0 +1,24 @@
+{
+  "kind": "Zone",
+  "boundary": { "inputs": [], "outputs": [] },
+  "nodes": [
+    { "value": null, "version": 0 },
+    {
+      "value": {
+        "kind": { "type": "GraphRef", "target": "World" },
+        "position": [0.0, 0.0]
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "kind": { "type": "ZoneOutput", "biome_bands": [], "biome_ids": [0] },
+        "position": [280.0, 0.0]
+      },
+      "version": 1
+    }
+  ],
+  "edges": [
+    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 2, "version": 1 }, "pin": 0 } }
+  ]
+}

@@ -1,0 +1,9 @@
+[package]
+name = "testbed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+voxulacrum = { path = "../voxulacrum" }

@@ -176,7 +176,7 @@ impl LoadedLibraries {
 
 /// Directory holding authored library assets.
 pub fn libraries_dir() -> PathBuf {
-    crate::paths::asset_root().join("assets").join("libraries")
+    crate::paths::content_root().join("libraries")
 }
 
 /// Load the shared library set: dir-scan primary, `load_initial` fallback.

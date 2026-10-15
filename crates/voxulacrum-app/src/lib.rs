@@ -26,4 +26,4 @@ mod jobs;
 mod validate;
 mod verify;
 
-pub use app::run;
+pub use app::{run, run_with, RunOptions};

@@ -108,7 +108,7 @@ struct PrefabFileRon {
 
 /// Path to the authored prefab table.
 pub fn prefabs_path() -> PathBuf {
-    crate::paths::asset_root().join("assets").join("prefabs.ron")
+    crate::paths::content_root().join("prefabs.ron")
 }
 
 /// Load the shared prefab registry: RON-primary, `load_initial` fallback.

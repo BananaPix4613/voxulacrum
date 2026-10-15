@@ -3522,6 +3522,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "testbed"
+version = "0.4.2"
+dependencies = [
+ "voxulacrum",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
