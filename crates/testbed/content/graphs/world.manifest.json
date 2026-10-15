@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "world": "world.graph.json",
+  "sea_level": 0,
+  "seed": 1,
+  "min_y": 0,
+  "max_y": 64,
+  "zones": [
+    { "id": 0, "graph": "zone.graph.json" }
+  ],
+  "biomes": [
+    { "id": 0, "graph": "biome_flat.graph.json" }
+  ]
+}

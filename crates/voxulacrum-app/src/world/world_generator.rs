@@ -965,7 +965,7 @@ pub fn world_manifest_path() -> std::path::PathBuf {
 
 /// The directory holding the world's graph assets.
 fn graphs_dir() -> std::path::PathBuf {
-    crate::paths::asset_root().join("assets").join("graphs")
+    crate::paths::content_root().join("graphs")
 }
 
 /// Load the default biome graph into a shared generator, seeded from `params`.

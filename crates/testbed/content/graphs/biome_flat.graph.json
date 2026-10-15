@@ -1,0 +1,34 @@
+{
+  "kind": "Biome",
+  "boundary": { "inputs": [], "outputs": [] },
+  "nodes": [
+    { "value": null, "version": 0 },
+    {
+      "value": { "kind": { "type": "Constant", "value": 32.0 }, "position": [0.0, 0.0] },
+      "version": 1
+    },
+    {
+      "value": { "kind": { "type": "WorldAxis", "axis": "Y" }, "position": [0.0, 180.0] },
+      "version": 1
+    },
+    {
+      "value": { "kind": { "type": "Subtract" }, "position": [240.0, 60.0] },
+      "version": 1
+    },
+    {
+      "value": { "kind": { "type": "Layer", "bands": [[1, 1], [2, 3]], "fill": 3 }, "position": [480.0, 180.0] },
+      "version": 1
+    },
+    {
+      "value": { "kind": { "type": "DensityOutput" }, "position": [720.0, 60.0] },
+      "version": 1
+    }
+  ],
+  "edges": [
+    { "from": { "node": { "idx": 1, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 3, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 2, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 3, "version": 1 }, "pin": 1 } },
+    { "from": { "node": { "idx": 3, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 3, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 4, "version": 1 }, "pin": 0 } },
+    { "from": { "node": { "idx": 4, "version": 1 }, "pin": 0 }, "to": { "node": { "idx": 5, "version": 1 }, "pin": 1 } }
+  ]
+}
