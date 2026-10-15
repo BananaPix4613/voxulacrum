@@ -103,7 +103,9 @@ pub fn blueprint_authoring_system(
         state.preview_for = want.clone();
         state.preview.clear();
         if let Some(name) = want {
-            match voxel_core::Blueprint::load(&dir, &name).and_then(|bp| bp.resolve(&registry.0)) {
+            match voxel_core::Blueprint::load(&dir, &name)
+                .and_then(|bp| bp.resolve(&registry.0, crate::paths::namespace()))
+            {
                 Ok(bp) => {
                     let anchor = IVec3::from_array(bp.anchor);
                     state.preview = bp
@@ -176,7 +178,7 @@ pub fn blueprint_authoring_system(
                         return;
                     };
                     match voxel_core::Blueprint::load(&dir, &name)
-                        .and_then(|bp| bp.resolve(&registry.0))
+                        .and_then(|bp| bp.resolve(&registry.0, crate::paths::namespace()))
                     {
                         Ok(blueprint) => {
                             let cells = blueprint.cells.len();

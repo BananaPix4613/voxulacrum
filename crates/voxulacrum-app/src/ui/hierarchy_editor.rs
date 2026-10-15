@@ -155,7 +155,7 @@ impl HierarchyEditor {
                     .filter_map(|(id, name)| {
                         libs.registry().get(*id).map(|g| LibraryChoice {
                             id: *id,
-                            name: name.clone(),
+                            name: name.relative_to(crate::paths::namespace()),
                             boundary: g.boundary.clone(),
                         })
                     })

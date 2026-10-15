@@ -742,12 +742,14 @@ fn read_graph(path: &std::path::Path) -> Result<Graph, String> {
         &mut graph,
         &crate::world::blueprint::blueprint_dir(),
         &registry,
+        crate::paths::namespace(),
     )
     .map_err(|e| format!("{}: {e}", path.display()))?;
     nodegraph_hotreload::resolve_species(
         &mut graph,
         &crate::world::blueprint::species_dir(),
         &registry,
+        crate::paths::namespace(),
     )
     .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(graph)

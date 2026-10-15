@@ -70,8 +70,8 @@ pub fn capture(
                             voxel.material
                         )
                     })?
-                    .id_name
-                    .clone();
+                    .name
+                    .relative_to(crate::paths::namespace());
                 cells.push(BlueprintCell {
                     at: (world_voxel - min).to_array(),
                     shape,
@@ -213,8 +213,13 @@ mod tests {
     fn capture_then_stamp_reproduces_the_solids_and_is_one_command() {
         let registry = crate::materials::embedded_registry();
         let mut world = world_with_two_air_chunks();
-        let granite = Voxel::cube(registry.resolve("granite").unwrap());
-        let soil = Voxel { shape: ShapeId::SlabTop, material: registry.resolve("soil").unwrap(), flags: 0 };
+        let namespace = crate::paths::namespace();
+        let granite = Voxel::cube(registry.resolve_str("granite", namespace).unwrap());
+        let soil = Voxel {
+            shape: ShapeId::SlabTop,
+            material: registry.resolve_str("soil", namespace).unwrap(),
+            flags: 0
+        };
 
         // Author a two-cell shape straddling the chunk seam.
         for (at, voxel) in [(IVec3::new(31, 2, 3), granite), (IVec3::new(32, 2, 3), soil)] {
@@ -246,7 +251,7 @@ mod tests {
         world
             .execute(MutationCommand::authoring(WorldMutation::StampBlueprint {
                 origin: target,
-                blueprint: bp.resolve(&registry).expect("resolves"),
+                blueprint: bp.resolve(&registry, namespace).expect("resolves"),
                 yaw: Yaw::Deg0,
             }))
             .expect("stamp accepted in authoring mode");

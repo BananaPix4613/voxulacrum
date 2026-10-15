@@ -26,7 +26,7 @@ pub fn materials_path() -> PathBuf {
 /// binary. The startup fallback, and the fixture for tests that need a registry
 /// without touching the filesystem.
 pub fn embedded_registry() -> MaterialRegistry {
-    MaterialRegistry::from_ron_str(SHIPPED_MATERIALS)
+    MaterialRegistry::from_ron_str(SHIPPED_MATERIALS, crate::paths::namespace())
         .expect("the assets/materials.ron compiled into this build is valid")
 }
 
@@ -37,7 +37,7 @@ pub fn embedded_registry() -> MaterialRegistry {
 /// compiled-in copy is used instead.
 pub fn load_registry() -> Arc<MaterialRegistry> {
     let path = materials_path();
-    match MaterialRegistry::load_from_ron(&path) {
+    match MaterialRegistry::load_from_ron(&path, crate::paths::namespace()) {
         Ok(registry) => {
             log::info!("Loaded {} materials from {}", registry.len(), path.display());
             Arc::new(registry)
@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn the_embedded_table_parses_and_matches_the_file() {
         let embedded = embedded_registry();
-        let from_disk = MaterialRegistry::load_from_ron(&materials_path())
+        let from_disk = MaterialRegistry::load_from_ron(&materials_path(), crate::paths::namespace())
             .expect("assets/materials.ron loads");
         
         assert_eq!(embedded.len(), from_disk.len());
