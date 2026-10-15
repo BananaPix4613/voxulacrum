@@ -32,6 +32,11 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+      # Engine/game boundary (roadmap §7.2): consumers depend on the
+      # `voxulacrum` facade only.
+      - name: Facade dependency check
+        run: cargo run -p boundary-check
+
       # Determinism coverage lives here: the slab-bearing generation test and the
       # scatter seed-derivation tests added in Phase 10 Substep 4, plus every
       # other workspace test.
