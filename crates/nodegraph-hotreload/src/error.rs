@@ -16,6 +16,10 @@ pub enum HotReloadError {
     /// Blueprint load, parse, or material-resolution failure.
     #[error("blueprint: {0}")]
     Blueprint(String),
+
+    /// A graph names a material that is malformed or not in the registry.
+    #[error("material: {0}")]
+    Material(String),
 }
 
 /// Result alias for hot-reload operations.

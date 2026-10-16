@@ -12,13 +12,14 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use bevy_ecs::prelude::{NonSendMut, ResMut, Resource};
+use bevy_ecs::prelude::{NonSendMut, Res, ResMut, Resource};
 use glam::IVec3;
 use nodegraph_eval::{CachedOutput, EvalContext, Evaluator, ScalarField};
 use nodegraph_ir::{Graph, NodeId};
 use voxel_core::{ChunkBuffer, MaterialRegistry, Voxel};
 
 use crate::ui::colormap::Colormap;
+use crate::materials::MaterialRegistryRes;
 use crate::ui::EguiRenderer;
 
 /// A captured node output, ready for the panel to render. The variant follows
@@ -144,6 +145,7 @@ impl FieldProbe {
 pub fn field_probe_system(
     mut probe: ResMut<FieldProbe>,
     egui: NonSendMut<EguiRenderer>,
+    materials: Res<MaterialRegistryRes>,
 ) {
     // 1. Drain a completed evaluation, if one finished.
     let received = probe.result_rx.get_mut().unwrap().try_recv().ok();
@@ -185,7 +187,7 @@ pub fn field_probe_system(
 
     // 3. Dispatch onto the shared pool (never the schedule thread).
     if probe.needs_eval && !probe.in_flight {
-        let (graph, selected) = egui.graph_editor.build_graph_with_selection();
+        let (mut graph, selected) = egui.graph_editor.build_graph_with_selection();
         probe.needs_eval = false;
         let Some(selected) = selected else {
             probe.data = None;
@@ -195,10 +197,19 @@ pub fn field_probe_system(
         let seed = egui.graph_editor.world_seed();
         let chunk = probe.chunk;
         let tx = probe.result_tx.clone();
+        let registry = materials.0.clone();
         probe.in_flight = true;
         probe.pool.spawn(move || {
             let started = std::time::Instant::now();
-            let data = evaluate_selected(&graph, selected, seed, chunk);
+            // The editor's graph never passes through `read_graph`, and a node just
+            // added or a material just renamed carries no id until it is resolved.
+            let data = nodegraph_hotreload::resolve_materials(
+                &mut graph,
+                &registry,
+                crate::paths::namespace(),
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|()| evaluate_selected(&graph, selected, seed, chunk));
             let eval_ms = started.elapsed().as_secs_f32() * 1000.0;
             let _ = tx.send(ProbeResult { data, eval_ms });
         });

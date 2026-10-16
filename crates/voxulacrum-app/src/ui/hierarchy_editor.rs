@@ -9,6 +9,7 @@ use nodegraph_editor::{EditorState, GraphChoice, GraphCatalogs, LibraryChoice};
 use nodegraph_ir::{Graph, GraphRefTarget, NodeId};
 
 use crate::libraries::LoadedLibraries;
+use voxel_core::MaterialId;
 
 use crate::world::world_generator::{
     self, BiomeManifestEntry, GraphSlot, WorldManifest, ZoneManifestEntry,
@@ -49,6 +50,9 @@ pub struct HierarchyEditor {
     /// place the generator loads it, so the two cannot disagree about which
     /// libraries exist.
     libraries: Option<Arc<LoadedLibraries>>,
+    /// Material names for the pickers, as this content writes them, read at
+    /// load from the same registry graphs resolve against.
+    materials: Vec<String>,
     /// Name entry for the "add biome parameter" action.
     new_param: String,
     /// Transient status line under the toolbar.
@@ -72,6 +76,7 @@ impl HierarchyEditor {
             new_zone_name: String::new(),
             new_rename: String::new(),
             libraries: None,
+            materials: Vec::new(),
             new_param: String::new(),
             status: None,
         }
@@ -90,6 +95,13 @@ impl HierarchyEditor {
         self.manifest_dirty = false;
         self.manifest_path = Some(manifest_path);
         self.libraries = Some(crate::libraries::load_libraries());
+        let registry = crate::materials::load_registry();
+        let namespace = crate::paths::namespace();
+        // Air is the engine's reserved id 0, never a material a node names.
+        self.materials = (1..registry.len())
+            .filter_map(|i| registry.get(MaterialId(i as u16)))
+            .map(|def| def.name.relative_to(namespace))
+            .collect();
         let default = GraphSlot::Biome(0);
         self.selected = if graphs.iter().any(|(s, _, _, _)| *s == default) {
             default
@@ -187,6 +199,7 @@ impl HierarchyEditor {
             // span, with the measurement in hand.
             blueprints: voxel_core::Blueprint::list(&crate::world::blueprint::blueprint_dir())
                 .unwrap_or_default(),
+            materials: self.materials.clone(),
             zones: self
                 .slots
                 .iter()

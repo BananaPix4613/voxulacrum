@@ -120,11 +120,11 @@
           "type": "Layer",
           "bands": [
             [
-              1,
+              "limestone",
               1
             ]
           ],
-          "fill": 1
+          "fill": "limestone"
         },
         "position": [
           909.58856,

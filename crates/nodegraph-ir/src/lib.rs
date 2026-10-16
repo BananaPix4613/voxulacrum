@@ -48,6 +48,7 @@ mod error;
 mod graph;
 mod index;
 mod library;
+mod material_ref;
 mod node;
 mod pin;
 
@@ -59,6 +60,7 @@ pub use error::{GraphError, GraphResult};
 pub use graph::{Graph, GraphKind};
 pub use index::EdgeIndex;
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
+pub use material_ref::MaterialRef;
 pub use node::{
     AbsParams, AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams,
     ConstantParams, CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,

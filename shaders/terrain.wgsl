@@ -198,22 +198,20 @@ fn compute_shadow(world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     );
 }
 
-// Debug palette: 9 high-contrast colors for material IDs 0-8
+// Debug palette: a high-contrast false color per material id, derived from the
+// id itself so no material is named here and every registered id is distinct.
+// Air (id 0, the engine's reserved empty) stays dark grey.
 fn debug_material_color(id: u32) -> vec3<f32> {
-    switch (id) {
-        case 0u: { return vec3<f32>(0.2, 0.2, 0.2); }   // Air (dark grey)
-        case 1u: { return vec3<f32>(1.0, 0.3, 0.3); }   // Limestone (red)
-        case 2u: { return vec3<f32>(0.3, 1.0, 0.3); }   // Granite (green)
-        case 3u: { return vec3<f32>(0.3, 0.3, 1.0); }   // Soil (blue)
-        case 4u: { return vec3<f32>(1.0, 1.0, 0.3); }   // Clay (yellow)
-        case 5u: { return vec3<f32>(0.3, 1.0, 1.0); }   // Sand (cyan)
-        case 6u: { return vec3<f32>(1.0, 0.3, 1.0); }   // Grass Soil (magenta)
-        case 7u: { return vec3<f32>(1.0, 0.6, 0.2); }   // Water (orange)
-        case 8u: { return vec3<f32>(0.6, 0.2, 1.0); }   // Gravel (purple)
-        case 9u: { return vec3<f32>(0.8, 0.5, 0.2); }   // Wood (tan)
-        case 10u: { return vec3<f32>(0.2, 0.8, 0.5); }  // Leaves (teal)
-        default: { return vec3<f32>(1.0, 1.0, 1.0); }   // Unknown (white)
+    if id == 0u {
+        return vec3<f32>(0.2, 0.2, 0.2);
     }
+    // Golden-ratio hue steps put neighboring ids far apart on the color wheel;
+    // the hue goes through the standard fully saturated HSV-to-RGB ramp.
+    let hue = fract(f32(id) * 0.61803398875);
+    let k = vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0);
+    let rgb = clamp(abs(fract(vec3<f32>(hue) + k) * 6.0 - 3.0) - 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
+    // Floor at 0.3, the old palette's darkest channel, so nothing reads as air.
+    return mix(vec3<f32>(0.3), vec3<f32>(1.0), rgb);
 }
 
 // Per-axis brightness. face_axis: 0=+X, 1=-X, 2=+Y(top), 3=-y(bottom), 4=+Z, 5=-Z.

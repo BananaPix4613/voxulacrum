@@ -7,8 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams, DomainWarpParams, FindFlatParams, FractalType, Graph, JitteredGridParams, LayerParams, MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef, PlaceBlueprintParams, TerrainOutputParams, WorldPosParams};
-use voxel_core::MaterialId;
+use nodegraph_ir::{AddParams, BuildTerrainParams, ConstantParams, CurveMapperParams, DomainWarpParams, FindFlatParams, FractalType, Graph, JitteredGridParams, LayerParams, MultiplyParams, NodeKind, NoiseParams, OutputParams, Perlin2DParams, PinRef, PlaceBlueprintParams, TerrainOutputParams, WorldPosParams, MaterialRef};
 
 use crate::error::HotReloadResult;
 
@@ -104,11 +103,11 @@ pub fn build_example_graph() -> Graph {
     // granite below — gives ~12 banded layers visible in cliff faces.
     let layer = g.add_node(NodeKind::Layer(LayerParams {
         bands: vec![
-            (MaterialId(6), 1), // grass-soil
-            (MaterialId(3), 3), // soil
-            (MaterialId(1), 8), // limestone
+            (MaterialRef::new("grass_soil"), 1),
+            (MaterialRef::new("soil"), 3),
+            (MaterialRef::new("limestone"), 8),
         ],
-        fill: MaterialId(2), // granite
+        fill: MaterialRef::new("granite"),
     }));
     g.connect(PinRef::new(final_density, 0), PinRef::new(layer, 0))
         .expect("density -> layer");
@@ -132,7 +131,7 @@ pub fn build_example_graph() -> Graph {
 
     let find = g.add_node(NodeKind::FindFlat(FindFlatParams {
         max_step: 1,
-        on_materials: vec![MaterialId(6)], // grass-soil surfaces only
+        on_materials: vec![MaterialRef::new("grass_soil")],
     }));
     g.connect(PinRef::new(build, 0), PinRef::new(find, 0))
         .expect("build -> find.terrain");
@@ -153,4 +152,37 @@ pub fn build_example_graph() -> Graph {
         .expect("trees -> terrain.terrain");
 
     g
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use voxel_core::{MaterialRegistry, ENGINE_NAMESPACE};
+
+    #[test]
+    fn the_example_names_only_shipped_materials() {
+        let registry = MaterialRegistry::from_ron_str(
+            include_str!("../../../assets/materials.ron"),
+            ENGINE_NAMESPACE,
+        )
+        .expect("assets/materials.ron is valid");
+        let mut g = build_example_graph();
+        crate::resolve_materials(&mut g, &registry, ENGINE_NAMESPACE)
+            .expect("every material the example names is shipped");
+    }
+
+    /// The shipped file once fell behind its builder far enough to stop
+    /// parsing, and nothing noticed: it is in the watched directory but no
+    /// manifest names it. Compared as re-serialized graphs, so line endings and
+    /// formatting cannot fail the comparison.
+    #[test]
+    fn the_shipped_example_matches_its_builder() {
+        let shipped = Graph::from_json(include_str!("../../../assets/graphs/example.graph.json"))
+            .expect("assets/graphs/example.graph.json parses; regenerate it with `regen_example`");
+        assert_eq!(
+            shipped.to_json_pretty().unwrap(),
+            build_example_graph().to_json_pretty().unwrap(),
+            "example.graph.json drifted from build_example_graph; run `regen_example`"
+        );
+    }
 }

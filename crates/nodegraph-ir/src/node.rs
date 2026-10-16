@@ -8,6 +8,7 @@ use crate::boundary::{EffectivePin, ResolvedBoundary, ResolvedPin};
 use crate::crossgraph::GraphRefTarget;
 use crate::graph::GraphKind;
 use crate::library::LibraryGraphId;
+use crate::material_ref::MaterialRef;
 use crate::pin::PinType;
 use voxel_core::ResolvedBlueprint;
 
@@ -261,12 +262,12 @@ impl Default for DomainWarpParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ConstantMaterialParams {
     /// The material emitted at every position.
-    pub material: voxel_core::MaterialId,
+    pub material: MaterialRef,
 }
 
 impl Default for ConstantMaterialParams {
     fn default() -> Self {
-        Self { material: voxel_core::MaterialId(1) } // 1 = stone-ish
+        Self { material: MaterialRef::new("limestone") }
     }
 }
 
@@ -279,20 +280,17 @@ impl Default for ConstantMaterialParams {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LayerParams {
     /// Top-down `(material, thickness_in_voxels)` pairs.
-    pub bands: Vec<(voxel_core::MaterialId, u32)>,
+    pub bands: Vec<(MaterialRef, u32)>,
     /// Material applied below the last band.
-    pub fill: voxel_core::MaterialId,
+    pub fill: MaterialRef,
 }
 
 impl Default for LayerParams {
     fn default() -> Self {
         // Grass on top, dirt under, stone fill below.
         Self {
-            bands: vec![
-                (voxel_core::MaterialId(6), 1), // grass soil
-                (voxel_core::MaterialId(3), 3), // soil
-            ],
-            fill: voxel_core::MaterialId(1), // limestone
+            bands: vec![(MaterialRef::new("grass_soil"), 1), (MaterialRef::new("soil"), 3)],
+            fill: MaterialRef::new("limestone"),
         }
     }
 }
@@ -376,7 +374,7 @@ pub struct FindFlatParams {
     /// Max allowed surface-Y difference to any 8-neighbor column.
     pub max_step: i32,
     /// Allowed surface materials. Empty = accept any solid surface.
-    pub on_materials: Vec<voxel_core::MaterialId>,
+    pub on_materials: Vec<MaterialRef>,
 }
 impl Default for FindFlatParams {
     fn default() -> Self { Self { max_step: 1, on_materials: Vec::new() } }
@@ -848,7 +846,7 @@ pub struct SurfaceFilterParams {
     /// Maximum surface world-Y to keep.
     pub max_height: f32,
     /// Allowed surface materials. Empty = any solid surface.
-    pub materials: Vec<voxel_core::MaterialId>,
+    pub materials: Vec<MaterialRef>,
 }
 impl Default for SurfaceFilterParams {
     fn default() -> Self {
@@ -1684,27 +1682,42 @@ impl NodeKind {
         }
     }
 
-    /// Every `MaterialId` this node's parameters reference.
+    /// Every material this node's parameters reference.
     /// 
     /// Here rather than in the validator, so the knowledge lives with the node
     /// definitions that own it.
-    /// 
+    ///
     /// **Maintenance obligation:** a new material-carrying node kind must be
-    /// added below. The wildcard arm means the compiler will not remind you, and
-    /// a missing arm is a silent gap in the lint rather than a build failure -
-    /// spelling out all fifty variants to buy that guarantee is not worth what
-    /// it costs to read.
-    pub fn material_refs(&self) -> Vec<voxel_core::MaterialId> {
+    /// added below, and to [`material_refs_mut`](Self::material_refs_mut). The
+    /// wildcard arm means the compiler will not remind you, and a missing arm is
+    /// a reference the lint never checks and resolution never fills - spelling
+    /// out all fifty variants to buy that guarantee is not worth what it costs
+    /// to read.
+    pub fn material_refs(&self) -> Vec<&MaterialRef> {
         match self {
-            NodeKind::ConstantMaterial(p) => vec![p.material],
+            NodeKind::ConstantMaterial(p) => vec![&p.material],
             NodeKind::Layer(p) => {
-                let mut out: Vec<voxel_core::MaterialId> =
-                    p.bands.iter().map(|(m, _)| *m).collect();
-                out.push(p.fill);
-                out
+                p.bands.iter().map(|(m, _)| m).chain(std::iter::once(&p.fill)).collect()
             }
-            NodeKind::FindFlat(p) => p.on_materials.clone(),
-            NodeKind::SurfaceFilter(p) => p.materials.clone(),
+            NodeKind::FindFlat(p) => p.on_materials.iter().collect(),
+            NodeKind::SurfaceFilter(p) => p.materials.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Mutable counterpart of [`material_refs`](Self::material_refs), for the
+    /// resolution pass that fills each reference's id.
+    pub fn material_refs_mut(&mut self) -> Vec<&mut MaterialRef> {
+        match self {
+            NodeKind::ConstantMaterial(p) => vec![&mut p.material],
+            NodeKind::Layer(p) => p
+                .bands
+                .iter_mut()
+                .map(|(m, _)| m)
+                .chain(std::iter::once(&mut p.fill))
+                .collect(),
+            NodeKind::FindFlat(p) => p.on_materials.iter_mut().collect(),
+            NodeKind::SurfaceFilter(p) => p.materials.iter_mut().collect(),
             _ => Vec::new(),
         }
     }

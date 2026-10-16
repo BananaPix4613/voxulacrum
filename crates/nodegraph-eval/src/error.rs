@@ -53,6 +53,16 @@ pub enum EvalError {
         /// The offending node.
         node: NodeId,
     },
+    
+    /// A node names a material that was never resolved to an id: the graph did
+    /// not pass through the hot-reload boundary.
+    #[error("node {node:?} names material {name:?}, which was never resolved")]
+    UnresolvedMaterial {
+        /// The offending node.
+        node: NodeId,
+        /// The material name as the graph writes it.
+        name: String,
+    },
 
     /// A `LibraryRef` node was evaluated. Library expansion is not implemented
     /// in this phase (the node is a typed scaffold only).

@@ -1,8 +1,7 @@
 //! Surface scanners: annotate scatter points with the terrain surface Y and
 //! filter by flatness / material.
 
-use nodegraph_ir::FindFlatParams;
-use voxel_core::{ChunkBuffer, Voxel};
+use voxel_core::{ChunkBuffer, MaterialId, Voxel};
 
 use crate::field::CHUNK_DIM;
 use crate::scatter::ScatterPoint;
@@ -15,7 +14,8 @@ const N: i32 = CHUNK_DIM as i32;
 pub(crate) fn find_flat(
     terrain: &ChunkBuffer<Voxel, 32>,
     points: &[ScatterPoint],
-    p: &FindFlatParams,
+    max_step: i32,
+    on_materials: &[MaterialId],
 ) -> Vec<ScatterPoint> {
     let mut out = Vec::new();
     for &pt in points {
@@ -26,10 +26,10 @@ pub(crate) fn find_flat(
         let cz = (pt.lz.round() as i32).clamp(0, N - 1);
         let Some(sy) = topmost_solid(terrain, cx, cz) else { continue; };
         let surf = terrain.get(cx as usize, sy as usize, cz as usize);
-        if !p.on_materials.is_empty() && !p.on_materials.contains(&surf.material) {
+        if !on_materials.is_empty() && !on_materials.contains(&surf.material) {
             continue;
         }
-        if !neighborhood_flat(terrain, cx, cz, sy, p.max_step) { continue; }
+        if !neighborhood_flat(terrain, cx, cz, sy, max_step) { continue; }
         out.push(ScatterPoint { surface_y: Some(sy), ..pt });
     }
     out
@@ -65,7 +65,6 @@ fn neighborhood_flat(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use voxel_core::MaterialId;
 
     fn flat_terrain(top: i32, mat: MaterialId) -> ChunkBuffer<Voxel, 32> {
         let mut b: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
@@ -82,7 +81,7 @@ mod tests {
     #[test]
     fn flat_ground_passes_and_sets_surface() {
         let t = flat_terrain(10, MaterialId(6));
-        let out = find_flat(&t, &[pt(16.0, 16.0)], &FindFlatParams::default());
+        let out = find_flat(&t, &[pt(16.0, 16.0)], 1, &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].surface_y, Some(10));
     }
@@ -90,8 +89,7 @@ mod tests {
     #[test]
     fn wrong_material_rejected() {
         let t = flat_terrain(10, MaterialId(2)); // granite
-        let p = FindFlatParams { max_step: 1, on_materials: vec![MaterialId(6)] };
-        assert!(find_flat(&t, &[pt(16.0, 16.0)], &p).is_empty());
+        assert!(find_flat(&t, &[pt(16.0, 16.0)], 1, &[MaterialId(6)]).is_empty());
     }
 
     #[test]
@@ -99,6 +97,6 @@ mod tests {
         // Tall pillar surrounded by air → neighbors empty → not flat.
         let mut t: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
         for y in 0..12 { t.set(16, y, 16, Voxel::cube(MaterialId(6))); }
-        assert!(find_flat(&t, &[pt(16.0, 16.0)], &FindFlatParams::default()).is_empty());
+        assert!(find_flat(&t, &[pt(16.0, 16.0)], 1, &[]).is_empty());
     }
 }

@@ -13,7 +13,7 @@ use nodegraph_ir::{
     EdgeIndex, Graph, NodeId, NodeKind, PoissonDistributionParams, SpeciesPickerParams,
     SurfaceFilterParams, Severity,
 };
-use voxel_core::{ChunkBuffer, Voxel};
+use voxel_core::{ChunkBuffer, MaterialId, Voxel};
 
 use crate::column::IdColumn;
 use crate::context::{mix64, EvalContext};
@@ -96,7 +96,8 @@ impl<'a> DetailEvaluator<'a> {
             NodeKind::PoissonDistribution(p) => DetailValue::Positions(self.poisson(p)),
             NodeKind::SurfaceFilter(p) => {
                 let pts = self.input_positions(id, 0)?;
-                DetailValue::Positions(self.surface_filter(pts, p))
+                let materials = crate::eval::material_ids(id, &p.materials)?;
+                DetailValue::Positions(self.surface_filter(pts, p, &materials))
             }
             NodeKind::BiomeContextMask(p) => {
                 let pts = self.input_positions(id, 0)?;
@@ -150,7 +151,12 @@ impl<'a> DetailEvaluator<'a> {
         out
     }
 
-    fn surface_filter(&self, pts: Vec<Candidate>, p: &SurfaceFilterParams) -> Vec<Candidate> {
+    fn surface_filter(
+        &self,
+        pts: Vec<Candidate>,
+        p: &SurfaceFilterParams,
+        materials: &[MaterialId],
+    ) -> Vec<Candidate> {
         pts.into_iter()
             .filter_map(|mut c| {
                 let (lx, lz) = (c.x as usize, c.z as usize);
@@ -161,7 +167,7 @@ impl<'a> DetailEvaluator<'a> {
                 }
                 if !p.materials.is_empty() {
                     let mat = self.terrain.get(lx, sy as usize, lz).material;
-                    if !p.materials.contains(&mat) {
+                    if !materials.contains(&mat) {
                         return None;
                     }
                 }

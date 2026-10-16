@@ -8,6 +8,7 @@ use glam::IVec3;
 use nodegraph_eval::{render_graph_to_png, EvalContext};
 use nodegraph_hotreload::GraphWatcher;
 use nodegraph_ir::{Graph};
+use voxel_core::{MaterialRegistry, ENGINE_NAMESPACE};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const QUIET_WINDOW: Duration = Duration::from_millis(50);
@@ -27,9 +28,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&dir)?;
     let _ = nodegraph_hotreload::bootstrap_example_graph(&dir)?;
 
+    // Graphs name their materials; resolve them against the content root the
+    // graphs live in, as the engine does at load.
+    let materials_path = dir.join("..").join("materials.ron");
+    let materials = match MaterialRegistry::load_from_ron(&materials_path, ENGINE_NAMESPACE) {
+        Ok(registry) => Some(registry),
+        Err(e) => {
+            log::warn!("{}: {e}; graphs that name materials will not render", materials_path.display());
+            None
+        }
+    };
+
     // Initial render of every existing graph.
     for path in list_graph_files(&dir)? {
-        regenerate(&path);
+        regenerate(&path, materials.as_ref());
     }
 
     let watcher = GraphWatcher::new(&dir)?;
@@ -55,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         for path in changes {
-            regenerate(&path);
+            regenerate(&path, materials.as_ref());
         }
     }
 }
@@ -72,11 +84,14 @@ fn list_graph_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn regenerate(json_path: &Path) {
+fn regenerate(json_path: &Path, materials: Option<&MaterialRegistry>) {
     let started = Instant::now();
     let result: Result<PathBuf, Box<dyn std::error::Error>> = (|| {
         let text = std::fs::read_to_string(json_path)?;
-        let graph = Graph::from_json(&text)?;
+        let mut graph = Graph::from_json(&text)?;
+        if let Some(registry) = materials {
+            nodegraph_hotreload::resolve_materials(&mut graph, registry, ENGINE_NAMESPACE)?;
+        }
         let png_path = json_path.with_extension("png");
         render_graph_to_png(
             &graph,

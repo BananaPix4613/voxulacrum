@@ -6,8 +6,8 @@ use std::sync::Arc;
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
 use glam::Vec3;
 use nodegraph_ir::{
-    Axis, DomainWarpParams, EdgeIndex, Graph, FractalType, LibraryGraphId, NoiseParams, NodeId,
-    NodeKind, Severity,
+    Axis, DomainWarpParams, EdgeIndex, Graph, FractalType, LibraryGraphId, MaterialRef,
+    NoiseParams, NodeId, NodeKind, Severity,
 };
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
@@ -491,12 +491,16 @@ impl<'g> Evaluator<'g> {
             }
             // --- Material providers ---
             NodeKind::ConstantMaterial(p) => {
-                CachedOutput::Material(Arc::new(ChunkBuffer::uniform(p.material)))
+                CachedOutput::Material(Arc::new(ChunkBuffer::uniform(material_id(id, &p.material)?)))
             }
             NodeKind::Layer(p) => {
                 let density = self.input_scalar(id, 0)?;
-                let bands = p.bands.clone();
-                let fill = p.fill;
+                let bands = p
+                    .bands
+                    .iter()
+                    .map(|(m, thickness)| Ok((material_id(id, m)?, *thickness)))
+                    .collect::<EvalResult<Vec<_>>>()?;
+                let fill = material_id(id, &p.fill)?;
                 let mut out: ChunkBuffer<MaterialId, 32> = ChunkBuffer::uniform(MaterialId::AIR);
 
                 // For each XZ column, find the topmost solid Y, then write
@@ -576,7 +580,10 @@ impl<'g> Evaluator<'g> {
             NodeKind::FindFlat(p) => {
                 let terrain = self.input_terrain(id, 0)?;
                 let points = self.input_positions(id, 1)?;
-                CachedOutput::Positions(Arc::new(crate::scan::find_flat(&terrain, &points, p)))
+                let on = material_ids(id, &p.on_materials)?;
+                CachedOutput::Positions(Arc::new(crate::scan::find_flat(
+                    &terrain, &points, p.max_step, &on,
+                )))
             }
             NodeKind::PlaceBlueprint(p) => {
                 let terrain = self.input_terrain(id, 0)?;
@@ -836,6 +843,19 @@ pub(crate) fn sample_curve(stops: &[(f32, f32)], v: f32) -> f32 {
     stops.last().unwrap().1
 }
 
+/// The id `reference` resolved to, or `UnresolvedMaterial` for `node`.
+pub(crate) fn material_id(node: NodeId, reference: &MaterialRef) -> EvalResult<MaterialId> {
+    reference.id().ok_or_else(|| EvalError::UnresolvedMaterial {
+        node,
+        name: reference.name().to_string(),
+    })
+}
+
+/// [`material_id`] for each of `references`, in order.
+pub(crate) fn material_ids(node: NodeId, references: &[MaterialRef]) -> EvalResult<Vec<MaterialId>> {
+    references.iter().map(|r| material_id(node, r)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,7 +903,9 @@ mod tests {
         use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, PinRef};
         let mut g = Graph::new();
         let d = g.add_node(NodeKind::Constant(ConstantParams { value: 0.75 }));
-        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams {
+            material: MaterialRef::with_id("limestone", MaterialId(1)),
+        }));
         let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
         g.connect(PinRef::new(d, 0), PinRef::new(out, 0)).unwrap(); // Scalar -> Density coercion
         g.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
@@ -892,7 +914,24 @@ mod tests {
         e.evaluate().unwrap();
         let (density, material) = e.cache().get(out).unwrap().as_biome_layer().expect("biome layer");
         assert_eq!(density.get(0, 0, 0), 0.75);
-        assert_eq!(material.get(0, 0, 0), ConstantMaterialParams::default().material);
+        assert_eq!(material.get(0, 0, 0), MaterialId(1));
+    }
+
+    #[test]
+    fn an_unresolved_material_is_an_error_not_air() {
+        use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, PinRef};
+        let mut g = Graph::new();
+        let d = g.add_node(NodeKind::Constant(ConstantParams { value: 0.75 }));
+        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
+        g.connect(PinRef::new(d, 0), PinRef::new(out, 0)).unwrap();
+        g.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
+
+        let mut e = Evaluator::new(&g, EvalContext::new(0, IVec3::ZERO));
+        match e.evaluate() {
+            Err(EvalError::UnresolvedMaterial { name, .. }) => assert_eq!(name, "limestone"),
+            other => panic!("expected UnresolvedMaterial, got {other:?}"),
+        }
     }
 
     /// World: `SurfaceNoise -> GraphOutput("climate")`, evaluated for `ctx`.

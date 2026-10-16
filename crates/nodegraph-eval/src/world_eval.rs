@@ -51,8 +51,21 @@ fn extract_material_rule(graph: &Graph, density_node: NodeId) -> BiomeMaterialRu
         return BiomeMaterialRule::Field;
     };
     match graph.nodes.get(edge.from.node).map(|n| &n.kind) {
-        Some(NodeKind::Layer(p)) => BiomeMaterialRule::Layer { bands: p.bands.clone(), fill: p.fill },
-        Some(NodeKind::ConstantMaterial(p)) => BiomeMaterialRule::Uniform(p.material),
+        // An unresolved reference falls back to the precomputed field, whose
+        // evaluation reports it with the node: this runs at construction and has
+        // nowhere to return an error to.
+        Some(NodeKind::Layer(p)) => {
+            let bands: Option<Vec<(MaterialId, u32)>> =
+                p.bands.iter().map(|(m, t)| m.id().map(|id| (id, *t))).collect();
+            match (bands, p.fill.id()) {
+                (Some(bands), Some(fill)) => BiomeMaterialRule::Layer { bands, fill },
+                _ => BiomeMaterialRule::Field,
+            }
+        }
+        Some(NodeKind::ConstantMaterial(p)) => match p.material.id() {
+            Some(id) => BiomeMaterialRule::Uniform(id),
+            None => BiomeMaterialRule::Field,
+        },
         _ => BiomeMaterialRule::Field,
     }
 }
@@ -1409,14 +1422,19 @@ pub struct ChunkEvaluation {
 mod tests {
     use super::*;
     use glam::IVec3;
-    use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, LayerParams, NoiseParams, PinRef, YBandParams, ZoneOutputParams};
+    use nodegraph_ir::{ConstantMaterialParams, ConstantParams, DensityOutputParams, LayerParams, MaterialRef, NoiseParams, PinRef, YBandParams, ZoneOutputParams};
+
+    /// `ConstantMaterial` as a loaded graph holds it: named and resolved.
+    fn stone() -> ConstantMaterialParams {
+        ConstantMaterialParams { material: MaterialRef::with_id("limestone", MaterialId(1)) }
+    }
 
     /// A biome graph filling the chunk with uniform `density` + a constant
     /// material: Constant -> BuildTerrain <- ConstantMaterial -> TerrainOutput.
     fn terrain_graph(density: f32) -> Graph {
         let mut g = Graph::new();
         let d = g.add_node(NodeKind::Constant(ConstantParams { value: density }));
-        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let m = g.add_node(NodeKind::ConstantMaterial(stone()));
         let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
         g.connect(PinRef::new(d, 0), PinRef::new(out, 0)).unwrap(); // Scalar -> Density coercion
         g.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
@@ -1426,7 +1444,7 @@ mod tests {
     fn terrain_graph_mat(density: f32, material: MaterialId) -> Graph {
         let mut g = Graph::new();
         let d = g.add_node(NodeKind::Constant(ConstantParams { value: density }));
-        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams { material }));
+        let m = g.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams { material: MaterialRef::with_id("test", material) }));
         let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
         g.connect(PinRef::new(d, 0), PinRef::new(out, 0)).unwrap();
         g.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
@@ -1448,7 +1466,7 @@ mod tests {
         let voxel = if density > 0.0 {
             Voxel {
                 shape: ShapeId::Cube,
-                material: ConstantMaterialParams::default().material,
+                material: MaterialId(1),
                 flags: 0,
             }
         } else {
@@ -1622,7 +1640,7 @@ mod tests {
         // Biome graph: BiomeParam("solid") drives density into BuildTerrain.
         let mut biome = Graph::new();
         let bp = biome.add_node(NodeKind::BiomeParam(BiomeParamParams { name: "solid".into(), default: -1.0 }));
-        let m = biome.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let m = biome.add_node(NodeKind::ConstantMaterial(stone()));
         let out = biome.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
         biome.connect(PinRef::new(bp, 0), PinRef::new(out, 0)).unwrap(); // Scalar -> Density coercion
         biome.connect(PinRef::new(m, 0), PinRef::new(out, 1)).unwrap();
@@ -1693,8 +1711,11 @@ mod tests {
         let mut g = Graph::new();
         let band = g.add_node(NodeKind::YBand(YBandParams { min: -1024.0, max: max_y }));
         let layer = g.add_node(NodeKind::Layer(LayerParams {
-            bands: vec![(T_GRASS, 1), (T_SOIL, 3)],
-            fill: T_STONE,
+            bands: vec![
+                (MaterialRef::with_id("grass_soil", T_GRASS), 1),
+                (MaterialRef::with_id("soil", T_SOIL), 3),
+            ],
+            fill: MaterialRef::with_id("limestone", T_STONE),
         }));
         let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
         g.connect(PinRef::new(band, 0), PinRef::new(layer, 0)).unwrap(); // Layer reads the density
@@ -2002,8 +2023,11 @@ mod tests {
         let one = g.add_node(NodeKind::Constant(ConstantParams { value: 1.0 }));
         let solid = g.add_node(NodeKind::Max(MaxParams::default()));
         let layer = g.add_node(NodeKind::Layer(LayerParams {
-            bands: vec![(MaterialId(6), 1), (MaterialId(3), 3)],
-            fill: MaterialId(1),
+            bands: vec![
+                (MaterialRef::with_id("grass_soil", MaterialId(6)), 1),
+                (MaterialRef::with_id("soil", MaterialId(3)), 3),
+            ],
+            fill: MaterialRef::with_id("limestone", MaterialId(1)),
         }));
         let out = g.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
 
@@ -2266,7 +2290,7 @@ mod tests {
             ..Default::default()
         }));
         let s2d = biome.add_node(NodeKind::SurfaceToDensity(SurfaceToDensityParams::default()));
-        let mat = biome.add_node(NodeKind::ConstantMaterial(ConstantMaterialParams::default()));
+        let mat = biome.add_node(NodeKind::ConstantMaterial(stone()));
         let out = biome.add_node(NodeKind::DensityOutput(DensityOutputParams::default()));
 
         // Pins are resolved by the builder, exactly as loading a world does -
