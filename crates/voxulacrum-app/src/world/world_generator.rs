@@ -87,9 +87,9 @@ impl WorldGenerator {
     /// Load a generator from a `*.graph.json` file on disk.
     #[allow(dead_code)] // single-graph loader; app runs the manifest path, tests use this
     pub fn from_path(path: &std::path::Path, world_seed: u64) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let graph = Graph::from_json(&text).map_err(|e| e.to_string())?;
-        Self::new(graph, world_seed)
+        // Through `read_graph`, the one site that parses a graph and resolves
+        // what it names; a graph parsed any other way cannot be evaluated.
+        Self::new(read_graph(path)?, world_seed)
     }
 
     /// Build a generator from a world manifest, at the seed the manifest
@@ -752,6 +752,8 @@ fn read_graph(path: &std::path::Path) -> Result<Graph, String> {
         crate::paths::namespace(),
     )
     .map_err(|e| format!("{}: {e}", path.display()))?;
+    nodegraph_hotreload::resolve_materials(&mut graph, &registry, crate::paths::namespace())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(graph)
 }
 

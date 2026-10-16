@@ -74,15 +74,15 @@
           "type": "Layer",
           "bands": [
             [
-              5,
+              "sand",
               1
             ],
             [
-              8,
+              "gravel",
               2
             ]
           ],
-          "fill": 1
+          "fill": "limestone"
         },
         "position": [
           720.0,

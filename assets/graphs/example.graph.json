@@ -1,4 +1,9 @@
 {
+  "kind": "Biome",
+  "boundary": {
+    "inputs": [],
+    "outputs": []
+  },
   "nodes": [
     {
       "value": null,
@@ -153,19 +158,19 @@
           "type": "Layer",
           "bands": [
             [
-              6,
+              "grass_soil",
               1
             ],
             [
-              3,
+              "soil",
               3
             ],
             [
-              1,
+              "limestone",
               8
             ]
           ],
-          "fill": 2
+          "fill": "granite"
         },
         "position": [
           0.0,
@@ -208,7 +213,7 @@
           "type": "FindFlat",
           "max_step": 1,
           "on_materials": [
-            6
+            "grass_soil"
           ]
         },
         "position": [
@@ -221,13 +226,8 @@
     {
       "value": {
         "kind": {
-          "type": "PlaceTree",
-          "seed": 13,
-          "trunk_min": 4,
-          "trunk_max": 6,
-          "canopy_radius": 3,
-          "trunk_material": 9,
-          "leaf_material": 10
+          "type": "PlaceBlueprint",
+          "blueprint": "rock"
         },
         "position": [
           0.0,

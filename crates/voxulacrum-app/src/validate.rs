@@ -189,11 +189,11 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
         // --- references resolve ---------------------------------------------
         // Collected per asset and reported once each: a `Layer` with eight bands
         // all naming the same missing material is one problem, not eight.
-        let mut missing_materials: HashSet<u32> = HashSet::new();
+        let mut missing_materials: HashSet<String> = HashSet::new();
         for (_, node) in asset.graph.nodes.iter() {
             for m in node.kind.material_refs() {
-                if materials.get(m).is_none() {
-                    missing_materials.insert(m.0 as u32);
+                if let Err(e) = materials.resolve_str(m.name(), crate::paths::namespace()) {
+                    missing_materials.insert(e);
                 }
             }
             match &node.kind {
@@ -219,15 +219,12 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
             }
         }
 
-        let mut missing: Vec<u32> = missing_materials.into_iter().collect();
+        let mut missing: Vec<String> = missing_materials.into_iter().collect();
         missing.sort_unstable();
-        for id in missing {
+        for problem in missing {
             out.push(Finding::error(
                 &asset.name,
-                format!(
-                    "references material {id}, which materials.ron does not define - \
-                     generation would emit an id nothing can render"
-                ),
+                format!("{problem} - the graph will not load until materials.ron defines it"),
             ));
         }
     }

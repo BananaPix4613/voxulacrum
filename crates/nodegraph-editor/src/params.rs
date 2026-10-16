@@ -1,8 +1,7 @@
 //! Per-`NodeKind` parameter editor widgets.
 
 use egui::Ui;
-use nodegraph_ir::{Axis, FractalType, GraphRefTarget, NodeKind, StructureCanopy};
-use voxel_core::MaterialId;
+use nodegraph_ir::{Axis, FractalType, GraphRefTarget, MaterialRef, NodeKind, StructureCanopy};
 
 /// One parameter row: a left-aligned label followed by its editor widget.
 /// Returns `true` if the widget reported a change this frame.
@@ -54,6 +53,9 @@ pub struct GraphCatalogs {
     pub graphs: Vec<GraphChoice>,
     /// Every blueprint on disk, by name, in selector order.
     pub blueprints: Vec<String>,
+    /// Every material a node can name, as this content writes it, in id order.
+    /// Excludes air, which no band, allow-list or wood should name.
+    pub materials: Vec<String>,
 }
 
 /// One library the author may reference, carrying the boundary a `LibraryRef` to
@@ -140,8 +142,10 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             changed
         }
         NodeKind::CurveMapper(p) => curve_stops_ui(ui, &mut p.stops),
-        NodeKind::ConstantMaterial(p) => material_id_ui(ui, &mut p.material, "material"),
-        NodeKind::Layer(p) => layer_bands_ui(ui, p),
+        NodeKind::ConstantMaterial(p) => {
+            material_ref_ui(ui, "constant_material", &mut p.material, "material", &catalogs.materials)
+        }
+        NodeKind::Layer(p) => layer_bands_ui(ui, p, &catalogs.materials),
         NodeKind::JitteredGrid(p) => {
             let mut changed = false;
             changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
@@ -159,12 +163,12 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
         }
         NodeKind::FindFlat(p) => {
             let mut changed = row(ui, "max step", |ui| ui.add(egui::DragValue::new(&mut p.max_step).range(0..=16)));
-            changed |= material_list_ui(ui, &mut p.on_materials);
+            changed |= material_list_ui(ui, "find_flat_material", &mut p.on_materials, &catalogs.materials);
             changed
         }
         NodeKind::PlaceTree(p) => {
             let mut changed = row(ui, "species", |ui| ui.text_edit_singleline(&mut p.species));
-            changed |= row(ui, "wood", |ui| ui.text_edit_singleline(&mut p.wood));
+            changed |= name_combo(ui, "tree_wood", "wood", &mut p.wood, &catalogs.materials, NO_MATERIALS);
             changed |= row(ui, "cell size", |ui| ui.add(egui::DragValue::new(&mut p.cell_size).range(4..=512)));
             changed |= row(ui, "density", |ui| ui.add(egui::DragValue::new(&mut p.density).speed(0.01).range(0.0..=1.0)));
             changed |= row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
@@ -172,9 +176,14 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             changed |= id_list_ui(ui, "tree_biomes", "biomes", &mut p.biomes, &catalogs.biomes, "biome");
             changed
         }
-        NodeKind::PlaceBlueprint(p) => {
-            name_combo(ui, "place_blueprint", "blueprint", &mut p.blueprint, &catalogs.blueprints)
-        }
+        NodeKind::PlaceBlueprint(p) => name_combo(
+            ui,
+            "place_blueprint",
+            "blueprint",
+            &mut p.blueprint,
+            &catalogs.blueprints,
+            NO_BLUEPRINTS,
+        ),
         NodeKind::PlaceStructure(p) => {
             let mut changed = name_combo(
                 ui,
@@ -182,6 +191,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
                 "blueprint",
                 &mut p.blueprint,
                 &catalogs.blueprints,
+                NO_BLUEPRINTS,
             );
             changed |= row(ui, "cell size", |ui| ui.add(egui::DragValue::new(&mut p.cell_size).range(4..=512)));
             changed |= row(ui, "density", |ui| ui.add(egui::DragValue::new(&mut p.density).speed(0.01).range(0.0..=1.0)));
@@ -237,7 +247,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             let mut changed = row(ui, "max slope", |ui| ui.add(egui::DragValue::new(&mut p.max_slope).speed(0.05).range(0.0..=10.0)));
             changed |= row(ui, "min height", |ui| ui.add(egui::DragValue::new(&mut p.min_height).speed(0.5)));
             changed |= row(ui, "max height", |ui| ui.add(egui::DragValue::new(&mut p.max_height).speed(0.5)));
-            changed |= material_list_ui(ui, &mut p.materials);
+            changed |= material_list_ui(ui, "surface_filter_material", &mut p.materials, &catalogs.materials);
             changed
         }
         NodeKind::BiomeContextMask(p) => row(ui, "biome", |ui| ui.add(egui::DragValue::new(&mut p.biome))),
@@ -400,23 +410,41 @@ fn noise_params_ui(ui: &mut Ui, p: &mut nodegraph_ir::NoiseParams) -> bool {
     changed
 }
 
-/// Inline drag-value for a `MaterialId` (just its u16). Authors can look up
-/// IDs in the preview's material color table.
-fn material_id_ui(ui: &mut Ui, id: &mut MaterialId, label: &str) -> bool {
-    row(ui, label, |ui| {
-        ui.add(egui::DragValue::new(&mut id.0).range(0..=u16::MAX))
-    })
+/// Shown in an empty material picker.
+const NO_MATERIALS: &str = "no materials in materials.ron";
+
+/// Shown in an empty blueprint picker.
+const NO_BLUEPRINTS: &str = "no blueprints in assets/blueprints";
+
+/// A material reference, picked by name from the registry.
+fn material_ref_ui(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash,
+    reference: &mut MaterialRef,
+    label: &str,
+    catalog: &[String],
+) -> bool {
+    let mut name = reference.name().to_string();
+    let changed = name_combo(ui, salt, label, &mut name, catalog, NO_MATERIALS);
+    if changed {
+        reference.set_name(name);
+    }
+    changed
 }
 
-/// Editor for a `Vec<MaterialId>` (the FindFlat allow-list). Empty = any.
-fn material_list_ui(ui: &mut Ui, mats: &mut Vec<MaterialId>) -> bool {
+/// Editor for a list of material references (an allow-list). Empty = any.
+fn material_list_ui(
+    ui: &mut Ui,
+    salt: &'static str,
+    mats: &mut Vec<MaterialRef>,
+    catalog: &[String],
+) -> bool {
     let mut changed = false;
     ui.label("on materials (empty = any):");
     let mut remove: Option<usize> = None;
     for (i, m) in mats.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            ui.label("mat");
-            changed |= ui.add(egui::DragValue::new(&mut m.0)).changed();
+            changed |= material_ref_ui(ui, (salt, i), m, "mat", catalog);
             if ui.small_button("×").clicked() {
                 remove = Some(i);
             }
@@ -426,21 +454,20 @@ fn material_list_ui(ui: &mut Ui, mats: &mut Vec<MaterialId>) -> bool {
         mats.remove(i);
         changed = true;
     }
-    if ui.button("+ material").clicked() {
-        mats.push(MaterialId(6));
+    if ui.add_enabled(!catalog.is_empty(), egui::Button::new("+ material")).clicked() {
+        mats.push(MaterialRef::new(catalog[0].clone()));
         changed = true;
     }
     changed
 }
 
-fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {
+fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams, catalog: &[String]) -> bool {
     let mut changed = false;
     ui.label("Bands (top to down):");
     let mut remove: Option<usize> = None;
     for (i, (mat, thickness)) in p.bands.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            ui.label("mat");
-            changed |= ui.add(egui::DragValue::new(&mut mat.0)).changed();
+            changed |= material_ref_ui(ui, ("layer_band", i), mat, "mat", catalog);
             ui.label("×");
             changed |= ui
                 .add(egui::DragValue::new(thickness).range(1u32..=64))
@@ -454,12 +481,12 @@ fn layer_bands_ui(ui: &mut Ui, p: &mut nodegraph_ir::LayerParams) -> bool {
         p.bands.remove(i);
         changed = true;
     }
-    if ui.button("+ band").clicked() {
-        p.bands.push((MaterialId(1), 1));
+    if ui.add_enabled(!catalog.is_empty(), egui::Button::new("+ band")).clicked() {
+        p.bands.push((MaterialRef::new(catalog[0].clone()), 1));
         changed = true;
     }
     ui.separator();
-    changed |= material_id_ui(ui, &mut p.fill, "fill");
+    changed |= material_ref_ui(ui, "layer_fill", &mut p.fill, "fill", catalog);
     changed
 }
 
@@ -552,10 +579,11 @@ fn zone_bands_ui(
 /// content, which is the failure mode named references exist to prevent.
 fn name_combo(
     ui: &mut Ui,
-    salt: &'static str,
+    salt: impl std::hash::Hash,
     label: &str,
     name: &mut String,
     catalog: &[String],
+    empty: &str,
 ) -> bool {
     let mut changed = false;
     let selected = if catalog.iter().any(|c| c == name) {
@@ -571,7 +599,7 @@ fn name_combo(
             .selected_text(selected)
             .show_ui(ui, |ui| {
                 if catalog.is_empty() {
-                    ui.weak("no blueprints in assets/blueprints");
+                    ui.weak(empty);
                 }
                 for candidate in catalog {
                     if ui.selectable_label(candidate == name, candidate).clicked()
