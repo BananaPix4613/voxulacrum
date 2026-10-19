@@ -135,25 +135,31 @@ impl Graph {
         self.edges.len() != before
     }
     
-    /// The library ids referenced by `LibraryRef` nodes in this graph.
-    /// Iteration order follows the slotmap and is unspecified; callers that
-    /// need determinism should sort.
+    /// The resolved library ids referenced by `LibraryRef` nodes in this graph;
+    /// a reference whose name was never resolved is skipped. Iteration order
+    /// follows the slotmap and is unspecified; callers that need determinism
+    /// should sort.
     pub fn library_refs(&self) -> impl Iterator<Item = LibraryGraphId> + '_ {
         self.nodes.values().filter_map(|n| match &n.kind {
-            NodeKind::LibraryRef(p) => Some(p.library),
+            NodeKind::LibraryRef(p) => p.library.id(),
             _ => None,
         })
     }
 
     /// Resolve every `LibraryRef` node's pins from `libraries`, caching the
-    /// projected boundary on each node. A reference to an unregistered library
-    /// resolves to no pins. Idempotent; re-run on load and after edits so the
-    /// cached pins track the referenced library's current boundary.
+    /// projected boundary on each node. Reads each reference's resolved id, so
+    /// names must be resolved first; a reference with no id, or to an
+    /// unregistered library, resolves to no pins. Idempotent; re-run on load and
+    /// after edits so the cached pins track the referenced library's current
+    /// boundary.
     pub fn resolve_library_refs(&mut self, libraries: &LibraryGraphRegistry) {
         for node in self.nodes.values_mut() {
             if let NodeKind::LibraryRef(params) = &mut node.kind {
-                params.resolved =
-                    libraries.get(params.library).map(|lib| lib.boundary.to_resolved());
+                params.resolved = params
+                    .library
+                    .id()
+                    .and_then(|id| libraries.get(id))
+                    .map(|lib| lib.boundary.to_resolved());
             }
         }
     }
@@ -440,6 +446,7 @@ impl Graph {
 
 #[cfg(test)]
 mod tests {
+    use crate::LibraryGraphRef;
     use super::*;
 
     #[test]
@@ -540,6 +547,7 @@ mod tests {
     #[test]
     fn library_ref_resolves_pins_from_boundary() {
         use crate::boundary::{BoundaryPort, GraphBoundary};
+        use crate::content_ref::LibraryGraphRef;
         use crate::library::{LibraryGraphId, LibraryGraphRegistry};
         use crate::node::LibraryRefParams;
         use crate::pin::PinType;
@@ -554,8 +562,8 @@ mod tests {
         
         let mut g = Graph::new();
         let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
-            library: LibraryGraphId(3),
-            ..Default::default()
+            library: LibraryGraphRef::with_id("test", LibraryGraphId(3)),
+            resolved: None,
         }));
         // Before resolution: no pins.
         assert!(g.nodes[n].kind.effective_inputs().is_empty());
@@ -578,11 +586,31 @@ mod tests {
         use crate::node::LibraryRefParams;
         let mut g = Graph::new();
         let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
-            library: LibraryGraphId(99),
-            ..Default::default()
+            library: LibraryGraphRef::with_id("test", LibraryGraphId(99)),
+            resolved: None,
         }));
         g.resolve_library_refs(&LibraryGraphRegistry::new());
         assert!(g.nodes[n].kind.effective_inputs().is_empty());
+        assert!(g.nodes[n].kind.effective_outputs().is_empty());
+    }
+    
+    #[test]
+    fn library_ref_with_an_unresolved_name_resolved_to_no_pins() {
+        use crate::boundary::GraphBoundary;
+        use crate::content_ref::LibraryGraphRef;
+        use crate::library::{LibraryGraphId, LibraryGraphRegistry};
+        use crate::node::LibraryRefParams;
+        // The library exists, but the reference only names it: no id, no pins.
+        let mut registry = LibraryGraphRegistry::new();
+        let mut lib = Graph::of_kind(GraphKind::Library);
+        lib.boundary = GraphBoundary::default();
+        registry.insert(LibraryGraphId(0), lib);
+        let mut g = Graph::new();
+        let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+            library: LibraryGraphRef::new("cave"),
+            resolved: None,
+        }));
+        g.resolve_library_refs(&registry);
         assert!(g.nodes[n].kind.effective_outputs().is_empty());
     }
     
@@ -604,8 +632,8 @@ mod tests {
         
         let mut g = Graph::of_kind(GraphKind::Zone);
         let lref = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
-            library: LibraryGraphId(1),
-            ..Default::default()
+            library: LibraryGraphRef::with_id("test", LibraryGraphId(1)),
+            resolved: None,
         }));
         let out = g.add_node(NodeKind::ZoneOutput(ZoneOutputParams::default()));
         

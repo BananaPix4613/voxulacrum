@@ -16,7 +16,6 @@ use crate::prefabs::{PrefabRegistry, PrefabShape};
 use crate::rendering::pipelines::{ScatterInstanceGpu, ScatterVertex};
 use crate::rendering::render_context::RenderContext;
 use crate::world::chunk::{LoadedChunk, CHUNK_SIZE, VOXEL_SCALE};
-use crate::world::layers::PrefabId;
 use crate::world::overrides::ChunkOverrides;
 use crate::world::World;
 use voxel_core::ShapeId;
@@ -140,7 +139,8 @@ fn build_chunk_scatter(
 }
 
 /// Group a chunk's effective scatter into per-prefab GPU instance vecs
-/// (index = `PrefabId`). Instances with an unknown prefab fall back to id 0.
+/// (index = `PrefabId`). Instances with an unknown prefab draw the content's
+/// placeholder.
 fn group_instances_by_prefab(
     chunk: &LoadedChunk,
     prefabs: &PrefabRegistry,
@@ -155,10 +155,15 @@ fn group_instances_by_prefab(
     let origin = [c.x as f32 * span, c.y as f32 * span, c.z as f32 * span];
 
     for si in overrides.effective_scatter(generated) {
-        // Resolve the prefab, falling back to id 0 for unknown ids.
+        // An id this table does not define (an instance saved or generated
+        // against different content) draws the placeholder the content declares.
         let (prefab_idx, def) = match prefabs.get(si.prefab_id) {
             Some(def) => (si.prefab_id.0 as usize, def),
-            None => (0, prefabs.get(PrefabId(0)).expect("prefab 0 present")),
+            None => {
+                let placeholder = prefabs.placeholder();
+                let def = prefabs.get(placeholder).expect("the placeholder names a prefab");
+                (placeholder.0 as usize, def)
+            }
         };
 
         let (ax, ay, az) = (si.anchor.x as usize, si.anchor.y as usize, si.anchor.z as usize);

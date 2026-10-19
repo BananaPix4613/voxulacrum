@@ -53,6 +53,8 @@ pub struct HierarchyEditor {
     /// Material names for the pickers, as this content writes them, read at
     /// load from the same registry graphs resolve against.
     materials: Vec<String>,
+    /// Prefab names for the pickers, read at load like `materials`.
+    prefabs: Vec<String>,
     /// Name entry for the "add biome parameter" action.
     new_param: String,
     /// Transient status line under the toolbar.
@@ -77,6 +79,7 @@ impl HierarchyEditor {
             new_rename: String::new(),
             libraries: None,
             materials: Vec::new(),
+            prefabs: Vec::new(),
             new_param: String::new(),
             status: None,
         }
@@ -100,6 +103,10 @@ impl HierarchyEditor {
         // Air is the engine's reserved id 0, never a material a node names.
         self.materials = (1..registry.len())
             .filter_map(|i| registry.get(MaterialId(i as u16)))
+            .map(|def| def.name.relative_to(namespace))
+            .collect();
+        self.prefabs = crate::prefabs::load_prefab_registry()
+            .iter()
             .map(|def| def.name.relative_to(namespace))
             .collect();
         let default = GraphSlot::Biome(0);
@@ -200,6 +207,7 @@ impl HierarchyEditor {
             blueprints: voxel_core::Blueprint::list(&crate::world::blueprint::blueprint_dir())
                 .unwrap_or_default(),
             materials: self.materials.clone(),
+            prefabs: self.prefabs.clone(),
             zones: self
                 .slots
                 .iter()

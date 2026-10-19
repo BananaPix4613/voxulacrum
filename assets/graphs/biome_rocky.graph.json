@@ -161,7 +161,7 @@
       "value": {
         "kind": {
           "type": "LibraryRef",
-          "library": 1
+          "library": "standard_cave_noise"
         },
         "position": [
           246.10802,

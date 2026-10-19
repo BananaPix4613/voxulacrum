@@ -1,6 +1,7 @@
 // Testbed prefab table. The registry must not be empty, so this holds one
 // entry; no detail graph in this world scatters it.
 (
+    placeholder: "test_rock",
     prefabs: [
         (id: 0, id_name: "test_rock", shape: Rock, color: (0.55, 0.55, 0.55), scale: 0.5),
     ],

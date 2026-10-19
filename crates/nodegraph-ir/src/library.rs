@@ -133,6 +133,7 @@ impl LibraryGraphRegistry {
 mod tests {
     use super::*;
     use crate::graph::Graph;
+    use crate::content_ref::LibraryGraphRef;
     use crate::node::{LibraryRefParams, NodeKind};
     
     /// A library graph whose only nodes are `LibraryRef`s to `targets`.
@@ -140,8 +141,8 @@ mod tests {
         let mut g = Graph::new();
         for &t in targets {
             g.add_node(NodeKind::LibraryRef(LibraryRefParams {
-                library: LibraryGraphId(t),
-                ..Default::default()
+                library: LibraryGraphRef::with_id(format!("lib_{t}"), LibraryGraphId(t)),
+                resolved: None,
             }));
         }
         g

@@ -41,6 +41,7 @@
 #![warn(missing_docs)]
 
 mod boundary;
+mod content_ref;
 mod crossgraph;
 mod diagnostic;
 mod edge;
@@ -48,7 +49,6 @@ mod error;
 mod graph;
 mod index;
 mod library;
-mod material_ref;
 mod node;
 mod pin;
 
@@ -60,7 +60,7 @@ pub use error::{GraphError, GraphResult};
 pub use graph::{Graph, GraphKind};
 pub use index::EdgeIndex;
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
-pub use material_ref::MaterialRef;
+pub use content_ref::{ContentRef, LibraryGraphRef, MaterialRef, PrefabRef};
 pub use node::{
     AbsParams, AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams,
     ConstantParams, CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,
