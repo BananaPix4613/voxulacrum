@@ -5,6 +5,8 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use crate::package::Package;
+
 /// Workspace root. `CARGO_MANIFEST_DIR` is `<workspace>/crates/voxulacrum-app`
 /// at compile time; the root is two levels up.
 pub fn asset_root() -> PathBuf {
@@ -30,45 +32,51 @@ pub fn presets_dir() -> PathBuf {
     asset_root().join("params")
 }
 
-/// Where world content comes from. Set once by `app::run_with`, before anything
-/// reads content; unset means the shipped reference world.
-struct Content {
-    name: String,
-    root: PathBuf,
-}
+/// The package this run's world comes from. Set once by `app::run_with`, before
+/// anything reads content; unset means the shipped reference world.
+static PACKAGE: OnceLock<Package> = OnceLock::new();
 
-static CONTENT: OnceLock<Content> = OnceLock::new();
-
-/// Point content lookups at `root` and this world's saves at `saves/<name>`.
-/// Called once, at startup, before any content is read.
-pub fn set_content(name: String, root: PathBuf) {
-    if CONTENT.set(Content { name, root }).is_err() {
-        panic!("the content root is set once, at startup");
+/// Load content from `package`, and keep this world's saves at
+/// `saves/<package id>`. Called once, at startup, before any content is read.
+pub fn set_package(package: Package) {
+    if PACKAGE.set(package).is_err() {
+        panic!("the package is set once, at startup");
     }
 }
 
 /// Directory holding world content: graphs, materials, prefabs, libraries,
-/// blueprints and species. `assets/` under the asset root unless
-/// `RunOptions::content` points elsewhere. Engine-owned files (shaders,
-/// palettes, input bindings, presets) stay under the asset root regardless.
+/// blueprints, species and foliage. The package's root, or `assets/` under the
+/// asset root for the reference world. Engine-owned files (shaders, palettes,
+/// input bindings, presets) stay under the asset root regardless.
 pub fn content_root() -> PathBuf {
-    match CONTENT.get() {
-        Some(content) => content.root.clone(),
+    match PACKAGE.get() {
+        Some(package) => package.root.clone(),
         None => asset_root().join("assets"),
     }
 }
 
-/// Directory name under `saves/` for this world. It follows the content root,
-/// so a second world never opens the reference world's save.
+/// Directory name under `saves/` for this world: the package's id, so a second
+/// world never opens the reference world's save.
 pub fn save_name() -> &'static str {
-    CONTENT.get().map_or("default", |content| content.name.as_str())
+    PACKAGE.get().map_or("default", |package| package.manifest.id.as_str())
 }
 
 /// Namespace this world's registry entries are known by, and the one bare names
 /// in its content resolve in: the engine's own for the reference world, the
-/// content name otherwise.
+/// package's content namespace otherwise.
 pub fn namespace() -> &'static str {
-    CONTENT.get().map_or(voxel_core::ENGINE_NAMESPACE, |content| content.name.as_str())
+    PACKAGE
+        .get()
+        .map_or(voxel_core::ENGINE_NAMESPACE, |package| package.manifest.namespace.as_str())
+}
+
+/// The world manifest this run starts: the package's `world`, or the reference
+/// world's `graphs/world.manifest.json`.
+pub fn world_manifest_path() -> PathBuf {
+    PACKAGE
+        .get()
+        .and_then(Package::world_manifest)
+        .unwrap_or_else(|| content_root().join("graphs").join("world.manifest.json"))
 }
 
 #[cfg(test)]
@@ -82,12 +90,13 @@ mod tests {
         assert!(dir.starts_with(asset_root()), "{dir:?} is not under the asset root");
     }
 
-    // No test calls `set_content`: the setting is process-wide, and the other
+    // No test calls `set_package`: the setting is process-wide, and the other
     // tests read the reference world through these same paths.
     #[test]
-    fn unset_content_is_the_reference_world() {
+    fn no_package_is_the_reference_world() {
         assert_eq!(content_root(), asset_root().join("assets"));
         assert_eq!(save_name(), "default");
         assert_eq!(namespace(), voxel_core::ENGINE_NAMESPACE);
+        assert_eq!(world_manifest_path(), content_root().join("graphs").join("world.manifest.json"));
     }
 }

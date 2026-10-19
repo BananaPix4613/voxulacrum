@@ -971,14 +971,18 @@ pub fn default_graph_path() -> std::path::PathBuf {
 }
 
 /// Path of the world manifest assembling the starter world's graph hierarchy
-/// (World + Zone + biome graphs).
+/// (World + Zone + biome graphs): the one the package names.
 pub fn world_manifest_path() -> std::path::PathBuf {
-    graphs_dir().join("world.manifest.json")
+    crate::paths::world_manifest_path()
 }
 
-/// The directory holding the world's graph assets.
+/// The directory holding the world's graph assets: where the world manifest
+/// sits, since the graphs it names are relative to it.
 fn graphs_dir() -> std::path::PathBuf {
-    crate::paths::content_root().join("graphs")
+    world_manifest_path()
+        .parent()
+        .expect("a world manifest path has a parent directory")
+        .to_path_buf()
 }
 
 /// Load the default biome graph into a shared generator, seeded from `params`.

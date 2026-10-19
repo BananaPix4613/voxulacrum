@@ -24,6 +24,7 @@ mod player;
 mod diagnostics;
 mod foliage;
 mod jobs;
+mod package;
 mod validate;
 mod verify;
 

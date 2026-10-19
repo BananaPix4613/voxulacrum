@@ -847,7 +847,7 @@ impl ApplicationHandler for App {
 /// world from the engine's `assets/` directory.
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
-    content: Option<(String, PathBuf)>,
+    package: Option<PathBuf>,
 }
 
 impl RunOptions {
@@ -855,28 +855,21 @@ impl RunOptions {
     pub fn new() -> Self {
         Self::default()
     }
-    
-    /// Load world content (graphs, materials, prefabs, libraries, blueprints
-    /// and species) from `root` instead of the engine's `assets/` directory,
-    /// and keep this world's saves in `saves/<name>/`. Shaders, palettes,
-    /// input bindings and parameter presets still come from the engine.
-    /// 
+
+    /// Start the world of the package at `root`: a directory holding a
+    /// `package.ron` manifest beside its content (graphs, materials, prefabs,
+    /// libraries, blueprints, species and foliage). The manifest names the
+    /// package's id, which is also its save directory under `saves/`, and the
+    /// content namespace its names resolve in. Shaders, palettes, input
+    /// bindings and parameter presets still come from the engine.
+    ///
+    /// The package loads when the engine starts. One that is malformed, needs a
+    /// different engine version, declares code modules or names no world stops
+    /// startup with a message saying why.
+    ///
     /// A relative `root` is resolved against the working directory.
-    ///
-    /// `name` is also the namespace this content's registry entries are known
-    /// by (`testbed:test_light`), so it follows the namespace rule: one or more
-    /// of `a-z`, `0-9`, `_` and `-`. That also keeps it a single directory
-    /// name under `saves/`.
-    ///
-    /// # Panics
-    /// 
-    /// If `name` is not a valid namespace.
-    pub fn content(mut self, name: impl Into<String>, root: impl Into<PathBuf>) -> Self {
-        let name = name.into();
-        if let Err(e) = voxel_core::QualifiedName::validate_namespace(&name) {
-            panic!("content name {name:?} must be a valid namespace: {e}");
-        }
-        self.content = Some((name, root.into()));
+    pub fn package(mut self, root: impl Into<PathBuf>) -> Self {
+        self.package = Some(root.into());
         self
     }
 }
@@ -887,15 +880,39 @@ pub fn run() {
 }
 
 /// Runs the engine. `--validate-graphs` and `--verify-generation` run headless
-/// and exit; otherwise this opens the window and enters the event loop.
+/// and exit; otherwise this opens the window and enters the event loop. Exits
+/// with code 1 if the package fails to load.
 pub fn run_with(options: RunOptions) {
     env_logger::init();
     
     // Before anything reads content, including the headless checks below, so
     // `--verify-generation` checks whichever world this run loads.
-    if let Some((name, root)) = options.content {
-        log::info!("Content: {} (saves/{name})", root.display());
-        paths::set_content(name, root);
+    if let Some(root) = options.package {
+        let package = match crate::package::Package::load(&root) {
+            Ok(package) if package.manifest.world.is_some() => package,
+            Ok(_) => {
+                eprintln!("error: {}: the package names no world to start", root.display());
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("error: {}: {e}", root.display());
+                std::process::exit(1);
+            }
+        };
+        let m = &package.manifest;
+        log::info!(
+            "Package {} {} ({:?}, engine {}) from {} (saves/{})",
+            m.id,
+            m.version,
+            m.kind,
+            m.engine,
+            root.display(),
+            m.id,
+        );
+        for d in &m.dependencies {
+            log::warn!("{} depends on {} {}, which is not loaded: dependencies are not loaded yet", m.id, d.id, d.version);
+        }
+        paths::set_package(package);
     }
     
     // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
@@ -916,38 +933,4 @@ pub fn run_with(options: RunOptions) {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("Event loop failed");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::RunOptions;
-    
-    #[test]
-    fn content_accepts_a_directory_name() {
-        let _ = RunOptions::new().content("testbed", "content");
-    }
-
-    #[test]
-    #[should_panic(expected = "must be a valid namespace")]
-    fn content_rejects_a_path() {
-        let _ = RunOptions::new().content("a/b", "content");
-    }
-
-    #[test]
-    #[should_panic(expected = "must be a valid namespace")]
-    fn content_rejects_a_parent_reference() {
-        let _ = RunOptions::new().content("..", "content");
-    }
-
-    #[test]
-    #[should_panic(expected = "must be a valid namespace")]
-    fn content_rejects_an_empty_name() {
-        let _ = RunOptions::new().content("", "content");
-    }
-
-    #[test]
-    #[should_panic(expected = "must be a valid namespace")]
-    fn content_rejects_a_name_that_is_not_a_namespace() {
-        let _ = RunOptions::new().content("My World", "content");
-    }
 }

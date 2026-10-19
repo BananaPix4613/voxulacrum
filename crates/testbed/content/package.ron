@@ -1,0 +1,12 @@
+// Testbed package: a flat world with test materials, built on the facade alone.
+// Its id is also its namespace (`testbed:test_light`) and its save directory
+// (`saves/testbed/`).
+(
+    id: "testbed",
+    version: "0.1.0",
+    kind: Game,
+    engine: "^0.4",
+    world: "graphs/world.manifest.json",
+    dependencies: [],
+    modules: [],
+)
