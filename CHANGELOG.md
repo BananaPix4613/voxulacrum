@@ -18,12 +18,12 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Engine/game boundary
 
-Milestone M2, in progress: B1–B5 are merged, and B6 and B7 remain. The engine is
-separating from the game that grew inside it. It is now a library behind a
-facade crate, a testbed project is built on that facade alone, and content names
-everything it references rather than numbering it. **There is no save-format
-change**, so 0.4.2 saves open as they are, and the generation hash is unchanged at
-`0xed02babdf0f40420`.
+Milestone M2, in progress: B1–B5 and B6a are merged, and B6b, B6c and B7 remain.
+The engine is separating from the game that grew inside it. It is now a library
+behind a facade crate, a testbed project loads as a package built on that facade
+alone, and content names everything it references rather than numbering it.
+**There is no save-format change**, so 0.4.2 saves open as they are, and the
+generation hash is unchanged at `0xed02babdf0f40420`.
 
 ### Added
 
@@ -36,15 +36,21 @@ change**, so 0.4.2 saves open as they are, and the generation hash is unchanged 
   crate left off the list is treated as a consumer.
 - **The testbed** (B4, #10) — `crates/testbed`, a flat world with test materials
   that depends only on the facade. It is the boundary check's first consumer.
-- **Content roots** (B4, #10) — `RunOptions::content(name, root)` loads world
-  content (graphs, materials, prefabs, libraries, blueprints, species, foliage)
-  from `root`, and keeps that world's saves in `saves/<name>/`, so a second world
-  never opens the reference world's save. Shaders, palettes, input bindings and
-  presets stay with the engine.
+- **Packages** (B4, #10; B6a, #74) — `RunOptions::package(root)` starts the
+  world of a data-only package: a directory with a `package.ron` manifest beside
+  its content (graphs, materials, prefabs, libraries, blueprints, species,
+  foliage). The manifest declares the package's id, which is also its save
+  directory under `saves/` so a second world never opens the reference world's
+  save, plus its content namespace, version, kind, the engine versions it
+  supports (a Cargo-style requirement such as `^0.4`), its world and its
+  dependencies. A package that needs a different engine, declares code modules
+  or names no world stops startup with a message saying why. Dependencies are
+  validated but not loaded yet. Shaders, palettes, input bindings and presets
+  stay with the engine.
 - **Namespaced registry identity** (B5a, #66) — every registry entry is
-  `namespace:name`. The reference world's namespace is `voxulacrum`, and other
-  content takes its content name. A bare name in content resolves in its own
-  namespace.
+  `namespace:name`. The reference world's namespace is `voxulacrum`, and a
+  package's is the one its manifest declares. A bare name in content resolves in
+  its own namespace.
 - **`foliage.ron`** (B5d, #69) — detail layers with the species in each, and
   scatter types. Species colors reach the shader as data instead of a hardcoded
   switch in `detail_paint.wgsl`.
@@ -93,17 +99,14 @@ change**, so 0.4.2 saves open as they are, and the generation hash is unchanged 
 
 - **Commands:** `cargo run -p voxulacrum …` becomes `cargo run -p voxulacrum-app …`
   (B1).
-- **Facade:** `RunOptions::content`'s name must be a valid namespace (B5a), for
-  example `my_world` rather than `My World`. It previously accepted any single
-  directory name.
-- **Content outside this repository** (none ships with the engine) must name what
-  it references:
-  - Graph files write names where they wrote ids, and three keys change:
-    `prefab_id` → `prefab`, `layer_id` → `layer` and `type_id` → `scatter_type`.
-    A number in any of these places fails to load.
-  - `prefabs.ron` requires a top-level `placeholder: "<name>"`.
-  - A content root needs a `foliage.ron`. Without one, the engine logs an error
-    and falls back to the reference world's table.
+- **Content outside this repository** (none ships with the engine) loads as a
+  package with a `package.ron`, and must name what it references:
+- Graph files write names where they wrote ids, and three keys change:
+  `prefab_id` → `prefab`, `layer_id` → `layer` and `type_id` → `scatter_type`.
+  A number in any of these places fails to load.
+- `prefabs.ron` requires a top-level `placeholder: "<name>"`.
+- A package needs a `foliage.ron`. Without one, the engine logs an error and
+  falls back to the reference world's table.
 
 ---
 

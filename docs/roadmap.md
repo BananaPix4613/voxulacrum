@@ -562,7 +562,7 @@ Keys are never reused. The D workstream's work items (D1–D11) are a separate s
 | Milestone | Items | Issues |
 |---|-------|--------|
 | M1 Clean slate | F1–F7 | #1–#6, #60 |
-| M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6, B7 | #7–#13, #66–#69 |
+| M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6 (steps B6a–B6c), B7 | #7–#13, #66–#69, #74–#76 |
 | M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6 | #14–#22 |
 | M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11 | #23–#36 |
 | M5 Playable on the new data | V1–V6, S1, S2, E1, E2, T1 | #37–#47 |
