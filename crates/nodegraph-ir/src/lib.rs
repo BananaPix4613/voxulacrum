@@ -60,7 +60,10 @@ pub use error::{GraphError, GraphResult};
 pub use graph::{Graph, GraphKind};
 pub use index::EdgeIndex;
 pub use library::{LibraryGraphId, LibraryGraphRegistry};
-pub use content_ref::{ContentRef, LibraryGraphRef, MaterialRef, PrefabRef};
+pub use content_ref::{
+    ContentRef, DetailLayerRef, DetailSpeciesRef, LibraryGraphRef, MaterialRef, PrefabRef,
+    ScatterTypeRef,
+};
 pub use node::{
     AbsParams, AddParams, Axis, BiomeParamParams, ClampParams, ConstantMaterialParams,
     ConstantParams, CurveMapperParams, DensityOutputParams, DensitySubtractParams, DomainWarpParams,

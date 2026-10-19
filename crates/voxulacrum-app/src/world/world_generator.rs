@@ -760,6 +760,9 @@ fn read_graph(path: &std::path::Path) -> Result<Graph, String> {
     crate::prefabs::load_prefab_registry()
         .resolve_refs(&mut graph, crate::paths::namespace())
         .map_err(|problems| format!("{}: {}", path.display(), problems.join("; ")))?;
+    crate::foliage::load_foliage_registry()
+        .resolve_refs(&mut graph, crate::paths::namespace())
+        .map_err(|problems| format!("{}: {}", path.display(), problems.join("; ")))?;
     Ok(graph)
 }
 
@@ -1066,20 +1069,33 @@ pub fn new_zone_graph(world_boundary: &nodegraph_ir::GraphBoundary) -> Graph {
     g
 }
 
-/// A minimal, valid DetailGraph: one `PaintDensity` terminal painting a default
-/// species across the biome.
+/// A minimal, valid DetailGraph: one `PaintDensity` terminal painting the
+/// content's first species of its first layer across the biome.
 ///
 /// `PaintDensity`'s surface input is optional, so this validates as authored and
 /// produces visible foliage immediately - an author can see the graph is
-/// attached before authoring anything into it.
+/// attached before authoring anything into it. Content with no foliage gets an
+/// unnamed paint node for the author to fill in, which validation reports.
 pub fn new_detail_graph() -> Graph {
     use glam::Vec2;
     use nodegraph_ir::*;
 
+    let namespace = crate::paths::namespace();
+    let (layer, species) = crate::foliage::load_foliage_registry()
+        .layers()
+        .first()
+        .and_then(|l| {
+            l.species
+                .first()
+                .map(|s| (l.name.relative_to(namespace), s.name.relative_to(namespace)))
+        })
+        .unwrap_or_default();
+
     let mut g = Graph::of_kind(GraphKind::Detail);
     g.add_node_at(
         NodeKind::PaintDensity(PaintDensityParams {
-            species: 1,
+            layer: DetailLayerRef::new(layer),
+            species: DetailSpeciesRef::new(species),
             density: 180,
             ..Default::default()
         }),

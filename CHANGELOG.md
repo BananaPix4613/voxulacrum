@@ -16,6 +16,97 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ---
 
+## [Unreleased] — Engine/game boundary
+
+Milestone M2, in progress: B1–B5 are merged, and B6 and B7 remain. The engine is
+separating from the game that grew inside it. It is now a library behind a
+facade crate, a testbed project is built on that facade alone, and content names
+everything it references rather than numbering it. **There is no save-format
+change**, so 0.4.2 saves open as they are, and the generation hash is unchanged at
+`0xed02babdf0f40420`.
+
+### Added
+
+- **The `voxulacrum` facade crate** (B3, #9) — the only supported engine surface
+  for games and the testbed. It exports `run`, `run_with` and `RunOptions`, and
+  its crate docs set the rules every export follows.
+- **`boundary-check`** (B3, #9) — a CI step that fails if any crate outside the
+  engine depends on an engine crate other than the facade. The engine crates are
+  listed under `[workspace.metadata.voxulacrum]` in the root `Cargo.toml`, and a
+  crate left off the list is treated as a consumer.
+- **The testbed** (B4, #10) — `crates/testbed`, a flat world with test materials
+  that depends only on the facade. It is the boundary check's first consumer.
+- **Content roots** (B4, #10) — `RunOptions::content(name, root)` loads world
+  content (graphs, materials, prefabs, libraries, blueprints, species, foliage)
+  from `root`, and keeps that world's saves in `saves/<name>/`, so a second world
+  never opens the reference world's save. Shaders, palettes, input bindings and
+  presets stay with the engine.
+- **Namespaced registry identity** (B5a, #66) — every registry entry is
+  `namespace:name`. The reference world's namespace is `voxulacrum`, and other
+  content takes its content name. A bare name in content resolves in its own
+  namespace.
+- **`foliage.ron`** (B5d, #69) — detail layers with the species in each, and
+  scatter types. Species colors reach the shader as data instead of a hardcoded
+  switch in `detail_paint.wgsl`.
+- **A content-declared prefab `placeholder`** (B5c, #68) — the prefab drawn for
+  an instance whose id the table doesn't define. It replaces prefab 0 being
+  chosen in engine code.
+
+### Changed
+
+- **`voxulacrum-app` is a library with a thin binary** (B1, #7). The package is
+  renamed from `voxulacrum` to `voxulacrum-app`; the binary is still
+  `voxulacrum-app`, so release artifacts keep their names.
+- **`ecs/systems.rs` is split into 16 subsystem modules** (B2, #8). The schedule
+  registers the same systems in the same order.
+- **Graphs name what they reference** (B5b–B5d, #67–#69). Materials (`Layer`,
+  `ConstantMaterial`, `FindFlat`, `SurfaceFilter`), libraries (`LibraryRef`),
+  prefabs (`ScatterPlace`, canopies), detail layers and species (`PaintDensity`)
+  and scatter types are names, resolved to ids when content loads. A name that
+  doesn't resolve fails the load with an error naming it, and
+  `--validate-graphs` reports it. The graph editor picks each of these from its
+  registry instead of editing raw numbers. Numeric ids still come from the
+  authored `id` fields; moving them into the save is D3 (M4).
+- **No engine code chooses content.** New `ScatterPlace`, `PaintDensity` and
+  canopy nodes name nothing until the author picks. A new detail graph takes the
+  content's first layer and species. `PlaceScatter` carries the prefab its
+  caller chose.
+- **Content names follow one rule**, `a-z`, `0-9`, `_` and `-` (B5a, #66). It
+  applies to every registry entry, and also to blueprint capture names, which
+  previously accepted uppercase letters that no graph could reference.
+- **Debug and fallback colors.** The material debug view derives a distinct
+  false color from each id instead of a table naming the reference world's
+  materials (B5b). A detail species the content doesn't define draws magenta
+  instead of green (B5d).
+- **`assets/graphs/example.graph.json` is regenerated from its builder** (B5b).
+  It had fallen far enough behind that it no longer parsed. Tests now pin it to
+  the builder and to the shipped materials.
+
+### Fixed
+
+- **The material registry's validation tests were passing on a RON parse
+  error** (B5a, #66). Their fixtures wrote colors as `[..]` where RON needs
+  `(..)`, so none of them reached the check it was named for. They now assert
+  the validation error itself.
+
+### Migration
+
+- **Commands:** `cargo run -p voxulacrum …` becomes `cargo run -p voxulacrum-app …`
+  (B1).
+- **Facade:** `RunOptions::content`'s name must be a valid namespace (B5a), for
+  example `my_world` rather than `My World`. It previously accepted any single
+  directory name.
+- **Content outside this repository** (none ships with the engine) must name what
+  it references:
+  - Graph files write names where they wrote ids, and three keys change:
+    `prefab_id` → `prefab`, `layer_id` → `layer` and `type_id` → `scatter_type`.
+    A number in any of these places fails to load.
+  - `prefabs.ron` requires a top-level `placeholder: "<name>"`.
+  - A content root needs a `foliage.ron`. Without one, the engine logs an error
+    and falls back to the reference world's table.
+
+---
+
 ## [0.4.2] — Clean slate follow-up
 
 One more way a world could lose saved edits, found while closing M1. No

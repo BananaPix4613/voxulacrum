@@ -17,7 +17,7 @@ pub struct PaintTexel {
     pub species: u8,
     /// Density driving rendered blade count.
     pub density: u8,
-    /// Tint palette index.
+    /// Brightness nudge `0..=255` (the shader scales color by `0.85..=1.15`).
     pub tint: u8,
     /// Bitflags (reserved).
     pub flags: u8,

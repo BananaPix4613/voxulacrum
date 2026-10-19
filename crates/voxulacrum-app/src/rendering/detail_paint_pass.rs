@@ -11,12 +11,14 @@
 //! density-driven blade count, wind, tint, and per-blade variation.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy_ecs::prelude::Resource;
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
+use crate::foliage::FoliageRegistry;
 use crate::rendering::pipelines::GrassVertex;
 use crate::rendering::render_context::RenderContext;
 use crate::world::chunk::{LoadedChunk, CHUNK_SIZE, VOXEL_SCALE};
@@ -49,13 +51,16 @@ struct ColumnTexel {
     surface_top: f32,
 }
 
-
-/// GPU per-chunk uniform: world-space chunk origin + voxel scale.
+/// GPU per-chunk uniform: world-space chunk origin, voxel scale, and the slot
+/// of the chunk's detail layer in the species color table (`u32::MAX` for a
+/// layer the registry does not define, which the shader draws magenta).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ChunkUniform {
     origin: [f32; 3],
     voxel_scale: f32,
+    layer_slot: u32,
+    _pad: [u32; 3],
 }
 
 /// Per-chunk GPU detail-paint data.
@@ -72,11 +77,15 @@ pub struct DetailPaintPass {
     pub chunk_bind_group_layout: wgpu::BindGroupLayout,
     /// Per-chunk paint buffers, keyed by chunk position.
     pub chunk_paint: HashMap<IVec3, ChunkDetailPaint>,
+    /// Group 2: the species color table, built once from the registry.
+    pub species_bind_group: wgpu::BindGroup,
+    /// The registry the table and layer slots came from (reused on regen).
+    foliage: Arc<FoliageRegistry>,
 }
 
 impl DetailPaintPass {
     /// Full rebuild - scans all loaded chunks. Used for initial load and regen.
-    pub fn new(ctx: &RenderContext, world: &World) -> Self {
+    pub fn new(ctx: &RenderContext, world: &World, foliage: &Arc<FoliageRegistry>) -> Self {
         let (vertices, indices) = create_blade_mesh();
 
         let blade_vertex_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -92,11 +101,25 @@ impl DetailPaintPass {
 
         let chunk_bind_group_layout = create_detail_chunk_layout(&ctx.device);
 
+        let species_colors = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("detail_paint_species_colors"),
+            contents: bytemuck::cast_slice(&foliage.species_color_table()),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let species_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("detail_paint_species_bind_group"),
+            layout: &create_detail_species_layout(&ctx.device),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: species_colors.as_entire_binding(),
+            }],
+        });
+        
         let mut chunk_paint = HashMap::new();
         for (&coord, _) in &world.chunks {
             let pos = IVec3::from(coord);
             if let Some(chunk) = world.get_chunk(pos) {
-                if let Some((columns, uniform)) = build_chunk_columns(chunk) {
+                if let Some((columns, uniform)) = build_chunk_columns(chunk, foliage) {
                     chunk_paint.insert(
                         pos,
                         make_chunk_paint(&ctx.device, &chunk_bind_group_layout, &columns, uniform),
@@ -112,7 +135,14 @@ impl DetailPaintPass {
             blade_index_count: indices.len() as u32,
             chunk_bind_group_layout,
             chunk_paint,
+            species_bind_group,
+            foliage: foliage.clone(),
         }
+    }
+    
+    /// The foliage registry this pass was built with (used to rebuild on regen).
+    pub fn foliage(&self) -> &Arc<FoliageRegistry> {
+        &self.foliage
     }
 
     /// Build (or refresh) per-chunk paint buffers for a single chunk.
@@ -121,7 +151,7 @@ impl DetailPaintPass {
             Some(c) => c,
             None => return,
         };
-        match build_chunk_columns(chunk) {
+        match build_chunk_columns(chunk, &self.foliage) {
             Some((columns, uniform)) => {
                 let entry =
                     make_chunk_paint(device, &self.chunk_bind_group_layout, &columns, uniform);
@@ -171,6 +201,24 @@ pub fn create_detail_chunk_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
     })
 }
 
+/// The group-2 bind group layout: the read-only species color table. Like the
+/// chunk layout, called both here and by the pipeline.
+pub fn create_detail_species_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("detail_paint_species_layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
 /// A 2-segment tapered blade (base quad + tip triangle). double-sided, sized
 /// for 0.5m voxels. `uv.y` carries normalized height (0 at base, 1 at tip),
 /// used by the shader for wind bend and shading.
@@ -195,7 +243,10 @@ fn create_blade_mesh() -> (Vec<GrassVertex>, Vec<u32>) {
 
 /// Build the per-column density buffer (+ chunk uniform) from a chunk's first
 /// detail layer. Returns `None` if the chunk has no paint to draw.
-fn build_chunk_columns(chunk: &LoadedChunk) -> Option<(Vec<ColumnTexel>, ChunkUniform)> {
+fn build_chunk_columns(
+    chunk: &LoadedChunk,
+    foliage: &FoliageRegistry,
+) -> Option<(Vec<ColumnTexel>, ChunkUniform)> {
     let layer = chunk.data.detail_layers.layers.first()?;
 
     let mut any = false;
@@ -241,6 +292,8 @@ fn build_chunk_columns(chunk: &LoadedChunk) -> Option<(Vec<ColumnTexel>, ChunkUn
     let uniform = ChunkUniform {
         origin: [c.x as f32 * span, c.y as f32 * span, c.z as f32 * span],
         voxel_scale: VOXEL_SCALE,
+        layer_slot: foliage.layer_slot(layer.layer_id).unwrap_or(u32::MAX),
+        _pad: [0; 3],
     };
     Some((columns, uniform))
 }

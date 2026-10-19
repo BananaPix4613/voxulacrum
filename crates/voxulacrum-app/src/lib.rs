@@ -22,6 +22,7 @@ mod libraries;
 mod core_budget;
 mod player;
 mod diagnostics;
+mod foliage;
 mod jobs;
 mod validate;
 mod verify;

@@ -27,6 +27,15 @@ pub type LibraryGraphRef = ContentRef<crate::library::LibraryGraphId>;
 /// crate carries as a `u32`.
 pub type PrefabRef = ContentRef<u32>;
 
+/// A detail paint layer named by graph content (the app's `DetailLayerId`).
+pub type DetailLayerRef = ContentRef<u16>;
+
+/// A species within a detail layer, named by graph content.
+pub type DetailSpeciesRef = ContentRef<u8>;
+
+/// A scatter type named by graph content (the app's `ScatterTypeId`).
+pub type ScatterTypeRef = ContentRef<u16>;
+
 impl<Id: Copy> ContentRef<Id> {
     /// An unresolved reference to `name`.
     pub fn new(name: impl Into<String>) -> Self {

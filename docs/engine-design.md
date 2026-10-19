@@ -564,7 +564,7 @@ pub struct DetailLayer {
 pub struct DetailTexel {
     pub species: u8,    // variant within layer; 0 = none
     pub density: u8,    // controls blade count rendered
-    pub tint: u8,       // palette index
+    pub tint: u8,       // brightness nudge (0.85..1.15); a value, not a palette index
     pub flags: u8,      // trampled, seasonal, wind strength
 }
 ```

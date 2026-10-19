@@ -1,0 +1,19 @@
+// Foliage registry: Tier-1 detail paint layers and the species within each,
+// and the scatter types Tier-2/3 instances are bucketed by. Layer and species
+// ids are saved in paint edits (layer ids contiguous from 0; species ids
+// 1..=255, 0 meaning "no species"); scatter type ids are contiguous from 0.
+// Keep in sync with FoliageRegistry::load_initial() (a unit test locks the two
+// together).
+(
+    layers: [
+        (id: 0, id_name: "grass", species: [
+            (id: 1, id_name: "meadow", color: (0.20, 0.55, 0.22)),
+            (id: 2, id_name: "dry",    color: (0.45, 0.52, 0.20)),
+        ]),
+    ],
+    scatter_types: [
+        (id: 0, id_name: "tufts"),
+        (id: 1, id_name: "bushes"),
+        (id: 2, id_name: "rocks"),
+    ],
+)

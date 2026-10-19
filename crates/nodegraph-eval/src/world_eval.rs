@@ -1089,7 +1089,7 @@ impl WorldEvaluator {
                             // live in memory only; see `StructureCanopy`.
                             canopy: p.canopy.as_ref().and_then(|c| {
                                 Some(FeatureCanopy {
-                                    type_id: c.type_id,
+                                    type_id: c.scatter_type.id()?,
                                     prefab_id: c.prefab.id()?,
                                     y_offset: c.y_offset,
                                 })
@@ -1568,7 +1568,7 @@ mod tests {
 
     #[test]
     fn biome_detail_graph_produces_foliage() {
-        use nodegraph_ir::{PoissonDistributionParams, PrefabRef, ScatterPlaceParams, SpeciesPickerParams};
+        use nodegraph_ir::{PoissonDistributionParams, PrefabRef, ScatterPlaceParams, ScatterTypeRef, SpeciesPickerParams};
 
         // A scatter DetailGraph: Poisson -> SpeciesPicker -> ScatterPlace.
         let mut detail = Graph::of_kind(GraphKind::Detail);
@@ -1580,7 +1580,7 @@ mod tests {
         let pick = detail.add_node(NodeKind::SpeciesPicker(SpeciesPickerParams::default()));
         let place = detail.add_node(NodeKind::ScatterPlace(ScatterPlaceParams {
             seed: 2,
-            type_id: 0,
+            scatter_type: ScatterTypeRef::with_id("test", 0),
             prefab: PrefabRef::with_id("test", 5),
         }));
         detail.connect(PinRef::new(pois, 0), PinRef::new(pick, 0)).unwrap();

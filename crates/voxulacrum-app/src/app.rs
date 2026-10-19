@@ -426,7 +426,8 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
     world.print_debug_stats(&material_registry);
 
     // Tier-1 detail paint + Tier-2/3 scatter + water
-    let detail_paint_pass = DetailPaintPass::new(&ctx, &world);
+    let foliage_registry = crate::foliage::load_foliage_registry();
+    let detail_paint_pass = DetailPaintPass::new(&ctx, &world, &foliage_registry);
     let scatter_pass = ScatterPass::new(&ctx, &world, &prefab_registry);
     let capsule_pass = CapsulePass::new(&ctx, &world);
     let canopy_pass = CanopyPass::new(&ctx, &world);

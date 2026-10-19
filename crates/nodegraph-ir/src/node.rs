@@ -7,7 +7,9 @@ use slotmap::new_key_type;
 use crate::boundary::{EffectivePin, ResolvedBoundary, ResolvedPin};
 use crate::crossgraph::GraphRefTarget;
 use crate::graph::GraphKind;
-use crate::content_ref::{LibraryGraphRef, MaterialRef, PrefabRef};
+use crate::content_ref::{
+    DetailLayerRef, DetailSpeciesRef, LibraryGraphRef, MaterialRef, PrefabRef, ScatterTypeRef,
+};
 use crate::pin::PinType;
 use voxel_core::ResolvedBlueprint;
 
@@ -612,8 +614,8 @@ impl Default for PlaceBlueprintParams {
 /// not.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct StructureCanopy {
-    /// Scatter type bucket the instance lands in.
-    pub type_id: u16,
+    /// Scatter type bucket the instance lands in, by name.
+    pub scatter_type: ScatterTypeRef,
     /// Prefab instanced at the anchor.
     pub prefab: PrefabRef,
     /// Voxels above the structure's anchor the canopy sits at - normally the
@@ -624,7 +626,7 @@ pub struct StructureCanopy {
 impl Default for StructureCanopy {
     fn default() -> Self {
         // No prefab until the author picks one: the engine names no content.
-        Self { type_id: 0, prefab: PrefabRef::new(""), y_offset: 4 }
+        Self { scatter_type: ScatterTypeRef::new(""), prefab: PrefabRef::new(""), y_offset: 4 }
     }
 }
 
@@ -880,17 +882,27 @@ impl Default for SpeciesPickerParams {
 /// (foliage paint) layer. The optional `SurfaceField` input modulates density.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct PaintDensityParams {
-    /// Target detail layer id (app `DetailLayerId`).
-    pub layer_id: u16,
-    /// Species variant within the layer (`0` = none).
-    pub species: u8,
+    /// Target detail layer, by name.
+    pub layer: DetailLayerRef,
+    /// Species within that layer, by name; resolved in the layer.
+    pub species: DetailSpeciesRef,
     /// Base density `0..=255` (scaled by the optional input field).
     pub density: u8,
-    /// Tint palette index.
+    /// Brightness nudge `0..=255`: the shader scales the species color by
+    /// `0.85..=1.15`. A value, not a reference.
     pub tint: u8,
 }
 impl Default for PaintDensityParams {
-    fn default() -> Self { Self { layer_id: 0, species: 1, density: 255, tint: 0 } }
+    fn default() -> Self {
+        // No layer or species until the author picks them: the engine names no
+        // content.
+        Self {
+            layer: DetailLayerRef::new(""),
+            species: DetailSpeciesRef::new(""),
+            density: 255,
+            tint: 0,
+        }
+    }
 }
 
 /// Parameters for [`NodeKind::ScatterPlace`]: a Tier-2/3 terminal writing scatter
@@ -899,8 +911,8 @@ impl Default for PaintDensityParams {
 pub struct ScatterPlaceParams {
     /// Per-node seed (rotation/scale variation).
     pub seed: u32,
-    /// Scatter type bucket (app `ScatterTypeId`).
-    pub type_id: u16,
+    /// Scatter type bucket, by name.
+    pub scatter_type: ScatterTypeRef,
     /// Prefab to instance, by name; its id (an app `PrefabId`) is set where
     /// content loads.
     pub prefab: PrefabRef,
@@ -909,7 +921,7 @@ pub struct ScatterPlaceParams {
 impl Default for ScatterPlaceParams {
     fn default() -> Self {
         // No prefab until the author picks one: the engine names no content.
-        Self { seed: 0, type_id: 0, prefab: PrefabRef::new("") }
+        Self { seed: 0, scatter_type: ScatterTypeRef::new(""), prefab: PrefabRef::new("") }
     }
 }
 

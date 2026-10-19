@@ -6,8 +6,8 @@ use std::sync::Arc;
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
 use glam::Vec3;
 use nodegraph_ir::{
-    Axis, DomainWarpParams, EdgeIndex, Graph, FractalType, LibraryGraphId, LibraryGraphRef, MaterialRef,
-    PrefabRef, NoiseParams, NodeId, NodeKind, Severity,
+    Axis, ContentRef, DomainWarpParams, EdgeIndex, Graph, FractalType, LibraryGraphId, LibraryGraphRef,
+    MaterialRef, PrefabRef, NoiseParams, NodeId, NodeKind, Severity,
 };
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
@@ -864,6 +864,15 @@ fn library_id(node: NodeId, reference: &LibraryGraphRef) -> EvalResult<LibraryGr
 /// The prefab id a reference's name resolved to, or `UnresolvedPrefab`.
 pub(crate) fn prefab_id(node: NodeId, reference: &PrefabRef) -> EvalResult<u32> {
     reference.id().ok_or_else(|| EvalError::UnresolvedPrefab {
+        node,
+        name: reference.name().to_string(),
+    })
+}
+
+/// The id a detail layer, species or scatter type reference resolved to, or
+/// `UnresolvedFoliage`.
+pub(crate) fn foliage_id<Id: Copy>(node: NodeId, reference: &ContentRef<Id>) -> EvalResult<Id> {
+    reference.id().ok_or_else(|| EvalError::UnresolvedFoliage {
         node,
         name: reference.name().to_string(),
     })

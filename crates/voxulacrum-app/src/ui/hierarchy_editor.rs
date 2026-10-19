@@ -55,6 +55,10 @@ pub struct HierarchyEditor {
     materials: Vec<String>,
     /// Prefab names for the pickers, read at load like `materials`.
     prefabs: Vec<String>,
+    /// Detail layers with their species, for the pickers, read at load.
+    detail_layers: Vec<(String, Vec<String>)>,
+    /// Scatter type names for the pickers, read at load.
+    scatter_types: Vec<String>,
     /// Name entry for the "add biome parameter" action.
     new_param: String,
     /// Transient status line under the toolbar.
@@ -80,6 +84,8 @@ impl HierarchyEditor {
             libraries: None,
             materials: Vec::new(),
             prefabs: Vec::new(),
+            detail_layers: Vec::new(),
+            scatter_types: Vec::new(),
             new_param: String::new(),
             status: None,
         }
@@ -108,6 +114,20 @@ impl HierarchyEditor {
         self.prefabs = crate::prefabs::load_prefab_registry()
             .iter()
             .map(|def| def.name.relative_to(namespace))
+            .collect();
+        let foliage = crate::foliage::load_foliage_registry();
+        self.detail_layers = foliage
+            .layers()
+            .iter()
+            .map(|l| {
+                let species = l.species.iter().map(|s| s.name.relative_to(namespace)).collect();
+                (l.name.relative_to(namespace), species)
+            })
+            .collect();
+        self.scatter_types = foliage
+            .scatter_types()
+            .iter()
+            .map(|t| t.name.relative_to(namespace))
             .collect();
         let default = GraphSlot::Biome(0);
         self.selected = if graphs.iter().any(|(s, _, _, _)| *s == default) {
@@ -208,6 +228,8 @@ impl HierarchyEditor {
                 .unwrap_or_default(),
             materials: self.materials.clone(),
             prefabs: self.prefabs.clone(),
+            detail_layers: self.detail_layers.clone(),
+            scatter_types: self.scatter_types.clone(),
             zones: self
                 .slots
                 .iter()
