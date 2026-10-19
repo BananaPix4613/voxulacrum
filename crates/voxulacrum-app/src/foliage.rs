@@ -215,7 +215,7 @@ impl FoliageRegistry {
         Ok(Self { layers, scatter_types })
     }
 
-    /// Hand-authored fallback, kept in sync with `assets/foliage.ron` (locked by
+    /// Hand-authored fallback, kept in sync with `packages/sandbox/foliage.ron` (locked by
     /// a test), named in `namespace` like a loaded table.
     pub fn load_initial(namespace: &str) -> Self {
         let species = |id: u8, id_name: &str, color: [f32; 3]| SpeciesEntryRon {
@@ -334,7 +334,7 @@ mod tests {
     fn the_shipped_grass_keeps_the_colors_the_shader_hard_coded() {
         // The values `base_color_for` in detail_paint.wgsl returned before this
         // table replaced it: species 1 (and anything unknown) green, 2 golden.
-        let reg = parse(include_str!("../../../assets/foliage.ron")).expect("foliage.ron is valid");
+        let reg = parse(include_str!("../../../packages/sandbox/foliage.ron")).expect("foliage.ron is valid");
         let table = reg.species_color_table();
         assert_eq!(table[1], [0.20, 0.55, 0.22, 1.0], "meadow");
         assert_eq!(table[2], [0.45, 0.52, 0.20, 1.0], "dry");
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn fallback_matches_shipped_ron() {
-        let from_file = parse(include_str!("../../../assets/foliage.ron")).unwrap();
+        let from_file = parse(include_str!("../../../packages/sandbox/foliage.ron")).unwrap();
         let initial = FoliageRegistry::load_initial(ENGINE_NAMESPACE);
         assert_eq!(from_file.layers, initial.layers, "foliage.ron and load_initial() layers drifted");
         assert_eq!(

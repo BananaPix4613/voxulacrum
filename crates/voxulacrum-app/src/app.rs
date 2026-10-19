@@ -242,7 +242,7 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
         mapped_at_creation: false,
     });
     
-    // Data-driven material registry: `assets/materials.ron` is the only source
+    // Data-driven material registry: `packages/sandbox/materials.ron` is the only source
     // of material identity and color. Loaded here because the color table below
     // is built from it; shared with the foliage passes and any system needing
     // material metadata.
@@ -843,15 +843,15 @@ impl ApplicationHandler for App {
 // run
 // ---------------------------------------------------------------------------
 
-/// How [`run_with`] starts the engine. The default runs the shipped reference
-/// world from the engine's `assets/` directory.
+/// How [`run_with`] starts the engine. The default runs the shipped sandbox
+/// world from `packages/sandbox/`.
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     package: Option<PathBuf>,
 }
 
 impl RunOptions {
-    /// The defaults: the shipped reference world.
+    /// The defaults: the shipped sandbox package.
     pub fn new() -> Self {
         Self::default()
     }
@@ -859,8 +859,8 @@ impl RunOptions {
     /// Start the world of the package at `root`: a directory holding a
     /// `package.ron` manifest beside its content (graphs, materials, prefabs,
     /// libraries, blueprints, species and foliage). The manifest names the
-    /// package's id, which is also its save directory under `saves/`, and the
-    /// content namespace its names resolve in. Shaders, palettes, input
+    /// package's id, its save directory under `saves/` (the id unless it names
+    /// another), and the content namespace its names resolve in. Shaders, palettes, input
     /// bindings and parameter presets still come from the engine.
     ///
     /// The package loads when the engine starts. One that is malformed, needs a
@@ -874,7 +874,7 @@ impl RunOptions {
     }
 }
 
-/// Runs the engine with the default [`RunOptions`]: the shipped reference world.
+/// Runs the engine with the default [`RunOptions`]: the shipped sandbox package.
 pub fn run() {
     run_with(RunOptions::default());
 }
@@ -887,33 +887,32 @@ pub fn run_with(options: RunOptions) {
     
     // Before anything reads content, including the headless checks below, so
     // `--verify-generation` checks whichever world this run loads.
-    if let Some(root) = options.package {
-        let package = match crate::package::Package::load(&root) {
-            Ok(package) if package.manifest.world.is_some() => package,
-            Ok(_) => {
-                eprintln!("error: {}: the package names no world to start", root.display());
-                std::process::exit(1);
-            }
-            Err(e) => {
-                eprintln!("error: {}: {e}", root.display());
-                std::process::exit(1);
-            }
-        };
-        let m = &package.manifest;
-        log::info!(
-            "Package {} {} ({:?}, engine {}) from {} (saves/{})",
-            m.id,
-            m.version,
-            m.kind,
-            m.engine,
-            root.display(),
-            m.id,
-        );
-        for d in &m.dependencies {
-            log::warn!("{} depends on {} {}, which is not loaded: dependencies are not loaded yet", m.id, d.id, d.version);
+    let root = options.package.unwrap_or_else(paths::default_package_root);
+    let package = match crate::package::Package::load(&root) {
+        Ok(package) if package.manifest.world.is_some() => package,
+        Ok(_) => {
+            eprintln!("error: {}: the package names no world to start", root.display());
+            std::process::exit(1);
         }
-        paths::set_package(package);
+        Err(e) => {
+            eprintln!("error: {}: {e}", root.display());
+            std::process::exit(1);
+        }
+    };
+    let m = &package.manifest;
+    log::info!(
+        "Package {} {} ({:?}, engine {}) from {} (saves/{})",
+        m.id,
+        m.version,
+        m.kind,
+        m.engine,
+        root.display(),
+        m.saves,
+    );
+    for d in &m.dependencies {
+        log::warn!("{} depends on {} {}, which is not loaded: dependencies are not loaded yet", m.id, d.id, d.version);
     }
+    paths::set_package(package);
     
     // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
     // Handled before the event loop exists, so this path never creates a window

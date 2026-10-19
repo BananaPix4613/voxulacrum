@@ -1,7 +1,7 @@
 //! Engine-side material registry loading and the shared [`MaterialRegistryRes`]
 //! ECS resource.
 //!
-//! Materials are data-driven: the table is authored in `assets/materials.ron`
+//! Materials are data-driven: the table is authored in `packages/sandbox/materials.ron`
 //! and loaded once at startup. That file is the only source of the table. A copy
 //! of it is also compiled into the binary and used only if the file is missing
 //! or invalid at startup, so the engine can never fail to start over materials.
@@ -12,22 +12,22 @@ use std::sync::Arc;
 use bevy_ecs::prelude::Resource;
 use voxel_core::MaterialRegistry;
 
-/// `assets/materials.ron` as it was when this binary was built. Not a second
+/// `packages/sandbox/materials.ron` as it was when this binary was built. Not a second
 /// table: the same file, held so a missing or corrupt copy on disk degrades to
 /// the shipped data instead of to no data.
-const SHIPPED_MATERIALS: &str = include_str!("../../../assets/materials.ron");
+const SHIPPED_MATERIALS: &str = include_str!("../../../packages/sandbox/materials.ron");
 
 /// Path to the authored material table.
 pub fn materials_path() -> PathBuf {
     crate::paths::content_root().join("materials.ron")
 }
 
-/// The registry built from the copy of `assets/materials.ron` compiled into this
+/// The registry built from the copy of `packages/sandbox/materials.ron` compiled into this
 /// binary. The startup fallback, and the fixture for tests that need a registry
 /// without touching the filesystem.
 pub fn embedded_registry() -> MaterialRegistry {
     MaterialRegistry::from_ron_str(SHIPPED_MATERIALS, crate::paths::namespace())
-        .expect("the assets/materials.ron compiled into this build is valid")
+        .expect("the packages/sandbox/materials.ron compiled into this build is valid")
 }
 
 /// Load the shared material registry: the RON file first, the compiled-in copy
@@ -45,7 +45,7 @@ pub fn load_registry() -> Arc<MaterialRegistry> {
         Err(e) => {
             log::error!(
                 "Failed to load materials from {}: {e}. Using the copy of \
-                 assets/materials.ron compiled into this build.",
+                 packages/sandbox/materials.ron compiled into this build.",
                 path.display()
             );
             Arc::new(embedded_registry())
@@ -75,7 +75,7 @@ mod tests {
     fn the_embedded_table_parses_and_matches_the_file() {
         let embedded = embedded_registry();
         let from_disk = MaterialRegistry::load_from_ron(&materials_path(), crate::paths::namespace())
-            .expect("assets/materials.ron loads");
+            .expect("packages/sandbox/materials.ron loads");
         
         assert_eq!(embedded.len(), from_disk.len());
         for i in 0..embedded.len() {

@@ -76,10 +76,10 @@ fn shape_discriminants_are_stable() {
 #[test]
 fn the_shipped_material_ids_are_stable() {
     let reg = MaterialRegistry::from_ron_str(
-        include_str!("../../../assets/materials.ron"),
+        include_str!("../../../packages/sandbox/materials.ron"),
         ENGINE_NAMESPACE,
     )
-    .expect("assets/materials.ron is valid");
+    .expect("packages/sandbox/materials.ron is valid");
     assert!(reg.len() >= 11);
     let grass = reg.resolve_str("grass_soil", ENGINE_NAMESPACE).expect("grass_soil resolves");
     assert_eq!(grass, MaterialId(6));

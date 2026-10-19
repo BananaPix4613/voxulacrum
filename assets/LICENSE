@@ -3,9 +3,10 @@ Sample content — Creative Commons Attribution 4.0 International (CC BY 4.0)
 
 Copyright (c) 2026 BananaPix
 
-The content in this directory — node graphs, the world manifest, standard
-libraries, material and prefab registries, input bindings — together with the
-palettes in `/palettes` and the shaders in `/shaders`, is licensed under the
+The content in this directory — input bindings — together with the packages
+in `/packages` (node graphs, world manifests, standard libraries, material and
+prefab registries, blueprints, species and foliage), the palettes in `/palettes`
+and the shaders in `/shaders`, is licensed under the
 Creative Commons Attribution 4.0 International License.
 
     Human-readable summary: https://creativecommons.org/licenses/by/4.0/

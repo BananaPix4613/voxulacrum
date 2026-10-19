@@ -18,10 +18,10 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Engine/game boundary
 
-Milestone M2, in progress: B1–B5 and B6a are merged, and B6b, B6c and B7 remain.
+Milestone M2, in progress: B1–B5, B6a and B6b are merged, and B6c and B7 remain.
 The engine is separating from the game that grew inside it. It is now a library
-behind a facade crate, a testbed project loads as a package built on that facade
-alone, and content names everything it references rather than numbering it.
+behind a facade crate, the world it ships and a testbed project both load as
+packages, and content names everything it references rather than numbering it.
 **There is no save-format change**, so 0.4.2 saves open as they are, and the
 generation hash is unchanged at `0xed02babdf0f40420`.
 
@@ -36,21 +36,25 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   crate left off the list is treated as a consumer.
 - **The testbed** (B4, #10) — `crates/testbed`, a flat world with test materials
   that depends only on the facade. It is the boundary check's first consumer.
-- **Packages** (B4, #10; B6a, #74) — `RunOptions::package(root)` starts the
+- **Packages** (B4, #10; B6a, #74; B6b, #75) — `RunOptions::package(root)` starts the
   world of a data-only package: a directory with a `package.ron` manifest beside
   its content (graphs, materials, prefabs, libraries, blueprints, species,
-  foliage). The manifest declares the package's id, which is also its save
-  directory under `saves/` so a second world never opens the reference world's
-  save, plus its content namespace, version, kind, the engine versions it
+  foliage). The manifest declares the package's id, its save directory under
+  `saves/` (the id unless `saves` names another, so a second world never opens
+  another's save), plus its content namespace, version, kind, the engine versions it
   supports (a Cargo-style requirement such as `^0.4`), its world and its
   dependencies. A package that needs a different engine, declares code modules
   or names no world stops startup with a message saying why. Dependencies are
   validated but not loaded yet. Shaders, palettes, input bindings and presets
   stay with the engine.
+- **The sandbox package** (B6b, #75) — the world that shipped in `assets/` is
+  now `packages/sandbox/`, a package like any other, with id and namespace
+  `sandbox`. `run()` starts it through the same loader as any other package, and
+  its manifest sets `saves: "default"` so existing saves keep opening.
 - **Namespaced registry identity** (B5a, #66) — every registry entry is
-  `namespace:name`. The reference world's namespace is `voxulacrum`, and a
-  package's is the one its manifest declares. A bare name in content resolves in
-  its own namespace.
+  `namespace:name`. A package's namespace is the one its manifest declares, or
+  its id: the sandbox world's is `sandbox` (B6b), and `voxulacrum` is kept for
+  the engine's own. A bare name in content resolves in its own namespace.
 - **`foliage.ron`** (B5d, #69) — detail layers with the species in each, and
   scatter types. Species colors reach the shader as data instead of a hardcoded
   switch in `detail_paint.wgsl`.
@@ -81,12 +85,18 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   applies to every registry entry, and also to blueprint capture names, which
   previously accepted uppercase letters that no graph could reference.
 - **Debug and fallback colors.** The material debug view derives a distinct
-  false color from each id instead of a table naming the reference world's
+  false color from each id instead of a table naming the sandbox world's
   materials (B5b). A detail species the content doesn't define draws magenta
   instead of green (B5d).
-- **`assets/graphs/example.graph.json` is regenerated from its builder** (B5b).
-  It had fallen far enough behind that it no longer parsed. Tests now pin it to
-  the builder and to the shipped materials.
+- **`packages/sandbox/graphs/example.graph.json` is regenerated from its builder**
+  (B5b). It had fallen far enough behind that it no longer parsed. Tests now pin 
+  it to the builder and to the shipped materials.
+- **Content moved out of `assets/`** (B6b, #75). Graphs, materials, prefabs,
+  libraries, blueprints, species and foliage now live in `packages/sandbox/`.
+  `assets/` keeps the engine's input bindings and the content license. Release
+  archives ship `packages/` beside the executable, and one started without
+  `packages/sandbox/package.ron` stops with an error instead of running on the
+  tables compiled into the binary.
 
 ### Fixed
 
@@ -106,7 +116,13 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   A number in any of these places fails to load.
 - `prefabs.ron` requires a top-level `placeholder: "<name>"`.
 - A package needs a `foliage.ron`. Without one, the engine logs an error and
-  falls back to the reference world's table.
+  falls back to the sandbox package's table.
+- **Paths** (B6b): content that lived under `assets/` (`graphs/`, `libraries/`,
+  `blueprints/`, `species/`, `materials.ron`, `prefabs.ron`, `foliage.ron`) is
+  now under `packages/sandbox/`, so uncommitted local edits to it need moving
+  across. `regen_example` and `watch_demo` default to `packages/sandbox/graphs`.
+  A qualified name that reached the shipped world as `voxulacrum:<name>` is now
+  `sandbox:<name>`.
 
 ---
 

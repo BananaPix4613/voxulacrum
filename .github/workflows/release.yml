@@ -96,7 +96,7 @@ jobs:
           else
             cp target/release/voxulacrum-app "dist/$name/"
           fi
-          cp -r shaders assets palettes "dist/$name/"
+          cp -r shaders assets packages palettes "dist/$name/"
           cp CHANGELOG.md README.md LICENSE THIRD-PARTY-NOTICES.md "dist/$name/"
 
       - name: Verify package layout
@@ -104,8 +104,10 @@ jobs:
         run: |
           d="dist/$PKG_NAME"
           fail=0
-          for p in shaders assets/graphs assets/libraries palettes \
-                   assets/materials.ron assets/prefabs.ron assets/input.ron \
+          for p in shaders palettes assets/input.ron \
+                   packages/sandbox/package.ron packages/sandbox/graphs \
+                   packages/sandbox/libraries packages/sandbox/materials.ron \
+                   packages/sandbox/prefabs.ron \
                    LICENSE THIRD-PARTY-NOTICES.md assets/LICENSE; do
             if [ ! -e "$d/$p" ]; then echo "::error::missing $p"; fail=1; fi
           done

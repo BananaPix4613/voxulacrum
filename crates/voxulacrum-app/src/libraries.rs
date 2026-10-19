@@ -1,6 +1,6 @@
 //! Data-driven library registry (Phase 6 Substep 2).
 //!
-//! Standard libraries are authored as `assets/libraries/*.library.json`: each
+//! Standard libraries are authored as `packages/sandbox/libraries/*.library.json`: each
 //! declares a typed [`GraphBoundary`] (its named inputs/outputs) plus the native
 //! `kernel` it binds to. Loading builds a [`LibraryGraphRegistry`] (so a
 //! `LibraryRef` node resolves its pins from a library's boundary) alongside a
@@ -354,11 +354,11 @@ mod tests {
     fn fallback_matches_shipped_asset() {
         // The built-in fallback must match the authored file so the two never drift.
         let shipped = [
-            include_str!("../../../assets/libraries/biome_border_fade.library.json"),
-            include_str!("../../../assets/libraries/standard_cave_noise.library.json"),
-            include_str!("../../../assets/libraries/surface_layering.library.json"),
-            include_str!("../../../assets/libraries/exposure_layering.library.json"),
-            include_str!("../../../assets/libraries/poisson_placement.library.json"),
+            include_str!("../../../packages/sandbox/libraries/biome_border_fade.library.json"),
+            include_str!("../../../packages/sandbox/libraries/standard_cave_noise.library.json"),
+            include_str!("../../../packages/sandbox/libraries/surface_layering.library.json"),
+            include_str!("../../../packages/sandbox/libraries/exposure_layering.library.json"),
+            include_str!("../../../packages/sandbox/libraries/poisson_placement.library.json"),
         ];
         let assets: Vec<LibraryAsset> = shipped
             .iter()

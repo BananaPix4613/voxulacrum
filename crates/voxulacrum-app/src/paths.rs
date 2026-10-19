@@ -10,7 +10,7 @@ use crate::package::Package;
 /// Workspace root. `CARGO_MANIFEST_DIR` is `<workspace>/crates/voxulacrum-app`
 /// at compile time; the root is two levels up.
 pub fn asset_root() -> PathBuf {
-    // Distribution: assets/shaders/palettes ship next to the .exe, so resolve
+    // Distribution: assets/packages/shaders/palettes ship next to the .exe, so resolve
     // relative to the executable. Development (`cargo run`): the exe lives in
     // target/<profile>/ with no assets alongside, so fall back to the compile-time
     // workspace root.
@@ -33,50 +33,58 @@ pub fn presets_dir() -> PathBuf {
 }
 
 /// The package this run's world comes from. Set once by `app::run_with`, before
-/// anything reads content; unset means the shipped reference world.
+/// anything reads content. Code that reads content without going through
+/// `run_with`, such as the tests, gets the default package, loaded on first use.
 static PACKAGE: OnceLock<Package> = OnceLock::new();
 
-/// Load content from `package`, and keep this world's saves at
-/// `saves/<package id>`. Called once, at startup, before any content is read.
+/// Directory of the package the engine starts when no other is named: the
+/// shipped sandbox world.
+pub fn default_package_root() -> PathBuf {
+    asset_root().join("packages").join("sandbox")
+}
+
+/// Load content from `package`, and keep this world's saves in its save
+/// directory. Called once, at startup, before any content is read.
 pub fn set_package(package: Package) {
     if PACKAGE.set(package).is_err() {
         panic!("the package is set once, at startup");
     }
 }
 
-/// Directory holding world content: graphs, materials, prefabs, libraries,
-/// blueprints, species and foliage. The package's root, or `assets/` under the
-/// asset root for the reference world. Engine-owned files (shaders, palettes,
-/// input bindings, presets) stay under the asset root regardless.
-pub fn content_root() -> PathBuf {
-    match PACKAGE.get() {
-        Some(package) => package.root.clone(),
-        None => asset_root().join("assets"),
-    }
+/// The package this run's world comes from, loading the default package if
+/// none was set.
+fn package() -> &'static Package {
+    PACKAGE.get_or_init(|| {
+        let root = default_package_root();
+        Package::load(&root).unwrap_or_else(|e| panic!("the default package at {}: {e}", root.display()))
+    })
 }
 
-/// Directory name under `saves/` for this world: the package's id, so a second
-/// world never opens the reference world's save.
+/// Directory holding world content: graphs, materials, prefabs, libraries,
+/// blueprints, species and foliage. The package's root. Engine-owned files
+/// (shaders, palettes, input bindings, presets) stay under the asset root.
+pub fn content_root() -> PathBuf {
+    package().root.clone()
+}
+
+/// Directory name under `saves/` for this world: the package's save directory
+/// (its id unless the manifest names another), so two packages never share a
+/// save.
 pub fn save_name() -> &'static str {
-    PACKAGE.get().map_or("default", |package| package.manifest.id.as_str())
+    &package().manifest.saves
 }
 
 /// Namespace this world's registry entries are known by, and the one bare names
-/// in its content resolve in: the engine's own for the reference world, the
-/// package's content namespace otherwise.
+/// in its content resolve in: the package's content namespace.
 pub fn namespace() -> &'static str {
-    PACKAGE
-        .get()
-        .map_or(voxel_core::ENGINE_NAMESPACE, |package| package.manifest.namespace.as_str())
+    &package().manifest.namespace
 }
 
-/// The world manifest this run starts: the package's `world`, or the reference
-/// world's `graphs/world.manifest.json`.
+/// The world manifest this run starts: the package's `world`.
 pub fn world_manifest_path() -> PathBuf {
-    PACKAGE
-        .get()
-        .and_then(Package::world_manifest)
-        .unwrap_or_else(|| content_root().join("graphs").join("world.manifest.json"))
+    package()
+        .world_manifest()
+        .expect("the package names a world: `run_with` refuses one that does not, and the default does")
 }
 
 #[cfg(test)]
@@ -91,12 +99,12 @@ mod tests {
     }
 
     // No test calls `set_package`: the setting is process-wide, and the other
-    // tests read the reference world through these same paths.
+    // tests read the sandbox package through these same paths.
     #[test]
-    fn no_package_is_the_reference_world() {
-        assert_eq!(content_root(), asset_root().join("assets"));
+    fn no_package_set_is_the_sandbox_package() {
+        assert_eq!(content_root(), default_package_root());
         assert_eq!(save_name(), "default");
-        assert_eq!(namespace(), voxel_core::ENGINE_NAMESPACE);
+        assert_eq!(namespace(), "sandbox");
         assert_eq!(world_manifest_path(), content_root().join("graphs").join("world.manifest.json"));
     }
 }

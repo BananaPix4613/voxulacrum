@@ -1,0 +1,13 @@
+// Sandbox package: the world the engine opens when no other package is named.
+// Its id is also its namespace (`sandbox:granite`). It keeps its saves in
+// `saves/default/`, where they were before it was a package.
+(
+    id: "sandbox",
+    saves: "default",
+    version: "0.1.0",
+    kind: Game,
+    engine: "^0.4",
+    world: "graphs/world.manifest.json",
+    dependencies: [],
+    modules: [],
+)

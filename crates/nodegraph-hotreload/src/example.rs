@@ -162,10 +162,10 @@ mod tests {
     #[test]
     fn the_example_names_only_shipped_materials() {
         let registry = MaterialRegistry::from_ron_str(
-            include_str!("../../../assets/materials.ron"),
+            include_str!("../../../packages/sandbox/materials.ron"),
             ENGINE_NAMESPACE,
         )
-        .expect("assets/materials.ron is valid");
+        .expect("packages/sandbox/materials.ron is valid");
         let mut g = build_example_graph();
         crate::resolve_materials(&mut g, &registry, ENGINE_NAMESPACE)
             .expect("every material the example names is shipped");
@@ -177,8 +177,8 @@ mod tests {
     /// formatting cannot fail the comparison.
     #[test]
     fn the_shipped_example_matches_its_builder() {
-        let shipped = Graph::from_json(include_str!("../../../assets/graphs/example.graph.json"))
-            .expect("assets/graphs/example.graph.json parses; regenerate it with `regen_example`");
+        let shipped = Graph::from_json(include_str!("../../../packages/sandbox/graphs/example.graph.json"))
+            .expect("packages/sandbox/graphs/example.graph.json parses; regenerate it with `regen_example`");
         assert_eq!(
             shipped.to_json_pretty().unwrap(),
             build_example_graph().to_json_pretty().unwrap(),

@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir: PathBuf = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("assets/graphs"));
+        .unwrap_or_else(|| PathBuf::from("packages/sandbox/graphs"));
 
     std::fs::create_dir_all(&dir)?;
     let target = dir.join("example.graph.json");

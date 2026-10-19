@@ -680,10 +680,10 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 ### M2 — Engine/game boundary
 **Contains:** B1–B7. **Needs:** nothing.
 **Non-goals:** format changes, rendering features, transport.
-- [ ] Games and the testbed depend only on the facade crate (CI-enforced)
-- [ ] The testbed and the reference world load as data-only packages
+- [x] Games and the testbed depend only on the facade crate (CI-enforced)
+- [x] The testbed and the reference world load as data-only packages
 - [ ] The game repository builds against the facade through a local `[patch]`
-- [ ] Registries are namespaced in memory
+- [x] Registries are namespaced in memory
 - [ ] Integrated-GPU baseline recorded in `perf-baseline.md`
 
 ### M3 — Runtime spine
