@@ -9,8 +9,8 @@
       "value": {
         "kind": {
           "type": "PaintDensity",
-          "layer_id": 0,
-          "species": 1,
+          "layer": "grass",
+          "species": "meadow",
           "density": 220,
           "tint": 0
         },
@@ -57,7 +57,7 @@
         "kind": {
           "type": "ScatterPlace",
           "seed": 9,
-          "type_id": 0,
+          "scatter_type": "tufts",
           "prefab": "grass_tuft"
         },
         "position": [
@@ -103,7 +103,7 @@
         "kind": {
           "type": "ScatterPlace",
           "seed": 19,
-          "type_id": 1,
+          "scatter_type": "bushes",
           "prefab": "bush"
         },
         "position": [
@@ -149,7 +149,7 @@
         "kind": {
           "type": "ScatterPlace",
           "seed": 29,
-          "type_id": 2,
+          "scatter_type": "rocks",
           "prefab": "rock"
         },
         "position": [

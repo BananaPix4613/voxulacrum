@@ -64,9 +64,16 @@ struct Column {
 struct ChunkUniform {
     origin: vec3<f32>,
     voxel_scale: f32,
+    // Slot of this chunk's detail layer in `species_colors`; past the table
+    // for a layer the registry does not define.
+    layer_slot: u32,
 };
 
 @group(1) @binding(1) var<uniform> chunk: ChunkUniform;
+
+// Species colors, 256 per layer, indexed `layer_slot * 256 + species`; filled
+// from the content's foliage registry. Entries no species defines are magenta.
+@group(2) @binding(0) var<storage, read> species_colors: array<vec4<f32>>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -110,11 +117,12 @@ fn hash_signed(h: u32) -> f32 {
     return hash01(h) * 2.0 - 1.0;
 }
 
-fn base_color_for(species: u32) -> vec3<f32> {
-    switch (species) {
-        case 2u: { return vec3<f32>(0.45, 0.52, 0.20); } // dry / golden
-        default: { return vec3<f32>(0.20, 0.55, 0.22); } // meadows green
+fn species_color(layer_slot: u32, species: u32) -> vec3<f32> {
+    let layer_count = arrayLength(&species_colors) / 256u;
+    if layer_slot >= layer_count {
+        return vec3<f32>(1.0, 0.0, 1.0);
     }
+    return species_colors[layer_slot * 256u + species].rgb;
 }
 
 /// Flood cost past which a cell is outside the readable pocket. Must match
@@ -271,7 +279,7 @@ fn vs_main(vertex: VertexInput, @builtin(instance_index) inst: u32) -> VertexOut
     let world_pos = base + local;
 
     // Color: species base, tint brightness nudge, per-blade hash variation.
-    var color = base_color_for(species);
+    var color = species_color(chunk.layer_slot, species);
     let bright = 0.85 + f32(tint) / 255.0 * 0.3;
     let cv = hash01(hash_u32(h1)) * 0.15 - 0.075;
     color = clamp(color * bright + vec3<f32>(cv, cv, cv * 0.5), vec3<f32>(0.0), vec3<f32>(1.0));

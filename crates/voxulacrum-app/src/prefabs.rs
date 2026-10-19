@@ -232,7 +232,7 @@ impl std::ops::Deref for PrefabRegistryRes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodegraph_ir::{PrefabRef, ScatterPlaceParams};
+    use nodegraph_ir::{PrefabRef, ScatterPlaceParams, ScatterTypeRef};
     use voxel_core::ENGINE_NAMESPACE;
 
     #[test]
@@ -307,7 +307,7 @@ mod tests {
         for name in names {
             g.add_node(NodeKind::ScatterPlace(ScatterPlaceParams {
                 seed: 0,
-                type_id: 0,
+                scatter_type: ScatterTypeRef::new("tufts"),
                 prefab: PrefabRef::new(*name),
             }));
         }

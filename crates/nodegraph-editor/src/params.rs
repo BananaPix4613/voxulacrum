@@ -61,6 +61,11 @@ pub struct GraphCatalogs {
     pub materials: Vec<String>,
     /// Every prefab a node can name, as this content writes it, in id order.
     pub prefabs: Vec<String>,
+    /// Every detail layer and the species within it, as this content writes
+    /// them, in id order.
+    pub detail_layers: Vec<(String, Vec<String>)>,
+    /// Every scatter type, as this content writes it, in id order.
+    pub scatter_types: Vec<String>,
 }
 
 /// One library the author may reference, carrying the boundary a `LibraryRef` to
@@ -214,7 +219,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
                 changed = true;
             }
             if let Some(c) = p.canopy.as_mut() {
-                changed |= row(ui, "type id", |ui| ui.add(egui::DragValue::new(&mut c.type_id)));
+                changed |= content_ref_ui(ui, "canopy_type", &mut c.scatter_type, "type", &catalogs.scatter_types, NO_SCATTER_TYPES);
                 changed |= content_ref_ui(ui, "canopy_prefab", &mut c.prefab, "prefab", &catalogs.prefabs, NO_PREFABS);
                 changed |= row(ui, "canopy y", |ui| ui.add(egui::DragValue::new(&mut c.y_offset).range(0..=32)));
             }
@@ -262,15 +267,25 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             changed
         }
         NodeKind::PaintDensity(p) => {
-            let mut changed = row(ui, "layer id", |ui| ui.add(egui::DragValue::new(&mut p.layer_id)));
-            changed |= row(ui, "species", |ui| ui.add(egui::DragValue::new(&mut p.species)));
+            let layers: Vec<String> = catalogs.detail_layers.iter().map(|(l, _)| l.clone()).collect();
+            let mut changed =
+                content_ref_ui(ui, "paint_layer", &mut p.layer, "layer", &layers, NO_DETAIL_LAYERS);
+            // Only the chosen layer's species: a species names a variant within
+            // its layer.
+            let species = catalogs
+                .detail_layers
+                .iter()
+                .find(|(l, _)| l == p.layer.name())
+                .map(|(_, s)| s.as_slice())
+                .unwrap_or(&[]);
+            changed |= content_ref_ui(ui, "paint_species", &mut p.species, "species", species, NO_SPECIES);
             changed |= row(ui, "density", |ui| ui.add(egui::DragValue::new(&mut p.density)));
-            changed |= row(ui, "tint", |ui| ui.add(egui::DragValue::new(&mut p.tint)));
+            changed |= row(ui, "brightness", |ui| ui.add(egui::DragValue::new(&mut p.tint)));
             changed
         }
         NodeKind::ScatterPlace(p) => {
             let mut changed = row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
-            changed |= row(ui, "type id", |ui| ui.add(egui::DragValue::new(&mut p.type_id)));
+            changed |= content_ref_ui(ui, "scatter_type", &mut p.scatter_type, "type", &catalogs.scatter_types, NO_SCATTER_TYPES);
             changed |= content_ref_ui(ui, "scatter_prefab", &mut p.prefab, "prefab", &catalogs.prefabs, NO_PREFABS);
             changed
         }
@@ -423,6 +438,15 @@ const NO_BLUEPRINTS: &str = "no blueprints in assets/blueprints";
 
 /// Shown in an empty prefab picker.
 const NO_PREFABS: &str = "no prefabs in prefabs.ron";
+
+/// Shown in an empty detail layer picker.
+const NO_DETAIL_LAYERS: &str = "no detail layers in foliage.ron";
+
+/// Shown in an empty species picker.
+const NO_SPECIES: &str = "no species in this layer";
+
+/// Shown in an empty scatter type picker.
+const NO_SCATTER_TYPES: &str = "no scatter types in foliage.ron";
 
 /// Any content reference, picked by name from `catalog`. Picking renames the
 /// reference, which clears its id until the next resolution.

@@ -79,7 +79,7 @@ impl<'a> DetailEvaluator<'a> {
         let mut foliage = ChunkFoliage::default();
         for id in order {
             if matches!(self.graph.nodes[id].kind, NodeKind::PaintDensity(_)) {
-                foliage.paint.push(self.eval_paint(id));
+                foliage.paint.push(self.eval_paint(id)?);
             } else if matches!(self.graph.nodes[id].kind, NodeKind::ScatterPlace(_)) {
                 foliage.scatter.push(self.eval_scatter(id)?);
             } else {
@@ -203,11 +203,13 @@ impl<'a> DetailEvaluator<'a> {
 
     // --- Terminal node implementation ---
 
-    fn eval_paint(&self, id: NodeId) -> PaintLayer {
+    fn eval_paint(&self, id: NodeId) -> EvalResult<PaintLayer> {
         let p = match &self.graph.nodes[id].kind {
             NodeKind::PaintDensity(p) => p,
             _ => unreachable!("eval_paint on non-PaintDensity"),
         };
+        let layer_id = crate::eval::foliage_id(id, &p.layer)?;
+        let species = crate::eval::foliage_id(id, &p.species)?;
         let mut texels = Box::new([PaintTexel::default(); CHUNK_DIM * CHUNK_DIM]);
         for lz in 0..CHUNK_DIM {
             for lx in 0..CHUNK_DIM {
@@ -218,7 +220,7 @@ impl<'a> DetailEvaluator<'a> {
                     continue;
                 }
                 texels[lx + lz * CHUNK_DIM] = PaintTexel {
-                    species: p.species,
+                    species,
                     density: p.density,
                     tint: p.tint,
                     flags: 0,
@@ -227,12 +229,16 @@ impl<'a> DetailEvaluator<'a> {
         }
         // (PaintDensity's optional SurfaceField input is ignored this phase -
         //  uniform density on surfaces; modulation is later refinement.)
-        PaintLayer { layer_id: p.layer_id, texels }
+        Ok(PaintLayer { layer_id, texels })
     }
 
     fn eval_scatter(&self, id: NodeId) -> EvalResult<ScatterBucket> {
         let (seed, type_id, prefab_id) = match &self.graph.nodes[id].kind {
-            NodeKind::ScatterPlace(p) => (p.seed, p.type_id, crate::eval::prefab_id(id, &p.prefab)?),
+            NodeKind::ScatterPlace(p) => (
+                p.seed,
+                crate::eval::foliage_id(id, &p.scatter_type)?,
+                crate::eval::prefab_id(id, &p.prefab)?,
+            ),
             _ => unreachable!("eval_scatter on non-ScatterPlace"),
         };
         let assignments = self.input_assignments(id, 0)?;
@@ -370,7 +376,8 @@ mod tests {
     use super::*;
     use glam::IVec3;
     use nodegraph_ir::{
-        Graph, GraphKind, NodeKind, PaintDensityParams, PinRef, PrefabRef, ScatterPlaceParams,
+        DetailLayerRef, DetailSpeciesRef, Graph, GraphKind, NodeKind, PaintDensityParams, PinRef,
+        PrefabRef, ScatterPlaceParams, ScatterTypeRef,
     };
     use voxel_core::MaterialId;
 
@@ -397,7 +404,7 @@ mod tests {
         let pick = g.add_node(NodeKind::SpeciesPicker(SpeciesPickerParams::default()));
         let place = g.add_node(NodeKind::ScatterPlace(ScatterPlaceParams {
             seed: 2,
-            type_id: 0,
+            scatter_type: ScatterTypeRef::with_id("test", 0),
             prefab: PrefabRef::with_id("test", 7),
         }));
         g.connect(PinRef::new(pois, 0), PinRef::new(pick, 0)).unwrap();
@@ -454,8 +461,8 @@ mod tests {
         let terrain = flat_terrain();
         let mut g = Graph::of_kind(GraphKind::Detail);
         g.add_node(NodeKind::PaintDensity(PaintDensityParams {
-            layer_id: 0,
-            species: 1,
+            layer: DetailLayerRef::with_id("grass", 0),
+            species: DetailSpeciesRef::with_id("meadow", 1),
             density: 200,
             tint: 0,
         }));

@@ -149,6 +149,7 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
     let libraries = crate::libraries::load_libraries();
     let materials = crate::materials::load_registry();
     let prefabs = crate::prefabs::load_prefab_registry();
+    let foliage = crate::foliage::load_foliage_registry();
 
     let world_boundary = match assets.iter_mut().find(|a| a.expected_kind == GraphKind::World) {
         Some(a) => {
@@ -162,6 +163,7 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
         // not resolve is reported below, once per node, so the error is unused.
         let _ = libraries.resolve_refs(&mut asset.graph, crate::paths::namespace());
         let _ = prefabs.resolve_refs(&mut asset.graph, crate::paths::namespace());
+        let _ = foliage.resolve_refs(&mut asset.graph, crate::paths::namespace());
         asset.graph.resolve_library_refs(libraries.registry());
         asset.graph.resolve_graph_refs(|t| match t {
             GraphRefTarget::World => Some(world_boundary.clone()),
@@ -210,10 +212,28 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
                         ));
                     }
                 }
-                NodeKind::ScatterPlace(p) if p.prefab.id().is_none() => {
+                NodeKind::ScatterPlace(p) => {
+                    if p.prefab.id().is_none() {
+                        out.push(Finding::error(
+                            &asset.name,
+                            format!("ScatterPlace names prefab {:?}, which is not defined", p.prefab.name()),
+                        ));
+                    }
+                    if p.scatter_type.id().is_none() {
+                        out.push(Finding::error(
+                            &asset.name,
+                            format!("ScatterPlace names scatter type {:?}, which is not defined", p.scatter_type.name()),
+                        ));
+                    }
+                }
+                NodeKind::PaintDensity(p) if p.layer.id().is_none() || p.species.id().is_none() => {
                     out.push(Finding::error(
                         &asset.name,
-                        format!("ScatterPlace names prefab {:?}, which is not defined", p.prefab.name()),
+                        format!(
+                            "PaintDensity names layer {:?} and species {:?}, which are not both defined",
+                            p.layer.name(),
+                            p.species.name()
+                        ),
                     ));
                 }
                 NodeKind::GraphRef(p) if !matches!(p.target, GraphRefTarget::World) => {

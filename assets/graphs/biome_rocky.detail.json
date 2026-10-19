@@ -13,8 +13,8 @@
       "value": {
         "kind": {
           "type": "PaintDensity",
-          "layer_id": 0,
-          "species": 1,
+          "layer": "grass",
+          "species": "meadow",
           "density": 40,
           "tint": 0
         },

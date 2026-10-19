@@ -82,6 +82,7 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
         if !self.hide_foliage && !self.detail_paint_pass.chunk_paint.is_empty() {
             pass.set_pipeline(self.detail_paint_pipeline);
             pass.set_bind_group(0, self.reflection_bind_group, &[]);
+            pass.set_bind_group(2, &self.detail_paint_pass.species_bind_group, &[]);
             pass.set_vertex_buffer(0, self.detail_paint_pass.blade_vertex_buffer.slice(..));
             pass.set_index_buffer(self.detail_paint_pass.blade_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             for (&chunk_pos, chunk) in &self.detail_paint_pass.chunk_paint {

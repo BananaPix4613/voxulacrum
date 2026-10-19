@@ -74,7 +74,7 @@ pub struct DetailTexel {
     pub species: u8,
     /// Density driving rendered blade count.
     pub density: u8,
-    /// Palette index for tint.
+    /// Brightness nudge `0..=255` (the shader scales color by `0.85..=1.15`).
     pub tint: u8,
     /// Bitflags: trampled, seasonal, wind strength, …
     pub flags: u8,

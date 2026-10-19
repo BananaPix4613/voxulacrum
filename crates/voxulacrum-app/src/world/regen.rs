@@ -84,7 +84,8 @@ impl WorldRegenCoordinator {
                 meshing.pipeline.reset_for_new_world();
                 meshing.pipeline.submit_all_dirty(world);
 
-                *detail_paint = DetailPaintPass::new(ctx, world);
+                let foliage = detail_paint.foliage().clone();
+                *detail_paint = DetailPaintPass::new(ctx, world, &foliage);
                 let prefabs = scatter.prefabs().clone();
                 *scatter = ScatterPass::new(ctx, world, &prefabs);
                 log::info!("Detail paint + scatter passes rebuilt after regeneration");

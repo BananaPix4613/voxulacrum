@@ -73,6 +73,15 @@ pub enum EvalError {
         name: String,
     },
 
+    /// A detail layer, species or scatter type reference was never resolved.
+    #[error("node {node:?} names foliage {name:?}, which was never resolved")]
+    UnresolvedFoliage {
+        /// The offending node.
+        node: NodeId,
+        /// The name as the graph writes it.
+        name: String,
+    },
+
     /// A `LibraryRef` node was evaluated. Library expansion is not implemented
     /// in this phase (the node is a typed scaffold only).
     #[error("node {node:?} is an unresolved library reference")]

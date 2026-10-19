@@ -319,10 +319,12 @@ pub fn create_detail_paint_pipeline(
 
     let chunk_layout =
         crate::rendering::detail_paint_pass::create_detail_chunk_layout(device);
-
+    let species_layout =
+        crate::rendering::detail_paint_pass::create_detail_species_layout(device);
+    
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("detail_paint_pipeline_layout"),
-        bind_group_layouts: &[global_bind_group_layout, &chunk_layout],
+        bind_group_layouts: &[global_bind_group_layout, &chunk_layout, &species_layout],
         push_constant_ranges: &[],
     });
 
