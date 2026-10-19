@@ -7,8 +7,8 @@ use egui::Ui;
 use egui_snarl::ui::{PinInfo, SnarlPin, SnarlViewer};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use nodegraph_ir::{
-    Diagnostic, GraphKind, GraphRefParams, LibraryRefParams, NodeCategory, NodeKind, PinType,
-    Severity,
+    Diagnostic, GraphKind, GraphRefParams, LibraryGraphRef, LibraryRefParams, NodeCategory,
+    NodeKind, PinType, Severity,
 };
 
 use crate::colors::{category_fill, header_text_color, pin_color, pin_shape};
@@ -334,7 +334,7 @@ impl SnarlViewer<NodeKind> for GraphViewer<'_> {
                             snarl.insert_node(
                                 pos,
                                 NodeKind::LibraryRef(LibraryRefParams {
-                                    library: lib.id,
+                                    library: LibraryGraphRef::with_id(lib.name.clone(), lib.id),
                                     resolved: Some(lib.boundary.to_resolved()),
                                 }),
                             );

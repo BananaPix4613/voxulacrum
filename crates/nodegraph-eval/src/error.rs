@@ -64,6 +64,15 @@ pub enum EvalError {
         name: String,
     },
 
+    /// A `ScatterPlace` names a prefab that was never resolved to an id.
+    #[error("node {node:?} names prefab {name:?}, which was never resolved")]
+    UnresolvedPrefab {
+        /// The offending node.
+        node: NodeId,
+        /// The prefab name as the graph writes it.
+        name: String,
+    },
+
     /// A `LibraryRef` node was evaluated. Library expansion is not implemented
     /// in this phase (the node is a typed scaffold only).
     #[error("node {node:?} is an unresolved library reference")]

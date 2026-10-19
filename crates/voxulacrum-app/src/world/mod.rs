@@ -304,8 +304,8 @@ impl World {
             WorldMutation::RemoveScatter { chunk, anchor } => {
                 self.handle_remove_scatter(chunk, anchor)
             }
-            WorldMutation::PlaceScatter { chunk, anchor, world_voxel } => {
-                self.handle_place_scatter(chunk, anchor, world_voxel)
+            WorldMutation::PlaceScatter { chunk, anchor, world_voxel, prefab } => {
+                self.handle_place_scatter(chunk, anchor, world_voxel, prefab)
             }
             WorldMutation::PourFluidColumn { anchor } => self.handle_pour_fluid_column(anchor),
             WorldMutation::CommitFluidPlans { plans } => self.handle_commit_fluid_plans(plans),
@@ -432,10 +432,11 @@ impl World {
         chunk_pos: IVec3,
         anchor: LocalPos,
         world_voxel: IVec3,
+        prefab: PrefabId,
     ) -> MutationOutcome {
         let mut outcome = MutationOutcome::default();
         if let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(chunk_pos)) {
-            if place_scatter_at(chunk, anchor, world_voxel) {
+            if place_scatter_at(chunk, anchor, world_voxel, prefab) {
                 chunk.persist_dirty = true;
                 outcome.scatter_rebuild.push(chunk_pos);
             }
@@ -1264,7 +1265,12 @@ fn remove_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos) -> bool {
 }
 
 /// Place one player scatter instance at `anchor`, jittered within the cell.
-fn place_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos, world_voxel: IVec3) -> bool {
+fn place_scatter_at(
+    chunk: &mut LoadedChunk,
+    anchor: LocalPos,
+    world_voxel: IVec3,
+    prefab: PrefabId,
+) -> bool {
     let seq = effective_count_at(chunk, anchor);
     let h = player_stable_id(world_voxel, seq);
     let overrides = chunk.data.edit_state.bucket_mut();
@@ -1273,7 +1279,7 @@ fn place_scatter_at(chunk: &mut LoadedChunk, anchor: LocalPos, world_voxel: IVec
         sub_offset: [(h & 0xFF) as u8 as i8, 0, ((h >> 8) & 0xFF) as u8 as i8],
         rotation_y: ((h >> 16) & 0xFF) as u8,
         scale_variant: 0,
-        prefab_id: PrefabId(0),
+        prefab_id: prefab,
         flags: ScatterFlags(ScatterFlags::PLAYER_PLACED),
         stable_id: StableInstanceId(h),
     });
@@ -1425,6 +1431,7 @@ mod mutation_tests {
                 chunk: IVec3::ZERO,
                 anchor,
                 world_voxel: IVec3::new(5, 0, 5),
+                prefab: PrefabId(1),
             }))
             .expect("authoring place accepted");
         assert!(outcome.scatter_rebuild.contains(&IVec3::ZERO));

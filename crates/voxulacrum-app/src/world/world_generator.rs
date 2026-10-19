@@ -754,6 +754,12 @@ fn read_graph(path: &std::path::Path) -> Result<Graph, String> {
     .map_err(|e| format!("{}: {e}", path.display()))?;
     nodegraph_hotreload::resolve_materials(&mut graph, &registry, crate::paths::namespace())
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::libraries::load_libraries()
+        .resolve_refs(&mut graph, crate::paths::namespace())
+        .map_err(|problems| format!("{}: {}", path.display(), problems.join("; ")))?;
+    crate::prefabs::load_prefab_registry()
+        .resolve_refs(&mut graph, crate::paths::namespace())
+        .map_err(|problems| format!("{}: {}", path.display(), problems.join("; ")))?;
     Ok(graph)
 }
 

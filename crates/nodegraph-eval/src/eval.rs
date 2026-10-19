@@ -6,8 +6,8 @@ use std::sync::Arc;
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
 use glam::Vec3;
 use nodegraph_ir::{
-    Axis, DomainWarpParams, EdgeIndex, Graph, FractalType, LibraryGraphId, MaterialRef,
-    NoiseParams, NodeId, NodeKind, Severity,
+    Axis, DomainWarpParams, EdgeIndex, Graph, FractalType, LibraryGraphId, LibraryGraphRef, MaterialRef,
+    PrefabRef, NoiseParams, NodeId, NodeKind, Severity,
 };
 use voxel_core::{ChunkBuffer, MaterialId, ShapeId, Voxel};
 
@@ -609,7 +609,7 @@ impl<'g> Evaluator<'g> {
                 material: self.input_material(id, 1)?,
             },
             // --- References (resolved outside the single-graph evaluator) ---
-            NodeKind::LibraryRef(p) => match self.kernel_for(id, p.library)? {
+            NodeKind::LibraryRef(p) => match self.kernel_for(id, library_id(id, &p.library)?)? {
                 LibraryKernel::StandardCaveNoise => {
                     let pos = self.input_vec3(id, 0)?;
                     // Seeded from the library id, not a node-local seed: the
@@ -618,7 +618,7 @@ impl<'g> Evaluator<'g> {
                     // is the correct reading of "the same library".
                     // **Trigger:** the first graph wanting two independently
                     // seeded cave fields forces a `seed` port onto the boundary.
-                    let seed = self.ctx.noise_seed(p.library.0);
+                    let seed = self.ctx.noise_seed(library_id(id, &p.library)?.0);
                     let mut out = ScalarField::zeroed();
                     for z in 0..CHUNK_DIM {
                         for y in 0..CHUNK_DIM {
@@ -759,10 +759,10 @@ impl<'g> Evaluator<'g> {
                     node: id, expected: "scalar", got: "material/terrain/positions",
                 });
             }
-            NodeKind::LibraryRef(p) => match self.kernel_for(id, p.library)? {
+            NodeKind::LibraryRef(p) => match self.kernel_for(id, library_id(id, &p.library)?)? {
                 LibraryKernel::StandardCaveNoise => {
                     let pos = self.sample_vec3(id, 0, x, y, z)?;
-                    standard_cave_noise(pos, self.ctx.noise_seed(p.library.0))
+                    standard_cave_noise(pos, self.ctx.noise_seed(library_id(id, &p.library)?.0))
                 }
                 _ => return Err(EvalError::WrongGraphDomain { node: id }),
             },
@@ -854,6 +854,19 @@ pub(crate) fn material_id(node: NodeId, reference: &MaterialRef) -> EvalResult<M
 /// [`material_id`] for each of `references`, in order.
 pub(crate) fn material_ids(node: NodeId, references: &[MaterialRef]) -> EvalResult<Vec<MaterialId>> {
     references.iter().map(|r| material_id(node, r)).collect()
+}
+
+/// The id a `LibraryRef`'s name resolved to, or `UnresolvedLibraryRef`.
+fn library_id(node: NodeId, reference: &LibraryGraphRef) -> EvalResult<LibraryGraphId> {
+    reference.id().ok_or(EvalError::UnresolvedLibraryRef { node })
+}
+
+/// The prefab id a reference's name resolved to, or `UnresolvedPrefab`.
+pub(crate) fn prefab_id(node: NodeId, reference: &PrefabRef) -> EvalResult<u32> {
+    reference.id().ok_or_else(|| EvalError::UnresolvedPrefab {
+        node,
+        name: reference.name().to_string(),
+    })
 }
 
 #[cfg(test)]

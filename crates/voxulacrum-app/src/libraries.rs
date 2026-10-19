@@ -16,7 +16,8 @@ use std::sync::Arc;
 use bevy_ecs::prelude::Resource;
 use nodegraph_eval::LibraryKernel;
 use nodegraph_ir::{
-    BoundaryPort, Graph, GraphBoundary, GraphKind, LibraryGraphId, LibraryGraphRegistry, PinType,
+    BoundaryPort, Graph, GraphBoundary, GraphKind, LibraryGraphId, LibraryGraphRegistry, NodeKind,
+    PinType,
 };
 use serde::Deserialize;
 use voxel_core::QualifiedName;
@@ -60,6 +61,29 @@ impl LoadedLibraries {
     /// `(id, name)` for every loaded library, in id order.
     pub fn entries(&self) -> &[(LibraryGraphId, QualifiedName)] {
         &self.entries
+    }
+    
+    /// The id of the library named `name`, if one is loaded.
+    pub fn resolve(&self, name: &QualifiedName) -> Option<LibraryGraphId> {
+        self.entries.iter().find(|(_, n)| n == name).map(|(id, _)| *id)
+    }
+    
+    /// Set the id of every `LibraryRef` in `graph` from its name, read in
+    /// `namespace`. Ids are always rewritten, like material ids. Every node is
+    /// visited; the error lists each name that is malformed or not loaded.
+    pub fn resolve_refs(&self, graph: &mut Graph, namespace: &str) -> Result<(), Vec<String>> {
+        let mut problems = Vec::new();
+        for (_, node) in graph.nodes.iter_mut() {
+            let NodeKind::LibraryRef(p) = &mut node.kind else { continue };
+            match QualifiedName::parse(p.library.name(), namespace) {
+                Ok(name) => match self.resolve(&name) {
+                    Some(id) => p.library.set_id(id),
+                    None => problems.push(format!("library {name} is not loaded")),
+                },
+                Err(e) => problems.push(format!("library {e}")),
+            }
+        }
+        if problems.is_empty() { Ok(()) } else { Err(problems) }
     }
 
     /// Build from parsed assets, naming them in `namespace`: validate contiguous
@@ -227,7 +251,7 @@ impl std::ops::Deref for LibrariesRes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodegraph_ir::{LibraryRefParams, NodeKind};
+    use nodegraph_ir::{LibraryGraphRef, LibraryRefParams};
     use voxel_core::ENGINE_NAMESPACE;
 
     fn asset(id: u32, id_name: &str, kernel: &str) -> LibraryAsset {
@@ -257,9 +281,10 @@ mod tests {
         let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
         let mut g = Graph::new();
         let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
-            library: LibraryGraphId(0),
-            ..Default::default()
+            library: LibraryGraphRef::new("biome_border_fade"),
+            resolved: None,
         }));
+        libs.resolve_refs(&mut g, ENGINE_NAMESPACE).expect("the library is loaded");
         g.resolve_library_refs(&libs.registry);
         let inputs = g.nodes[n].kind.effective_inputs();
         let outputs = g.nodes[n].kind.effective_outputs();
@@ -268,6 +293,33 @@ mod tests {
         assert_eq!(inputs[1].name, "radius");
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].name, "weight");
+    }
+    
+    #[test]
+    fn a_library_name_resolves_to_its_id() {
+        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
+        let mut g = Graph::new();
+        let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+            library: LibraryGraphRef::new("standard_cave_noise"),
+            resolved: None,
+        }));
+        libs.resolve_refs(&mut g, ENGINE_NAMESPACE).unwrap();
+        let NodeKind::LibraryRef(p) = &g.nodes[n].kind else { unreachable!() };
+        assert_eq!(p.library.id(), Some(LibraryGraphId(1)));
+    }
+    
+    #[test]
+    fn every_unknown_library_is_reported() {
+        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
+        let mut g = Graph::new();
+        for name in ["no_such_library", "Bad Name"] {
+            g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+                library: LibraryGraphRef::new(name),
+                resolved: None,
+            }));
+        }
+        let problems = libs.resolve_refs(&mut g, ENGINE_NAMESPACE).unwrap_err();
+        assert_eq!(problems.len(), 2, "{problems:?}")
     }
 
     #[test]

@@ -1084,10 +1084,15 @@ impl WorldEvaluator {
                             random_yaw: p.random_yaw,
                             surface_offset: p.surface_offset,
                             payload: FeaturePayload::Blueprint(blueprint.clone()),
-                            canopy: p.canopy.as_ref().map(|c| FeatureCanopy {
-                                type_id: c.type_id,
-                                prefab_id: c.prefab_id,
-                                y_offset: c.y_offset,
+                            // A canopy whose prefab never resolved is dropped
+                            // rather than drawn as some other prefab. Canopies
+                            // live in memory only; see `StructureCanopy`.
+                            canopy: p.canopy.as_ref().and_then(|c| {
+                                Some(FeatureCanopy {
+                                    type_id: c.type_id,
+                                    prefab_id: c.prefab.id()?,
+                                    y_offset: c.y_offset,
+                                })
                             }),
                         }
                     }
@@ -1563,7 +1568,7 @@ mod tests {
 
     #[test]
     fn biome_detail_graph_produces_foliage() {
-        use nodegraph_ir::{PoissonDistributionParams, ScatterPlaceParams, SpeciesPickerParams};
+        use nodegraph_ir::{PoissonDistributionParams, PrefabRef, ScatterPlaceParams, SpeciesPickerParams};
 
         // A scatter DetailGraph: Poisson -> SpeciesPicker -> ScatterPlace.
         let mut detail = Graph::of_kind(GraphKind::Detail);
@@ -1576,7 +1581,7 @@ mod tests {
         let place = detail.add_node(NodeKind::ScatterPlace(ScatterPlaceParams {
             seed: 2,
             type_id: 0,
-            prefab_id: 5,
+            prefab: PrefabRef::with_id("test", 5),
         }));
         detail.connect(PinRef::new(pois, 0), PinRef::new(pick, 0)).unwrap();
         detail.connect(PinRef::new(pick, 0), PinRef::new(place, 0)).unwrap();
@@ -1996,7 +2001,8 @@ mod tests {
     fn library_density_biome() -> (Graph, HashMap<nodegraph_ir::LibraryGraphId, LibraryKernel>) {
         use nodegraph_ir::{
             BoundaryPort, ConstantParams, GraphBoundary, LayerParams, LibraryGraphId,
-            LibraryGraphRegistry, LibraryRefParams, MaxParams, PinType, WorldPosParams,
+            LibraryGraphRef, LibraryGraphRegistry, LibraryRefParams, MaxParams, PinType,
+            WorldPosParams,
         };
 
         const CAVE: LibraryGraphId = LibraryGraphId(0);
@@ -2015,8 +2021,8 @@ mod tests {
         let mut g = Graph::new();
         let pos = g.add_node(NodeKind::WorldPos(WorldPosParams::default()));
         let cave = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
-            library: CAVE,
-            ..Default::default()
+            library: LibraryGraphRef::with_id("standard_cave_noise", CAVE),
+            resolved: None,
         }));
         g.resolve_library_refs(&registry);
 

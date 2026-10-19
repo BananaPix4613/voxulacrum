@@ -9,11 +9,14 @@
 //!
 //! The file names each prefab with a bare `id_name`; the loader qualifies it
 //! with the namespace the content loads under, as the material registry does.
+//! The file also names its `placeholder`: the prefab drawn for an instance whose
+//! id the table does not define. The content chooses it, not the engine.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy_ecs::prelude::Resource;
+use nodegraph_ir::{Graph, NodeKind};
 use serde::Deserialize;
 use voxel_core::QualifiedName;
 
@@ -49,6 +52,8 @@ pub struct PrefabDef {
 #[derive(Clone, Debug)]
 pub struct PrefabRegistry {
     prefabs: Vec<PrefabDef>,
+    /// Drawn for an instance whose prefab id this table does not define.
+    placeholder: PrefabId,
 }
 
 impl PrefabRegistry {
@@ -67,8 +72,47 @@ impl PrefabRegistry {
         self.prefabs.iter()
     }
 
+    /// The id of the prefab named `name`, if one is defined.
+    pub fn resolve(&self, name: &QualifiedName) -> Option<PrefabId> {
+        self.prefabs.iter().position(|p| p.name == *name).map(|i| PrefabId(i as u32))
+    }
+
+    /// The prefab drawn for an instance whose id this table does not define:
+    /// one saved or generated against different content. Declared by the
+    /// content (`placeholder` in `prefabs.ron`), never chosen by the engine.
+    pub fn placeholder(&self) -> PrefabId {
+        self.placeholder
+    }
+
+    /// Set the id of every prefab reference in `graph` (each `ScatterPlace`, and
+    /// each `PlaceStructure` canopy) from its name, read in `namespace`. Ids are
+    /// always rewritten, like material ids. Every node is visited; the error
+    /// lists each name that is malformed or not defined.
+    pub fn resolve_refs(&self, graph: &mut Graph, namespace: &str) -> Result<(), Vec<String>> {
+        let mut problems = Vec::new();
+        for (_, node) in graph.nodes.iter_mut() {
+            let reference = match &mut node.kind {
+                NodeKind::ScatterPlace(p) => &mut p.prefab,
+                NodeKind::PlaceStructure(p) => match p.canopy.as_mut() {
+                    Some(canopy) => &mut canopy.prefab,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            match QualifiedName::parse(reference.name(), namespace) {
+                Ok(name) => match self.resolve(&name) {
+                    Some(id) => reference.set_id(id.0),
+                    None => problems.push(format!("prefab {name} is not defined")),
+                },
+                Err(e) => problems.push(format!("prefab {e}")),
+            }
+        }
+        if problems.is_empty() { Ok(()) } else { Err(problems) }
+    }
+
     /// Load from a RON file, naming entries in `namespace`. Validates contiguous
-    /// ids `0..len` and valid, unique names, and orders by id.
+    /// ids `0..len`, valid and unique names, and a placeholder the table
+    /// defines, and orders by id.
     pub fn load_from_ron(path: &std::path::Path, namespace: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         Self::from_ron_str(&text, namespace)
@@ -99,22 +143,34 @@ impl PrefabRegistry {
             }
             prefabs.push(PrefabDef { id: e.id, name, shape: e.shape, color: e.color, scale: e.scale });
         }
-        Ok(Self { prefabs })
+        let placeholder = placeholder_id(&prefabs, &file.placeholder, namespace)?;
+        Ok(Self { prefabs, placeholder })
     }
 
     /// Hand-authored fallback, kept in sync with `assets/prefabs.ron` (locked by a
     /// test), named in `namespace` like a loaded table.
     pub fn load_initial(namespace: &str) -> Self {
         let name = |n: &str| QualifiedName::new(namespace, n).expect("built-in prefab names are valid");
-        Self {
-            prefabs: vec![
-                PrefabDef { id: 0, name: name("grass_tuft"), shape: PrefabShape::GrassTuft, color: [0.30, 0.55, 0.20], scale: 0.65 },
-                PrefabDef { id: 1, name: name("bush"),       shape: PrefabShape::Bush,      color: [0.20, 0.42, 0.16], scale: 0.85 },
-                PrefabDef { id: 2, name: name("rock"),       shape: PrefabShape::Rock,      color: [0.50, 0.50, 0.53], scale: 0.75 },
-                PrefabDef { id: 3, name: name("canopy"),     shape: PrefabShape::Bush,      color: [0.24, 0.46, 0.18], scale: 4.5  },
-            ],
-        }
+        let prefabs = vec![
+            PrefabDef { id: 0, name: name("grass_tuft"), shape: PrefabShape::GrassTuft, color: [0.30, 0.55, 0.20], scale: 0.65 },
+            PrefabDef { id: 1, name: name("bush"),       shape: PrefabShape::Bush,      color: [0.20, 0.42, 0.16], scale: 0.85 },
+            PrefabDef { id: 2, name: name("rock"),       shape: PrefabShape::Rock,      color: [0.50, 0.50, 0.53], scale: 0.75 },
+            PrefabDef { id: 3, name: name("canopy"),     shape: PrefabShape::Bush,      color: [0.24, 0.46, 0.18], scale: 4.5  },
+        ];
+        let placeholder = placeholder_id(&prefabs, "grass_tuft", namespace)
+            .expect("the built-in placeholder is in the built-in table");
+        Self { prefabs, placeholder }
     }
+}
+
+/// The id `text` names among `prefabs`, for a table's placeholder.
+fn placeholder_id(prefabs: &[PrefabDef], text: &str, namespace: &str) -> Result<PrefabId, String> {
+    let name = QualifiedName::parse(text, namespace).map_err(|e| format!("placeholder {e}"))?;
+    prefabs
+        .iter()
+        .position(|p| p.name == name)
+        .map(|i| PrefabId(i as u32))
+        .ok_or_else(|| format!("placeholder {name} names no prefab in the table"))
 }
 
 /// On-disk schema for one prefab in `assets/prefabs.ron`.
@@ -130,6 +186,8 @@ struct PrefabEntryRon {
 /// On-disk schema of `assets/prefabs.ron`.
 #[derive(Deserialize)]
 struct PrefabFileRon {
+    /// The prefab drawn for an instance whose id the table does not define.
+    placeholder: String,
     prefabs: Vec<PrefabEntryRon>,
 }
 
@@ -174,11 +232,13 @@ impl std::ops::Deref for PrefabRegistryRes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodegraph_ir::{PrefabRef, ScatterPlaceParams};
     use voxel_core::ENGINE_NAMESPACE;
 
     #[test]
     fn parses_ron_and_orders_by_id() {
         let text = r#"(
+            placeholder: "rock",
             prefabs: [
                 (id: 2, id_name: "rock", shape: Rock, color: (0.5, 0.5, 0.53), scale: 0.45),
                 (id: 0, id_name: "grass_tuft", shape: GrassTuft, color: (0.3, 0.55, 0.2), scale: 0.35),
@@ -191,11 +251,12 @@ mod tests {
         assert_eq!(reg.prefabs[0].name.to_string(), "voxulacrum:grass_tuft");
         assert_eq!(reg.prefabs[1].shape, PrefabShape::Bush);
         assert_eq!(reg.prefabs[2].shape, PrefabShape::Rock);
+        assert_eq!(reg.placeholder(), PrefabId(2), "the placeholder resolves by name");
     }
 
     #[test]
     fn non_contiguous_ids_rejected() {
-        let text = r#"( prefabs: [
+        let text = r#"( placeholder: "a", prefabs: [
             (id: 0, id_name: "a", shape: Rock, color: (0.0, 0.0, 0.0), scale: 1.0),
             (id: 2, id_name: "b", shape: Rock, color: (0.0, 0.0, 0.0), scale: 1.0),
         ] )"#;
@@ -205,7 +266,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_rejected() {
-        let text = r#"( prefabs: [
+        let text = r#"( placeholder: "a", prefabs: [
             (id: 0, id_name: "a", shape: Rock, color: (0.0, 0.0, 0.0), scale: 1.0),
             (id: 1, id_name: "a", shape: Rock, color: (0.0, 0.0, 0.0), scale: 1.0),
         ] )"#;
@@ -215,7 +276,7 @@ mod tests {
 
     #[test]
     fn a_name_that_is_not_a_name_is_rejected() {
-        let text = r#"( prefabs: [
+        let text = r#"( placeholder: "x", prefabs: [
             (id: 0, id_name: "Big Rock", shape: Rock, color: (0.0, 0.0, 0.0), scale: 1.0),
         ] )"#;
         let err = PrefabRegistry::from_ron_str(text, ENGINE_NAMESPACE).expect_err("must refuse");
@@ -223,14 +284,52 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_the_table_does_not_define_is_rejected() {
+        let text = r#"( placeholder: "boulder", prefabs: [
+            (id: 0, id_name: "rock", shape: Rock, color: (0.0, 0.0, 0.0), scale: 1.0),
+        ] )"#;
+        let err = PrefabRegistry::from_ron_str(text, ENGINE_NAMESPACE).expect_err("must refuse");
+        assert!(err.contains("voxulacrum:boulder"), "{err}");
+    }
+
+    #[test]
     fn fallback_matches_shipped_ron() {
         // The built-in fallback must match the authored file so the two never drift.
         const RON: &str = include_str!("../../../assets/prefabs.ron");
         let from_file = PrefabRegistry::from_ron_str(RON, ENGINE_NAMESPACE).expect("prefabs.ron valid");
-        assert_eq!(
-            from_file.prefabs,
-            PrefabRegistry::load_initial(ENGINE_NAMESPACE).prefabs,
-            "prefabs.ron and load_initial() drifted"
-        );
+        let initial = PrefabRegistry::load_initial(ENGINE_NAMESPACE);
+        assert_eq!(from_file.prefabs, initial.prefabs, "prefabs.ron and load_initial() drifted");
+        assert_eq!(from_file.placeholder, initial.placeholder, "placeholders drifted");
+    }
+
+    fn scatter_graph(names: &[&str]) -> Graph {
+        let mut g = Graph::new();
+        for name in names {
+            g.add_node(NodeKind::ScatterPlace(ScatterPlaceParams {
+                seed: 0,
+                type_id: 0,
+                prefab: PrefabRef::new(*name),
+            }));
+        }
+        g
+    }
+
+    #[test]
+    fn a_prefab_name_resolves_to_its_id() {
+        let reg = PrefabRegistry::load_initial(ENGINE_NAMESPACE);
+        let mut g = scatter_graph(&["bush"]);
+        reg.resolve_refs(&mut g, ENGINE_NAMESPACE).unwrap();
+        let (_, node) = g.nodes.iter().next().unwrap();
+        let NodeKind::ScatterPlace(p) = &node.kind else { unreachable!() };
+        assert_eq!(p.prefab.id(), Some(1));
+    }
+
+    #[test]
+    fn every_unknown_prefab_is_reported() {
+        let reg = PrefabRegistry::load_initial(ENGINE_NAMESPACE);
+        // The palette default names no prefab, so it is reported too.
+        let mut g = scatter_graph(&["boulder", ""]);
+        let problems = reg.resolve_refs(&mut g, ENGINE_NAMESPACE).unwrap_err();
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 }

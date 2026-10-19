@@ -19,6 +19,7 @@ use smallvec::SmallVec;
 use voxel_core::{ChunkCoord, LocalPos, ResolvedBlueprint, Voxel, Yaw};
 
 use super::fluid_sim::ChunkPlan;
+use super::layers::PrefabId;
 use super::chunk::LoadedChunk;
 use super::world_generator::WorldGenerator;
 
@@ -143,10 +144,11 @@ pub enum WorldMutation {
     /// generated ones are tombstoned (`scatter_removed`), player-added ones dropped.
     #[allow(dead_code)]
     RemoveScatter { chunk: IVec3, anchor: LocalPos },
-    /// Place one player scatter instance at `anchor` in `chunk`. `world_voxel` is
-    /// the anchor's world-space voxel coordinate, used to derive the stable id.
+    /// Place one player scatter instance of `prefab` at `anchor` in `chunk`.
+    /// `world_voxel` is the anchor's world-space voxel coordinate, used to derive
+    /// the stable id. The prefab is the caller's choice; the engine picks none.
     #[allow(dead_code)]
-    PlaceScatter { chunk: IVec3, anchor: LocalPos, world_voxel: IVec3 },
+    PlaceScatter { chunk: IVec3, anchor: LocalPos, world_voxel: IVec3, prefab: PrefabId },
     /// Pour a short settled water column above `anchor` (world-space voxel),
     /// spanning whatever chunks the column crosses. Each poured cell is written as
     /// a player fluid override and activated so the next sim tick flows it.

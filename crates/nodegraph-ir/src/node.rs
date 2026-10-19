@@ -7,8 +7,7 @@ use slotmap::new_key_type;
 use crate::boundary::{EffectivePin, ResolvedBoundary, ResolvedPin};
 use crate::crossgraph::GraphRefTarget;
 use crate::graph::GraphKind;
-use crate::library::LibraryGraphId;
-use crate::material_ref::MaterialRef;
+use crate::content_ref::{LibraryGraphRef, MaterialRef, PrefabRef};
 use crate::pin::PinType;
 use voxel_core::ResolvedBlueprint;
 
@@ -616,7 +615,7 @@ pub struct StructureCanopy {
     /// Scatter type bucket the instance lands in.
     pub type_id: u16,
     /// Prefab instanced at the anchor.
-    pub prefab_id: u32,
+    pub prefab: PrefabRef,
     /// Voxels above the structure's anchor the canopy sits at - normally the
     /// trunk's height, so the canopy crowns it.
     pub y_offset: i32,
@@ -624,7 +623,8 @@ pub struct StructureCanopy {
 
 impl Default for StructureCanopy {
     fn default() -> Self {
-        Self { type_id: 0, prefab_id: 0, y_offset: 4 }
+        // No prefab until the author picks one: the engine names no content.
+        Self { type_id: 0, prefab: PrefabRef::new(""), y_offset: 4 }
     }
 }
 
@@ -721,10 +721,11 @@ impl Default for RiverParams {
 /// graph by id. The referenced library's boundary is resolved into this node's
 /// pins by [`Graph::resolve_library_refs`](crate::Graph::resolve_library_refs)
 /// and cached in `resolved` (recomputed on load; not serialized).
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LibraryRefParams {
-    /// The library graph this node instantiates.
-    pub library: LibraryGraphId,
+    /// The library graph this node instantiates, by name; its id is set where
+    /// content loads.
+    pub library: LibraryGraphRef,
     /// Pins resolved from the referenced library's boundary. `None` until a
     /// resolve pass runs, in which case the node presents no pins.
     #[serde(skip)]
@@ -894,14 +895,22 @@ impl Default for PaintDensityParams {
 
 /// Parameters for [`NodeKind::ScatterPlace`]: a Tier-2/3 terminal writing scatter
 /// instances for each assigned candidate.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ScatterPlaceParams {
     /// Per-node seed (rotation/scale variation).
     pub seed: u32,
     /// Scatter type bucket (app `ScatterTypeId`).
     pub type_id: u16,
-    /// Prefab to instance (app `PrefabId`).
-    pub prefab_id: u32,
+    /// Prefab to instance, by name; its id (an app `PrefabId`) is set where
+    /// content loads.
+    pub prefab: PrefabRef,
+}
+
+impl Default for ScatterPlaceParams {
+    fn default() -> Self {
+        // No prefab until the author picks one: the engine names no content.
+        Self { seed: 0, type_id: 0, prefab: PrefabRef::new("") }
+    }
 }
 
 /// Parameters for [`NodeKind::BiomeParam`]: read a named per-biome scalar from

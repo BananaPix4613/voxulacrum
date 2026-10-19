@@ -1,7 +1,10 @@
 //! Per-`NodeKind` parameter editor widgets.
 
 use egui::Ui;
-use nodegraph_ir::{Axis, FractalType, GraphRefTarget, MaterialRef, NodeKind, StructureCanopy};
+use nodegraph_ir::{
+    Axis, ContentRef, FractalType, GraphRefTarget, LibraryGraphRef, MaterialRef, NodeKind,
+    StructureCanopy,
+};
 
 /// One parameter row: a left-aligned label followed by its editor widget.
 /// Returns `true` if the widget reported a change this frame.
@@ -56,6 +59,8 @@ pub struct GraphCatalogs {
     /// Every material a node can name, as this content writes it, in id order.
     /// Excludes air, which no band, allow-list or wood should name.
     pub materials: Vec<String>,
+    /// Every prefab a node can name, as this content writes it, in id order.
+    pub prefabs: Vec<String>,
 }
 
 /// One library the author may reference, carrying the boundary a `LibraryRef` to
@@ -210,7 +215,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
             }
             if let Some(c) = p.canopy.as_mut() {
                 changed |= row(ui, "type id", |ui| ui.add(egui::DragValue::new(&mut c.type_id)));
-                changed |= row(ui, "prefab id", |ui| ui.add(egui::DragValue::new(&mut c.prefab_id)));
+                changed |= content_ref_ui(ui, "canopy_prefab", &mut c.prefab, "prefab", &catalogs.prefabs, NO_PREFABS);
                 changed |= row(ui, "canopy y", |ui| ui.add(egui::DragValue::new(&mut c.y_offset).range(0..=32)));
             }
             changed
@@ -266,7 +271,7 @@ pub fn params_ui(ui: &mut Ui, kind: &mut NodeKind, catalogs: &GraphCatalogs) -> 
         NodeKind::ScatterPlace(p) => {
             let mut changed = row(ui, "seed", |ui| ui.add(egui::DragValue::new(&mut p.seed)));
             changed |= row(ui, "type id", |ui| ui.add(egui::DragValue::new(&mut p.type_id)));
-            changed |= row(ui, "prefab id", |ui| ui.add(egui::DragValue::new(&mut p.prefab_id)));
+            changed |= content_ref_ui(ui, "scatter_prefab", &mut p.prefab, "prefab", &catalogs.prefabs, NO_PREFABS);
             changed
         }
         NodeKind::BiomeParam(p) => {
@@ -307,19 +312,19 @@ fn library_ref_ui(
     let mut changed = false;
     let selected = libraries
         .iter()
-        .find(|l| l.id == p.library)
+        .find(|l| l.name == p.library.name())
         .map(|l| l.name.clone())
-        .unwrap_or_else(|| format!("library {} (missing)", p.library.0));
+        .unwrap_or_else(|| format!("{} (missing)", p.library.name()));
     ui.horizontal(|ui| {
         ui.label("library");
         egui::ComboBox::from_id_salt("library_ref")
             .selected_text(selected)
             .show_ui(ui, |ui| {
                 for lib in libraries {
-                    if ui.selectable_label(lib.id == p.library, &lib.name).clicked()
-                        && lib.id != p.library
+                    if ui.selectable_label(lib.name == p.library.name(), &lib.name).clicked()
+                        && lib.name != p.library.name()
                     {
-                        p.library = lib.id;
+                        p.library = LibraryGraphRef::with_id(lib.name.clone(), lib.id);
                         p.resolved = Some(lib.boundary.to_resolved());
                         changed = true;
                     }
@@ -415,6 +420,27 @@ const NO_MATERIALS: &str = "no materials in materials.ron";
 
 /// Shown in an empty blueprint picker.
 const NO_BLUEPRINTS: &str = "no blueprints in assets/blueprints";
+
+/// Shown in an empty prefab picker.
+const NO_PREFABS: &str = "no prefabs in prefabs.ron";
+
+/// Any content reference, picked by name from `catalog`. Picking renames the
+/// reference, which clears its id until the next resolution.
+fn content_ref_ui<Id: Copy>(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash,
+    reference: &mut ContentRef<Id>,
+    label: &str,
+    catalog: &[String],
+    empty: &str,
+) -> bool {
+    let mut name = reference.name().to_string();
+    let changed = name_combo(ui, salt, label, &mut name, catalog, empty);
+    if changed {
+        reference.set_name(name);
+    }
+    changed
+}
 
 /// A material reference, picked by name from the registry.
 fn material_ref_ui(

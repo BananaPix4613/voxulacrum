@@ -148,6 +148,7 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
 
     let libraries = crate::libraries::load_libraries();
     let materials = crate::materials::load_registry();
+    let prefabs = crate::prefabs::load_prefab_registry();
 
     let world_boundary = match assets.iter_mut().find(|a| a.expected_kind == GraphKind::World) {
         Some(a) => {
@@ -157,6 +158,10 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
         None => Default::default(),
     };
     for asset in assets.iter_mut() {
+        // Names to ids first, since pins project from the id. A name that does
+        // not resolve is reported below, once per node, so the error is unused.
+        let _ = libraries.resolve_refs(&mut asset.graph, crate::paths::namespace());
+        let _ = prefabs.resolve_refs(&mut asset.graph, crate::paths::namespace());
         asset.graph.resolve_library_refs(libraries.registry());
         asset.graph.resolve_graph_refs(|t| match t {
             GraphRefTarget::World => Some(world_boundary.clone()),
@@ -198,12 +203,18 @@ fn validate(manifest_path: &Path) -> Vec<Finding> {
             }
             match &node.kind {
                 NodeKind::LibraryRef(p) => {
-                    if libraries.registry().get(p.library).is_none() {
+                    if p.library.id().is_none() {
                         out.push(Finding::error(
                             &asset.name,
-                            format!("LibraryRef targets library {}, which does not exist", p.library.0),
+                            format!("LibraryRef names library {:?}, which is not loaded", p.library.name()),
                         ));
                     }
+                }
+                NodeKind::ScatterPlace(p) if p.prefab.id().is_none() => {
+                    out.push(Finding::error(
+                        &asset.name,
+                        format!("ScatterPlace names prefab {:?}, which is not defined", p.prefab.name()),
+                    ));
                 }
                 NodeKind::GraphRef(p) if !matches!(p.target, GraphRefTarget::World) => {
                     out.push(Finding::warn(

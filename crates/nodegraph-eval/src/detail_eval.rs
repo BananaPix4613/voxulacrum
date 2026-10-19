@@ -232,7 +232,7 @@ impl<'a> DetailEvaluator<'a> {
 
     fn eval_scatter(&self, id: NodeId) -> EvalResult<ScatterBucket> {
         let (seed, type_id, prefab_id) = match &self.graph.nodes[id].kind {
-            NodeKind::ScatterPlace(p) => (p.seed, p.type_id, p.prefab_id),
+            NodeKind::ScatterPlace(p) => (p.seed, p.type_id, crate::eval::prefab_id(id, &p.prefab)?),
             _ => unreachable!("eval_scatter on non-ScatterPlace"),
         };
         let assignments = self.input_assignments(id, 0)?;
@@ -370,7 +370,7 @@ mod tests {
     use super::*;
     use glam::IVec3;
     use nodegraph_ir::{
-        Graph, GraphKind, NodeKind, PaintDensityParams, PinRef, ScatterPlaceParams,
+        Graph, GraphKind, NodeKind, PaintDensityParams, PinRef, PrefabRef, ScatterPlaceParams,
     };
     use voxel_core::MaterialId;
 
@@ -398,7 +398,7 @@ mod tests {
         let place = g.add_node(NodeKind::ScatterPlace(ScatterPlaceParams {
             seed: 2,
             type_id: 0,
-            prefab_id: 7,
+            prefab: PrefabRef::with_id("test", 7),
         }));
         g.connect(PinRef::new(pois, 0), PinRef::new(pick, 0)).unwrap();
         g.connect(PinRef::new(pick, 0), PinRef::new(place, 0)).unwrap();

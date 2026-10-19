@@ -1,21 +1,33 @@
-//! Material references in graph content: a name, plus the id it resolves to.
+//! References in graph content: a name, plus the id it resolves to.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use voxel_core::MaterialId;
 
-/// A material named by graph content, as `granite` or `namespace:granite`.
+/// Something graph content names, as `granite` or `namespace:granite`: a
+/// material, a library, a prefab.
 ///
-/// The name is what a graph file stores. The id is filled in at the hot-reload
-/// boundary (`nodegraph_hotreload::resolve_materials`) and never serialized, so
-/// a graph file can only ever name its materials. Two references are equal when
-/// their names are, so a graph equals its own round trip through JSON.
+/// The name is what a graph file stores. The id is filled in where content
+/// loads (for materials, `nodegraph_hotreload::resolve_materials`) and never
+/// serialized, so a graph file can only ever name what it references. Two
+/// references are equal when their names are, so a graph equals its own round
+/// trip through JSON.
 #[derive(Clone, Debug)]
-pub struct MaterialRef {
+pub struct ContentRef<Id> {
     name: String,
-    id: Option<MaterialId>,
+    id: Option<Id>,
 }
 
-impl MaterialRef {
+/// A material named by graph content.
+pub type MaterialRef = ContentRef<MaterialId>;
+
+/// A library graph named by graph content.
+pub type LibraryGraphRef = ContentRef<crate::library::LibraryGraphId>;
+
+/// A prefab named by graph content. Its id is the app's `PrefabId`, which this
+/// crate carries as a `u32`.
+pub type PrefabRef = ContentRef<u32>;
+
+impl<Id: Copy> ContentRef<Id> {
     /// An unresolved reference to `name`.
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into(), id: None }
@@ -23,11 +35,11 @@ impl MaterialRef {
 
     /// A reference already resolved to `id`, for graphs built in memory (tests
     /// and tools) that never pass through the hot-reload boundary.
-    pub fn with_id(name: impl Into<String>, id: MaterialId) -> Self {
+    pub fn with_id(name: impl Into<String>, id: Id) -> Self {
         Self { name: name.into(), id: Some(id) }
     }
 
-    /// The material's name as content writes it.
+    /// The referenced name as content writes it.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -40,31 +52,31 @@ impl MaterialRef {
     }
 
     /// The resolved id, or `None` before resolution.
-    pub fn id(&self) -> Option<MaterialId> {
+    pub fn id(&self) -> Option<Id> {
         self.id
     }
 
     /// Record the id this reference resolved to.
-    pub fn set_id(&mut self, id: MaterialId) {
+    pub fn set_id(&mut self, id: Id) {
         self.id = Some(id);
     }
 }
 
-impl PartialEq for MaterialRef {
+impl<Id> PartialEq for ContentRef<Id> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
     }
 }
 
-impl Serialize for MaterialRef {
+impl<Id> Serialize for ContentRef<Id> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.name)
     }
 }
 
-impl<'de> Deserialize<'de> for MaterialRef {
+impl<'de, Id> Deserialize<'de> for ContentRef<Id> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::new)
+        String::deserialize(deserializer).map(|name| Self { name, id: None })
     }
 }
 
