@@ -2,7 +2,7 @@
 //!
 //! Each scatter instance carries a `PrefabId`; the registry maps that id to a
 //! [`PrefabDef`] describing the prop's procedural silhouette, color, and base
-//! scale. Mirrors the material registry: authored in `assets/prefabs.ron`,
+//! scale. Mirrors the material registry: authored in `packages/sandbox/prefabs.ron`,
 //! RON-primary with a hand-authored fallback so the engine never fails to start
 //! over prefabs. This module is pure data - the scatter render pass builds the
 //! actual mesh for each [`PrefabShape`] (Substep 10b).
@@ -147,7 +147,7 @@ impl PrefabRegistry {
         Ok(Self { prefabs, placeholder })
     }
 
-    /// Hand-authored fallback, kept in sync with `assets/prefabs.ron` (locked by a
+    /// Hand-authored fallback, kept in sync with `packages/sandbox/prefabs.ron` (locked by a
     /// test), named in `namespace` like a loaded table.
     pub fn load_initial(namespace: &str) -> Self {
         let name = |n: &str| QualifiedName::new(namespace, n).expect("built-in prefab names are valid");
@@ -173,7 +173,7 @@ fn placeholder_id(prefabs: &[PrefabDef], text: &str, namespace: &str) -> Result<
         .ok_or_else(|| format!("placeholder {name} names no prefab in the table"))
 }
 
-/// On-disk schema for one prefab in `assets/prefabs.ron`.
+/// On-disk schema for one prefab in `packages/sandbox/prefabs.ron`.
 #[derive(Deserialize)]
 struct PrefabEntryRon {
     id: u32,
@@ -183,7 +183,7 @@ struct PrefabEntryRon {
     scale: f32,
 }
 
-/// On-disk schema of `assets/prefabs.ron`.
+/// On-disk schema of `packages/sandbox/prefabs.ron`.
 #[derive(Deserialize)]
 struct PrefabFileRon {
     /// The prefab drawn for an instance whose id the table does not define.
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn fallback_matches_shipped_ron() {
         // The built-in fallback must match the authored file so the two never drift.
-        const RON: &str = include_str!("../../../assets/prefabs.ron");
+        const RON: &str = include_str!("../../../packages/sandbox/prefabs.ron");
         let from_file = PrefabRegistry::from_ron_str(RON, ENGINE_NAMESPACE).expect("prefabs.ron valid");
         let initial = PrefabRegistry::load_initial(ENGINE_NAMESPACE);
         assert_eq!(from_file.prefabs, initial.prefabs, "prefabs.ron and load_initial() drifted");

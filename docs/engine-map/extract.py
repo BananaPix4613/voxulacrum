@@ -27,7 +27,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-SOURCE_GLOBS = ["crates/*/src/**/*.rs", "shaders/*.wgsl", "assets/**/*", "palettes/*"]
+SOURCE_GLOBS = ["crates/*/src/**/*.rs", "shaders/*.wgsl", "assets/**/*", "packages/**/*", "palettes/*"]
 COUPLING_MIN_REFS = 5  # below this, an undescribed coupling is noise
 
 WORD = re.compile(r"[A-Za-z_]\w*")

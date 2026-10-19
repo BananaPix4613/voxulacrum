@@ -56,7 +56,7 @@ available. Code you write in separate files — your game, your mods — is your
 under whatever terms you choose. MPL §3.3 covers this explicitly.
 
 **Sample content: [CC BY 4.0](assets/LICENSE).** The graphs, palettes, shaders
-and registries in `assets/`, `palettes/` and `shaders/` are the worked examples
+and registries in `assets/`, `packages/`, `palettes/` and `shaders/` are the worked examples
 of how the engine is meant to be used. Take them apart, adapt them, ship them —
 just credit the source.
 

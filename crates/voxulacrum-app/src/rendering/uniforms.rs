@@ -587,7 +587,7 @@ mod tests {
     /// instead of quietly comparing the built-in copy to itself.
     fn shipped_registry() -> MaterialRegistry {
         MaterialRegistry::load_from_ron(&crate::materials::materials_path(), crate::paths::namespace())
-            .expect("assets/materials.ron loads")
+            .expect("packages/sandbox/materials.ron loads")
     }
 
     /// The table the shader should see for `registry`: each material's color in

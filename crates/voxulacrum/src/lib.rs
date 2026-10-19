@@ -8,7 +8,7 @@
 //!
 //! | Path | Contents |
 //! |---|---|
-//! | [`run`] | Engine entry point: runs the shipped reference world |
+//! | [`run`] | Engine entry point: runs the shipped sandbox package |
 //! | [`run_with`] | Engine entry point with [`RunOptions`] |
 //! | [`RunOptions`] | How the engine starts: where world content comes from and where its saves go |
 //!

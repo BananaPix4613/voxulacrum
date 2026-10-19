@@ -1,7 +1,7 @@
 # Testbed content
 
 The world the testbed loads, through `RunOptions::content("testbed", ...)`.
-Saves go to `saves/testbed/`, never to the reference world's `saves/default/`.
+Saves go to `saves/testbed/`, never to the sandbox package's `saves/default/`.
 
 | Path | What |
 |---|---|

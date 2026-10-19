@@ -202,7 +202,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut SkeletonPanelState) {
             {
                 state.load_requested = true;
             }
-            if ui.button("↻").on_hover_text("Re-read assets/species").clicked() {
+            if ui.button("↻").on_hover_text("Re-read packages/sandbox/species").clicked() {
                 state.list_dirty = true;
             }
         });
@@ -250,7 +250,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut SkeletonPanelState) {
                 state.save_requested = true;
             }
         });
-        ui.weak("writes assets/species/<name>.species.json — a Place Tree node names it");
+        ui.weak("writes packages/sandbox/species/<name>.species.json — a Place Tree node names it");
 
         // One or the other, never both: a stale success line under a fresh
         // error reads as though the error were survivable.

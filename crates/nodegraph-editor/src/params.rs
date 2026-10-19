@@ -434,7 +434,7 @@ fn noise_params_ui(ui: &mut Ui, p: &mut nodegraph_ir::NoiseParams) -> bool {
 const NO_MATERIALS: &str = "no materials in materials.ron";
 
 /// Shown in an empty blueprint picker.
-const NO_BLUEPRINTS: &str = "no blueprints in assets/blueprints";
+const NO_BLUEPRINTS: &str = "no blueprints in packages/sandbox/blueprints";
 
 /// Shown in an empty prefab picker.
 const NO_PREFABS: &str = "no prefabs in prefabs.ron";

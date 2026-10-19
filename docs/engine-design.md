@@ -289,7 +289,7 @@ Parameters are free-form (any biome can declare any parameter name) with documen
 
 ### Standard libraries
 
-The engine ships a set of standard libraries as authored assets under `assets/libraries/`:
+The engine ships a set of standard libraries as authored assets under `packages/sandbox/libraries/`:
 
 - `StandardCaveNoise` — 3D Worley + ridged noise composite
 - `SurfaceLayering` — depth-conditional material cake (grass/dirt/stone)

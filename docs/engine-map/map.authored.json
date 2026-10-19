@@ -15,8 +15,8 @@
   ],
 
   "subsystems": [
-    { "id": "assets", "region": "content", "name": "Content on disk", "crate": "assets/ · palettes/", "status": "settled",
-      "claims": ["assets/*", "palettes/*"],
+    { "id": "assets", "region": "content", "name": "Content on disk", "crate": "assets/ · packages/ · palettes/", "status": "settled",
+      "claims": ["assets/*", "packages/*", "palettes/*"],
       "short": "The manifest and every authored file it names.",
       "summary": "The manifest is the root. It names the seed, sea level, world height, world-level parameters, and the graph files for the World, each Zone and each Biome. Libraries, blueprints, species, materials and prefabs are referenced by name and resolved at load.",
       "owns": ["`world.manifest.json` (schema v1)", "Graph files (`.graph.json`, `.detail.json`)", "Library assets, blueprints, species", "`materials.ron`, `prefabs.ron`, `input.ron`, palettes"],
@@ -243,9 +243,9 @@
   ],
 
   "module_notes": {
-    "assets/graphs/world.manifest.json": "Seed, sea_level, min_y/max_y, world params, zone and biome registrations. Read through `WorldManifest::read`, which migrates pre-v1 files.",
-    "assets/materials.ron": "The material table, including the `render_delegated` flag that hands wood to the capsule pass.",
-    "assets/prefabs.ron": "Scatter prefab silhouettes, colors and scales.",
+    "packages/sandbox/graphs/world.manifest.json": "Seed, sea_level, min_y/max_y, world params, zone and biome registrations. Read through `WorldManifest::read`, which migrates pre-v1 files.",
+    "packages/sandbox/materials.ron": "The material table, including the `render_delegated` flag that hands wood to the capsule pass.",
+    "packages/sandbox/prefabs.ron": "Scatter prefab silhouettes, colors and scales.",
     "assets/input.ron": "Key bindings for the semantic action layer.",
     "crates/nodegraph-editor/src/colors.rs": "Pin and node colors for the editor canvas.",
     "crates/nodegraph-eval/src/lib.rs": "Crate root and re-exports.",

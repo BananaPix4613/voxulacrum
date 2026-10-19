@@ -7,8 +7,9 @@
 
 use std::fmt;
 
-/// Namespace of the content shipped with the engine: the reference world, and
-/// the throwaway content engine tests use.
+/// Namespace of the engine's own content, and of the throwaway content engine
+/// tests use. A package's content has its own: `sandbox` for the shipped
+/// sandbox world.
 pub const ENGINE_NAMESPACE: &str = "voxulacrum";
 
 /// A registry entry's identity: a namespace and a name within it. Each part is

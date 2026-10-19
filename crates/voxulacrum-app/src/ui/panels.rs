@@ -527,11 +527,11 @@ fn draw_lighting(ui: &mut egui::Ui, p: &mut LightingParams, selected: &mut usize
     });
 }
 
-/// The material table, read-only: `assets/materials.ron` is its only source, so
+/// The material table, read-only: `packages/sandbox/materials.ron` is its only source, so
 /// there is nothing here to edit.
 fn draw_materials(ui: &mut egui::Ui, registry: &voxel_core::MaterialRegistry) {
     ui.collapsing("Materials", |ui| {
-        ui.label("Authored in assets/materials.ron");
+        ui.label("Authored in packages/sandbox/materials.ron");
         for i in 0..registry.len() {
             let Some(def) = registry.get(voxel_core::MaterialId(i as u16)) else { continue };
             ui.horizontal(|ui| {

@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn the_shipped_blueprint_parses_and_resolves() {
-        const ROCK: &str = include_str!("../../../assets/blueprints/rock.blueprint.json");
+        const ROCK: &str = include_str!("../../../packages/sandbox/blueprints/rock.blueprint.json");
         Blueprint::from_json(ROCK)
             .expect("shipped blueprint parses")
             .resolve(&crate::material_registry::shipped_for_tests(), ENGINE_NAMESPACE)

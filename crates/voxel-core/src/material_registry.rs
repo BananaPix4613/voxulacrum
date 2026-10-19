@@ -1,11 +1,11 @@
 //! Stable material registry: numeric [`MaterialId`]s plus snake_case name
-//! resolution. The table is data-driven: `assets/materials.ron` is its only
+//! resolution. The table is data-driven: `packages/sandbox/materials.ron` is its only
 //! source, loaded via [`MaterialRegistry::load_from_ron`] or
 //! [`MaterialRegistry::from_ron_str`]. This crate keeps no copy of it.
 //!
 //! The file names each material with a bare `id_name`; the loader qualifies it
-//! with the namespace its content loads under, so `granite` in the reference
-//! world is `voxulacrum:granite`.
+//! with the namespace its content loads under, so `granite` in the sandbox
+//! package is `sandbox:granite`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -104,7 +104,7 @@ impl MaterialRegistry {
         self.entries.is_empty()
     }
 
-    /// Load the material table from a RON file (`assets/materials.ron`),
+    /// Load the material table from a RON file (`packages/sandbox/materials.ron`),
     /// naming its entries in `namespace`.
     ///
     /// Each material declares an explicit stable numeric `id`. The loader
@@ -206,15 +206,15 @@ struct MaterialFileRon {
     materials: Vec<MaterialEntryRon>,
 }
 
-/// The shipped table, for this crate's tests. `assets/materials.ron` is the only
+/// The shipped table, for this crate's tests. `packages/sandbox/materials.ron` is the only
 /// source of the table, so tests read it rather than keeping a copy of their own.
 #[cfg(all(test, feature = "serde"))]
 pub(crate) fn shipped_for_tests() -> MaterialRegistry {
     MaterialRegistry::from_ron_str(
-        include_str!("../../../assets/materials.ron"),
+        include_str!("../../../packages/sandbox/materials.ron"),
         crate::name::ENGINE_NAMESPACE,
     )
-    .expect("the shipped assets/materials.ron is valid")
+    .expect("the shipped packages/sandbox/materials.ron is valid")
 }
 
 #[cfg(all(test, feature = "serde"))]
@@ -263,7 +263,7 @@ mod ron_tests {
     #[test]
     fn names_are_qualified_with_the_load_namespace() {
         let r = MaterialRegistry::from_ron_str(
-            include_str!("../../../assets/materials.ron"),
+            include_str!("../../../packages/sandbox/materials.ron"),
             "testbed",
         )
             .unwrap();

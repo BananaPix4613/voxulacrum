@@ -5,7 +5,7 @@
 //! position from the graph and are what a chunk-Y seam, a border scan and a
 //! feature probe run per column.
 //!
-//! Two of the cases load the graphs actually shipped in `assets/`, so the
+//! Two of the cases load the graphs actually shipped in `packages/sandbox/`, so the
 //! numbers describe today's content. The synthetic chains exist because that
 //! path's cost is quadratic in graph size - one recursion per node, and an
 //! input resolution per recursion - and the shipped graphs are far too small to
@@ -17,9 +17,9 @@ use nodegraph_eval::*;
 use nodegraph_ir::*;
 use std::hint::black_box;
 
-/// A graph from `assets/graphs`.
+/// A graph from `packages/sandbox/graphs`.
 fn load(name: &str) -> Graph {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/graphs/").to_string() + name;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/sandbox/graphs/").to_string() + name;
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"))
 }

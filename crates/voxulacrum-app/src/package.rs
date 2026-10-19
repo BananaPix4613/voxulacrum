@@ -3,9 +3,9 @@
 //! A package is a directory with a `package.ron` manifest at its root and its
 //! content laid out beside it in the fixed content layout (`materials.ron`,
 //! `prefabs.ron`, `foliage.ron`, `graphs/`, `libraries/`, `blueprints/`,
-//! `species/`). The manifest names the package's id (also its save directory),
-//! its content namespace, its version, the engine versions it supports and the
-//! world it starts.
+//! `species/`). The manifest names the package's id, its save directory (the id
+//! unless it names another), its content namespace, its version, the engine
+//! versions it supports and the world it starts.
 //!
 //! This loader takes data-only packages: one that declares code modules is
 //! refused until the WebAssembly runtime exists (M11). Dependencies are
@@ -43,6 +43,9 @@ pub struct Dependency {
 pub struct PackageManifest {
     /// Identity, and the package's save directory under `saves/`.
     pub id: String,
+    /// The package's directory under `saves/`: the id unless the manifest names
+    /// another, so a package can keep a save directory it predates.
+    pub saves: String,
     /// The namespace bare names in this package's content resolve in.
     pub namespace: String,
     /// The package's own version.
@@ -104,6 +107,9 @@ impl PackageManifest {
         QualifiedName::validate_namespace(&file.id).map_err(|e| format!("id: {e}"))?;
         let namespace = if file.namespace.is_empty() { file.id.clone() } else { file.namespace };
         QualifiedName::validate_namespace(&namespace).map_err(|e| format!("namespace: {e}"))?;
+        // The namespace rule also keeps it one directory name under `saves/`.
+        let saves = if file.saves.is_empty() { file.id.clone() } else { file.saves };
+        QualifiedName::validate_namespace(&saves).map_err(|e| format!("saves: {e}"))?;
 
         let version = Version::parse(&file.version)
             .map_err(|e| format!("version {:?}: {e}", file.version))?;
@@ -143,7 +149,7 @@ impl PackageManifest {
             dependencies.push(Dependency { id: d.id, version: req });
         }
 
-        Ok(Self { id: file.id, namespace, version, kind: file.kind, engine: engine_req, world, dependencies })
+        Ok(Self { id: file.id, saves, namespace, version, kind: file.kind, engine: engine_req, world, dependencies })
     }
 }
 
@@ -152,6 +158,8 @@ impl PackageManifest {
 #[derive(Deserialize)]
 struct ManifestRon {
     id: String,
+    #[serde(default)]
+    saves: String,
     #[serde(default)]
     namespace: String,
     version: String,
@@ -192,6 +200,7 @@ mod tests {
     fn a_minimal_manifest_parses_and_the_namespace_defaults_to_the_id() {
         let m = parse("").unwrap();
         assert_eq!((m.id.as_str(), m.namespace.as_str()), ("demo", "demo"));
+        assert_eq!(m.saves, "demo", "the save directory defaults to the id");
         assert_eq!(m.kind, PackageKind::Game);
         assert_eq!(m.world, None);
         assert!(m.dependencies.is_empty());
@@ -202,6 +211,18 @@ mod tests {
         let m = parse(r#"namespace: "demo_content", world: "graphs/world.manifest.json","#).unwrap();
         assert_eq!(m.namespace, "demo_content");
         assert_eq!(m.world, Some(PathBuf::from("graphs/world.manifest.json")));
+    }
+
+    #[test]
+    fn an_explicit_save_directory_is_kept() {
+        let m = parse(r#"saves: "default","#).unwrap();
+        assert_eq!((m.id.as_str(), m.saves.as_str()), ("demo", "default"));
+    }
+
+    #[test]
+    fn a_save_directory_that_is_not_one_directory_name_is_refused() {
+        let err = parse(r#"saves: "../elsewhere","#).unwrap_err();
+        assert!(err.starts_with("saves:"), "{err}");
     }
 
     #[test]

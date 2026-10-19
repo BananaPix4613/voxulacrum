@@ -1,4 +1,4 @@
-//! CLI demo: watch `assets/graphs/` (or an arg-supplied dir), re-evaluate
+//! CLI demo: watch `packages/sandbox/graphs/` (or an arg-supplied dir), re-evaluate
 //! each `*.json` graph on change, and write its `<name>.png` heightmap.
 
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir: PathBuf = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("assets/graphs"));
+        .unwrap_or_else(|| PathBuf::from("packages/sandbox/graphs"));
 
     std::fs::create_dir_all(&dir)?;
     let _ = nodegraph_hotreload::bootstrap_example_graph(&dir)?;
