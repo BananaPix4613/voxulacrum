@@ -18,11 +18,11 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Engine/game boundary
 
-Milestone M2, in progress: B1–B7 are merged, and the integrated-GPU baseline
-remains. The engine is separating from the game that grew inside it. It is now
-a library behind a facade crate, the world it ships and a testbed project both
-load as packages, content names everything it references rather than numbering
-it, and the prototype game's policy is package data in a repository of its own.
+Milestone M2: B1–B7 and T2 are merged, and every exit gate is met. The engine
+has separated from the game that grew inside it. It is now a library behind a
+facade crate, the world it ships and a testbed project both load as packages,
+content names everything it references rather than numbering it, and the
+prototype game's policy is package data in a repository of its own.
 **There is no save-format change**, so 0.4.2 saves open as they are, and the
 generation hash is unchanged at `0xed02babdf0f40420`.
 
@@ -39,6 +39,12 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   the engine workspace its `voxulacrum` dependency belongs to.
 - **The testbed** (B4, #10) — `crates/testbed`, a flat world with test materials
   that depends only on the facade. It is the boundary check's first consumer.
+- **`--gpu low-power|high-performance`** (T2, #85) — chooses the GPU power
+  preference the engine asks for; the default stays high performance. The
+  chosen adapter is named in the startup log and on the Performance panel's
+  first line. `perf-baseline.md` records the first integrated-GPU baseline with
+  it: 61 fps at the launch zoom and 31 fps at the widest supported zoom, where
+  the integrated GPU is the limit.
 - **Packages** (B4, #10; B6a, #74; B6b, #75; B6c, #76) —
   `RunOptions::package(root)` starts the world of a data-only package: a
   directory with a `package.ron` manifest beside its content (graphs, materials,
