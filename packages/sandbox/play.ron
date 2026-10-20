@@ -1,0 +1,15 @@
+// Play settings for the sandbox: the player's body, movement and reach, in
+// voxels and seconds. These are the values the engine used to hardcode, so the
+// sandbox plays as it did.
+(
+    player: (
+        half_width: 0.3,
+        height: 1.5,
+        eye_height: 1.6,
+        gravity: 24.0,
+        move_speed: 4.5,
+        max_fall_speed: 50.0,
+        step_height: 1.0,
+        reach: 4.5,
+    ),
+)

@@ -1,0 +1,14 @@
+// Play settings for the testbed: the player's body, movement and reach, in
+// voxels and seconds.
+(
+    player: (
+        half_width: 0.3,
+        height: 1.5,
+        eye_height: 1.6,
+        gravity: 24.0,
+        move_speed: 4.5,
+        max_fall_speed: 50.0,
+        step_height: 1.0,
+        reach: 4.5,
+    ),
+)

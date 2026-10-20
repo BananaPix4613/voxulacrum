@@ -21,6 +21,7 @@ mod prefabs;
 mod libraries;
 mod core_budget;
 mod player;
+mod play;
 mod diagnostics;
 mod foliage;
 mod jobs;

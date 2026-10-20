@@ -16,6 +16,7 @@ use crate::world::mutation::EngineMode;
 pub fn room_detection_system(
     world: Res<VoxelWorld>,
     players: Query<&crate::player::systems::Player>,
+    play: Option<Res<crate::play::PlaySettings>>,
     mut room: ResMut<crate::world::room::RoomState>,
 ) {
     use crate::player::sim::WorldView;
@@ -27,7 +28,7 @@ pub fn room_detection_system(
     const CLARITY_RADIUS: u32 = 24;     // MUST match CLARITY_RADIUS in terrain.wgsl
 
     let player = players.iter().next();
-    if world.0.mode != EngineMode::Play || player.is_none() {
+    if world.0.mode != EngineMode::Play || player.is_none() || play.is_none() {
         if room.enclosed {
             log::info!("player left enclosed space (play/mode ended)");
         }
@@ -38,9 +39,10 @@ pub fn room_detection_system(
     }
 
     let feet = player.unwrap().curr.position;
+    let eye_height = play.unwrap().player.eye_height;
     let head = glam::IVec3::new(
         feet.x.floor() as i32,
-        (feet.y + 1.6).floor() as i32,
+        (feet.y + eye_height).floor() as i32,
         feet.z.floor() as i32,
     );
 

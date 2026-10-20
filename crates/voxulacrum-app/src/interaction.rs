@@ -182,13 +182,6 @@ fn is_solid_world(world: &World, v: IVec3) -> bool {
     }
 }
 
-/// Max distance (voxels) the player can target for break/place (Substep 11).
-const PLAYER_REACH: f32 = 4.5;
-
-/// Vertical offset from the player's feet to the eye, for the targeting ray
-/// origin and reach distance - matches the head-cell offset room detection uses.
-const PLAYER_EYE_HEIGHT: f32 = 1.6;
-
 /// Highlight color when the hovered voxel is within reach (Substep 12) - also
 /// Authoring's pick-highlight color, unchanged from before this substep.
 const HIGHLIGHT_ACTIVE: [f32; 3] = [1.0, 1.0, 0.2];
@@ -225,7 +218,7 @@ impl Default for PlayerToolState {
 
 /// Cursor-ray reach targeting for Play mode: the same cursor ray as Authoring's
 /// pick, always shown (even out of reach, greyed - Substep 12), but `anchor`/
-/// `place` only populate within `PLAYER_REACH` of the player's eye.
+/// `place` only populate within the package's `REACH` of the player's eye.
 pub fn player_targeting_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
@@ -234,6 +227,7 @@ pub fn player_targeting_system(
     world: Res<VoxelWorld>,
     ctx: Res<RenderContext>,
     players: Query<&Player>,
+    play: Option<Res<crate::play::PlaySettings>>,
     mut target: ResMut<TargetState>,
     mut debug_lines: ResMut<DebugLinePass>,
 ) {
@@ -242,11 +236,12 @@ pub fn player_targeting_system(
 
     let hit = if miss {
         None
-    } else if let Some(player) = player {
-        let eye = (player.curr.position + Vec3::new(0.0, PLAYER_EYE_HEIGHT, 0.0)) / VOXEL_SCALE;
+    } else if let (Some(player), Some(play)) = (player, play.as_deref()) {
+        let tuning = &play.player;
+        let eye = (player.curr.position + Vec3::new(0.0, tuning.eye_height, 0.0)) / VOXEL_SCALE;
         cursor_ray(&pointer, &sim, &surface)
             .and_then(|(origin, dir)| raycast_voxel_faced(&world.0, origin, dir, f32::INFINITY))
-            .map(|(hit, prev)| (hit, prev, hit.as_vec3().distance(eye) <= PLAYER_REACH))
+            .map(|(hit, prev)| (hit, prev, hit.as_vec3().distance(eye) <= tuning.reach))
     } else {
         None
     };

@@ -127,7 +127,7 @@ pub fn compute_render_dimensions(
 // ECS initialization
 // ---------------------------------------------------------------------------
 
-fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
+fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>) -> (World, Schedule) {
     let mut ecs = World::new();
 
     // --- wgpu initialization ---
@@ -516,6 +516,9 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
     ecs.insert_resource(FluidClock::new());
     ecs.insert_resource(ClimateClock::new());
     ecs.insert_resource(player::systems::PlayerClock::new());
+    if let Some(play) = play {
+        ecs.insert_resource(play);
+    }
     ecs.insert_resource(RoomState::default());
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
     ecs.insert_resource(prefabs::PrefabRegistryRes(prefab_registry));
@@ -625,14 +628,17 @@ struct App {
     ecs_world: Option<World>,
     schedule: Option<Schedule>,
     exiting: bool,
+    /// The world package's play settings, until the ECS world takes them.
+    play: Option<crate::play::PlaySettings>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(play: Option<crate::play::PlaySettings>) -> Self {
         Self {
             ecs_world: None,
             schedule: None,
             exiting: false,
+            play,
         }
     }
 }
@@ -655,7 +661,7 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        let (ecs_world, schedule) = init_ecs(window);
+        let (ecs_world, schedule) = init_ecs(window, self.play.take());
         self.ecs_world = Some(ecs_world);
         self.schedule = Some(schedule);
         log::info!("ECS world initialized.");
@@ -923,6 +929,16 @@ pub fn run_with(options: RunOptions) {
     for d in dependencies {
         log::info!("Dependency {} {} from {}", d.manifest.id, d.manifest.version, d.root.display());
     }
+    let play = match crate::play::PlaySettings::load(&world.root) {
+        Ok(play) => play,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if play.is_none() {
+        log::info!("{} has no {}: Play mode is off", m.id, crate::play::PLAY_FILE);
+    }
     paths::set_packages(packages);
     
     // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
@@ -941,6 +957,6 @@ pub fn run_with(options: RunOptions) {
     log::info!("Voxulacrum engine starting...");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    let mut app = App::new();
+    let mut app = App::new(play);
     event_loop.run_app(&mut app).expect("Event loop failed");
 }
