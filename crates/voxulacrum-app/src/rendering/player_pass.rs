@@ -237,16 +237,21 @@ impl PlayerPass {
     }
 }
 
-/// Build the avatar mesh: a capsule (the standard prototype body), a facing
+/// Build the avatar mesh: a capsule the size of the player's `body`, a facing
 /// visor on the front, and a circular hard drop shadow at `ground_y` (the first
 /// solid surface below the player) when present.
-pub fn build_player_mesh(feet: Vec3, facing: f32, ground_y: Option<f32>) -> (Vec<CapVertex>, Vec<u32>, u32) {
+pub fn build_player_mesh(
+    feet: Vec3,
+    facing: f32,
+    ground_y: Option<f32>,
+    body: &crate::play::PlayerTuning,
+) -> (Vec<CapVertex>, Vec<u32>, u32) {
     let mut verts: Vec<CapVertex> = Vec::with_capacity(256);
     let mut indices: Vec<u32> = Vec::with_capacity(1024);
 
-    let radius = 0.3;
-    let total_height = 1.5;
-    let cyl_height = total_height - 2.0 * radius; // 0.9
+    let radius = body.half_width;
+    let total_height = body.height;
+    let cyl_height = total_height - 2.0 * radius;
     build_capsule(&mut verts, &mut indices, feet, radius, cyl_height, 12, 5, [0.30, 0.55, 0.75]);
 
     // Facing visor ("eyes") on the front, oriented to the look direction.

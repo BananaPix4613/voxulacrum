@@ -18,10 +18,11 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Engine/game boundary
 
-Milestone M2, in progress: B1–B6 are merged, and B7 remains.
-The engine is separating from the game that grew inside it. It is now a library
-behind a facade crate, the world it ships and a testbed project both load as
-packages, and content names everything it references rather than numbering it.
+Milestone M2, in progress: B1–B7 are merged, and the integrated-GPU baseline
+remains. The engine is separating from the game that grew inside it. It is now
+a library behind a facade crate, the world it ships and a testbed project both
+load as packages, content names everything it references rather than numbering
+it, and the prototype game's policy is package data in a repository of its own.
 **There is no save-format change**, so 0.4.2 saves open as they are, and the
 generation hash is unchanged at `0xed02babdf0f40420`.
 
@@ -33,7 +34,9 @@ generation hash is unchanged at `0xed02babdf0f40420`.
 - **`boundary-check`** (B3, #9) — a CI step that fails if any crate outside the
   engine depends on an engine crate other than the facade. The engine crates are
   listed under `[workspace.metadata.voxulacrum]` in the root `Cargo.toml`, and a
-  crate left off the list is treated as a consumer.
+  crate left off the list is treated as a consumer. `--manifest-path` (B7, #13)
+  checks a workspace outside the engine, such as a game's, against the list in
+  the engine workspace its `voxulacrum` dependency belongs to.
 - **The testbed** (B4, #10) — `crates/testbed`, a flat world with test materials
   that depends only on the facade. It is the boundary check's first consumer.
 - **Packages** (B4, #10; B6a, #74; B6b, #75; B6c, #76) —
@@ -73,6 +76,18 @@ generation hash is unchanged at `0xed02babdf0f40420`.
 - **A content-declared prefab `placeholder`** (B5c, #68) — the prefab drawn for
   an instance whose id the table doesn't define. It replaces prefab 0 being
   chosen in engine code.
+- **`play.ron`** (B7, #13) — a package's Play mode: the player's body, movement
+  and reach (`player`), where entering Play puts the player (`spawn`, today only
+  `SurfaceUnderCamera`), the break and place tool with the materials it cycles
+  through (`build`), and whether the selected material shows on screen (`hud`).
+  Build materials are names, resolved when the package loads. A package without
+  `play.ron` has no Play mode; a malformed one, or a build material that doesn't
+  resolve, stops startup.
+- **The game repository** (B7, #13) —
+  [voxulacrum-sandbox-game](https://github.com/BananaPix4613/voxulacrum-sandbox-game)
+  holds Voxbox, a prototype game that starts as a copy of the sandbox world. It
+  builds on the facade alone, through a git dependency or a local `[patch]`, and
+  its CI runs `boundary-check --manifest-path`.
 
 ### Changed
 
@@ -113,6 +128,13 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   `.library.json` files, the testbed's copy of `poisson_placement` and the
   hand-written fallback set are gone. A package's `libraries/` is optional; its
   entries load after the engine's, with ids assigned in load order.
+- **No game constants in the engine** (B7, #13). The player's size, gravity,
+  speed, fall speed, step height, eye height and reach, the spawn rule, and the
+  build tool's materials come from `play.ron`. The sandbox and the testbed ship
+  the values the engine used to hardcode, so both play as before. The avatar is
+  drawn at the tuned body size, and the enclosed-space check measures from the
+  tuned eye height. The build tool cycles through the package's list instead of
+  every material after air.
 
 ### Fixed
 
@@ -146,6 +168,9 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   package can't use `voxulacrum` as its id or namespace. A dependency's
   blueprint resolves its bare material names in its own namespace, so until
   dependencies can ship materials (D3), it qualifies them.
+- **Play mode** (B7): a package needs a `play.ron` for Play mode. Copy the
+  sandbox's as a starting point, and list the materials the build tool should
+  place under `build`.
 
 ---
 

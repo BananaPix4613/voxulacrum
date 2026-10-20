@@ -98,6 +98,7 @@ pub fn player_mode_toggle_system(
     sim: Res<SimulationManager>,
     mut world: ResMut<VoxelWorld>,
     players: Query<Entity, With<Player>>,
+    play: Option<Res<crate::play::PlaySettings>>,
     mut commands: Commands,
 ) {
     if !input.just_pressed(GameAction::TogglePlayMode) {
@@ -105,8 +106,16 @@ pub fn player_mode_toggle_system(
     }
     match world.0.mode {
         EngineMode::Authoring => {
+            let Some(play) = play else {
+                log::info!("This package has no {}, so it has no Play mode", crate::play::PLAY_FILE);
+                return;
+            };
             let cam = sim.camera.smooth_target;
-            let position = surface_spawn(&world.0, cam.x, cam.z).unwrap_or(cam);
+            let position = match play.spawn {
+                crate::play::SpawnRule::SurfaceUnderCamera => {
+                    surface_spawn(&world.0, cam.x, cam.z).unwrap_or(cam)
+                }
+            };
             let state = PlayerState { position, ..Default::default() };
             commands.spawn((Player { curr: state, prev: state }, PlayerInputBuffer::default()));
             world.0.mode = EngineMode::Play;
@@ -148,14 +157,18 @@ pub fn player_sim_system(
     world: Res<VoxelWorld>,
     mut clock: ResMut<PlayerClock>,
     mut q: Query<(&mut Player, &PlayerInputBuffer)>,
+    play: Option<Res<crate::play::PlaySettings>>,
 ) {
+    let Some(play) = play else {
+        return; // no play settings, so no player was ever spawned
+    };
     let Some((mut player, buffer)) = q.iter_mut().next() else {
         return; // no player: don't accumulate, so spawn doesn't burst catch-up ticks
     };
     let ticks = clock.ticks_for(frame.dt);
     for _ in 0..ticks {
         player.prev = player.curr;
-        player.curr = player_step(&player.curr, &buffer.pending, &world.0);
+        player.curr = player_step(&player.curr, &buffer.pending, &world.0, &play.player);
     }
 }
 

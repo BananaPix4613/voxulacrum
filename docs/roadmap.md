@@ -1,6 +1,6 @@
 # Voxulacrum Engine Roadmap — 0.4.0 through 1.0
 
-**Status:** Authoritative planning reference, v2.0
+**Status:** Authoritative planning reference, v2.1
 **Companions:** `engine-design.md` (v1.11 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
 **Tracker:** every work item is a GitHub issue, grouped by [milestone](https://github.com/BananaPix4613/voxulacrum/milestones) and tracked on the *Voxulacrum engine* project board (§9.3).
 **Purpose:** Make the technical goals visible, fix the working discipline, and sequence every core capability the engine needs before it is a *ready product* — an engine another person (or future you) can build a title on without engine surgery.
@@ -51,7 +51,7 @@ Properties that must hold at any scale of game derived from this engine. Every m
 
 **P7 — Data shapes are settled; implementations are incremental; interim shapes are recorded.** Any divergence between target and implementation is written down with a named migration trigger. Silent drift is the failure mode.
 
-**P8 — No head-on views.** *(Revised v2.0.)* The camera's resting views always show three faces of an axis-aligned block: a top and two sides. A view straight along a world axis collapses blocks into flat two-face shapes and removes the depth an isometric game depends on. The rule covers the camera, not objects (a rotating ship may briefly face the camera) and not transitions (an eased 90° rotation passes through head-on angles for a frame or two). The world's voxel geometry stays cubes only; models, entities and dynamic grids may take any shape or rotation. This replaces "the grid is the visual language": cardinal geometry for the world is a property of the voxel format, while pixel-perfect snapping and quantized light are per-game presentation choices (P19).
+**P8 — No head-on views (the default camera).** *(Revised v2.1.)* The engine's isometric camera module, which the samples and the testbed start with, keeps its resting views showing three faces of an axis-aligned block: a top and two sides. A view straight along a world axis collapses blocks into flat two-face shapes and removes the depth an isometric game depends on. The rule covers that camera's resting views, not objects (a rotating ship may briefly face the camera) and not transitions (an eased 90° rotation passes through head-on angles for a frame or two). It is a rule of the camera module, not of the engine: a game that brings its own camera, perspective or otherwise, is not bound by it (P20). What stays engine-wide is the voxel format: the world's voxel geometry is axis-aligned cubes only, while models, entities and dynamic grids may take any shape or rotation. Pixel-perfect snapping and quantized light are per-game presentation choices (P19).
 
 **P9 — One renderer, authoring in the engine.** *(Revised v2.0.)* Authoring stays inside the engine, on its one renderer, as a loop (P11). The editor is its own binary built on the engine library, and playtesting a game or mod launches it as a separate process the editor attaches to over a debug protocol. The original "one binary" form would put game code back inside the engine once games live in their own repositories. (The headless server binary is server-core, not a second engine.)
 
@@ -74,6 +74,8 @@ Properties that must hold at any scale of game derived from this engine. Every m
 **P18 — Never delete data you don't understand.** *(Added v2.0.)* Content from a missing or disabled package loads as placeholders and opaque blobs that keep their original identity, and is restored when the package returns.
 
 **P19 — No house style.** *(Added v2.0.)* Pixel-perfect snapping, palette quantization, outlines, texel-locked resolution and the lighting model are presentation settings a game chooses, never assumptions another engine system depends on. Strict pixel art, textured 3D with pixel-art textures, and hybrids are presets over one pipeline.
+
+**P20 — The core makes no camera assumption.** *(Added v2.1.)* Core systems (streaming, culling, level of detail, shadows, picking, audio) take a camera description as input: view, projection, frustum and an area of interest. Isometric framing, orthographic projection, texel snapping, 90° rotation steps, cutaway and floor-anchored follow belong to the isometric camera module in the kit, which games may use or replace. The testbed runs a perspective camera beside the isometric one to keep this true.
 
 ---
 
@@ -238,14 +240,14 @@ Plus: stable entity IDs across save/load and network, component conventions (pos
 ### 6.4 Character controller & physics
 Fixed-timestep pure-function stepping, slab-aware **swept** AABB resolution (not discrete — tunneling is a swept-collision problem), auto-step, gravity and terminal velocity, fluid buoyancy and swimming, sub-tick ordering when moving geometry displaces entities, and an exposed parameter block so a game tunes a controller rather than rewriting one. Reusable by non-player actors.
 **Isometric-specific requirement:** players misjudge depth constantly under this projection. Generous step-up, forgiving edge collision, and ledge-snap assist are not polish — **physics tuning is readability work here**, and belongs in the same version as the controller generalization.
-**State:** shipped and working for the player. The kit controller with 0.5 m steps and a parameter block — **M5** (E2); fluid interaction and forgiveness tuning — **M8**; riding moving grids — **M9**.
+**State:** shipped and working for the player, tuned by the package's `play.ron` since B7. The kit controller with 0.5 m steps and a parameter block — **M5** (E2); fluid interaction and forgiveness tuning — **M8**; riding moving grids — **M9**.
 
 ### 6.5 Interaction & targeting
 Reach-limited cursor and forward raycast; target resolution across voxels, scatter, fluids, and entities with cycling when several share an anchor; placement validation against footprints; highlight rendering hooks; registerable interaction kinds.
 **Two requirements from the external review, both real for this camera:**
 - **Targeting must consult visibility state** (P13). Under an orthographic camera the mouse ray passes diagonally through an entire column, and first-hit DDA cannot reach anything under an overhang. The fix is a **hybrid**: first-hit by default, with scroll stepping backward through candidate cells along the ray. Hidden geometry is skipped using the same visibility classification the renderer uses — not a separate heuristic.
 - **The cursor cell must render as a visible 3D box drawn through geometry.** A first-person crosshair is self-evident; an isometric cursor is not.
-**State:** reach-limited break/place shipped for the player, voxels only, first-hit only. Candidate stepping, visibility-aware skipping, multi-store resolution, entity targeting, registerable kinds — **M8**; the visibility-agreement gate is verified at **M5** when the region graph becomes shared state.
+**State:** reach-limited break/place shipped for the player, voxels only, first-hit only; reach and the build materials come from the package's `play.ron` (B7). Candidate stepping, visibility-aware skipping, multi-store resolution, entity targeting, registerable kinds — **M8**; the visibility-agreement gate is verified at **M5** when the region graph becomes shared state.
 
 ### 6.6 Blueprint & prefab system
 A real format: voxel template (shapes and materials, slabs included), anchor offset, footprint, destruction policy, sway weights, variant sets, placement rules, and a **protected-volume flag** that region transformation (§6.26) must respect — the mechanism that lets authored vaults survive a self-modifying world. Runtime: capture a region to a blueprint, stamp through the mutation door with priority resolution, reference blueprints from graphs for worldgen structures.
@@ -282,7 +284,7 @@ Camera modes (follow, free, cinematic, fixed), zoom bands with pixel snapping pr
 - **Screens must be data-definable.** New content adds new screens; if every screen is hand-written Rust, content work becomes engine work.
 
 Needed: an in-game UI layer at pixel-art scale (egui remains editor tooling permanently — it is not the game UI stack), layout with resolution scaling, controller navigation, data binding, HUD element registration, menu/screen stack with input focus and pause semantics, and world-space anchors (nameplates, prompts).
-**State:** a minimal play HUD. **M8**, scoped as one of that milestone's two largest items.
+**State:** a minimal play HUD, which a package switches on in `play.ron` (B7). HUD drawn by game code, and everything above — **M8**, scoped as one of that milestone's two largest items.
 
 ### 6.13 Input & bindings
 `GameAction` enum, `input.ron` maps, edge/held/continuous triggers, context stacks (gameplay vs. menu vs. editor), gamepad support, runtime rebinding.
@@ -487,6 +489,11 @@ Architectural choices whose cost rises sharply at a named milestone. Each is dec
 
 **Further decisions recorded in v2.0** (detail in `target-architecture.md`): engine/game separation with a facade crate and a separate game repository (M2); P8 and P9 revised (§2); the integrated server and the tick framework pulled forward (M3); tick rates of 30 Hz simulation, 60 Hz physics substeps and 10 Hz fluids (M3); determinism tiers with `libm` in generation (M3); Rapier in f32 physics scenes per activity cluster (M8); i32 voxel coordinates kept (M4); cubic vertical streaming with no fixed world height (M4); worldgen client-side by default with a private-seed server option (M7); mods as ahead-of-time compiled WebAssembly components with the package boundary drawn at M2 (runtime in M11); no house style, with presentation presets and lighting models (M5); logic at voxel scale through ports and a network service (M9); tiny debris as instanced cubes rather than grids (M9); inventory units deferred to the game.
 
+**Recorded in v2.1** (October 2026, detail in `engine-design.md` once B8 lands):
+- **Foliage and trees are interim.** The current stack (the procedural `PrefabShape` props, skeleton trees drawn as capsule impostors, canopy cores, the tier-1 detail-paint schema and `render_delegated`) gets no new work. Its replacements are voxel clips (D9) for voxel trees and structures, fixtures and sub-voxel models (D11) for non-cube props, registered layers (D4) for detail and scatter, and sprites, depth sprites and billboard clumps (M6) for grass and canopies. The skeleton generator stays, as a generator that outputs voxels.
+- **The camera is a module.** The isometric orthographic camera moves to the kit, and the core takes a camera description (P8, P20, V8).
+- **One object model.** Primitives, asset types, extension points and override rules are designed together (B8) before R4, V5 and M4 depend on them. Assets are named, never addressed by path; presentation fields may be overridden by client-only packages, simulation fields may not.
+
 ---
 
 ## 9. Workstreams, milestones and dependencies
@@ -563,9 +570,9 @@ Keys are never reused. The D workstream's work items (D1–D11) are a separate s
 |---|-------|--------|
 | M1 Clean slate | F1–F7 | #1–#6, #60 |
 | M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6 (steps B6a–B6c), B7 | #7–#13, #66–#69, #74–#76 |
-| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6 | #14–#22 |
+| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6, B8, B9 | #14–#22, #80, #81 |
 | M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11 | #23–#36 |
-| M5 Playable on the new data | V1–V6, S1, S2, E1, E2, T1 | #37–#47 |
+| M5 Playable on the new data | V1–V8, S1, S2, E1, E2, T1 | #37–#47, #82, #83 |
 | M6–M11 | One placeholder each | #48–#53 |
 
 Within each row, issue numbers follow the order of the keys: F1 is #1, R3 is #16 with its steps at #17–#19, and D2 is #24 with its steps at #25–#27.
@@ -682,12 +689,12 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 **Non-goals:** format changes, rendering features, transport.
 - [x] Games and the testbed depend only on the facade crate (CI-enforced)
 - [x] The testbed and the reference world load as data-only packages
-- [ ] The game repository builds against the facade through a local `[patch]`
+- [x] The game repository builds against the facade through a local `[patch]`
 - [x] Registries are namespaced in memory
 - [ ] Integrated-GPU baseline recorded in `perf-baseline.md`
 
 ### M3 — Runtime spine
-**Contains:** R1–R6. **Needs:** B1, B2.
+**Contains:** R1–R6, B8, B9. **Needs:** B1, B2.
 **Non-goals:** serialization over a channel (M7), format changes.
 - [ ] Server-core builds with no wgpu, winit or egui dependency (CI-enforced)
 - [ ] One 30 Hz tick framework; the three ad-hoc clocks are gone
@@ -695,6 +702,8 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [ ] Singleplayer runs through the in-process server boundary within 5% of 0.4.0's CPU budget
 - [ ] Headless server generates, simulates, and persists with no window
 - [ ] Cross-platform determinism job green
+- [ ] Engine object model recorded in `engine-design.md` (B8)
+- [ ] Game code queries the world and edits it through the facade, with no engine change (B9)
 
 ### M4 — Format freeze
 **Contains:** D1–D11. **Needs:** B1, B5; R3 for D8; R6 for D10.
@@ -709,10 +718,11 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [ ] New generation hash anchor recorded. **The last save wipe.**
 
 ### M5 — Playable on the new data
-**Contains:** V1–V6, S1, S2, E1, E2, T1. **Needs:** D1, D2; R4 for V6.
+**Contains:** V1–V6, S1, S2, E1, E2, T1. **Needs:** D1, D2; R4 for V6 and V8; B8 for V7.
 **Non-goals:** audio, particles, networking, entities above the player.
 - [ ] 30 fps at minimum settings on the integrated GPU
-- [ ] One testbed scene (terrain, a rotating grid, a character) runs under all three presentation presets, switchable at runtime
+- [ ] One testbed scene (terrain, a rotating grid, a character) runs under all three presentation presets and under a perspective camera, switchable at runtime
+- [ ] Voxels are textured, and a client-only package overrides a texture by name
 - [ ] Region graph persistent, incrementally updated, and consumed by occlusion and camera anchoring
 - [ ] Gameplay light queryable and consistent with what the renderer shows; placing a light never remeshes
 - [ ] Targeting and collision agree with rendered visibility in every occlusion mode (R9)
@@ -899,3 +909,4 @@ This roadmap is authoritative for sequencing and for the 1.0 readiness definitio
 - v1.1 — Redefined 1.0 by the readiness rubric rather than by shipping an MVT. Added the tooling track with a T0–T3 maturity model. Added the core engine capability surface for game implementation, with an API conformance set as the rubric's proof. Added pillars P11 and P12. Split hardening out of the game-layer version. Identified VFX/particles and non-player entity visuals as unacknowledged gaps. Removed resolved items (player collision, cross-chunk fluid persistence).
 - v1.2 — Integrated the external architecture review (`engine-architecture-reference.md`), with full disposition recorded in §21. Added pillars **P13** (visibility as queryable world state) and **P14** (one scheduler, one clock family), and rubric row **R9** (coherence). Added §8, the forcing-date decision list (D1–D8), and made recording them a release-checklist item. Added capabilities §6.22–§6.29: region graph, entity simulation tiers, tick framework, lighting as a queryable field, world-scale change, world instances and protected volumes, interactive simulation framework, and the conditional grid abstraction; renumbered the conformance set to §6.30 and added a sixth conformance feature. Amended §6.1, 6.3–6.5, 6.7, 6.8, 6.10–6.12, 6.14, 6.17, 6.19–6.21 with adopted corrections. Added **0.10.0 (World simulation & progression)** and moved hardening to 0.11.0, with an explicit note that 0.10.0 is the designated scope-cut point. Recorded a newly-found latent defect: saves store numeric registry IDs with no embedded name mapping.
 - v2.0 — Replaced the version ladder with workstreams, work items, explicit dependencies, and milestones M1–M11 (§1, §9, §12); version numbers are now cut when a milestone completes or compatibility changes (§7.1). Replaced "one branch per version" with short per-item branches off an always-green `master` (§7.5). Revised P8 (no head-on views) and P9 (one renderer, editor as its own binary); added P15–P19 (§2). Declared the minimum spec (§7.3). Recorded outcomes for D1–D5, D7 and D8, plus fifteen further decisions (§8). Rewrote §3 for the state at 0.4.0 and retargeted the tooling tables and capability states to milestones. Added the 0.4.0 closing record (§11) and §21.5. Work items moved to GitHub issues, milestones and a project board; §9.3 maps the plan onto them. `target-architecture.md` and `migration-plan.md` added as companions. Section references in audits written before v2.0 (for example §3.12, §12, §13), and in the text kept from v1.2 in §10, §11 and §21, point to v1.2, which is in git history.
+- v2.1 — Revised P8 into a rule of the default isometric camera and added P20 (the core makes no camera assumption). Recorded that the foliage and tree stack is interim, with its replacements (§8). Added B8 (engine object model) and B9 (game code on the facade) to M3, and V7 (voxel textures and overrides) and V8 (camera as a module) to M5, with matching gates. Rescoped B7 to move game policy as data.

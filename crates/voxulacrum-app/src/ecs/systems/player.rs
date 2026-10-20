@@ -18,14 +18,16 @@ pub fn player_render_prep_system(
     sim: Res<SimulationManager>,
     render_targets: Res<RenderTargets>,
     players: Query<&crate::player::systems::Player>,
+    play: Option<Res<crate::play::PlaySettings>>,
     mut player_pass: ResMut<PlayerPass>,
 ) {
     let player = players.iter().next();
-    if world.0.mode != EngineMode::Play || player.is_none() {
+    if world.0.mode != EngineMode::Play || player.is_none() || play.is_none() {
         player_pass.visible = false;
         return;
     }
     let p = player.unwrap();
+    let play = play.unwrap();
     let feet = p.prev.position.lerp(p.curr.position, clock.alpha());
 
     // Snap the RENDERED position to the world texel lattice (sim untouched).
@@ -43,7 +45,7 @@ pub fn player_render_prep_system(
     let feet = view.inverse().transform_point3(v);
 
     let ground_y = player_ground_below(&world.0, feet);
-    let (verts, indices, body) = crate::rendering::player_pass::build_player_mesh(feet, p.curr.facing, ground_y);
+    let (verts, indices, body) = crate::rendering::player_pass::build_player_mesh(feet, p.curr.facing, ground_y, &play.player);
     player_pass.update(&ctx.queue, &verts, &indices, body);
     player_pass.visible = true;
 }

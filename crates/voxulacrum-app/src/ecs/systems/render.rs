@@ -355,13 +355,17 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     let registry = ecs.resource::<MaterialRegistryRes>().0.clone();
     ecs.resource_scope::<UiState, _>(|ecs, mut ui_state| {
         ecs.resource_scope::<ui::field_probe::FieldProbe, _>(|ecs, mut probe| {
-            let mode = ecs.resource::<VoxelWorld>().0.mode;
-            let material_idx = ecs.resource::<crate::interaction::PlayerToolState>().material_index;
-            let (material_name, material_color): (String, [f32; 3]) =
-                match registry.get(voxel_core::MaterialId(material_idx as u16)) {
-                    Some(def) => (def.display_name.clone(), def.color),
-                    None => ("-".to_string(), [0.6, 0.6, 0.6]),
-                };
+            // The build tool's selected material, when the package shows it in Play.
+            let in_play = ecs.resource::<VoxelWorld>().0.mode == crate::world::mutation::EngineMode::Play;
+            let selected = ecs.resource::<crate::interaction::PlayerToolState>().selected;
+            let play_hud: Option<(String, [f32; 3])> = ecs
+                .get_resource::<crate::play::PlaySettings>()
+                .filter(|play| in_play && play.hud)
+                .and_then(|play| play.build.as_ref())
+                .and_then(|build| build.materials.get(selected))
+                .and_then(|material| material.id())
+                .and_then(|id| registry.get(id))
+                .map(|def| (def.display_name.clone(), def.color));
 
             let mut egui = ecs.non_send_resource_mut::<ui::EguiRenderer>();
             egui.draw(
@@ -372,9 +376,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
                 &mut encoder,
                 &surface_view,
                 &window_arc,
-                mode,
-                &material_name,
-                material_color,
+                play_hud.as_ref().map(|(name, color)| (name.as_str(), *color)),
             );
         });
     });

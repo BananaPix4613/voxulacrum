@@ -7,7 +7,7 @@
 
 use bevy_ecs::prelude::*;
 use glam::{IVec3, Mat4, Vec3};
-use voxel_core::{MaterialId, Voxel};
+use voxel_core::Voxel;
 
 use crate::ecs::resources::VoxelWorld;
 use crate::input::{GameAction, InputState, PointerState, RawInputBuffer};
@@ -182,13 +182,6 @@ fn is_solid_world(world: &World, v: IVec3) -> bool {
     }
 }
 
-/// Max distance (voxels) the player can target for break/place (Substep 11).
-const PLAYER_REACH: f32 = 4.5;
-
-/// Vertical offset from the player's feet to the eye, for the targeting ray
-/// origin and reach distance - matches the head-cell offset room detection uses.
-const PLAYER_EYE_HEIGHT: f32 = 1.6;
-
 /// Highlight color when the hovered voxel is within reach (Substep 12) - also
 /// Authoring's pick-highlight color, unchanged from before this substep.
 const HIGHLIGHT_ACTIVE: [f32; 3] = [1.0, 1.0, 0.2];
@@ -209,23 +202,16 @@ pub struct TargetState {
     pub in_reach: bool,
 }
 
-/// The player's currently selected build material (Substep 12), cycled by
-/// `CycleTool`. It is a `MaterialId` into the material registry (id 0, Air, is
-/// skipped - it isn't a placeable tool).
-#[derive(Resource)]
+/// The build tool's selected material (Substep 12), cycled by `CycleTool`: an
+/// index into the package's `build.materials`, starting at the first.
+#[derive(Resource, Default)]
 pub struct PlayerToolState {
-    pub material_index: usize,
-}
-
-impl Default for PlayerToolState {
-    fn default() -> Self {
-        Self { material_index: 1 } // Limestone, matching Substep 11's placeholder
-    }
+    pub selected: usize,
 }
 
 /// Cursor-ray reach targeting for Play mode: the same cursor ray as Authoring's
 /// pick, always shown (even out of reach, greyed - Substep 12), but `anchor`/
-/// `place` only populate within `PLAYER_REACH` of the player's eye.
+/// `place` only populate within the package's `REACH` of the player's eye.
 pub fn player_targeting_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
@@ -234,6 +220,7 @@ pub fn player_targeting_system(
     world: Res<VoxelWorld>,
     ctx: Res<RenderContext>,
     players: Query<&Player>,
+    play: Option<Res<crate::play::PlaySettings>>,
     mut target: ResMut<TargetState>,
     mut debug_lines: ResMut<DebugLinePass>,
 ) {
@@ -242,11 +229,12 @@ pub fn player_targeting_system(
 
     let hit = if miss {
         None
-    } else if let Some(player) = player {
-        let eye = (player.curr.position + Vec3::new(0.0, PLAYER_EYE_HEIGHT, 0.0)) / VOXEL_SCALE;
+    } else if let (Some(player), Some(play)) = (player, play.as_deref()) {
+        let tuning = &play.player;
+        let eye = (player.curr.position + Vec3::new(0.0, tuning.eye_height, 0.0)) / VOXEL_SCALE;
         cursor_ray(&pointer, &sim, &surface)
             .and_then(|(origin, dir)| raycast_voxel_faced(&world.0, origin, dir, f32::INFINITY))
-            .map(|(hit, prev)| (hit, prev, hit.as_vec3().distance(eye) <= PLAYER_REACH))
+            .map(|(hit, prev)| (hit, prev, hit.as_vec3().distance(eye) <= tuning.reach))
     } else {
         None
     };
@@ -262,21 +250,20 @@ pub fn player_targeting_system(
     debug_lines.set_highlight(&ctx, target.hover, color);
 }
 
-/// Cycle the active build material on `CycleTool(delta)`, wrapping through every
-/// non-Air registered material. Play-mode only.
+/// Cycle the build tool's material on `CycleTool(delta)`, wrapping through the
+/// package's `build.materials`. Play-mode only.
 pub fn player_tool_system(
     input: Res<InputState>,
-    registry: Res<crate::materials::MaterialRegistryRes>,
+    play: Option<Res<crate::play::PlaySettings>>,
     world: Res<VoxelWorld>,
     mut tool: ResMut<PlayerToolState>,
 ) {
     if world.0.mode != EngineMode::Play {
         return;
     }
-    let count = registry.len();
-    if count <= 1 {
-        return; // only Air registered - nothing to cycle
-    }
+    let Some(build) = play.as_deref().and_then(|play| play.build.as_ref()) else {
+        return; // the package has no build tool
+    };
     let delta = if input.just_pressed(GameAction::CycleTool(1)) {
         1i32
     } else if input.just_pressed(GameAction::CycleTool(-1)) {
@@ -284,24 +271,29 @@ pub fn player_tool_system(
     } else {
         return;
     };
-    // Wrap through [1, count) - index 0 (Air) is never a selectable tool.
-    let span = (count - 1) as i32;
-    let zero_based = (tool.material_index as i32 - 1 + delta).rem_euclid(span);
-    tool.material_index = (zero_based + 1) as usize;
+    // Never empty: `PlaySettings` refuses an empty build list.
+    let count = build.materials.len() as i32;
+    tool.selected = (tool.selected as i32 + delta).rem_euclid(count) as usize;
 }
 
 /// Break/place on Primary/Secondary action at the current reach target
-/// (Substep 11). Mirrors `scatter_edit_system`'s mutation shape but issues real
-/// voxel edits through `MutationCommand::play`.
+/// (Substep 11), placing the build tool's selected material. Mirrors
+/// `scatter_edit_system`'s mutation shape but issues real voxel edits through
+/// `MutationCommand::play`. A package with no build tool breaks and places
+/// nothing.
 pub fn player_action_system(
     input: Res<InputState>,
     target: Res<TargetState>,
     tool: Res<PlayerToolState>,
+    play: Option<Res<crate::play::PlaySettings>>,
     mut world: ResMut<VoxelWorld>,
 ) {
     if world.0.mode != EngineMode::Play {
         return;
     }
+    let Some(build) = play.as_deref().and_then(|play| play.build.as_ref()) else {
+        return;
+    };
 
     if input.just_pressed(GameAction::PrimaryAction) {
         if let Some(anchor) = target.anchor {
@@ -311,7 +303,9 @@ pub fn player_action_system(
     if input.just_pressed(GameAction::SecondaryAction) {
         if let (Some(place), Some(anchor)) = (target.place, target.anchor) {
             if place != anchor {
-                let material = MaterialId(tool.material_index as u16);
+                let material = build.materials[tool.selected]
+                    .id()
+                    .expect("build materials resolve when the package loads");
                 edit_voxel(&mut world.0, place, Voxel::cube(material));
             }
         }

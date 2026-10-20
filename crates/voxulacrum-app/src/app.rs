@@ -127,7 +127,7 @@ pub fn compute_render_dimensions(
 // ECS initialization
 // ---------------------------------------------------------------------------
 
-fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
+fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>) -> (World, Schedule) {
     let mut ecs = World::new();
 
     // --- wgpu initialization ---
@@ -516,6 +516,9 @@ fn init_ecs(window: Arc<Window>) -> (World, Schedule) {
     ecs.insert_resource(FluidClock::new());
     ecs.insert_resource(ClimateClock::new());
     ecs.insert_resource(player::systems::PlayerClock::new());
+    if let Some(play) = play {
+        ecs.insert_resource(play);
+    }
     ecs.insert_resource(RoomState::default());
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
     ecs.insert_resource(prefabs::PrefabRegistryRes(prefab_registry));
@@ -625,14 +628,17 @@ struct App {
     ecs_world: Option<World>,
     schedule: Option<Schedule>,
     exiting: bool,
+    /// The world package's play settings, until the ECS world takes them.
+    play: Option<crate::play::PlaySettings>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(play: Option<crate::play::PlaySettings>) -> Self {
         Self {
             ecs_world: None,
             schedule: None,
             exiting: false,
+            play,
         }
     }
 }
@@ -655,7 +661,7 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        let (ecs_world, schedule) = init_ecs(window);
+        let (ecs_world, schedule) = init_ecs(window, self.play.take());
         self.ecs_world = Some(ecs_world);
         self.schedule = Some(schedule);
         log::info!("ECS world initialized.");
@@ -858,17 +864,20 @@ impl RunOptions {
 
     /// Start the world of the package at `root`: a directory holding a
     /// `package.ron` manifest beside its content (graphs, materials, prefabs,
-    /// libraries, blueprints, species and foliage). The manifest names the
-    /// package's id, its save directory under `saves/` (the id unless it names
-    /// another), and the content namespace its names resolve in. Shaders, palettes, input
-    /// bindings and parameter presets still come from the engine.
+    /// libraries, blueprints, species, foliage and play settings). The manifest
+    /// names the package's id, its save directory under `saves/` (the id unless
+    /// it names another), and the content namespace its names resolve in. Its
+    /// `play.ron` gives the world its Play mode; a package without one has none.
+    /// Shaders, palettes, input bindings and parameter presets still come from
+    /// the engine.
     ///
     /// The package loads when the engine starts. One that is malformed, needs a
-    /// different engine version, declares code modules or names no world stops
-    /// startup with a message saying why. Its dependencies load first, from
-    /// `packages/<id>/` beside the engine, and one that is missing, the wrong
-    /// version, part of a cycle, or ships `materials.ron`, `prefabs.ron` or
-    /// `foliage.ron` stops startup too.
+    /// different engine version, declares code modules, names no world, or has
+    /// a `play.ron` that doesn't validate stops startup with a message saying
+    /// why. Its dependencies load first, from `packages/<id>/` beside the
+    /// engine, and one that is missing, the wrong version, part of a cycle,
+    /// shares another package's namespace, or ships `materials.ron`,
+    /// `prefabs.ron` or `foliage.ron` stops startup too.
     ///
     /// A relative `root` is resolved against the working directory.
     pub fn package(mut self, root: impl Into<PathBuf>) -> Self {
@@ -923,8 +932,25 @@ pub fn run_with(options: RunOptions) {
     for d in dependencies {
         log::info!("Dependency {} {} from {}", d.manifest.id, d.manifest.version, d.root.display());
     }
+    let mut play = match crate::play::PlaySettings::load(&world.root) {
+        Ok(play) => play,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if play.is_none() {
+        log::info!("{} has no {}: Play mode is off", m.id, crate::play::PLAY_FILE);
+    }
     paths::set_packages(packages);
-    
+    if let Some(play) = &mut play {
+        let registry = crate::materials::load_registry();
+        if let Err(e) = play.resolve_materials(&registry, paths::namespace()) {
+            eprintln!("error: {}: {e}", paths::content_root().join(crate::play::PLAY_FILE).display());
+            std::process::exit(1);
+        }
+    }
+
     // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
     // Handled before the event loop exists, so this path never creates a window
     // or a GPU device - and, being outside the frame schedule, it is exempt from
@@ -941,6 +967,6 @@ pub fn run_with(options: RunOptions) {
     log::info!("Voxulacrum engine starting...");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    let mut app = App::new();
+    let mut app = App::new(play);
     event_loop.run_app(&mut app).expect("Event loop failed");
 }

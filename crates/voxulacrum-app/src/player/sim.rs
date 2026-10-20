@@ -1,7 +1,7 @@
 //! Pure player simulation (Substep 4). No ECS, no renderer, no `World` type - only
-//! `glam` and the [`WorldView`] seam - so this module moves to the server-core
-//! crate unchanged at Phase 10. `player_step` is the fixed-timestep function the
-//! networking proposal specifies both client and server run.
+//! `glam`, the [`WorldView`] seam and the package's [`PlayerTuning`] - so this module
+//! moves to the server-core crate unchanged at Phase 10. `player_step` is the
+//! fixed-timestep function the networking proposal specifies both client and server run.
 //!
 //! Substep 4 scope: state + the pure-function shape + a determinism test. It reads
 //! the world for ground contact and turns to face the move direction, but does not
@@ -9,17 +9,13 @@
 
 use glam::{IVec3, Vec2, Vec3};
 
+use crate::play::PlayerTuning;
+
 /// Fixed sim tick duration. `PlayerClock` ticks at this rate; `player_step`
 /// integrates against it, so the sim is framerate-independent and deterministic.
 pub const TICK_DT: f32 = 1.0 / 30.0;
 
-const HALF_WIDTH: f32 = 0.3; // AABB is 0.6 wide/deep,
-const HEIGHT: f32 = 1.5;     // 1.5 tall, feet at `position`.
-const GRAVITY: f32 = 24.0;
-const MOVE_SPEED: f32 = 4.5;
-const TERMINAL_VELOCITY: f32 = -50.0;
 const EPS: f32 = 1e-4;
-const STEP_HEIGHT: f32 = 1.0; // auto-step at most one cube (slabs land partway)
 
 /// Read-only world access threaded into the pure step. The app's `World` (and,
 /// later, the server's) implements it; the step never touches ECS or renderer state.
@@ -59,7 +55,7 @@ pub struct InputFrame {
 /// Advance the player by one fixed tick. Pure: reads `state`, `input`, and the
 /// read-only `world`; returns the next state. Substep 5a: gravity + per-axis,
 /// slab-aware AABB collision. Auto-step is Substep 5b.
-pub fn player_step(state: &PlayerState, input: &InputFrame, world: &impl WorldView) -> PlayerState {
+pub fn player_step(state: &PlayerState, input: &InputFrame, world: &impl WorldView, tuning: &PlayerTuning) -> PlayerState {
     let mut next = *state;
 
     // Face the move direction when moving.
@@ -69,12 +65,12 @@ pub fn player_step(state: &PlayerState, input: &InputFrame, world: &impl WorldVi
 
     // Horizontal velocity is set directly from input (immediate character control);
     // vertical integrates gravity.
-    next.velocity.x = input.move_world.x * MOVE_SPEED;
-    next.velocity.z = input.move_world.y * MOVE_SPEED;
-    next.velocity.y = (state.velocity.y - GRAVITY * TICK_DT).max(TERMINAL_VELOCITY);
+    next.velocity.x = input.move_world.x * tuning.move_speed;
+    next.velocity.z = input.move_world.y * tuning.move_speed;
+    next.velocity.y = (state.velocity.y - tuning.gravity * TICK_DT).max(-tuning.max_fall_speed);
 
     let disp = next.velocity * TICK_DT;
-    let (new_pos, on_ground) = resolve_collision(state.position, disp, world);
+    let (new_pos, on_ground) = resolve_collision(state.position, disp, world, tuning);
     next.position = new_pos;
     next.on_ground = on_ground;
     if on_ground && next.velocity.y < 0.0 {
@@ -86,8 +82,8 @@ pub fn player_step(state: &PlayerState, input: &InputFrame, world: &impl WorldVi
 /// Resolve `disp` from `pos` against solid voxels, one axis at a time (Y, then
 /// horizontal). A grounded horizontal move blocked by a single-cube obstacle
 /// triggers a geometric auto-step. Returns the new feet position and grounded state.
-fn resolve_collision(pos: Vec3, disp: Vec3, world: &impl WorldView) -> (Vec3, bool) {
-    let (mut min, mut max) = feet_aabb(pos);
+fn resolve_collision(pos: Vec3, disp: Vec3, world: &impl WorldView, tuning: &PlayerTuning) -> (Vec3, bool) {
+    let (mut min, mut max) = feet_aabb(pos, tuning);
 
     // Vertical.
     let dy = clamp_axis(&min, &max, 1, disp.y, world);
@@ -100,7 +96,7 @@ fn resolve_collision(pos: Vec3, disp: Vec3, world: &impl WorldView) -> (Vec3, bo
     // the fixed AABB size.
     let (h_min, _, blocked) = move_horizontal(&min, &max, disp.x, disp.z, world);
     if blocked && on_ground {
-        if let Some((s_min, _)) = try_auto_step(&min, &max, disp.x, disp.z, world) {
+        if let Some((s_min, _)) = try_auto_step(&min, &max, disp.x, disp.z, tuning.step_height, world) {
             min = s_min;
             on_ground = true; // now standing on the step surface
         } else {
@@ -110,7 +106,7 @@ fn resolve_collision(pos: Vec3, disp: Vec3, world: &impl WorldView) -> (Vec3, bo
         min = h_min;
     }
 
-    (Vec3::new(min[0] + HALF_WIDTH, min[1], min[2] + HALF_WIDTH), on_ground)
+    (Vec3::new(min[0] + tuning.half_width, min[1], min[2] + tuning.half_width), on_ground)
 }
 
 /// Move the AABB horizontally (X then Z). Returns the new bounds and whether
@@ -143,7 +139,7 @@ fn move_horizontal(
     (min, max, blocked)
 }
 
-/// Attempt a single-cube (or slab) step-up: rise up to `STEP_HEIGHT`, redo the
+/// Attempt a single-cube (or slab) step-up: rise up to `step_height`, redo the
 /// horizontal move at the raised height, then snap back down onto the step
 /// surface. Purely geometric: the rise is bounded by real ceilings, the move by
 /// real walls, and the snap-down must land on real support within the step - so
@@ -154,10 +150,11 @@ fn try_auto_step(
     max: &[f32; 3],
     dx: f32,
     dz: f32,
+    step_height: f32,
     world: &impl WorldView,
 ) -> Option<([f32; 3], [f32; 3])> {
     // Rise (bounded by any ceiling).
-    let up = clamp_axis(min, max, 1, STEP_HEIGHT, world);
+    let up = clamp_axis(min, max, 1, step_height, world);
     if up < EPS {
         return None; // no vertical clearance to step at all
     }
@@ -185,10 +182,11 @@ fn try_auto_step(
 }
 
 /// AABB `[min, max]` for a player whose feet are at `pos`.
-fn feet_aabb(pos: Vec3) -> ([f32; 3], [f32; 3]) {
+fn feet_aabb(pos: Vec3, tuning: &PlayerTuning) -> ([f32; 3], [f32; 3]) {
+    let w = tuning.half_width;
     (
-        [pos.x - HALF_WIDTH, pos.y, pos.z - HALF_WIDTH],
-        [pos.x + HALF_WIDTH, pos.y + HEIGHT, pos.z + HALF_WIDTH],
+        [pos.x - w, pos.y, pos.z - w],
+        [pos.x + w, pos.y + tuning.height, pos.z + w],
     )
 }
 
@@ -261,6 +259,18 @@ fn clamp_axis(min: &[f32; 3], max: &[f32; 3], axis: usize, delta: f32, world: &i
 mod tests {
     use super::*;
 
+    /// The sandbox's tuning, written out so these tests don't follow its file.
+    const TUNING: PlayerTuning = PlayerTuning {
+        half_width: 0.3,
+        height: 1.5,
+        eye_height: 1.6,
+        gravity: 24.0,
+        move_speed: 4.5,
+        max_fall_speed: 50.0,
+        step_height: 1.0,
+        reach: 4.5,
+    };
+
     fn walk_x() -> InputFrame {
         InputFrame { move_world: Vec2::new(1.0, 0.0), jump: false }
     }
@@ -282,7 +292,7 @@ mod tests {
             let mut s = start;
             let mut trace = Vec::new();
             for inp in &inputs {
-                s = player_step(&s, inp, &world);
+                s = player_step(&s, inp, &world, &TUNING);
                 trace.push(s);
             }
             trace
@@ -295,7 +305,7 @@ mod tests {
         let world = FlatWorld;
         let mut s = PlayerState { position: Vec3::new(0.5, 5.0, 0.5), ..Default::default() };
         for _ in 0..300 {
-            s = player_step(&s, &InputFrame::default(), &world);
+            s = player_step(&s, &InputFrame::default(), &world, &TUNING);
         }
         assert!((s.position.y - 0.0).abs() < 1e-2, "feet should rest at y=0, got {}", s.position.y);
         assert!(s.on_ground);
@@ -313,7 +323,7 @@ mod tests {
         let world = WallWorld;
         let mut s = PlayerState { position: Vec3::new(0.5, 0.0, 0.5), on_ground: true, ..Default::default() };
         for _ in 0..120 {
-            s = player_step(&s, &walk_x(), &world);
+            s = player_step(&s, &walk_x(), &world, &TUNING);
         }
         // A 2-cube wall is not a single-cube step: the raised horizontal move is
         // still blocked, so no auto-step - the player stops.
@@ -332,7 +342,7 @@ mod tests {
         let world = LedgeWorld;
         let mut s = PlayerState { position: Vec3::new(0.5, 0.0, 0.5), on_ground: true, ..Default::default() };
         for _ in 0..120 {
-            s = player_step(&s, &walk_x(), &world);
+            s = player_step(&s, &walk_x(), &world, &TUNING);
         }
         assert!(s.position.x > 2.0, "walked off the ledge");
         assert!(s.position.y < -0.5, "fell after leaving the floor");
@@ -352,7 +362,7 @@ mod tests {
         let world = StepWorld;
         let mut s = PlayerState { position: Vec3::new(0.5, 0.0, 0.5), on_ground: true, ..Default::default() };
         for _ in 0..120 {
-            s = player_step(&s, &walk_x(), &world);
+            s = player_step(&s, &walk_x(), &world, &TUNING);
         }
         assert!(s.position.x > 2.5, "walked onto the higher ground, x={}", s.position.x);
         assert!((s.position.y - 1.0).abs() < 0.1, "stepped up to y=1, got {}", s.position.y);
@@ -370,7 +380,7 @@ mod tests {
         let world = SlabStep;
         let mut s = PlayerState { position: Vec3::new(0.5, 0.0, 0.5), on_ground: true, ..Default::default() };
         for _ in 0..120 {
-            s = player_step(&s, &walk_x(), &world);
+            s = player_step(&s, &walk_x(), &world, &TUNING);
         }
         assert!(s.position.x > 2.5);
         assert!((s.position.y - 0.5).abs() < 0.1, "stepped onto the slab top y=0.5, got {}", s.position.y);
@@ -392,7 +402,7 @@ mod tests {
         let world = SlabTopStep;
         let mut s = PlayerState { position: Vec3::new(0.5, 0.0, 0.5), on_ground: true, ..Default::default() };
         for _ in 0..120 {
-            s = player_step(&s, &walk_x(), &world);
+            s = player_step(&s, &walk_x(), &world, &TUNING);
         }
         assert!(s.position.x > 2.5, "walked onto the slab-top surface, x={}", s.position.x);
         assert!((s.position.y - 1.0).abs() < 0.1, "stood on the cell-top face y=1.0, got {}", s.position.y);
@@ -406,7 +416,7 @@ mod tests {
             let mut s = start;
             let mut trace = Vec::new();
             for _ in 0..60 {
-                s = player_step(&s, &walk_x(), &world);
+                s = player_step(&s, &walk_x(), &world, &TUNING);
                 trace.push(s);
             }
             trace
