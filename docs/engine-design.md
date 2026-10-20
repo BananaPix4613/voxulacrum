@@ -289,7 +289,7 @@ Parameters are free-form (any biome can declare any parameter name) with documen
 
 ### Standard libraries
 
-The engine ships a set of standard libraries as authored assets under `packages/sandbox/libraries/`:
+The engine ships a set of standard libraries in its built-in package, `voxulacrum`, so content references them as `voxulacrum:<name>`:
 
 - `StandardCaveNoise` — 3D Worley + ridged noise composite
 - `SurfaceLayering` — depth-conditional material cake (grass/dirt/stone)
@@ -297,7 +297,7 @@ The engine ships a set of standard libraries as authored assets under `packages/
 - `BiomeBorderFade` — standard fade kernel used by biomes at their edges
 - `PoissonPlacement` — point distribution for scatter
 
-Standard libraries follow the same authoring format as any other library. They are **backed by `LibraryKernel`** — an enum matching each standard library's name to a native implementation. The authored asset captures the library's boundary declaration and identity; the actual computation runs in native code. This is the pragmatic starting shape: libraries participate in the graph editor, the reference/cycle-detection system, and the invalidation table, without paying the cost of full graph-body library implementation for functions that biomes don't currently customize.
+Standard libraries are **backed by `LibraryKernel`** — an enum matching each standard library's name to a native implementation, which also declares each library's boundary (`LibraryKernel::boundary`), so a declaration cannot drift from the code it describes. A package may author further libraries in the `.library.json` format, naming a kernel: the asset captures the library's boundary declaration and identity, and the actual computation runs in native code. This is the pragmatic starting shape: libraries participate in the graph editor, the reference/cycle-detection system, and the invalidation table, without paying the cost of full graph-body library implementation for functions that biomes don't currently customize.
 
 When authors want to write a library body from scratch (rather than customize a native kernel's parameters), the same file format extends to hold a graph body instead of a kernel reference. That extension is a compatible addition, not a rewrite.
 
