@@ -1,7 +1,7 @@
 # Voxulacrum Engine Roadmap — 0.4.0 through 1.0
 
 **Status:** Authoritative planning reference, v2.1
-**Companions:** `engine-design.md` (v1.11 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
+**Companions:** `engine-design.md` (v1.12 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
 **Tracker:** every work item is a GitHub issue, grouped by [milestone](https://github.com/BananaPix4613/voxulacrum/milestones) and tracked on the *Voxulacrum engine* project board (§9.3).
 **Purpose:** Make the technical goals visible, fix the working discipline, and sequence every core capability the engine needs before it is a *ready product* — an engine another person (or future you) can build a title on without engine surgery.
 
@@ -152,7 +152,7 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 | **Column inspector** | For this (x,z): climate, zone, biome, border distances, per-stage density, materials, fluid, detail, scatter | Shipped 0.4.0 |
 | **Biome/zone map preview** | Top-down world map at arbitrary scale without generating chunks | Shipped 0.4.0 |
 | **Live parameter scrubbing** | What happens as I drag this value? | Tools workstream, unscheduled |
-| **Isolated preview scene** | How does this biome/structure/clip look alone? | M2 (the testbed doubles as this) |
+| **Isolated preview scene** | How does this biome/structure/clip look alone? | Shipped 0.5.0 (the testbed) |
 | **Regeneration diff view** | Which chunks did this edit invalidate, and what changed? | Tools workstream, unscheduled |
 | **Presentation preset switcher** | How does the same scene read under each style? | M5 |
 | **Palette / time-of-day scrubber** | How does the world read at every hour and season? | M6 |
@@ -168,6 +168,8 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 | Tool | When | Status |
 |---|---|---|
 | **`FrameTimings`**, job inspector, streaming readout, cache hit/miss, memory/residency panel, determinism checker, mutation log | 0.3.0 | Shipped |
+| **GPU selection** (`--gpu low-power`) and the adapter named on the Performance panel | 0.5.0 | Shipped |
+| **GPU time** on the Performance panel (timestamp queries) | M5 (T3) | |
 | **In-engine console** — registered commands and variables | M5 (T1) | |
 | **Debug protocol** — the editor attaches to a running game or modded build | M8 | |
 | **Profiling capture export** + frame graph | M5 | |
@@ -183,7 +185,7 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 |---|---|
 | **Headless generation CLI** (`--verify-generation`) | Shipped 0.3.0 |
 | **Graph validation CLI** (`--validate-graphs`) | Shipped 0.4.0 |
-| **Facade dependency check** — games and the testbed may depend only on the facade crate | M2 |
+| **Facade dependency check** — games and the testbed may depend only on the facade crate | Shipped 0.5.0, for the engine workspace and, with `--manifest-path`, for a game's |
 | **Cross-platform determinism job** (Windows and Linux runners) | M3 |
 | **Asset lint** — registry ID collisions, dangling references, missing files, hardcoded user-facing strings | M5 |
 | **Golden-image render regression** | M5 |
@@ -570,10 +572,10 @@ Keys are never reused. The D workstream's work items (D1–D11) are a separate s
 |---|-------|--------|
 | M1 Clean slate | F1–F7 | #1–#6, #60 |
 | M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6 (steps B6a–B6c), B7, T2 | #7–#13, #66–#69, #74–#76, #85 |
-| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6, B8, B9 | #14–#22, #80, #81 |
+| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6, B8, B9, F8–F10, T4 | #14–#22, #80, #81, #87–#89, #91 |
 | M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11 | #23–#36 |
-| M5 Playable on the new data | V1–V8, S1, S2, E1, E2, T1 | #37–#47, #82, #83 |
-| M6–M11 | One placeholder each | #48–#53 |
+| M5 Playable on the new data | V1–V8, S1, S2, E1, E2, T1, T3 | #37–#47, #82, #83, #90 |
+| M6–M11 | One placeholder each; M8 also T5, T6 | #48–#53, #92, #93 |
 
 Within each row, issue numbers follow the order of the keys: F1 is #1, R3 is #16 with its steps at #17–#19, and D2 is #24 with its steps at #25–#27.
 
@@ -694,7 +696,7 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [x] Integrated-GPU baseline recorded in `perf-baseline.md`
 
 ### M3 — Runtime spine
-**Contains:** R1–R6, B8, B9. **Needs:** B1, B2.
+**Contains:** R1–R6, B8, B9, F8–F10, T4. **Needs:** B1, B2.
 **Non-goals:** serialization over a channel (M7), format changes.
 - [ ] Server-core builds with no wgpu, winit or egui dependency (CI-enforced)
 - [ ] One 30 Hz tick framework; the three ad-hoc clocks are gone
@@ -718,7 +720,7 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [ ] New generation hash anchor recorded. **The last save wipe.**
 
 ### M5 — Playable on the new data
-**Contains:** V1–V6, S1, S2, E1, E2, T1. **Needs:** D1, D2; R4 for V6 and V8; B8 for V7.
+**Contains:** V1–V8, S1, S2, E1, E2, T1, T3. **Needs:** D1, D2; R4 for V6 and V8; B8 for V7.
 **Non-goals:** audio, particles, networking, entities above the player.
 - [ ] 30 fps at minimum settings on the integrated GPU
 - [ ] One testbed scene (terrain, a rotating grid, a character) runs under all three presentation presets and under a perspective camera, switchable at runtime
@@ -747,7 +749,7 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [ ] Four players hosted on the minimum spec
 
 ### M8 — Game layer
-**Contains:** entity store with realized and abstract tiers, Rapier scenes per activity cluster, UI framework with string tables, inventory and containers, audio and VFX APIs, camera framework, game-state persistence, debug protocol. **Needs:** M3, M5.
+**Contains:** entity store with realized and abstract tiers, Rapier scenes per activity cluster, UI framework with string tables, inventory and containers, audio and VFX APIs, camera framework, game-state persistence, debug protocol, and editor and hot-reload support for dependency packages (T5, T6). **Needs:** M3, M5.
 - [ ] Conformance features 1, 2, 4 and 5 build and run without engine changes
 - [ ] A player can create, play, save, resume, host, and configure a world entirely through game UI
 - [ ] No hardcoded user-facing strings (asset lint enforced)

@@ -16,13 +16,13 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ---
 
-## [Unreleased] — Engine/game boundary
+## [0.5.0] — Engine/game boundary
 
-Milestone M2: B1–B7 and T2 are merged, and every exit gate is met. The engine
-has separated from the game that grew inside it. It is now a library behind a
-facade crate, the world it ships and a testbed project both load as packages,
-content names everything it references rather than numbering it, and the
-prototype game's policy is package data in a repository of its own.
+Milestone M2. The engine has separated from the game that grew inside it. It is
+now a library behind a facade crate, the world it ships and a testbed project
+both load as packages, content names everything it references rather than
+numbering it, and the prototype game's policy is package data in a repository of
+its own.
 **There is no save-format change**, so 0.4.2 saves open as they are, and the
 generation hash is unchanged at `0xed02babdf0f40420`.
 

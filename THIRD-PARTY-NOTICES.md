@@ -5856,6 +5856,7 @@ Used by:
 - raw-window-handle 0.6.2 — https://github.com/rust-windowing/raw-window-handle
 - rustc-hash 2.1.1 — https://github.com/rust-lang/rustc-hash
 - rustversion 1.0.22 — https://github.com/dtolnay/rustversion
+- semver 1.0.28 — https://github.com/dtolnay/semver
 - serde 1.0.228 — https://github.com/serde-rs/serde
 - serde_core 1.0.228 — https://github.com/serde-rs/serde
 - serde_derive 1.0.228 — https://github.com/serde-rs/serde
@@ -8379,12 +8380,15 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 ## Mozilla Public License 2.0
 
 Used by:
-- nodegraph-editor 0.4.2
-- nodegraph-eval 0.4.2
-- nodegraph-hotreload 0.4.2
-- nodegraph-ir 0.4.2
-- voxel-core 0.4.2
-- voxulacrum 0.4.2
+- boundary-check 0.5.0
+- nodegraph-editor 0.5.0
+- nodegraph-eval 0.5.0
+- nodegraph-hotreload 0.5.0
+- nodegraph-ir 0.5.0
+- testbed 0.5.0
+- voxel-core 0.5.0
+- voxulacrum 0.5.0
+- voxulacrum-app 0.5.0
 
 ```
 Mozilla Public License Version 2.0

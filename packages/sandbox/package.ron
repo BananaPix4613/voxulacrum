@@ -6,7 +6,7 @@
     saves: "default",
     version: "0.1.0",
     kind: Game,
-    engine: "^0.4",
+    engine: "^0.5",
     world: "graphs/world.manifest.json",
     dependencies: [],
     modules: [],
