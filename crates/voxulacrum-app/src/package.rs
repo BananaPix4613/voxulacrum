@@ -2,10 +2,10 @@
 //!
 //! A package is a directory with a `package.ron` manifest at its root and its
 //! content laid out beside it in the fixed content layout (`materials.ron`,
-//! `prefabs.ron`, `foliage.ron`, `graphs/`, `libraries/`, `blueprints/`,
-//! `species/`). The manifest names the package's id, its save directory (the id
-//! unless it names another), its content namespace, its version, the engine
-//! versions it supports and the world it starts.
+//! `prefabs.ron`, `foliage.ron`, `play.ron`, `graphs/`, `libraries/`,
+//! `blueprints/`, `species/`). The manifest names the package's id, its save
+//! directory (the id unless it names another), its content namespace, its
+//! version, the engine versions it supports and the world it starts.
 //!
 //! This loader takes data-only packages: one that declares code modules is
 //! refused until the WebAssembly runtime exists (M11). A package's

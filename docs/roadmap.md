@@ -240,14 +240,14 @@ Plus: stable entity IDs across save/load and network, component conventions (pos
 ### 6.4 Character controller & physics
 Fixed-timestep pure-function stepping, slab-aware **swept** AABB resolution (not discrete — tunneling is a swept-collision problem), auto-step, gravity and terminal velocity, fluid buoyancy and swimming, sub-tick ordering when moving geometry displaces entities, and an exposed parameter block so a game tunes a controller rather than rewriting one. Reusable by non-player actors.
 **Isometric-specific requirement:** players misjudge depth constantly under this projection. Generous step-up, forgiving edge collision, and ledge-snap assist are not polish — **physics tuning is readability work here**, and belongs in the same version as the controller generalization.
-**State:** shipped and working for the player. The kit controller with 0.5 m steps and a parameter block — **M5** (E2); fluid interaction and forgiveness tuning — **M8**; riding moving grids — **M9**.
+**State:** shipped and working for the player, tuned by the package's `play.ron` since B7. The kit controller with 0.5 m steps and a parameter block — **M5** (E2); fluid interaction and forgiveness tuning — **M8**; riding moving grids — **M9**.
 
 ### 6.5 Interaction & targeting
 Reach-limited cursor and forward raycast; target resolution across voxels, scatter, fluids, and entities with cycling when several share an anchor; placement validation against footprints; highlight rendering hooks; registerable interaction kinds.
 **Two requirements from the external review, both real for this camera:**
 - **Targeting must consult visibility state** (P13). Under an orthographic camera the mouse ray passes diagonally through an entire column, and first-hit DDA cannot reach anything under an overhang. The fix is a **hybrid**: first-hit by default, with scroll stepping backward through candidate cells along the ray. Hidden geometry is skipped using the same visibility classification the renderer uses — not a separate heuristic.
 - **The cursor cell must render as a visible 3D box drawn through geometry.** A first-person crosshair is self-evident; an isometric cursor is not.
-**State:** reach-limited break/place shipped for the player, voxels only, first-hit only. Candidate stepping, visibility-aware skipping, multi-store resolution, entity targeting, registerable kinds — **M8**; the visibility-agreement gate is verified at **M5** when the region graph becomes shared state.
+**State:** reach-limited break/place shipped for the player, voxels only, first-hit only; reach and the build materials come from the package's `play.ron` (B7). Candidate stepping, visibility-aware skipping, multi-store resolution, entity targeting, registerable kinds — **M8**; the visibility-agreement gate is verified at **M5** when the region graph becomes shared state.
 
 ### 6.6 Blueprint & prefab system
 A real format: voxel template (shapes and materials, slabs included), anchor offset, footprint, destruction policy, sway weights, variant sets, placement rules, and a **protected-volume flag** that region transformation (§6.26) must respect — the mechanism that lets authored vaults survive a self-modifying world. Runtime: capture a region to a blueprint, stamp through the mutation door with priority resolution, reference blueprints from graphs for worldgen structures.
@@ -284,7 +284,7 @@ Camera modes (follow, free, cinematic, fixed), zoom bands with pixel snapping pr
 - **Screens must be data-definable.** New content adds new screens; if every screen is hand-written Rust, content work becomes engine work.
 
 Needed: an in-game UI layer at pixel-art scale (egui remains editor tooling permanently — it is not the game UI stack), layout with resolution scaling, controller navigation, data binding, HUD element registration, menu/screen stack with input focus and pause semantics, and world-space anchors (nameplates, prompts).
-**State:** a minimal play HUD. **M8**, scoped as one of that milestone's two largest items.
+**State:** a minimal play HUD, which a package switches on in `play.ron` (B7). HUD drawn by game code, and everything above — **M8**, scoped as one of that milestone's two largest items.
 
 ### 6.13 Input & bindings
 `GameAction` enum, `input.ron` maps, edge/held/continuous triggers, context stacks (gameplay vs. menu vs. editor), gamepad support, runtime rebinding.
@@ -689,7 +689,7 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 **Non-goals:** format changes, rendering features, transport.
 - [x] Games and the testbed depend only on the facade crate (CI-enforced)
 - [x] The testbed and the reference world load as data-only packages
-- [ ] The game repository builds against the facade through a local `[patch]`
+- [x] The game repository builds against the facade through a local `[patch]`
 - [x] Registries are namespaced in memory
 - [ ] Integrated-GPU baseline recorded in `perf-baseline.md`
 

@@ -11,6 +11,7 @@ to the sandbox package's `saves/default/`.
 | `materials.ron` | Air, three greys, and red, green and blue for placed blocks |
 | `prefabs.ron` | One entry, because the registry may not be empty |
 | `foliage.ron` | No layers or scatter types: the flat world paints and scatters nothing |
+| `play.ron` | The sandbox's player tuning, and a build tool over the six test materials |
 
 The testbed declares no libraries. Every library it could name comes from the
 engine package, as `voxulacrum:<name>`.

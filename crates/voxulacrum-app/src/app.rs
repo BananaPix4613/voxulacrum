@@ -864,17 +864,20 @@ impl RunOptions {
 
     /// Start the world of the package at `root`: a directory holding a
     /// `package.ron` manifest beside its content (graphs, materials, prefabs,
-    /// libraries, blueprints, species and foliage). The manifest names the
-    /// package's id, its save directory under `saves/` (the id unless it names
-    /// another), and the content namespace its names resolve in. Shaders, palettes, input
-    /// bindings and parameter presets still come from the engine.
+    /// libraries, blueprints, species, foliage and play settings). The manifest
+    /// names the package's id, its save directory under `saves/` (the id unless
+    /// it names another), and the content namespace its names resolve in. Its
+    /// `play.ron` gives the world its Play mode; a package without one has none.
+    /// Shaders, palettes, input bindings and parameter presets still come from
+    /// the engine.
     ///
     /// The package loads when the engine starts. One that is malformed, needs a
-    /// different engine version, declares code modules or names no world stops
-    /// startup with a message saying why. Its dependencies load first, from
-    /// `packages/<id>/` beside the engine, and one that is missing, the wrong
-    /// version, part of a cycle, or ships `materials.ron`, `prefabs.ron` or
-    /// `foliage.ron` stops startup too.
+    /// different engine version, declares code modules, names no world, or has
+    /// a `play.ron` that doesn't validate stops startup with a message saying
+    /// why. Its dependencies load first, from `packages/<id>/` beside the
+    /// engine, and one that is missing, the wrong version, part of a cycle,
+    /// shares another package's namespace, or ships `materials.ron`,
+    /// `prefabs.ron` or `foliage.ron` stops startup too.
     ///
     /// A relative `root` is resolved against the working directory.
     pub fn package(mut self, root: impl Into<PathBuf>) -> Self {
