@@ -865,7 +865,10 @@ impl RunOptions {
     ///
     /// The package loads when the engine starts. One that is malformed, needs a
     /// different engine version, declares code modules or names no world stops
-    /// startup with a message saying why.
+    /// startup with a message saying why. Its dependencies load first, from
+    /// `packages/<id>/` beside the engine, and one that is missing, the wrong
+    /// version, part of a cycle, or ships `materials.ron`, `prefabs.ron` or
+    /// `foliage.ron` stops startup too.
     ///
     /// A relative `root` is resolved against the working directory.
     pub fn package(mut self, root: impl Into<PathBuf>) -> Self {
@@ -899,7 +902,15 @@ pub fn run_with(options: RunOptions) {
             std::process::exit(1);
         }
     };
-    let m = &package.manifest;
+    let packages = match crate::package::Package::load_order(package, &paths::packages_dir()) {
+        Ok(packages) => packages,
+        Err(e) => {
+            eprintln!("error: {}: {e}", root.display());
+            std::process::exit(1);
+        }
+    };
+    let (world, dependencies) = packages.split_last().expect("the load order ends with the world's own package");
+    let m = &world.manifest;
     log::info!(
         "Package {} {} ({:?}, engine {}) from {} (saves/{})",
         m.id,
@@ -909,10 +920,10 @@ pub fn run_with(options: RunOptions) {
         root.display(),
         m.saves,
     );
-    for d in &m.dependencies {
-        log::warn!("{} depends on {} {}, which is not loaded: dependencies are not loaded yet", m.id, d.id, d.version);
+    for d in dependencies {
+        log::info!("Dependency {} {} from {}", d.manifest.id, d.manifest.version, d.root.display());
     }
-    paths::set_package(package);
+    paths::set_packages(packages);
     
     // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
     // Handled before the event loop exists, so this path never creates a window

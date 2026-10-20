@@ -8,9 +8,11 @@
 //! versions it supports and the world it starts.
 //!
 //! This loader takes data-only packages: one that declares code modules is
-//! refused until the WebAssembly runtime exists (M11). Dependencies are
-//! declared and validated but not loaded yet.
+//! refused until the WebAssembly runtime exists (M11). A package's
+//! dependencies are found in `packages/<id>/` and ordered ahead of it
+//! ([`Package::load_order`]). The engine package, `voxulacrum`, is built in.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use semver::{Version, VersionReq};
@@ -56,7 +58,7 @@ pub struct PackageManifest {
     pub engine: VersionReq,
     /// The world manifest this package starts, relative to its root.
     pub world: Option<PathBuf>,
-    /// Packages this one depends on (not loaded yet).
+    /// Packages this one depends on, which load before it.
     pub dependencies: Vec<Dependency>,
 }
 
@@ -68,6 +70,11 @@ pub struct Package {
     /// The validated manifest.
     pub manifest: PackageManifest,
 }
+
+/// Files only the package a world starts from may hold: the tables whose ids
+/// saves store, which two packages cannot share until saves carry a registry
+/// mapping (D3, M4).
+const ROOT_ONLY: [&str; 3] = ["materials.ron", "prefabs.ron", "foliage.ron"];
 
 impl Package {
     /// Load and validate the package at `root` for this engine build.
@@ -84,6 +91,91 @@ impl Package {
             if !world.is_file() {
                 return Err(format!("world {} does not exist", world.display()));
             }
+        }
+        Ok(package)
+    }
+
+    /// Every package a world started from `root` loads, in load order: each
+    /// dependency before the packages that need it, ties broken by id, and
+    /// `root` last. A dependency is found at `<packages_dir>/<id>/`. The engine
+    /// package is built in, so depending on `voxulacrum` checks this engine's
+    /// version and loads nothing.
+    pub fn load_order(root: Package, packages_dir: &Path) -> Result<Vec<Package>, String> {
+        Self::load_order_for(root, packages_dir, &engine_version())
+    }
+
+    fn load_order_for(root: Package, packages_dir: &Path, engine: &Version) -> Result<Vec<Package>, String> {
+        // Load every package reachable from `root`, checking each requirement
+        // against the version that loaded.
+        let mut loaded: BTreeMap<String, Package> = BTreeMap::new();
+        let mut pending = vec![root.manifest.id.clone()];
+        loaded.insert(root.manifest.id.clone(), root);
+        while let Some(id) = pending.pop() {
+            let dependencies = loaded[&id].manifest.dependencies.clone();
+            for d in dependencies {
+                if d.id == ENGINE_NAMESPACE {
+                    if !d.version.matches(engine) {
+                        return Err(format!(
+                            "{id} needs engine package {} {}, but this engine is {engine}",
+                            d.id, d.version
+                        ));
+                    }
+                    continue;
+                }
+                if !loaded.contains_key(&d.id) {
+                    let dependency = Self::load_dependency(&d.id, packages_dir, engine)
+                        .map_err(|e| format!("{id} depends on {}: {e}", d.id))?;
+                    loaded.insert(d.id.clone(), dependency);
+                    pending.push(d.id.clone());
+                }
+                let version = &loaded[&d.id].manifest.version;
+                if !d.version.matches(version) {
+                    return Err(format!("{id} needs {} {}, but {} is {version}", d.id, d.version, d.id));
+                }
+            }
+        }
+
+        // Order them: a package is placed once everything it depends on is,
+        // and of the packages ready to place, the lowest id goes first.
+        let mut waiting: BTreeMap<String, BTreeSet<String>> = loaded
+            .iter()
+            .map(|(id, p)| {
+                let on = p.manifest.dependencies.iter().filter(|d| d.id != ENGINE_NAMESPACE);
+                (id.clone(), on.map(|d| d.id.clone()).collect())
+            })
+            .collect();
+        let mut order = Vec::with_capacity(loaded.len());
+        while let Some(id) = waiting.iter().find(|(_, on)| on.is_empty()).map(|(id, _)| id.clone()) {
+            waiting.remove(&id);
+            for on in waiting.values_mut() {
+                on.remove(&id);
+            }
+            order.push(loaded.remove(&id).expect("every waiting package is loaded"));
+        }
+        if !waiting.is_empty() {
+            let ids: Vec<&str> = waiting.keys().map(String::as_str).collect();
+            return Err(format!("dependencies form a cycle among {}", ids.join(", ")));
+        }
+        Ok(order)
+    }
+
+    /// Load the dependency `id` from `<packages_dir>/<id>/`, refusing a
+    /// directory whose manifest names another id, or a package holding files
+    /// only a world's own package may.
+    fn load_dependency(id: &str, packages_dir: &Path, engine: &Version) -> Result<Self, String> {
+        let root = packages_dir.join(id);
+        if !root.join(MANIFEST_FILE).is_file() {
+            return Err(format!("no package at {}", root.display()));
+        }
+        let package = Self::load_for(&root, engine)?;
+        if package.manifest.id != id {
+            return Err(format!("the package at {} is {:?}", root.display(), package.manifest.id));
+        }
+        if let Some(file) = ROOT_ONLY.iter().find(|f| root.join(f).exists()) {
+            return Err(format!(
+                "it ships {file}, which only the package a world starts from may until saves \
+                 carry a registry mapping (D3, M4)"
+            ));
         }
         Ok(package)
     }
@@ -293,5 +385,109 @@ mod tests {
         let err = Package::load_for(&root, &engine()).unwrap_err();
         let _ = std::fs::remove_dir_all(&root);
         assert!(err.contains("does not exist"), "{err}");
+    }
+
+    /// A scratch directory for one test, emptied first.
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("voxulacrum-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Write package `id` at `version` into `dir`, with `dependencies` as the
+    /// body of its RON list, and return its root.
+    fn write_package(dir: &Path, id: &str, version: &str, dependencies: &str) -> PathBuf {
+        let root = dir.join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        let text = format!(
+            r#"( id: "{id}", version: "{version}", kind: Mod, engine: "^0.4", dependencies: [{dependencies}] )"#
+        );
+        std::fs::write(root.join(MANIFEST_FILE), text).unwrap();
+        root
+    }
+
+    /// The ids `root` in `dir` loads, in load order.
+    fn order(dir: &Path, root: &str) -> Result<Vec<String>, String> {
+        let root = Package::load_for(&dir.join(root), &engine())?;
+        let order = Package::load_order_for(root, dir, &engine())?;
+        Ok(order.into_iter().map(|p| p.manifest.id).collect())
+    }
+
+    #[test]
+    fn dependencies_load_before_the_packages_that_need_them_then_by_id() {
+        let dir = scratch("load-order");
+        write_package(&dir, "base", "1.0.0", "");
+        write_package(&dir, "zeta", "1.0.0", r#"(id: "base", version: "^1")"#);
+        write_package(&dir, "alpha", "1.0.0", "");
+        let deps = r#"(id: "zeta", version: "^1"), (id: "alpha", version: "^1"), (id: "base", version: "^1")"#;
+        write_package(&dir, "game", "0.1.0", deps);
+        let ids = order(&dir, "game");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(ids.unwrap(), ["alpha", "base", "zeta", "game"]);
+    }
+
+    #[test]
+    fn the_engine_package_is_built_in() {
+        let dir = scratch("engine-dependency");
+        write_package(&dir, "game", "0.1.0", r#"(id: "voxulacrum", version: "^0.4")"#);
+        write_package(&dir, "old", "0.1.0", r#"(id: "voxulacrum", version: "^0.3")"#);
+        let (game, old) = (order(&dir, "game"), order(&dir, "old"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(game.unwrap(), ["game"], "the engine package loads nothing from disk");
+        let err = old.unwrap_err();
+        assert!(err.contains("old needs engine package voxulacrum ^0.3"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_dependency_is_refused() {
+        let dir = scratch("missing-dependency");
+        write_package(&dir, "game", "0.1.0", r#"(id: "absent", version: "^1")"#);
+        let err = order(&dir, "game").unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains("game depends on absent: no package at"), "{err}");
+    }
+
+    #[test]
+    fn a_dependency_cycle_is_refused() {
+        let dir = scratch("dependency-cycle");
+        write_package(&dir, "a", "1.0.0", r#"(id: "b", version: "^1")"#);
+        write_package(&dir, "b", "1.0.0", r#"(id: "a", version: "^1")"#);
+        write_package(&dir, "game", "0.1.0", r#"(id: "a", version: "^1")"#);
+        let err = order(&dir, "game").unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains("cycle among a, b, game"), "{err}");
+    }
+
+    #[test]
+    fn a_dependency_of_the_wrong_version_is_refused() {
+        let dir = scratch("dependency-version");
+        write_package(&dir, "base", "2.0.0", "");
+        write_package(&dir, "game", "0.1.0", r#"(id: "base", version: "^1")"#);
+        let err = order(&dir, "game").unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains("game needs base ^1, but base is 2.0.0"), "{err}");
+    }
+
+    #[test]
+    fn a_dependency_directory_holding_another_package_is_refused() {
+        let dir = scratch("dependency-id");
+        let other = write_package(&dir, "other", "1.0.0", "");
+        std::fs::rename(&other, dir.join("base")).unwrap();
+        write_package(&dir, "game", "0.1.0", r#"(id: "base", version: "^1")"#);
+        let err = order(&dir, "game").unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains(r#"is "other""#), "{err}");
+    }
+
+    #[test]
+    fn a_dependency_that_ships_a_saved_table_is_refused() {
+        let dir = scratch("dependency-table");
+        let base = write_package(&dir, "base", "1.0.0", "");
+        std::fs::write(base.join("materials.ron"), "").unwrap();
+        write_package(&dir, "game", "0.1.0", r#"(id: "base", version: "^1")"#);
+        let err = order(&dir, "game").unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains("ships materials.ron"), "{err}");
     }
 }
