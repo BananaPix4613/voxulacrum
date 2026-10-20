@@ -6,6 +6,10 @@
 //! list is a consumer (the testbed now, games later), so an engine crate left
 //! off the list fails the check rather than slipping past it.
 //!
+//! [`check`] reads the engine workspace itself. [`check_consumers`] reads a
+//! workspace outside it, such as a game's, where every member is a consumer and
+//! the list comes from the engine workspace its facade dependency belongs to.
+//!
 //! The input is the JSON from `cargo metadata --format-version 1 --no-deps`.
 //! Only direct dependencies are checked: what a consumer reaches through the
 //! facade is allowed by definition.
@@ -24,19 +28,11 @@ pub struct Summary {
     pub consumers: Vec<String>,
 }
 
-/// Check `metadata`. On failure, returns one message per problem found.
+/// Check the engine workspace's `metadata`. On failure, returns one message per
+/// problem found.
 pub fn check(metadata: &Value) -> Result<Summary, Vec<String>> {
     let engine = engine_crates(metadata)?;
-    let member_ids: Vec<&Value> = metadata["workspace_members"]
-        .as_array()
-        .map(|ids| ids.iter().collect())
-        .unwrap_or_default();
-    let members: Vec<&Value> = metadata["packages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|p| member_ids.contains(&&p["id"]))
-        .collect();
+    let members = members(metadata);
     let is_engine = |name: &str| engine.iter().any(|e| e == name);
 
     let mut errors = Vec::new();
@@ -56,21 +52,7 @@ pub fn check(metadata: &Value) -> Result<Summary, Vec<String>> {
             continue;
         }
         consumers.push(name.to_string());
-        for dep in package["dependencies"].as_array().into_iter().flatten() {
-            // `name` is the package name even when the dependency is renamed.
-            let dep_name = dep["name"].as_str().unwrap_or_default();
-            if dep_name == FACADE || !is_engine(dep_name) {
-                continue;
-            }
-            let kind = dep["kind"].as_str().unwrap_or("normal");
-            let place = match dep["target"].as_str() {
-                Some(target) => format!("{kind}, {target}"),
-                None => kind.to_string(),
-            };
-            errors.push(format!(
-                "{name}: depends on {dep_name} ({place}); depend on {FACADE} instead"
-            ));
-        }
+        errors.extend(dependency_errors(name, package, &is_engine));
     }
 
     if errors.is_empty() {
@@ -78,6 +60,65 @@ pub fn check(metadata: &Value) -> Result<Summary, Vec<String>> {
     } else {
         Err(errors)
     }
+}
+
+/// Check a workspace outside the engine, such as a game's: every member of
+/// `workspace` is a consumer, and the engine crates are the ones `engine`, the
+/// engine workspace's own metadata, lists. On failure, returns one message per
+/// problem found.
+pub fn check_consumers(workspace: &Value, engine: &Value) -> Result<Summary, Vec<String>> {
+    let engine_list = engine_crates(engine)?;
+    let is_engine = |name: &str| engine_list.iter().any(|e| e == name);
+
+    let mut errors = Vec::new();
+    let mut consumers = Vec::new();
+    for package in members(workspace) {
+        let name = package["name"].as_str().unwrap_or("<unnamed>");
+        consumers.push(name.to_string());
+        errors.extend(dependency_errors(name, package, &is_engine));
+    }
+
+    if errors.is_empty() {
+        Ok(Summary { engine_crates: engine_list.len(), consumers })
+    } else {
+        Err(errors)
+    }
+}
+
+/// The workspace members' package entries, in metadata order.
+fn members(metadata: &Value) -> Vec<&Value> {
+    let member_ids: Vec<&Value> = metadata["workspace_members"]
+        .as_array()
+        .map(|ids| ids.iter().collect())
+        .unwrap_or_default();
+    metadata["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| member_ids.contains(&&p["id"]))
+        .collect()
+}
+
+/// One message for each direct dependency of consumer `name` that is an engine
+/// crate other than the facade.
+fn dependency_errors(name: &str, package: &Value, is_engine: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut errors = Vec::new();
+    for dep in package["dependencies"].as_array().into_iter().flatten() {
+        // `name` is the package name even when the dependency is renamed.
+        let dep_name = dep["name"].as_str().unwrap_or_default();
+        if dep_name == FACADE || !is_engine(dep_name) {
+            continue;
+        }
+        let kind = dep["kind"].as_str().unwrap_or("normal");
+        let place = match dep["target"].as_str() {
+            Some(target) => format!("{kind}, {target}"),
+            None => kind.to_string(),
+        };
+        errors.push(format!(
+            "{name}: depends on {dep_name} ({place}); depend on {FACADE} instead"
+        ));
+    }
+    errors
 }
 
 /// The `engine-crates` list from the workspace metadata.
@@ -126,6 +167,19 @@ mod tests {
             "packages": packages,
             "workspace_members": ids,
             "metadata": { "voxulacrum": { "engine-crates": engine } },
+        })
+    }
+
+    /// Metadata for an outside workspace whose one member, `game`, has `deps`,
+    /// with the facade among its other packages.
+    fn outside(deps: Vec<Value>) -> Value {
+        json!({
+            "packages": [
+                { "name": "game", "id": "path+file:///game#0.1.0", "dependencies": deps },
+                { "name": "voxulacrum", "id": "git+https://example/voxulacrum#0.4.2", "dependencies": [] },
+            ],
+            "workspace_members": ["path+file:///game#0.1.0"],
+            "metadata": null,
         })
     }
 
@@ -208,5 +262,29 @@ mod tests {
         let mut ws = workspace(json!(ENGINE), vec![]);
         ws["metadata"] = Value::Null;
         assert!(one_error(&ws).contains("no `engine-crates` list"));
+    }
+
+    #[test]
+    fn an_outside_consumer_on_the_facade_passes() {
+        let engine = workspace(json!(ENGINE), vec![]);
+        let summary = check_consumers(&outside(vec![dep("voxulacrum", None)]), &engine).unwrap();
+        assert_eq!(summary, Summary { engine_crates: 3, consumers: vec!["game".to_string()] });
+    }
+
+    #[test]
+    fn an_outside_consumer_on_an_engine_crate_fails() {
+        let engine = workspace(json!(ENGINE), vec![]);
+        let game = outside(vec![dep("voxulacrum", None), dep("voxel-core", None)]);
+        let errors = check_consumers(&game, &engine).unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("game: depends on voxel-core"), "{errors:?}");
+    }
+
+    #[test]
+    fn an_outside_check_needs_the_engine_list() {
+        let mut engine = workspace(json!(ENGINE), vec![]);
+        engine["metadata"] = Value::Null;
+        let errors = check_consumers(&outside(vec![]), &engine).unwrap_err();
+        assert!(errors[0].contains("no `engine-crates` list"), "{errors:?}");
     }
 }
