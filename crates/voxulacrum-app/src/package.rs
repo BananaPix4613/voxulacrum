@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 
 use semver::{Version, VersionReq};
 use serde::Deserialize;
-use voxel_core::QualifiedName;
+use voxel_core::{QualifiedName, ENGINE_NAMESPACE};
 
 /// File name of a package's manifest, at the package root.
 pub const MANIFEST_FILE: &str = "package.ron";
@@ -107,6 +107,11 @@ impl PackageManifest {
         QualifiedName::validate_namespace(&file.id).map_err(|e| format!("id: {e}"))?;
         let namespace = if file.namespace.is_empty() { file.id.clone() } else { file.namespace };
         QualifiedName::validate_namespace(&namespace).map_err(|e| format!("namespace: {e}"))?;
+        for (what, value) in [("id", &file.id), ("namespace", &namespace)] {
+            if value == ENGINE_NAMESPACE {
+                return Err(format!("{what}: `{ENGINE_NAMESPACE}` is the engine package's"));
+            }
+        }
         // The namespace rule also keeps it one directory name under `saves/`.
         let saves = if file.saves.is_empty() { file.id.clone() } else { file.saves };
         QualifiedName::validate_namespace(&saves).map_err(|e| format!("saves: {e}"))?;
@@ -243,6 +248,15 @@ mod tests {
         let text = r#"( id: "My Game", version: "0.1.0", kind: Game, engine: "^0.4" )"#;
         let err = PackageManifest::parse(text, &engine()).unwrap_err();
         assert!(err.starts_with("id:"), "{err}");
+    }
+
+    #[test]
+    fn the_engine_package_id_and_namespace_are_refused() {
+        let text = r#"( id: "voxulacrum", version: "0.1.0", kind: Game, engine: "^0.4" )"#;
+        let err = PackageManifest::parse(text, &engine()).unwrap_err();
+        assert!(err.starts_with("id:"), "{err}");
+        let err = parse(r#"namespace: "voxulacrum","#).unwrap_err();
+        assert!(err.starts_with("namespace:"), "{err}");
     }
 
     #[test]

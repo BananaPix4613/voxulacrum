@@ -1,15 +1,18 @@
 //! Native library kernels: the byte-identical home of the computations that
 //! authored library assets bind to by name.
 //!
-//! A `.library.json` asset declares a typed boundary plus a `kernel` name; the
-//! engine resolves that name to a [`LibraryKernel`] and, where the library's
-//! output is consumed, invokes the correspondingly-named kernel function (or,
-//! for `BiomeBorderFade`, [`biome_border_fade`](crate::biome_border_fade)).
-//! Because a kernel *is* native code - shared with the node that already
-//! implemented it, where one exists - a library port carries no numeric drift.
+//! The engine package declares one library per kernel, with the boundary
+//! [`LibraryKernel::boundary`] gives it. A package's `.library.json` asset may
+//! declare another, naming a kernel. The engine resolves that name to a
+//! [`LibraryKernel`] and, where the library's output is consumed, invokes the
+//! correspondingly-named kernel function (or, for `BiomeBorderFade`,
+//! [`biome_border_fade`](crate::biome_border_fade)). Because a kernel *is*
+//! native code - shared with the node that already implemented it, where one
+//! exists - a library port carries no numeric drift.
 
 use fastnoise_lite::{FastNoiseLite, FractalType as FnlFractalType, NoiseType};
 use glam::Vec3;
+use nodegraph_ir::{BoundaryPort, GraphBoundary, PinType};
 use voxel_core::MaterialId;
 
 /// A native library kernel, identified by the `kernel` name of an authored
@@ -35,6 +38,15 @@ pub enum LibraryKernel {
 }
 
 impl LibraryKernel {
+    /// Every kernel, in the order the engine package declares its libraries.
+    pub const ALL: [Self; 5] = [
+        Self::BiomeBorderFade,
+        Self::StandardCaveNoise,
+        Self::SurfaceLayering,
+        Self::ExposureLayering,
+        Self::PoissonPlacement,
+    ];
+
     /// Resolve a kernel from an asset's `kernel` field, or `None` if unknown.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -56,6 +68,37 @@ impl LibraryKernel {
             Self::ExposureLayering => "exposure_layering",
             Self::PoissonPlacement => "poisson_placement",
         }
+    }
+
+    /// The boundary the engine package declares for this kernel's library: the
+    /// inputs a `LibraryRef` to it feeds and the outputs it exposes.
+    pub fn boundary(self) -> GraphBoundary {
+        let port = |name: &str, ty| BoundaryPort::new(name, ty);
+        let (inputs, outputs) = match self {
+            Self::BiomeBorderFade => (
+                vec![port("distance", PinType::SurfaceField), port("radius", PinType::Scalar)],
+                vec![port("weight", PinType::SurfaceField)],
+            ),
+            Self::StandardCaveNoise => (
+                vec![port("position", PinType::Vec3)],
+                vec![port("density", PinType::Density)],
+            ),
+            Self::SurfaceLayering => (
+                vec![port("density", PinType::Density)],
+                vec![port("material", PinType::Material)],
+            ),
+            Self::ExposureLayering => (
+                vec![
+                    port("base_material", PinType::Material),
+                    port("cap_material", PinType::Material),
+                    port("exposure", PinType::Scalar),
+                    port("threshold", PinType::Scalar),
+                ],
+                vec![port("material", PinType::Material)],
+            ),
+            Self::PoissonPlacement => (Vec::new(), vec![port("points", PinType::Positions)]),
+        };
+        GraphBoundary { inputs, outputs }
     }
 }
 
@@ -128,13 +171,7 @@ mod tests {
 
     #[test]
     fn kernel_names_round_trip() {
-        for k in [
-            LibraryKernel::BiomeBorderFade,
-            LibraryKernel::StandardCaveNoise,
-            LibraryKernel::SurfaceLayering,
-            LibraryKernel::ExposureLayering,
-            LibraryKernel::PoissonPlacement,
-        ] {
+        for k in LibraryKernel::ALL {
             assert_eq!(LibraryKernel::from_name(k.name()), Some(k));
         }
         assert_eq!(LibraryKernel::from_name("nope"), None);

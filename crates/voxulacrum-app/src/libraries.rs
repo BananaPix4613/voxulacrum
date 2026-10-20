@@ -1,31 +1,30 @@
-//! Data-driven library registry (Phase 6 Substep 2).
+//! Library registry.
 //!
-//! Standard libraries are authored as `packages/sandbox/libraries/*.library.json`: each
-//! declares a typed [`GraphBoundary`] (its named inputs/outputs) plus the native
-//! `kernel` it binds to. Loading builds a [`LibraryGraphRegistry`] (so a
+//! A library binds a typed [`GraphBoundary`] (its named inputs and outputs) to
+//! a native [`LibraryKernel`]. The engine package declares one library per
+//! kernel, in namespace `voxulacrum`, so content names them as
+//! `voxulacrum:<name>` and never repeats their declarations. A package may also
+//! author `libraries/*.library.json`, named in its own namespace, which load
+//! after the engine's. Loading builds a [`LibraryGraphRegistry`] (so a
 //! `LibraryRef` node resolves its pins from a library's boundary) alongside a
-//! per-id [`LibraryKernel`] map (so the computation can be invoked where a
-//! library's output is consumed - the density-blend pass, Substep 8). Directory
-//! scan primary, hand-authored fallback so the engine never fails to start over
-//! libraries. Mirrors the material / prefab registries.
+//! per-id kernel map (so the computation can be invoked where a library's
+//! output is consumed). Ids are assigned in load order; nothing saved holds one.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bevy_ecs::prelude::Resource;
 use nodegraph_eval::LibraryKernel;
-use nodegraph_ir::{
-    BoundaryPort, Graph, GraphBoundary, GraphKind, LibraryGraphId, LibraryGraphRegistry, NodeKind,
-    PinType,
-};
+use nodegraph_ir::{Graph, GraphBoundary, GraphKind, LibraryGraphId, LibraryGraphRegistry, NodeKind};
 use serde::Deserialize;
-use voxel_core::QualifiedName;
+use voxel_core::{QualifiedName, ENGINE_NAMESPACE};
 
 /// One authored library asset (`*.library.json`).
 #[derive(Deserialize)]
 struct LibraryAsset {
-    /// Stable numeric id (contiguous from 0), authoritative over file order.
+    /// Order within its package (contiguous from 0), authoritative over file
+    /// order. The loaded id follows every library loaded before the package's.
     id: u32,
     /// Stable string handle (used in diagnostics).
     id_name: String,
@@ -86,141 +85,113 @@ impl LoadedLibraries {
         if problems.is_empty() { Ok(()) } else { Err(problems) }
     }
 
-    /// Build from parsed assets, naming them in `namespace`: validate contiguous
-    /// ids and valid, unique names, project each boundary into a Library `Graph`
-    /// (for pin resolution) and resolve its kernel name. Fails on an empty set,
-    /// a non-contiguous id, a bad or duplicate name, or an unknown kernel name.
-    fn from_assets(mut assets: Vec<LibraryAsset>, namespace: &str) -> Result<Self, String> {
-        assets.sort_by_key(|a| a.id);
-        if assets.is_empty() {
-            return Err("library registry must have at least one entry".into());
-        }
+    /// Build from sets of parsed assets, each named in its own namespace. Ids
+    /// run on from one set to the next, in the order given. Within a set,
+    /// authored ids must be contiguous from 0 and names valid and unique. Each
+    /// boundary is projected into a Library `Graph` (for pin resolution) and
+    /// each kernel name resolved. Fails on a non-contiguous id, a bad or
+    /// duplicate name, or an unknown kernel name.
+    fn from_sets(sets: Vec<(&str, Vec<LibraryAsset>)>) -> Result<Self, String> {
         let mut registry = LibraryGraphRegistry::new();
         let mut kernels = HashMap::new();
         let mut entries: Vec<(LibraryGraphId, QualifiedName)> = Vec::new();
-        for (i, a) in assets.into_iter().enumerate() {
-            if a.id as usize != i {
-                return Err(format!(
-                    "library ids must be contiguous from 0; expected {i}, found {}",
-                    a.id
-                ));
+        for (namespace, mut assets) in sets {
+            assets.sort_by_key(|a| a.id);
+            let first = entries.len() as u32;
+            for (i, a) in assets.into_iter().enumerate() {
+                if a.id as usize != i {
+                    return Err(format!(
+                        "library ids must be contiguous from 0; expected {i}, found {}",
+                        a.id
+                    ));
+                }
+                let id = LibraryGraphId(first + a.id);
+                let name = QualifiedName::new(namespace, &a.id_name)
+                    .map_err(|e| format!("library id {}: {e}", a.id))?;
+                if entries.iter().any(|(_, existing)| *existing == name) {
+                    return Err(format!("duplicate library id_name: {:?}", a.id_name));
+                }
+                let kernel = LibraryKernel::from_name(&a.kernel).ok_or_else(|| {
+                    format!("library {name} names unknown kernel '{}'", a.kernel)
+                })?;
+                let mut graph = Graph::of_kind(GraphKind::Library);
+                graph.boundary = a.boundary;
+                registry.insert(id, graph);
+                kernels.insert(id, kernel);
+                entries.push((id, name));
             }
-            let id = LibraryGraphId(a.id);
-            let name = QualifiedName::new(namespace, &a.id_name)
-                .map_err(|e| format!("library id {}: {e}", a.id))?;
-            if entries.iter().any(|(_, existing)| *existing == name) {
-                return Err(format!("duplicate library id_name: {:?}", a.id_name));
-            }
-            let kernel = LibraryKernel::from_name(&a.kernel).ok_or_else(|| {
-                format!("library {name} names unknown kernel '{}'", a.kernel)
-            })?;
-            let mut graph = Graph::of_kind(GraphKind::Library);
-            graph.boundary = a.boundary;
-            registry.insert(id, graph);
-            kernels.insert(id, kernel);
-            entries.push((id, name));
         }
         Ok(Self { registry, kernels, entries })
     }
 
-    /// Load every `*.library.json` in `dir`, ordered by filename for
-    /// determinism, naming them in `namespace`.
-    pub fn load_from_dir(dir: &std::path::Path, namespace: &str) -> Result<Self, String> {
-        let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.to_string_lossy().ends_with(".library.json"))
-            .collect();
-        paths.sort();
-        let mut assets = Vec::new();
-        for path in paths {
-            let text =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let asset: LibraryAsset =
-                serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-            assets.push(asset);
-        }
-        Self::from_assets(assets, namespace)
+    /// The engine package's libraries alone.
+    pub fn engine() -> Self {
+        Self::from_sets(vec![(ENGINE_NAMESPACE, engine_assets())])
+            .expect("the engine package's libraries are valid")
     }
 
-    /// Hand-authored fallback, kept in sync with the shipped assets (locked by a
-    /// test), named in `namespace` like a loaded set.
-    pub fn load_initial(namespace: &str) -> Self {
-        let assets = vec![
-            LibraryAsset {
-                id: 0,
-                id_name: "biome_border_fade".into(),
-                boundary: GraphBoundary {
-                    inputs: vec![
-                        BoundaryPort::new("distance", PinType::SurfaceField),
-                        BoundaryPort::new("radius", PinType::Scalar),
-                    ],
-                    outputs: vec![BoundaryPort::new("weight", PinType::SurfaceField)],
-                },
-                kernel: "biome_border_fade".into(),
-            },
-            LibraryAsset {
-                id: 1,
-                id_name: "standard_cave_noise".into(),
-                boundary: GraphBoundary {
-                    inputs: vec![BoundaryPort::new("position", PinType::Vec3)],
-                    outputs: vec![BoundaryPort::new("density", PinType::Density)],
-                },
-                kernel: "standard_cave_noise".into(),
-            },
-            LibraryAsset {
-                id: 2,
-                id_name: "surface_layering".into(),
-                boundary: GraphBoundary {
-                    inputs: vec![BoundaryPort::new("density", PinType::Density)],
-                    outputs: vec![BoundaryPort::new("material", PinType::Material)],
-                },
-                kernel: "surface_layering".into(),
-            },
-            LibraryAsset {
-                id: 3,
-                id_name: "exposure_layering".into(),
-                boundary: GraphBoundary {
-                    inputs: vec![
-                        BoundaryPort::new("base_material", PinType::Material),
-                        BoundaryPort::new("cap_material", PinType::Material),
-                        BoundaryPort::new("exposure", PinType::Scalar),
-                        BoundaryPort::new("threshold", PinType::Scalar),
-                    ],
-                    outputs: vec![BoundaryPort::new("material", PinType::Material)],
-                },
-                kernel: "exposure_layering".into(),
-            },
-            LibraryAsset {
-                id: 4,
-                id_name: "poisson_placement".into(),
-                boundary: GraphBoundary {
-                    inputs: Vec::new(),
-                    outputs: vec![BoundaryPort::new("points", PinType::Positions)],
-                },
-                kernel: "poisson_placement".into(),
-            },
-        ];
-        Self::from_assets(assets, namespace).expect("built-in library set is valid")
+    /// The engine package's libraries, then those authored in `dir`, named in
+    /// `namespace`. A missing `dir` authors none.
+    pub fn load(dir: &Path, namespace: &str) -> Result<Self, String> {
+        let authored = read_assets(dir)?;
+        Self::from_sets(vec![(ENGINE_NAMESPACE, engine_assets()), (namespace, authored)])
     }
 }
 
-/// Directory holding authored library assets.
+/// The engine package's libraries: one per [`LibraryKernel`], in
+/// [`LibraryKernel::ALL`]'s order, named for its kernel and declaring the
+/// boundary the kernel gives.
+fn engine_assets() -> Vec<LibraryAsset> {
+    LibraryKernel::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, k)| LibraryAsset {
+            id: i as u32,
+            id_name: k.name().into(),
+            boundary: k.boundary(),
+            kernel: k.name().into(),
+        })
+        .collect()
+}
+
+/// Every `*.library.json` in `dir`, ordered by file name for determinism. A
+/// missing directory holds none: a package need not author libraries.
+fn read_assets(dir: &Path) -> Result<Vec<LibraryAsset>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.to_string_lossy().ends_with(".library.json"))
+        .collect();
+    paths.sort();
+    let mut assets = Vec::new();
+    for path in paths {
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let asset: LibraryAsset =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        assets.push(asset);
+    }
+    Ok(assets)
+}
+
+/// Directory holding the package's authored library assets.
 pub fn libraries_dir() -> PathBuf {
     crate::paths::content_root().join("libraries")
 }
 
-/// Load the shared library set: dir-scan primary, `load_initial` fallback.
+/// Load the library set: the engine package's, then the package's own.
 ///
-/// Never fails - a missing or invalid asset directory is logged at error level
-/// and the hand-authored fallback set is used instead.
+/// Never fails - an invalid asset directory is logged at error level and the
+/// engine package's libraries are used alone.
 pub fn load_libraries() -> Arc<LoadedLibraries> {
     let dir = libraries_dir();
-    let namespace = crate::paths::namespace();
-    match LoadedLibraries::load_from_dir(&dir, namespace) {
+    match LoadedLibraries::load(&dir, crate::paths::namespace()) {
         Ok(libs) => {
             log::info!(
-                "Loaded {} libraries ({} kernels) from {}",
+                "Loaded {} libraries ({} kernels): the engine's and {}",
                 libs.registry.len(),
                 libs.kernels.len(),
                 dir.display()
@@ -229,10 +200,10 @@ pub fn load_libraries() -> Arc<LoadedLibraries> {
         }
         Err(e) => {
             log::error!(
-                "Failed to load libraries from {}: {e}. Falling back to built-in set.",
+                "Failed to load libraries from {}: {e}. Using the engine's alone.",
                 dir.display()
             );
-            Arc::new(LoadedLibraries::load_initial(namespace))
+            Arc::new(LoadedLibraries::engine())
         }
     }
 }
@@ -251,8 +222,7 @@ impl std::ops::Deref for LibrariesRes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodegraph_ir::{LibraryGraphRef, LibraryRefParams};
-    use voxel_core::ENGINE_NAMESPACE;
+    use nodegraph_ir::{LibraryGraphRef, LibraryRefParams, PinType};
 
     fn asset(id: u32, id_name: &str, kernel: &str) -> LibraryAsset {
         LibraryAsset {
@@ -265,7 +235,7 @@ mod tests {
 
     #[test]
     fn loads_and_binds_kernel() {
-        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
+        let libs = LoadedLibraries::engine();
         assert_eq!(libs.kernels.len(), 5);
         let id = LibraryGraphId(0);
         assert_eq!(libs.kernels.get(&id), Some(&LibraryKernel::BiomeBorderFade));
@@ -277,8 +247,27 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_libraries_keep_their_ids() {
+        let libs = LoadedLibraries::engine();
+        let names: Vec<String> = libs.entries.iter().map(|(_, n)| n.to_string()).collect();
+        assert_eq!(
+            names,
+            [
+                "voxulacrum:biome_border_fade",
+                "voxulacrum:standard_cave_noise",
+                "voxulacrum:surface_layering",
+                "voxulacrum:exposure_layering",
+                "voxulacrum:poisson_placement",
+            ]
+        );
+        for (i, (id, _)) in libs.entries.iter().enumerate() {
+            assert_eq!(*id, LibraryGraphId(i as u32));
+        }
+    }
+
+    #[test]
     fn library_ref_resolves_against_loaded_registry() {
-        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
+        let libs = LoadedLibraries::engine();
         let mut g = Graph::new();
         let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
             library: LibraryGraphRef::new("biome_border_fade"),
@@ -294,10 +283,10 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].name, "weight");
     }
-    
+
     #[test]
     fn a_library_name_resolves_to_its_id() {
-        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
+        let libs = LoadedLibraries::engine();
         let mut g = Graph::new();
         let n = g.add_node(NodeKind::LibraryRef(LibraryRefParams {
             library: LibraryGraphRef::new("standard_cave_noise"),
@@ -307,75 +296,69 @@ mod tests {
         let NodeKind::LibraryRef(p) = &g.nodes[n].kind else { unreachable!() };
         assert_eq!(p.library.id(), Some(LibraryGraphId(1)));
     }
-    
+
     #[test]
-    fn every_unknown_library_is_reported() {
-        let libs = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
+    fn package_content_names_engine_libraries_by_qualified_name() {
+        let libs = LoadedLibraries::engine();
         let mut g = Graph::new();
-        for name in ["no_such_library", "Bad Name"] {
-            g.add_node(NodeKind::LibraryRef(LibraryRefParams {
-                library: LibraryGraphRef::new(name),
-                resolved: None,
-            }));
-        }
-        let problems = libs.resolve_refs(&mut g, ENGINE_NAMESPACE).unwrap_err();
-        assert_eq!(problems.len(), 2, "{problems:?}")
+        g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+            library: LibraryGraphRef::new("voxulacrum:standard_cave_noise"),
+            resolved: None,
+        }));
+        libs.resolve_refs(&mut g, "demo").expect("a qualified name reaches the engine package");
+        g.add_node(NodeKind::LibraryRef(LibraryRefParams {
+            library: LibraryGraphRef::new("standard_cave_noise"),
+            resolved: None,
+        }));
+        let problems = libs.resolve_refs(&mut g, "demo").unwrap_err();
+        assert_eq!(problems, ["library demo:standard_cave_noise is not loaded"]);
+    }
+
+    #[test]
+    fn a_package_library_loads_after_the_engine_libraries_in_its_own_namespace() {
+        let libs = LoadedLibraries::from_sets(vec![
+            (ENGINE_NAMESPACE, engine_assets()),
+            ("demo", vec![asset(0, "poisson_placement", "poisson_placement")]),
+        ])
+            .unwrap();
+        let own = QualifiedName::new("demo", "poisson_placement").unwrap();
+        let engine = QualifiedName::new(ENGINE_NAMESPACE, "poisson_placement").unwrap();
+        assert_eq!(libs.resolve(&own), Some(LibraryGraphId(5)));
+        assert_eq!(libs.resolve(&engine), Some(LibraryGraphId(4)));
+    }
+
+    #[test]
+    fn a_package_without_a_libraries_directory_has_the_engine_libraries() {
+        let dir = std::env::temp_dir().join(format!("voxulacrum-no-libraries-{}", std::process::id()));
+        let libs = LoadedLibraries::load(&dir, "demo").unwrap();
+        assert_eq!(libs.entries.len(), LibraryKernel::ALL.len());
     }
 
     #[test]
     fn non_contiguous_ids_rejected() {
         let assets = vec![asset(0, "a", "biome_border_fade"), asset(2, "b", "biome_border_fade")];
-        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        let err = LoadedLibraries::from_sets(vec![("demo", assets)]).expect_err("must refuse");
         assert!(err.contains("contiguous"), "{err}");
     }
 
     #[test]
     fn unknown_kernel_rejected() {
         let assets = vec![asset(0, "x", "does_not_exist")];
-        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        let err = LoadedLibraries::from_sets(vec![("demo", assets)]).expect_err("must refuse");
         assert!(err.contains("does_not_exist"), "{err}");
     }
 
     #[test]
     fn duplicate_names_rejected() {
         let assets = vec![asset(0, "a", "biome_border_fade"), asset(1, "a", "biome_border_fade")];
-        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        let err = LoadedLibraries::from_sets(vec![("demo", assets)]).expect_err("must refuse");
         assert!(err.contains("duplicate"), "{err}");
     }
 
     #[test]
     fn a_name_that_is_not_a_name_is_rejected() {
         let assets = vec![asset(0, "Cave Noise", "standard_cave_noise")];
-        let err = LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect_err("must refuse");
+        let err = LoadedLibraries::from_sets(vec![("demo", assets)]).expect_err("must refuse");
         assert!(err.contains("Cave Noise"), "{err}");
-    }
-
-    #[test]
-    fn fallback_matches_shipped_asset() {
-        // The built-in fallback must match the authored file so the two never drift.
-        let shipped = [
-            include_str!("../../../packages/sandbox/libraries/biome_border_fade.library.json"),
-            include_str!("../../../packages/sandbox/libraries/standard_cave_noise.library.json"),
-            include_str!("../../../packages/sandbox/libraries/surface_layering.library.json"),
-            include_str!("../../../packages/sandbox/libraries/exposure_layering.library.json"),
-            include_str!("../../../packages/sandbox/libraries/poisson_placement.library.json"),
-        ];
-        let assets: Vec<LibraryAsset> = shipped
-            .iter()
-            .map(|s| serde_json::from_str(s).expect("asset JSON valid"))
-            .collect();
-        let from_files =
-            LoadedLibraries::from_assets(assets, ENGINE_NAMESPACE).expect("assets valid");
-        let initial = LoadedLibraries::load_initial(ENGINE_NAMESPACE);
-        assert_eq!(from_files.kernels, initial.kernels);
-        assert_eq!(from_files.entries, initial.entries, "names drifted");
-        for id in 0u32..5 {
-            let gid = LibraryGraphId(id);
-            assert_eq!(
-                from_files.registry.get(gid).unwrap().boundary,
-                initial.registry.get(gid).unwrap().boundary,
-                "shipped asset {id} boundary drifted from load_initial"
-            );
-        }
     }
 }

@@ -161,7 +161,7 @@
       "value": {
         "kind": {
           "type": "LibraryRef",
-          "library": "standard_cave_noise"
+          "library": "voxulacrum:standard_cave_noise"
         },
         "position": [
           246.10802,
