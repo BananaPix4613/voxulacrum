@@ -18,7 +18,7 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Engine/game boundary
 
-Milestone M2, in progress: B1–B5, B6a and B6b are merged, and B6c and B7 remain.
+Milestone M2, in progress: B1–B6 are merged, and B7 remains.
 The engine is separating from the game that grew inside it. It is now a library
 behind a facade crate, the world it ships and a testbed project both load as
 packages, and content names everything it references rather than numbering it.
@@ -36,25 +36,37 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   crate left off the list is treated as a consumer.
 - **The testbed** (B4, #10) — `crates/testbed`, a flat world with test materials
   that depends only on the facade. It is the boundary check's first consumer.
-- **Packages** (B4, #10; B6a, #74; B6b, #75) — `RunOptions::package(root)` starts the
-  world of a data-only package: a directory with a `package.ron` manifest beside
-  its content (graphs, materials, prefabs, libraries, blueprints, species,
-  foliage). The manifest declares the package's id, its save directory under
-  `saves/` (the id unless `saves` names another, so a second world never opens
-  another's save), plus its content namespace, version, kind, the engine versions it
-  supports (a Cargo-style requirement such as `^0.4`), its world and its
-  dependencies. A package that needs a different engine, declares code modules
-  or names no world stops startup with a message saying why. Dependencies are
-  validated but not loaded yet. Shaders, palettes, input bindings and presets
-  stay with the engine.
+- **Packages** (B4, #10; B6a, #74; B6b, #75; B6c, #76) —
+  `RunOptions::package(root)` starts the world of a data-only package: a
+  directory with a `package.ron` manifest beside its content (graphs, materials,
+  prefabs, libraries, blueprints, species, foliage). The manifest declares the
+  package's id, its save directory under `saves/` (the id unless `saves` names
+  another, so a second world never opens another's save), plus its content
+  namespace, version, kind, the engine versions it supports (a Cargo-style
+  requirement such as `^0.4`), its world and its dependencies. A package that
+  needs a different engine, declares code modules or names no world stops
+  startup with a message saying why. Dependencies load from `packages/<id>/`
+  before the packages that need them, in dependency order and then by id. A
+  dependency that is missing, the wrong version, part of a cycle, shares another
+  package's namespace, or ships `materials.ron`, `prefabs.ron` or `foliage.ron`
+  stops startup too. A qualified name reaches into any loaded package for
+  libraries, blueprints and species; materials, prefabs and foliage come from
+  the world's own package until saves carry a registry mapping (D3, M4).
+  Shaders, palettes, input bindings and presets stay with the engine.
 - **The sandbox package** (B6b, #75) — the world that shipped in `assets/` is
   now `packages/sandbox/`, a package like any other, with id and namespace
   `sandbox`. `run()` starts it through the same loader as any other package, and
   its manifest sets `saves: "default"` so existing saves keep opening.
+- **The engine package** (B6c, #76) — a built-in package, `voxulacrum`, that
+  declares one library per engine kernel, beside the kernels themselves. Every
+  package loads after it, so content names `voxulacrum:standard_cave_noise`
+  instead of shipping its own copy of the declaration. Its id and namespace are
+  reserved, and a package may depend on it to state the engine versions it
+  supports.
 - **Namespaced registry identity** (B5a, #66) — every registry entry is
   `namespace:name`. A package's namespace is the one its manifest declares, or
-  its id: the sandbox world's is `sandbox` (B6b), and `voxulacrum` is kept for
-  the engine's own. A bare name in content resolves in its own namespace.
+  its id: the sandbox world's is `sandbox` (B6b), and `voxulacrum` is the engine
+  package's (B6c). A bare name in content resolves in its own namespace.
 - **`foliage.ron`** (B5d, #69) — detail layers with the species in each, and
   scatter types. Species colors reach the shader as data instead of a hardcoded
   switch in `detail_paint.wgsl`.
@@ -97,6 +109,10 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   archives ship `packages/` beside the executable, and one started without
   `packages/sandbox/package.ron` stops with an error instead of running on the
   tables compiled into the binary.
+- **Libraries come from the engine package** (B6c, #76). The sandbox's five
+  `.library.json` files, the testbed's copy of `poisson_placement` and the
+  hand-written fallback set are gone. A package's `libraries/` is optional; its
+  entries load after the engine's, with ids assigned in load order.
 
 ### Fixed
 
@@ -123,6 +139,13 @@ generation hash is unchanged at `0xed02babdf0f40420`.
   across. `regen_example` and `watch_demo` default to `packages/sandbox/graphs`.
   A qualified name that reached the shipped world as `voxulacrum:<name>` is now
   `sandbox:<name>`.
+- **Libraries** (B6c): a package no longer declares the engine's libraries.
+  Delete copies of the standard `.library.json` files, and write `LibraryRef`
+  names as `voxulacrum:<name>`. A bare name resolves in the package's own
+  namespace, so it fails unless the package declares that library itself. A
+  package can't use `voxulacrum` as its id or namespace. A dependency's
+  blueprint resolves its bare material names in its own namespace, so until
+  dependencies can ship materials (D3), it qualifies them.
 
 ---
 

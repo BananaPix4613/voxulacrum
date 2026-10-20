@@ -32,32 +32,47 @@ pub fn presets_dir() -> PathBuf {
     asset_root().join("params")
 }
 
-/// The package this run's world comes from. Set once by `app::run_with`, before
-/// anything reads content. Code that reads content without going through
-/// `run_with`, such as the tests, gets the default package, loaded on first use.
-static PACKAGE: OnceLock<Package> = OnceLock::new();
+/// The package this run loads, in load order, the world's own last. Set once
+/// by `app::run_with`, before anything reads content. Code that reads content
+/// without going through `run_with`, such as the tests, gets the default
+/// package's, loaded on first use.
+static PACKAGES: OnceLock<Vec<Package>> = OnceLock::new();
+
+/// Directory dependencies are found in: one package per directory, named for
+/// its id.
+pub fn packages_dir() -> PathBuf {
+    asset_root().join("packages")
+}
 
 /// Directory of the package the engine starts when no other is named: the
 /// shipped sandbox world.
 pub fn default_package_root() -> PathBuf {
-    asset_root().join("packages").join("sandbox")
+    packages_dir().join("sandbox")
 }
 
-/// Load content from `package`, and keep this world's saves in its save
-/// directory. Called once, at startup, before any content is read.
-pub fn set_package(package: Package) {
-    if PACKAGE.set(package).is_err() {
-        panic!("the package is set once, at startup");
+/// Load content from `packages`, in [`Package::load_order`]'s order, and keep
+/// this world's saves in the last one's save directory. Called once, at
+/// startup, before any content is read.
+pub fn set_packages(packages: Vec<Package>) {
+    if PACKAGES.set(packages).is_err() {
+        panic!("the packages are set once, at startup");
     }
 }
 
-/// The package this run's world comes from, loading the default package if
-/// none was set.
-fn package() -> &'static Package {
-    PACKAGE.get_or_init(|| {
+/// Every package this run loads, in load order, the world's own last. Loads
+/// the default package and its dependencies if none was set.
+pub fn packages() -> &'static [Package] {
+    PACKAGES.get_or_init(|| {
         let root = default_package_root();
-        Package::load(&root).unwrap_or_else(|e| panic!("the default package at {}: {e}", root.display()))
+        Package::load(&root)
+            .and_then(|package| Package::load_order(package, &packages_dir()))
+            .unwrap_or_else(|e| panic!("the default package at {}: {e}", root.display()))
     })
+}
+
+/// The package this run's world comes from.
+fn package() -> &'static Package {
+    packages().last().expect("the load order ends with the world's own package")
 }
 
 /// Directory holding world content: graphs, materials, prefabs, libraries,
@@ -98,7 +113,7 @@ mod tests {
         assert!(dir.starts_with(asset_root()), "{dir:?} is not under the asset root");
     }
 
-    // No test calls `set_package`: the setting is process-wide, and the other
+    // No test calls `set_packages`: the setting is process-wide, and the other
     // tests read the sandbox package through these same paths.
     #[test]
     fn no_package_set_is_the_sandbox_package() {

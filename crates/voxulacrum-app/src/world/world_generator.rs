@@ -740,14 +740,14 @@ fn read_graph(path: &std::path::Path) -> Result<Graph, String> {
     let registry = crate::materials::load_registry();
     nodegraph_hotreload::resolve_blueprints(
         &mut graph,
-        &crate::world::blueprint::blueprint_dir(),
+        &crate::world::blueprint::blueprint_dirs(),
         &registry,
         crate::paths::namespace(),
     )
     .map_err(|e| format!("{}: {e}", path.display()))?;
     nodegraph_hotreload::resolve_species(
         &mut graph,
-        &crate::world::blueprint::species_dir(),
+        &crate::world::blueprint::species_dirs(),
         &registry,
         crate::paths::namespace(),
     )
