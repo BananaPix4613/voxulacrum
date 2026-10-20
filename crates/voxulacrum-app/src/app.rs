@@ -127,7 +127,7 @@ pub fn compute_render_dimensions(
 // ECS initialization
 // ---------------------------------------------------------------------------
 
-fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>) -> (World, Schedule) {
+fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>, gpu: wgpu::PowerPreference) -> (World, Schedule) {
     let mut ecs = World::new();
 
     // --- wgpu initialization ---
@@ -139,11 +139,16 @@ fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>) -> (Wo
         .create_surface(window.clone())
         .expect("Failed to create surface");
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
+        power_preference: gpu,
         compatible_surface: Some(&surface),
         force_fallback_adapter: false,
     }))
     .expect("No suitable GPU adapter found");
+    // Named in the log and the Performance panel, so a reading always says
+    // which GPU it came from.
+    let info = adapter.get_info();
+    let gpu_label = format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend);
+    log::info!("GPU: {gpu_label}, from a {gpu:?} request");
 
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
@@ -488,7 +493,8 @@ fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>) -> (Wo
         Ok(graphs) => egui_renderer.graph_editor.load(manifest_path, graphs),
         Err(e) => log::error!("Failed to load editor graph hierarchy: {e}"),
     }
-    let ui_state = UiState::new(initial_params, presets_dir);
+    let mut ui_state = UiState::new(initial_params, presets_dir);
+    ui_state.gpu = gpu_label;
 
     // Meshing
     let mut meshing_pipeline = MeshingPipeline::new(&ui_state.params.mesh_cache);
@@ -630,15 +636,18 @@ struct App {
     exiting: bool,
     /// The world package's play settings, until the ECS world takes them.
     play: Option<crate::play::PlaySettings>,
+    /// The GPU power preference the command line asked for.
+    gpu: wgpu::PowerPreference,
 }
 
 impl App {
-    fn new(play: Option<crate::play::PlaySettings>) -> Self {
+    fn new(play: Option<crate::play::PlaySettings>, gpu: wgpu::PowerPreference) -> Self {
         Self {
             ecs_world: None,
             schedule: None,
             exiting: false,
             play,
+            gpu,
         }
     }
 }
@@ -661,7 +670,7 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        let (ecs_world, schedule) = init_ecs(window, self.play.take());
+        let (ecs_world, schedule) = init_ecs(window, self.play.take(), self.gpu);
         self.ecs_world = Some(ecs_world);
         self.schedule = Some(schedule);
         log::info!("ECS world initialized.");
@@ -957,6 +966,13 @@ pub fn run_with(options: RunOptions) {
     // `nodegraph_eval`'s schedule-thread evaluation guard for the same reason
     // the startup world fill is.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let gpu = match gpu_preference(&args) {
+        Ok(gpu) => gpu,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
     if let Some(code) = validate::run_from_args(&args) {
         std::process::exit(code);
     }
@@ -967,6 +983,52 @@ pub fn run_with(options: RunOptions) {
     log::info!("Voxulacrum engine starting...");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    let mut app = App::new(play);
+    let mut app = App::new(play, gpu);
     event_loop.run_app(&mut app).expect("Event loop failed");
+}
+
+
+/// The GPU power preference `--gpu <low-power|high-performance>` asks for:
+/// high performance unless the command line names the other. `low-power`
+/// picks the integrated GPU on a machine with two, for the minimum-spec
+/// baseline (roadmap §7.3).
+fn gpu_preference(args: &[String]) -> Result<wgpu::PowerPreference, String> {
+    let Some(i) = args.iter().position(|a| a == "--gpu") else {
+        return Ok(wgpu::PowerPreference::HighPerformance);
+    };
+    match args.get(i + 1).map(String::as_str) {
+        Some("high-performance") => Ok(wgpu::PowerPreference::HighPerformance),
+        Some("low-power") => Ok(wgpu::PowerPreference::LowPower),
+        Some(other) => Err(format!("--gpu takes `low-power` or `high-performance`, not {other:?}")),
+        None => Err("--gpu takes `low-power` or `high-performance`".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(text: &str) -> Vec<String> {
+        text.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn the_gpu_defaults_to_high_performance() {
+        assert_eq!(gpu_preference(&args("--validate-graphs")), Ok(wgpu::PowerPreference::HighPerformance));
+    }
+
+    #[test]
+    fn the_gpu_flag_picks_a_power_preference() {
+        assert_eq!(gpu_preference(&args("--gpu low-power")), Ok(wgpu::PowerPreference::LowPower));
+        assert_eq!(
+            gpu_preference(&args("--verify-generation 64 --gpu high-performance")),
+            Ok(wgpu::PowerPreference::HighPerformance)
+        );
+    }
+
+    #[test]
+    fn a_gpu_flag_without_a_known_value_is_refused() {
+        assert!(gpu_preference(&args("--gpu fast")).unwrap_err().contains("\"fast\""));
+        assert!(gpu_preference(&args("--gpu")).is_err());
+    }
 }

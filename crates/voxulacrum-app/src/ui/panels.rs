@@ -21,6 +21,8 @@ pub struct UiState {
     pub selected_preset: usize,
     pub save_name: String,
     pub selected_keyframe: usize,
+    /// The GPU this run renders on: name, device type and backend.
+    pub gpu: String,
     pub fps: f32,
     pub frame_time_ms: f32,
     /// Frames whose CPU work exceeded the budget in the last completed second.
@@ -110,6 +112,7 @@ impl UiState {
             selected_preset: 0,
             save_name: "default".into(),
             selected_keyframe: 0,
+            gpu: String::new(),
             fps: 0.0,
             frame_time_ms: 0.0,
             over_budget_frames: 0,
@@ -1020,6 +1023,7 @@ fn draw_meshing_section(
 fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
     if !state.params.debug.show_performance { return; }
     ui.collapsing("Performance", |ui| {
+        ui.label(format!("GPU: {}", state.gpu));
         ui.label(format!("FPS: {:.0}", state.fps));
         ui.label(format!(
             "CPU worst: {:.1}ms / {:.1} budget — {} frames over",
