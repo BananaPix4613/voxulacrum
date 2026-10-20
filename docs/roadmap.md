@@ -569,7 +569,7 @@ Keys are never reused. The D workstream's work items (D1–D11) are a separate s
 | Milestone | Items | Issues |
 |---|-------|--------|
 | M1 Clean slate | F1–F7 | #1–#6, #60 |
-| M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6 (steps B6a–B6c), B7 | #7–#13, #66–#69, #74–#76 |
+| M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6 (steps B6a–B6c), B7, T2 | #7–#13, #66–#69, #74–#76, #85 |
 | M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6, B8, B9 | #14–#22, #80, #81 |
 | M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11 | #23–#36 |
 | M5 Playable on the new data | V1–V8, S1, S2, E1, E2, T1 | #37–#47, #82, #83 |
@@ -685,13 +685,13 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [x] 0.4.0 tagged on `master`; fixes released as a patch
 
 ### M2 — Engine/game boundary
-**Contains:** B1–B7. **Needs:** nothing.
+**Contains:** B1–B7, T2. **Needs:** nothing.
 **Non-goals:** format changes, rendering features, transport.
 - [x] Games and the testbed depend only on the facade crate (CI-enforced)
 - [x] The testbed and the reference world load as data-only packages
 - [x] The game repository builds against the facade through a local `[patch]`
 - [x] Registries are namespaced in memory
-- [ ] Integrated-GPU baseline recorded in `perf-baseline.md`
+- [x] Integrated-GPU baseline recorded in `perf-baseline.md`
 
 ### M3 — Runtime spine
 **Contains:** R1–R6, B8, B9. **Needs:** B1, B2.

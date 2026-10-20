@@ -16,7 +16,9 @@ Getting this wrong invalidates the numbers, and it did once during 0.3.0 — see
 1. **Release build only.** `cargo run -p voxulacrum-app --bin voxulacrum-app --release`.
    The dev profile runs roughly 7× slower (0.3.0 measured 22 ms/frame against
    ~3 ms), so a debug reading is not a slow version of the truth, it is a
-   different number entirely.
+   different number entirely. Append `-- --gpu low-power` to run on the
+   integrated GPU of a machine with two; the Performance panel's first line
+   names the GPU every reading came from.
 2. **Let the view settle for 15+ seconds.** `FrameTimings` aggregates over a
    one-second window, so a reading taken right after a camera move reports the
    *fill*, not the resting state.
@@ -462,6 +464,102 @@ the cost in exactly the two spans greedy meshing would reduce.
 (2b–2d), mitigated where the cause was independent (2e). The remainder is not a
 streaming defect and is not fixed by bounding a phase; it is the meshing
 strategy, and it is decided — not implemented — at this version's exit.
+
+---
+
+## M2 — Integrated-GPU baseline
+
+**Measured:** 2026-10-20, branch `perf/integrated-gpu-baseline` (T2, #85),
+commit `cd49769`. The first reading on the minimum-spec graphics roadmap §7.3
+declares: the development laptop's integrated GPU, selected with
+`--gpu low-power`, beside the discrete GPU from the same build.
+
+### Hardware and build
+
+| | |
+|---|---|
+| Machine | Lenovo ThinkPad P16 Gen 3, as in 0.3.0 |
+| CPU | Intel Core Ultra 7 155H (20 usable worker threads) |
+| Discrete GPU | NVIDIA RTX 500 Ada Generation Laptop GPU, Vulkan (the default) |
+| Integrated GPU | Intel(R) Graphics as wgpu names it, the 155H's own, Vulkan (`--gpu low-power`) |
+| Window | 1280×720, the launch size; display 60 Hz |
+| Power | Windows Balanced power mode |
+| Build | release: `opt-level = 3`, `lto = "thin"`, `codegen-units = 1` |
+| Present mode | `Fifo` (vsync) |
+| World | the sandbox package from launch; no camera movement but zoom |
+
+### Readings at rest
+
+One reading per column, each taken after 15+ seconds with `0/20 threads busy`,
+`missing 0` and `in-flight 0`. r=9 is the launch zoom; r=14 is `zoom_max`, the
+widest supported radius. The r=9 fill is the startup fill; the r=14 fill is the
+zoom-out from r=9.
+
+| | discrete, r=9 | integrated, r=9 | discrete, r=14 | integrated, r=14 |
+|---|---|---|---|---|
+| FPS | 62 | 61 | 60 | **31** |
+| CPU worst | 8.2 ms | 7.5 ms | 10.7 ms | 15.7 ms |
+| Present mean | 10.7 ms | 11.0 ms | 9.3 ms | **20.0 ms** |
+| Wall worst | 50.9 ms | 19.0 ms | 33.2 ms | 35.8 ms |
+| `render` mean / max | 12.92 / 47.84 | 13.36 / 15.14 | 13.38 / 29.23 | 27.79 / 32.54 |
+| `sim` mean / max | 3.19 / 5.90 | 2.89 / 5.00 | 2.90 / 4.26 | 3.63 / 5.36 |
+| Resident chunks | 420 | 420 | 1,220 | 1,220 |
+| Chunks visible / total | 67 / 124 | 67 / 124 | 283 / 412 | 283 / 412 |
+| Triangles | 315.7 K | 315.7 K | 1.3 M | 1.3 M |
+| Fill | 1,143 ms / 248 chunks | 1,117 ms / 248 chunks | **3,383 ms / 641 chunks** | **3,372 ms / 585 chunks** |
+| Frontier CPU worst | 38.5 ms (1 of 68 over) | 42.9 ms (1 of 65) | 45.4 ms (5 of 322) | **98.3 ms (20 of 238)** |
+| Frontier worst frame | `mesh 11.1 + render 25.4` | `mesh 26.7 + render 22.0` | `mesh 23.6 + render 18.9` | `mesh 32.6 + render 62.7` |
+| Memory | 5.8 MB CPU + 37.7 MB GPU | same | 27.6 MB CPU + 120.9 MB GPU | same |
+
+**At the launch zoom the integrated GPU keeps up.** Both GPUs hold vsync, CPU
+work is under half the budget, and the ~11 ms present mean on both is the CPU
+idling for vblank, not waiting on the GPU.
+
+**At the widest supported zoom the integrated GPU is the limit.** It drops to
+31 fps with a 20.0 ms present mean in a ~32 ms frame: the CPU finishes its work
+and waits for the GPU. Under `Fifo` a frame that misses one vblank waits for
+the next, so 31 fps says only that the integrated GPU's frame takes between
+16.7 and 33.3 ms. Nothing in this build measures where in that range it falls.
+
+**CPU work also rises on the integrated GPU at r=14, unattributed.** CPU worst
+is 15.7 ms against 10.7, and `render` minus the present block is ~7.8 ms against
+~4.1. Two plausible causes are the Intel driver's draw-recording cost, and the
+CPU and the integrated GPU sharing one package power budget under Balanced
+mode. Neither is tested.
+
+**Two breaches are not the integrated GPU's.** Fill at r=14 takes 3.4 s for
+~600 chunks on both GPUs, so it is generation-bound. The frontier breaches 33 ms
+on both, as recorded in 0.4.0. Its worst frame is the one place the integrated
+GPU makes things clearly worse: `render 62.7 ms` against 18.9.
+
+### §7.3 budget status on the integrated GPU
+
+Tracked, not gating until M5.
+
+| Budget | Target | Integrated GPU | Status |
+|---|---|---|---|
+| Minimum spec frame rate | 30 fps at reduced settings | 61 fps at r=9, 31 fps at r=14, at default settings | **meets it at r=14 with no margin**; reduced settings don't exist yet (V2) |
+| Frame CPU | 16.6 ms | 15.7 ms at r=14 | pass, 6 % margin |
+| Streaming fill | < 2 s after camera rest | 3.4 s at r=14 | **breach**, on both GPUs |
+| Frontier worst | < 33 ms | 98.3 ms at r=14 | **breach**, on both GPUs; 2× worse here |
+
+### Not compared with 0.4.0
+
+The jobs panel read `generate` 60–79 ms mean here, against 0.4.0's 9.3 ms, and
+the fills above are far slower per chunk than 0.4.0's 286 ms for 116 chunks.
+These readings are startup fills and a single zoom-out, the kind 0.4.0 calls
+reading **A** and does not treat as representative. 0.4.0's figures are reading
+**B**, taken after a three-minute pan. A reading B on the current sandbox comes
+before calling the difference a regression.
+
+### Carried forward
+
+- **GPU time.** Under `Fifo` the panel can only bound the GPU's frame time. GPU
+  timestamp queries, shown beside `CPU worst`, would measure it.
+- **A reading B on the current sandbox**, to settle whether `generate` and fill
+  regressed since 0.4.0, or whether this section only caught startup costs.
+- **The integrated GPU's extra CPU work** at r=14, once GPU time can be
+  separated from it.
 
 ---
 
