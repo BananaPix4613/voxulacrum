@@ -178,3 +178,13 @@ Open `type:defect` issues at the cut: none.
 | Tooling-maturity tables | `roadmap.md` §4: the facade check and the testbed preview scene shipped; GPU selection added |
 | Open-defect list triaged | none open; seven candidates filed (§7) |
 | Annotated tag pushed on `master` | `v0.5.0`, by the maintainer |
+
+## 9. Addendum: the first release run
+
+The `v0.5.0` tag's release run failed both builds at **Verify package layout**:
+`missing packages/sandbox/libraries`. B6b had added that path to the check, and
+B6c then deleted the directory when the engine package took over the library
+declarations. Nothing runs the check before a tag, which §6 already recorded as
+unverified. The check now lists `packages/sandbox/play.ron` in its place, and the
+release was rebuilt from `master` through the workflow's manual run, attached to
+the existing `v0.5.0` tag; the engine code is the same at both commits.

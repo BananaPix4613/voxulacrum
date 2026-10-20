@@ -106,7 +106,7 @@ jobs:
           fail=0
           for p in shaders palettes assets/input.ron \
                    packages/sandbox/package.ron packages/sandbox/graphs \
-                   packages/sandbox/libraries packages/sandbox/materials.ron \
+                   packages/sandbox/play.ron packages/sandbox/materials.ron \
                    packages/sandbox/prefabs.ron \
                    LICENSE THIRD-PARTY-NOTICES.md assets/LICENSE; do
             if [ ! -e "$d/$p" ]; then echo "::error::missing $p"; fail=1; fi
