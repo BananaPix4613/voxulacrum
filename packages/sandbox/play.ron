@@ -1,6 +1,7 @@
 // Play settings for the sandbox: the player's body, movement and reach, in
-// voxels and seconds. These are the values the engine used to hardcode, so the
-// sandbox plays as it did.
+// voxels and seconds; where Play starts; and the build tool. These are the
+// values and choices the engine used to hardcode, so the sandbox plays as it
+// did.
 (
     player: (
         half_width: 0.3,
@@ -12,4 +13,20 @@
         step_height: 1.0,
         reach: 4.5,
     ),
+    spawn: SurfaceUnderCamera,
+    hud: true,
+    build: Some((
+        materials: [
+            "limestone",
+            "granite",
+            "soil",
+            "clay",
+            "sand",
+            "grass_soil",
+            "water",
+            "gravel",
+            "wood",
+            "leaves",
+        ],
+    )),
 )

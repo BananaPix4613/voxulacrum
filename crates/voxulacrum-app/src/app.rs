@@ -929,7 +929,7 @@ pub fn run_with(options: RunOptions) {
     for d in dependencies {
         log::info!("Dependency {} {} from {}", d.manifest.id, d.manifest.version, d.root.display());
     }
-    let play = match crate::play::PlaySettings::load(&world.root) {
+    let mut play = match crate::play::PlaySettings::load(&world.root) {
         Ok(play) => play,
         Err(e) => {
             eprintln!("error: {e}");
@@ -940,7 +940,14 @@ pub fn run_with(options: RunOptions) {
         log::info!("{} has no {}: Play mode is off", m.id, crate::play::PLAY_FILE);
     }
     paths::set_packages(packages);
-    
+    if let Some(play) = &mut play {
+        let registry = crate::materials::load_registry();
+        if let Err(e) = play.resolve_materials(&registry, paths::namespace()) {
+            eprintln!("error: {}: {e}", paths::content_root().join(crate::play::PLAY_FILE).display());
+            std::process::exit(1);
+        }
+    }
+
     // Headless determinism check for CI (`--verify-generation [N] [--seed S]`).
     // Handled before the event loop exists, so this path never creates a window
     // or a GPU device - and, being outside the frame schedule, it is exempt from

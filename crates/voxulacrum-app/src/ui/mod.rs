@@ -163,9 +163,7 @@ impl EguiRenderer {
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
         window: &winit::window::Window,
-        mode: crate::world::mutation::EngineMode,
-        material_name: &str,
-        material_color: [f32; 3],
+        play_hud: Option<(&str, [f32; 3])>,
     ) {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
@@ -211,7 +209,7 @@ impl EguiRenderer {
                 let tex = self.map_texture.as_ref().map(|(_, h)| h);
                 biome_map::draw_window(ctx, &mut ui_state.biome_map, tex);
             }
-            if mode == crate::world::mutation::EngineMode::Play {
+            if let Some((material_name, material_color)) = play_hud {
                 panels::draw_play_hud(ctx, material_name, material_color);
             }
         });

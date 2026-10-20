@@ -106,12 +106,16 @@ pub fn player_mode_toggle_system(
     }
     match world.0.mode {
         EngineMode::Authoring => {
-            if play.is_none() {
+            let Some(play) = play else {
                 log::info!("This package has no {}, so it has no Play mode", crate::play::PLAY_FILE);
                 return;
-            }
+            };
             let cam = sim.camera.smooth_target;
-            let position = surface_spawn(&world.0, cam.x, cam.z).unwrap_or(cam);
+            let position = match play.spawn {
+                crate::play::SpawnRule::SurfaceUnderCamera => {
+                    surface_spawn(&world.0, cam.x, cam.z).unwrap_or(cam)
+                }
+            };
             let state = PlayerState { position, ..Default::default() };
             commands.spawn((Player { curr: state, prev: state }, PlayerInputBuffer::default()));
             world.0.mode = EngineMode::Play;
