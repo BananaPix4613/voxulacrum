@@ -3,12 +3,13 @@
 //! A library binds a typed [`GraphBoundary`] (its named inputs and outputs) to
 //! a native [`LibraryKernel`]. The engine package declares one library per
 //! kernel, in namespace `voxulacrum`, so content names them as
-//! `voxulacrum:<name>` and never repeats their declarations. A package may also
-//! author `libraries/*.library.json`, named in its own namespace, which load
-//! after the engine's. Loading builds a [`LibraryGraphRegistry`] (so a
-//! `LibraryRef` node resolves its pins from a library's boundary) alongside a
-//! per-id kernel map (so the computation can be invoked where a library's
-//! output is consumed). Ids are assigned in load order; nothing saved holds one.
+//! `voxulacrum:<name>` and never repeats their declarations. Each loaded
+//! package may also author `libraries/*.library.json`, named in its own
+//! namespace; they load after the engine's, in load order. Loading builds a
+//! [`LibraryGraphRegistry`] (so a `LibraryRef` node resolves its pins from a
+//! library's boundary) alongside a per-id kernel map (so the computation can
+//! be invoked where a library's output is consumed). Ids are assigned in load
+//! order; nothing saved holds one.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -130,11 +131,15 @@ impl LoadedLibraries {
             .expect("the engine package's libraries are valid")
     }
 
-    /// The engine package's libraries, then those authored in `dir`, named in
-    /// `namespace`. A missing `dir` authors none.
-    pub fn load(dir: &Path, namespace: &str) -> Result<Self, String> {
-        let authored = read_assets(dir)?;
-        Self::from_sets(vec![(ENGINE_NAMESPACE, engine_assets()), (namespace, authored)])
+    /// The engine package's libraries, then those authored in each of
+    /// `packages`, a `(libraries directory, namespace)` per package in load
+    /// order. A missing directory authors none.
+    pub fn load(packages: &[(PathBuf, &str)]) -> Result<Self, String> {
+        let mut sets = vec![(ENGINE_NAMESPACE, engine_assets())];
+        for (dir, namespace) in packages {
+            sets.push((*namespace, read_assets(dir)?));
+        }
+        Self::from_sets(sets)
     }
 }
 
@@ -177,32 +182,28 @@ fn read_assets(dir: &Path) -> Result<Vec<LibraryAsset>, String> {
     Ok(assets)
 }
 
-/// Directory holding the package's authored library assets.
-pub fn libraries_dir() -> PathBuf {
-    crate::paths::content_root().join("libraries")
-}
-
-/// Load the library set: the engine package's, then the package's own.
+/// Load the library set: the engine package's, then each loaded package's, in
+/// load order.
 ///
 /// Never fails - an invalid asset directory is logged at error level and the
 /// engine package's libraries are used alone.
 pub fn load_libraries() -> Arc<LoadedLibraries> {
-    let dir = libraries_dir();
-    match LoadedLibraries::load(&dir, crate::paths::namespace()) {
+    let packages: Vec<(PathBuf, &str)> = crate::paths::packages()
+        .iter()
+        .map(|p| (p.root.join("libraries"), p.manifest.namespace.as_str()))
+        .collect();
+    match LoadedLibraries::load(&packages) {
         Ok(libs) => {
             log::info!(
-                "Loaded {} libraries ({} kernels): the engine's and {}",
+                "Loaded {} libraries ({} kernels) from the engine and {} package(s)",
                 libs.registry.len(),
                 libs.kernels.len(),
-                dir.display()
+                packages.len()
             );
             Arc::new(libs)
         }
         Err(e) => {
-            log::error!(
-                "Failed to load libraries from {}: {e}. Using the engine's alone.",
-                dir.display()
-            );
+            log::error!("Failed to load libraries: {e}. Using the engine's alone.");
             Arc::new(LoadedLibraries::engine())
         }
     }
@@ -330,8 +331,28 @@ mod tests {
     #[test]
     fn a_package_without_a_libraries_directory_has_the_engine_libraries() {
         let dir = std::env::temp_dir().join(format!("voxulacrum-no-libraries-{}", std::process::id()));
-        let libs = LoadedLibraries::load(&dir, "demo").unwrap();
+        let libs = LoadedLibraries::load(&[(dir, "demo")]).unwrap();
         assert_eq!(libs.entries.len(), LibraryKernel::ALL.len());
+    }
+    
+    #[test]
+    fn each_package_s_libraries_load_in_load_order_in_its_own_namespace() {
+        let dir = std::env::temp_dir().join(format!("voxulacrum-package-libraries-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (package, name) in [("base", "fade"), ("game", "edge")] {
+            let libraries = dir.join(package);
+            std::fs::create_dir_all(&libraries).unwrap();
+            let json = format!(
+                r#"{{ "id": 0, "id_name": "{name}", "boundary": {{}}, "kernel": "biome_border_fade" }}"#
+            );
+            std::fs::write(libraries.join(format!("{name}.library.json")), json).unwrap();
+        }
+        let libs = LoadedLibraries::load(&[(dir.join("base"), "base"), (dir.join("game"), "game")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let libs = libs.unwrap();
+        let loaded: Vec<(u32, String)> =
+            libs.entries[5..].iter().map(|(id, n)| (id.0, n.to_string())).collect();
+        assert_eq!(loaded, [(5, "base:fade".to_string()), (6, "game:edge".to_string())]);
     }
 
     #[test]

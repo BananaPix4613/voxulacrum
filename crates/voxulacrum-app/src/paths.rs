@@ -59,18 +59,20 @@ pub fn set_packages(packages: Vec<Package>) {
     }
 }
 
-/// The package this run's world comes from, loading the default package and
-/// its dependencies if none was set.
+/// Every package this run loads, in load order, the world's own last. Loads
+/// the default package and its dependencies if none was set.
+pub fn packages() -> &'static [Package] {
+    PACKAGES.get_or_init(|| {
+        let root = default_package_root();
+        Package::load(&root)
+            .and_then(|package| Package::load_order(package, &packages_dir()))
+            .unwrap_or_else(|e| panic!("the default package at {}: {e}", root.display()))
+    })
+}
+
+/// The package this run's world comes from.
 fn package() -> &'static Package {
-    PACKAGES
-        .get_or_init(|| {
-            let root = default_package_root();
-            Package::load(&root)
-                .and_then(|package| Package::load_order(package, &packages_dir()))
-                .unwrap_or_else(|e| panic!("the default package at {}: {e}", root.display()))
-        })
-        .last()
-        .expect("the load order ends with the world's own package")
+    packages().last().expect("the load order ends with the world's own package")
 }
 
 /// Directory holding world content: graphs, materials, prefabs, libraries,

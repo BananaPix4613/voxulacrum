@@ -156,6 +156,16 @@ impl Package {
             let ids: Vec<&str> = waiting.keys().map(String::as_str).collect();
             return Err(format!("dependencies form a cycle among {}", ids.join(", ")));
         }
+        // Each package's names are known by its namespace, so two may not share one.
+        for (i, p) in order.iter().enumerate() {
+            let earlier = order[..i].iter().find(|q| q.manifest.namespace == p.manifest.namespace);
+            if let Some(q) = earlier {
+                return Err(format!(
+                    "{} and {} both use namespace `{}`",
+                    q.manifest.id, p.manifest.id, p.manifest.namespace
+                ));
+            }
+        }
         Ok(order)
     }
 
@@ -489,5 +499,17 @@ mod tests {
         let err = order(&dir, "game").unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(err.contains("ships materials.ron"), "{err}");
+    }
+
+    #[test]
+    fn two_packages_sharing_a_namespace_are_refused() {
+        let dir = scratch("shared-namespace");
+        let base = write_package(&dir, "base", "1.0.0", "");
+        let text = r#"( id: "base", namespace: "game", version: "1.0.0", kind: Mod, engine: "^0.4" )"#;
+        std::fs::write(base.join(MANIFEST_FILE), text).unwrap();
+        write_package(&dir, "game", "0.1.0", r#"(id: "base", version: "^1")"#);
+        let err = order(&dir, "game").unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains("base and game both use namespace `game`"), "{err}");
     }
 }

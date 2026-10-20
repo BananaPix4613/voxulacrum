@@ -20,10 +20,12 @@ use voxel_core::{
     ResolvedBlueprint, Voxel, Yaw, BLUEPRINT_VERSION,
 };
 use std::path::PathBuf;
+use nodegraph_hotreload::ContentDirs;
 
 use super::{split_world_voxel, World};
 
-/// The authored blueprint library on disk.
+/// The world's own package's blueprints: where captures are saved and the
+/// picker lists from.
 pub fn blueprint_dir() -> PathBuf {
     crate::paths::content_root().join("blueprints")
 }
@@ -34,6 +36,24 @@ pub fn blueprint_dir() -> PathBuf {
 /// the first time. Both now resolve through `paths::content_root`.
 pub fn species_dir() -> PathBuf {
     crate::paths::content_root().join("species")
+}
+
+/// Where each loaded package keeps its blueprints, by namespace, so a name
+/// resolves into the package it names.
+pub fn blueprint_dirs() -> ContentDirs {
+    content_dirs("blueprints")
+}
+
+/// Where each loaded package keeps its species, by namespace.
+pub fn species_dirs() -> ContentDirs {
+    content_dirs("species")
+}
+
+/// Each loaded package's `kind` directory, by namespace.
+fn content_dirs(kind: &str) -> ContentDirs {
+    crate::paths::packages().iter().fold(ContentDirs::new(), |dirs, p| {
+        dirs.with(p.manifest.namespace.as_str(), p.root.join(kind))
+    })
 }
 
 /// Capture the solid voxels in the inclusive world-space box `[min, max]` into a

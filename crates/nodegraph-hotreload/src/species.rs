@@ -12,7 +12,7 @@ use nodegraph_ir::{Graph, NodeKind, ResolvedTree, TreeSpecies};
 use voxel_core::MaterialRegistry;
 
 use crate::error::{HotReloadError, HotReloadResult};
-use crate::names::local_name;
+use crate::names::ContentDirs;
 
 /// Schema version this build writes and understands.
 pub const SPECIES_VERSION: u32 = 1;
@@ -105,11 +105,12 @@ pub fn load_species(dir: &Path, name: &str) -> HotReloadResult<TreeSpecies> {
 /// a source that places nothing and says nothing is how a wrong world looks
 /// like a working one.
 /// 
-/// Both names resolve in `namespace`, the namespace of the content holding the
-/// graph.
+/// Both names are read in `namespace`, the namespace of the content holding
+/// the graph. The species file comes from the directory `dirs` gives the
+/// species name's namespace.
 pub fn resolve_species(
     graph: &mut Graph,
-    dir: &Path,
+    dirs: &ContentDirs,
     registry: &MaterialRegistry,
     namespace: &str,
 ) -> HotReloadResult<()> {
@@ -118,7 +119,8 @@ pub fn resolve_species(
         if p.resolved.is_some() {
             continue;
         }
-        let species = load_species(dir, &local_name(&p.species, namespace, "species")?)?;
+        let (name, dir) = dirs.locate(&p.species, namespace, "species")?;
+        let species = load_species(dir, name.name())?;
         let wood = registry.resolve_str(&p.wood, namespace).map_err(|e| {
             HotReloadError::Blueprint(format!("species '{}' wood: {e}", p.species))
         })?;

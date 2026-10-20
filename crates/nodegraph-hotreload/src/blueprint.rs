@@ -3,35 +3,34 @@
 //! `<name>.blueprint.json`, resolves its material names through the registry,
 //! and fills the node's in-memory template.
 
-use std::path::Path;
-
 use nodegraph_ir::{Graph, NodeKind};
 use voxel_core::{Blueprint, MaterialRegistry, ResolvedBlueprint};
 
 use crate::error::{HotReloadError, HotReloadResult};
-use crate::names::local_name;
+use crate::names::ContentDirs;
 
-/// Load and resolve the blueprint `name` names, for content that loads under
-/// `namespace`: `<dir>/<file>.blueprint.json`, with its materials resolved in
-/// that namespace.
+/// Load and resolve the blueprint `name` names, read in `namespace`: its
+/// `<file>.blueprint.json` comes from the directory `dirs` gives the name's
+/// namespace, and its own bare material names resolve in that namespace.
 pub fn load_blueprint(
-    dir: &Path,
+    dirs: &ContentDirs,
     name: &str,
     registry: &MaterialRegistry,
     namespace: &str,
 ) -> HotReloadResult<ResolvedBlueprint> {
-    let file = local_name(name, namespace, "blueprint")?;
-    Blueprint::load(dir, &file)
-        .and_then(|bp| bp.resolve(registry, namespace))
+    let (name, dir) = dirs.locate(name, namespace, "blueprint")?;
+    Blueprint::load(dir, name.name())
+        .and_then(|bp| bp.resolve(registry, name.namespace()))
         .map_err(HotReloadError::Blueprint)
 }
 
 /// Fill every `PlaceBlueprint` and `PlaceStructure` node's `resolved` template
-/// by loading its named blueprint from `dir`. Nodes already resolved are skipped.
-/// Errors on the first missing, malformed, or unresolvable blueprint.
+/// by loading its named blueprint from the namespace it names. Nodes already
+/// resolved are skipped. Errors on the first missing, malformed, or
+/// unresolvable blueprints.
 pub fn resolve_blueprints(
     graph: &mut Graph,
-    dir: &Path,
+    dirs: &ContentDirs,
     registry: &MaterialRegistry,
     namespace: &str,
 ) -> HotReloadResult<()> {
@@ -39,12 +38,12 @@ pub fn resolve_blueprints(
         match &mut node.kind {
             NodeKind::PlaceBlueprint(p) => {
                 if p.resolved.is_none() {
-                    p.resolved = Some(load_blueprint(dir, &p.blueprint, registry, namespace)?);
+                    p.resolved = Some(load_blueprint(dirs, &p.blueprint, registry, namespace)?);
                 }
             }
             NodeKind::PlaceStructure(p) => {
                 if p.resolved.is_none() {
-                    p.resolved = Some(load_blueprint(dir, &p.blueprint, registry, namespace)?);
+                    p.resolved = Some(load_blueprint(dirs, &p.blueprint, registry, namespace)?);
                 }
             }
             _ => {}
