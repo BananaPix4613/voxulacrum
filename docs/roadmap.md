@@ -1,6 +1,6 @@
 # Voxulacrum Engine Roadmap — 0.4.0 through 1.0
 
-**Status:** Authoritative planning reference, v2.1
+**Status:** Authoritative planning reference, v2.2
 **Companions:** `engine-design.md` (v1.12 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
 **Tracker:** every work item is a GitHub issue, grouped by [milestone](https://github.com/BananaPix4613/voxulacrum/milestones) and tracked on the *Voxulacrum engine* project board (§9.3).
 **Purpose:** Make the technical goals visible, fix the working discipline, and sequence every core capability the engine needs before it is a *ready product* — an engine another person (or future you) can build a title on without engine surgery.
@@ -173,7 +173,7 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 | **In-engine console** — registered commands and variables | M5 (T1) | |
 | **Debug protocol** — the editor attaches to a running game or modded build | M8 | |
 | **Profiling capture export** + frame graph | M5 | |
-| **Tick scheduler inspector** — scheduled/random/block tick load per region | M3 | |
+| **Tick scheduler inspector** — tick number, ticks per frame, dropped ticks and cost per tick phase; scheduled/random/block tick load per region once those ticks exist | M3 (R2) | |
 | **Per-grid and per-system cost attribution** ("what is using physics time") | M9 | |
 | **Network panel** — bandwidth, delta queue depth, prediction corrections, interpolation health | M7 | |
 | **Entity inspector** — live components; realized/abstract tier state | M8 | |
@@ -186,7 +186,7 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 | **Headless generation CLI** (`--verify-generation`) | Shipped 0.3.0 |
 | **Graph validation CLI** (`--validate-graphs`) | Shipped 0.4.0 |
 | **Facade dependency check** — games and the testbed may depend only on the facade crate | Shipped 0.5.0, for the engine workspace and, with `--manifest-path`, for a game's |
-| **Cross-platform determinism job** (Windows and Linux runners) | M3 |
+| **Cross-platform determinism job** (Windows and Linux runners) | M3 (T7) |
 | **Asset lint** — registry ID collisions, dangling references, missing files, hardcoded user-facing strings | M5 |
 | **Golden-image render regression** | M5 |
 | **Perf regression job**, including the integrated-GPU minimum spec | M5 |
@@ -361,7 +361,7 @@ Runs at **voxel resolution using face coverage masks**, never at a finer subdivi
 
 ### 6.24 Tick & scheduling framework
 **The substrate every survival simulation needs, and currently absent.** One tick framework replacing the three ad-hoc clocks (`PlayerClock`, `FluidClock`, `ClimateClock`): fixed simulation tick with render interpolation, scheduled block updates, random ticks over resident regions with a defined distribution, sub-rate clocks derived from the primary tick rather than free-running, and a coarse region tick for distant simulation. All of it replicated-clock-aware so server and client agree on tick identity (P14).
-**State:** three independent clocks, no block/random/scheduled tick concept. **M3** (R1, R2), at 30 Hz with derived sub-rates.
+**State:** three independent clocks, no block/random/scheduled tick concept. The tick framework at 30 Hz, with derived sub-rates and the tick inspector — **M3** (R1, R2). Scheduled, random and block ticks are designed in M3 and built with their first consumer.
 
 ### 6.25 Lighting as a queryable field
 **Two lights, named separately** — the external review's reframe, and correct for authoritative multiplayer: `GameplayLight` and `RenderLight`. The server must answer "can a creature spawn here," "does this crop grow," "is snow melting," "is the player in darkness" — questions no GPU shadow map can answer. Conflating them is how a server ends up disagreeing with what players see (R9).
@@ -572,12 +572,12 @@ Keys are never reused. The D workstream's work items (D1–D11) are a separate s
 |---|-------|--------|
 | M1 Clean slate | F1–F7 | #1–#6, #60 |
 | M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6 (steps B6a–B6c), B7, T2 | #7–#13, #66–#69, #74–#76, #85 |
-| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R6, B8, B9, F8–F10, T4 | #14–#22, #80, #81, #87–#89, #91 |
-| M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11 | #23–#36 |
+| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R7, B8, B9, F8–F10, T4, T7 | #14–#22, #80, #81, #87–#89, #91, #94, #95 |
+| M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11, B10 | #23–#36, #96 |
 | M5 Playable on the new data | V1–V8, S1, S2, E1, E2, T1, T3 | #37–#47, #82, #83, #90 |
 | M6–M11 | One placeholder each; M8 also T5, T6 | #48–#53, #92, #93 |
 
-Within each row, issue numbers follow the order of the keys: F1 is #1, R3 is #16 with its steps at #17–#19, and D2 is #24 with its steps at #25–#27.
+Within each row, issue numbers follow the order of the keys: F1 is #1, R3 is #16 with its steps at #17–#19, and D2 is #24 with its steps at #25–#27. Items added after a row was first written take the next free numbers: T7 is #94, R7 is #95 and B10 is #96.
 
 ---
 
@@ -696,19 +696,20 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [x] Integrated-GPU baseline recorded in `perf-baseline.md`
 
 ### M3 — Runtime spine
-**Contains:** R1–R6, B8, B9, F8–F10, T4. **Needs:** B1, B2.
-**Non-goals:** serialization over a channel (M7), format changes.
-- [ ] Server-core builds with no wgpu, winit or egui dependency (CI-enforced)
-- [ ] One 30 Hz tick framework; the three ad-hoc clocks are gone
-- [ ] Rendering reads only a render world filled by the extract step
-- [ ] Singleplayer runs through the in-process server boundary within 5% of 0.4.0's CPU budget
-- [ ] Headless server generates, simulates, and persists with no window
-- [ ] Cross-platform determinism job green
+**Contains:** R1–R7 (R3 in steps R3a–R3c), B8, B9, F8–F10, T4, T7. **Needs:** B1, B2.
+**Non-goals:** serialization over a channel (M7), format changes, pipelined rendering, building scheduled, random and block ticks (R1 designs them; their first consumer builds them), removing camera assumptions from rendering (V8), registering registries from game code (B10, M4), a client build without server code (M7).
+- [ ] Server-core and the headless server build on a Linux runner with no windowing or GPU packages, and CI fails if `wgpu`, `naga`, `winit`, `raw-window-handle`, `egui` or `eframe` appears anywhere in their resolved dependencies (R3b, R3c)
+- [ ] One 30 Hz tick framework: the three ad-hoc clocks are gone, no simulation code reads frame time, and state at tick 3,000 is identical under three different frame-time sequences (R2, R3c)
+- [ ] Rendering builds without the world code and reads only a render world filled by the extract step; no world type holds GPU or mesh state (R4)
+- [ ] Singleplayer runs through the in-process server boundary with mean frame CPU within 5% of the M3 baseline on T4's scripted scenarios, and p95 within 10% on the scripted pan: median of five runs on the recorded hardware (R5, T4)
+- [ ] A headless server on Linux generates, simulates and persists for 9,000 ticks with scripted edits and a fluid pour, then reloads with matching hashes (R3c)
+- [ ] Cross-platform determinism job green: Windows and Linux runners produce identical hashes for 512 generated chunks, every layer, and for two Tier-1 scenarios (T7, R7)
+- [ ] Runtime spine recorded in `engine-design.md` (R1)
 - [ ] Engine object model recorded in `engine-design.md` (B8)
-- [ ] Game code queries the world and edits it through the facade, with no engine change (B9)
+- [ ] Game code adds a system that queries the world, edits it through a command and reacts to an event, through the facade with no engine change (B9)
 
 ### M4 — Format freeze
-**Contains:** D1–D11. **Needs:** B1, B5; R3 for D8; R6 for D10.
+**Contains:** D1–D11, B10. **Needs:** B1, B5; R3 for D8; R6 for D10; B9, D3 and D4 for B10.
 **Non-goals:** new rendering, moving grids.
 - [ ] A converted reference world matches its 1 m original voxel for voxel after doubling
 - [ ] A save survives a registry reorder and a material insertion with no reinterpretation
@@ -912,3 +913,4 @@ This roadmap is authoritative for sequencing and for the 1.0 readiness definitio
 - v1.2 — Integrated the external architecture review (`engine-architecture-reference.md`), with full disposition recorded in §21. Added pillars **P13** (visibility as queryable world state) and **P14** (one scheduler, one clock family), and rubric row **R9** (coherence). Added §8, the forcing-date decision list (D1–D8), and made recording them a release-checklist item. Added capabilities §6.22–§6.29: region graph, entity simulation tiers, tick framework, lighting as a queryable field, world-scale change, world instances and protected volumes, interactive simulation framework, and the conditional grid abstraction; renumbered the conformance set to §6.30 and added a sixth conformance feature. Amended §6.1, 6.3–6.5, 6.7, 6.8, 6.10–6.12, 6.14, 6.17, 6.19–6.21 with adopted corrections. Added **0.10.0 (World simulation & progression)** and moved hardening to 0.11.0, with an explicit note that 0.10.0 is the designated scope-cut point. Recorded a newly-found latent defect: saves store numeric registry IDs with no embedded name mapping.
 - v2.0 — Replaced the version ladder with workstreams, work items, explicit dependencies, and milestones M1–M11 (§1, §9, §12); version numbers are now cut when a milestone completes or compatibility changes (§7.1). Replaced "one branch per version" with short per-item branches off an always-green `master` (§7.5). Revised P8 (no head-on views) and P9 (one renderer, editor as its own binary); added P15–P19 (§2). Declared the minimum spec (§7.3). Recorded outcomes for D1–D5, D7 and D8, plus fifteen further decisions (§8). Rewrote §3 for the state at 0.4.0 and retargeted the tooling tables and capability states to milestones. Added the 0.4.0 closing record (§11) and §21.5. Work items moved to GitHub issues, milestones and a project board; §9.3 maps the plan onto them. `target-architecture.md` and `migration-plan.md` added as companions. Section references in audits written before v2.0 (for example §3.12, §12, §13), and in the text kept from v1.2 in §10, §11 and §21, point to v1.2, which is in git history.
 - v2.1 — Revised P8 into a rule of the default isometric camera and added P20 (the core makes no camera assumption). Recorded that the foliage and tree stack is interim, with its replacements (§8). Added B8 (engine object model) and B9 (game code on the facade) to M3, and V7 (voxel textures and overrides) and V8 (camera as a module) to M5, with matching gates. Rescoped B7 to move game policy as data.
+- v2.2 — Revised M3 before work started: R1 widened to the runtime spine design; R3's steps re-cut to follow code dependencies; R6 absorbs the streaming split; T4 re-scoped to a scripted benchmark and the M3 baseline; R7 (Tier-1 math) and T7 (cross-platform determinism job) added; B9 narrowed, with registry registration moved to B10 in M4; M3's gates made measurable.
