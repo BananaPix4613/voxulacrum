@@ -959,8 +959,9 @@ pub fn run() {
 /// Runs the engine. `--validate-graphs` and `--verify-generation` run headless
 /// and exit; otherwise this opens the window and enters the event loop.
 /// `--bench <scenario>` runs a benchmark scenario in the window, writes its
-/// results and exits (`docs/perf-baseline.md`). Exits with code 1 if the
-/// package fails to load or a benchmark fails.
+/// results and exits (`docs/perf-baseline.md`); with `--runs <n>` it runs the
+/// scenario `n` times, each in a child process, and summarizes them. Exits
+/// with code 1 if the package fails to load or a benchmark fails.
 pub fn run_with(options: RunOptions) {
     env_logger::init();
     
@@ -1046,6 +1047,22 @@ pub fn run_with(options: RunOptions) {
             std::process::exit(1);
         }
     };
+    // A repeated benchmark opens no window of its own: it runs each pass as a
+    // child process and exits once they are done.
+    match (bench::repeat::Repeat::from_args(&args), &bench_setup) {
+        (Err(e), _) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        (Ok(Some(repeat)), Some(setup)) => {
+            std::process::exit(bench::repeat::run(repeat, &args, setup));
+        }
+        (Ok(Some(_)), None) => {
+            eprintln!("error: --runs repeats a benchmark, so it needs --bench <scenario>");
+            std::process::exit(1);
+        }
+        (Ok(None), _) => {}
+    }
     if bench_setup.is_some() {
         if let Err(e) = bench::clear_save() {
             eprintln!("error: the benchmark's save could not be cleared: {e}");

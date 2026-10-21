@@ -102,11 +102,7 @@ impl JobWindow {
 impl BenchResult {
     /// Write the results to `path` as JSON, creating its directory.
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+        write_json(self, path)
     }
 
     /// Two lines for the console: the headline figures, and where the full
@@ -122,6 +118,15 @@ impl BenchResult {
             self.scenario, self.frames, self.seconds, cpu.mean, cpu.p95, cpu.max, path.display(),
         )
     }
+}
+
+/// Write `value` to `path` as JSON, creating its directory.
+pub fn write_json<T: Serialize>(value: &T, path: &Path) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]

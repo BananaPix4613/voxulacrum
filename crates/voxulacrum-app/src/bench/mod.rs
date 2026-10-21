@@ -3,6 +3,7 @@
 //! frame in its measured window. The procedure, and the readings taken with
 //! it, are in `docs/perf-baseline.md`.
 
+pub mod repeat;
 pub mod results;
 pub mod run;
 pub mod scenario;

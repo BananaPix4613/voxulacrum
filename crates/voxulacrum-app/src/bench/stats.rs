@@ -34,6 +34,38 @@ impl Summary {
     }
 }
 
+/// One figure across repeated runs: its median, its range, and that range as a
+/// percentage of the median, which is the spread the baseline is recorded with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Spread {
+    pub median: f64,
+    pub min: f64,
+    pub max: f64,
+    /// `(max - min) / median`,  as a percentage; 0 when the median is 0.
+    pub percent: f64,
+}
+
+impl Spread {
+    /// The spread of `values`; all zero when there are none. With an even
+    /// count the median is the mean of the middle two.
+    pub fn of(values: &[f64]) -> Self {
+        if values.is_empty() {
+            return Self::default();
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let n = sorted.len();
+        let median = if n % 2 == 1 {
+            sorted[n / 2]
+        } else {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        };
+        let (min, max) = (sorted[0], sorted[n - 1]);
+        let percent = if median != 0.0 { (max - min) / median * 100.0 } else { 0.0 };
+        Self { median, min, max, percent }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +92,29 @@ mod tests {
         assert_eq!(Summary::of(&ramp(20)), Summary { mean: 10.5, p95: 19.0, max: 20.0 });
         assert_eq!(Summary::of(&ramp(100)).p95, 95.0);
         assert_eq!(Summary::of(&ramp(21)).p95, 20.0);
+    }
+
+    #[test]
+    fn the_spread_of_an_odd_count_is_about_the_middle_run() {
+        assert_eq!(
+            Spread::of(&[4.5, 3.5, 4.0]),
+            Spread { median: 4.0, min: 3.5, max: 4.5, percent: 25.0 },
+        );
+    }
+
+    #[test]
+    fn the_median_of_an_even_count_is_the_mean_of_the_middle_two() {
+        assert_eq!(Spread::of(&[1.0, 4.0, 2.0, 3.0]).median, 2.5);
+    }
+
+    #[test]
+    fn no_runs_spread_to_zero() {
+        assert_eq!(Spread::of(&[]), Spread::default());
+    }
+
+    #[test]
+    fn a_zero_median_has_no_spread() {
+        assert_eq!(Spread::of(&[0.0, 0.0, 1.0]).percent, 0.0);
     }
 
     #[test]
