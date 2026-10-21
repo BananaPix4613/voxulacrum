@@ -28,6 +28,9 @@ pub enum Step {
     /// Move the camera's target to `target`, in world units, and set its zoom
     /// (the orthographic half-height), both at once.
     Camera { target: (f32, f32, f32), zoom: f32 },
+    /// Move the camera's target in a straight line from wherever it is to `to`,
+    /// at a constant speed, arriving after `seconds`. The zoom stays as it is.
+    Pan { to: (f32, f32, f32), seconds: f32 },
     /// Wait until the engine is at rest: nothing missing from the streamed set,
     /// and no generation or meshing outstanding. The run fails if that takes
     /// longer than `timeout` seconds.
@@ -78,11 +81,12 @@ impl Step {
     fn validate(&self, at: &str, measuring: bool) -> Result<(), String> {
         match self {
             Step::Camera { target, zoom } => {
-                let (x, y, z) = *target;
-                if !(x.is_finite() && y.is_finite() && z.is_finite()) {
-                    return Err(format!("{at}: Camera target must be finite, got {target:?}"));
-                }
+                finite(at, "Camera target", *target)?;
                 positive(at, "Camera zoom", *zoom)
+            }
+            Step::Pan { to, seconds } => {
+                finite(at, "Pan to", *to)?;
+                positive(at, "Pan seconds", *seconds)
             }
             Step::Settle { timeout } => positive(at, "Settle timeout", *timeout),
             Step::Wait(seconds) => positive(at, "Wait", *seconds),
@@ -99,6 +103,15 @@ impl Step {
                 Ok(())
             }
         }
+    }
+}
+
+fn finite(at: &str, what: &str, point: (f32, f32, f32)) -> Result<(), String> {
+    let (x, y, z) = point;
+    if x.is_finite() && y.is_finite() && z.is_finite() {
+        Ok(())
+    } else {
+        Err(format!("{at}: {what} must be finite, got {point:?}"))
     }
 }
 
@@ -144,6 +157,7 @@ mod tests {
         for (text, name) in [
             (include_str!("../../../../bench/s1-rest-launch.ron"), "S1"),
             (include_str!("../../../../bench/s2-rest-r14.ron"), "S2"),
+            (include_str!("../../../../bench/s3-pan-r14.ron"), "S3"),
         ] {
             let parsed = Scenario::from_ron_str(text).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(parsed.name, name);
@@ -155,6 +169,19 @@ mod tests {
     fn whole_seconds_may_be_written_without_a_decimal_point() {
         let parsed = Scenario::from_ron_str(&scenario("Measure([ Wait(60) ])")).unwrap();
         assert_eq!(parsed.steps, vec![Step::Measure(vec![Step::Wait(60.0)])]);
+    }
+
+    #[test]
+    fn a_pan_parses_and_refuses_a_duration_that_is_not_positive() {
+        let parsed = Scenario::from_ron_str(&scenario("Measure([ Pan(to: (364.0, 32.0, 64.0), seconds: 25.0) ])"))
+            .unwrap();
+        assert_eq!(
+            parsed.steps,
+            vec![Step::Measure(vec![Step::Pan { to: (364.0, 32.0, 64.0), seconds: 25.0 }])],
+        );
+        let err = Scenario::from_ron_str(&scenario("Measure([ Pan(to: (0.0, 0.0, 0.0), seconds: 0.0) ])"))
+            .unwrap_err();
+        assert!(err.contains("Pan seconds"), "{err}");
     }
 
     #[test]

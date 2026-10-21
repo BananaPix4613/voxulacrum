@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, Schedule};
 use glam::Vec3;
 
-use super::results::{BenchResult, JobWindow};
+use super::results::{BenchResult, Fill, JobWindow};
 use super::scenario::{Scenario, Step};
 use super::stats::Summary;
 use super::{process_cpu_seconds, BenchSetup};
@@ -32,6 +32,7 @@ const BYTES_PER_MB: f32 = 1024.0 * 1024.0;
 #[derive(Clone, Debug, PartialEq)]
 enum Op {
     Camera { target: Vec3, zoom: f32 },
+    Pan { to: Vec3, seconds: f32 },
     Settle { timeout: f32 },
     Wait(f32),
     BeginMeasure,
@@ -45,6 +46,9 @@ fn program(steps: &[Step], ops: &mut Vec<Op>) {
             Step::Camera { target, zoom } => {
                 ops.push(Op::Camera { target: Vec3::from(*target), zoom: *zoom });
             }
+            Step::Pan { to, seconds } => {
+                ops.push(Op::Pan { to: Vec3::from(*to), seconds: *seconds });
+            }
             Step::Settle { timeout } => ops.push(Op::Settle { timeout: *timeout }),
             Step::Wait(seconds) => ops.push(Op::Wait(*seconds)),
             Step::Measure(inner) => {
@@ -56,6 +60,17 @@ fn program(steps: &[Step], ops: &mut Vec<Op>) {
     }
 }
 
+/// Where a pan from `from` to `to` over `seconds` puts the camera after
+/// `elapsed` seconds, and whether it has arrived. A function of time rather
+/// than of frames, so the path is the same at any frame rate.
+fn pan_position(from: Vec3, to: Vec3, elapsed: f32, seconds: f32) -> (Vec3, bool) {
+    if elapsed >= seconds {
+        (to, true)
+    } else {
+        (from.lerp(to, elapsed / seconds), false)
+    }
+}
+
 /// What the measured window has recorded so far.
 struct Recording {
     started: Instant,
@@ -64,6 +79,10 @@ struct Recording {
     mesh: JobKindStats,
     fill_ms: f32,
     fill_chunks: usize,
+    /// The streaming fill figures last seen, so a change marks a fill that
+    /// just completed.
+    last_fill: (f32, usize),
+    fills: Vec<Fill>,
     frame_cpu: Vec<f32>,
     stage_sum: [f64; STAGE_COUNT],
     frontier_frames: usize,
@@ -79,6 +98,8 @@ impl Recording {
             mesh: jobs.stats(JobKind::Mesh),
             fill_ms: s.fill_ms,
             fill_chunks: s.fill_chunks,
+            last_fill: (s.fill_ms, s.fill_chunks),
+            fills: Vec::new(),
             // Two minutes at 60 fps, so the longest scenario never reallocates.
             frame_cpu: Vec::with_capacity(8192),
             stage_sum: [0.0; STAGE_COUNT],
@@ -93,6 +114,15 @@ impl Recording {
         }
         if frontier {
             self.frontier_frames += 1;
+        }
+    }
+
+    /// Note streaming's fill figures for this frame. Streaming publishes a fill
+    /// when it completes and keeps it until the next, so a change is a new one.
+    fn note_fill(&mut self, ms: f32, chunks: usize) {
+        if (ms, chunks) != self.last_fill {
+            self.last_fill = (ms, chunks);
+            self.fills.push(Fill { ms, chunks });
         }
     }
 
@@ -131,6 +161,7 @@ impl Recording {
             mesh: JobWindow::between(&self.mesh, &jobs.stats(JobKind::Mesh)),
             fill_ms: self.fill_ms,
             fill_chunks: self.fill_chunks,
+            fills: self.fills,
             load_radius: s.load_radius,
             resident_chunks: s.resident,
             chunks_visible: ui.chunks_visible,
@@ -152,6 +183,10 @@ pub struct BenchRun {
     next: usize,
     /// When the step running now started.
     op_started: Instant,
+    /// True on the frame the step running now is first run.
+    op_fresh: bool,
+    /// Where the pan running now started from.
+    pan_from: Vec3,
     /// Consecutive frames at rest, for `Settle`.
     rest_frames: u32,
     recording: Option<Recording>,
@@ -168,6 +203,8 @@ impl BenchRun {
             ops,
             next: 0,
             op_started: Instant::now(),
+            op_fresh: true,
+            pan_from: Vec3::ZERO,
             rest_frames: 0,
             recording: None,
             result: None,
@@ -234,7 +271,19 @@ pub fn bench_drive_system(
     let rest = at_rest(&streaming, &jobs);
     while let Some(op) = bench.ops.get(bench.next).cloned() {
         let elapsed = bench.op_started.elapsed().as_secs_f32();
+        let fresh = std::mem::replace(&mut bench.op_fresh, false);
         let done = match op {
+            Op::Pan { to, seconds } => {
+                if fresh {
+                    bench.pan_from = sim.camera.target;
+                }
+                let (at, arrived) = pan_position(bench.pan_from, to, elapsed, seconds);
+                // As for `Camera`: both targets, so the path is the scenario's
+                // and not the smoothing's.
+                sim.camera.target = at;
+                sim.camera.smooth_target = at;
+                arrived
+            }
             Op::Camera { target, zoom } => {
                 // Both targets, so the camera's smoothing has nothing to ease
                 // toward and the view is where the scenario put it this frame.
@@ -278,6 +327,7 @@ pub fn bench_drive_system(
         }
         bench.next += 1;
         bench.op_started = Instant::now();
+        bench.op_fresh = true;
         bench.rest_frames = 0;
     }
     bench.finish();
@@ -296,6 +346,7 @@ pub fn bench_record_system(
     // The same test `frame_timings_frame_end` uses for the frontier sample.
     let s = streaming.stats();
     recording.record(cpu_ms, &stages, s.missing > 0 || s.in_flight > 0);
+    recording.note_fill(s.fill_ms, s.fill_chunks);
 }
 
 /// Add the benchmark's systems to the frame schedule: stepping through the
@@ -336,6 +387,40 @@ mod tests {
     }
 
     #[test]
+    fn a_pan_moves_with_time_and_arrives_exactly() {
+        let from = Vec3::new(64.0, 32.0, 64.0);
+        let to = Vec3::new(364.0, 32.0, 64.0);
+        assert_eq!(pan_position(from, to, 0.0, 25.0), (from, false));
+        assert_eq!(pan_position(from, to, 12.5, 25.0), (Vec3::new(214.0, 32.0, 64.0), false));
+        assert_eq!(pan_position(from, to, 25.3, 25.0), (to, true));
+    }
+
+    #[test]
+    fn each_fill_streaming_completes_is_recorded_once() {
+        let mut recording = Recording {
+            started: Instant::now(),
+            process_cpu: None,
+            generate: JobKindStats::default(),
+            mesh: JobKindStats::default(),
+            fill_ms: 0.0,
+            fill_chunks: 0,
+            last_fill: (0.0, 0),
+            fills: Vec::new(),
+            frame_cpu: Vec::new(),
+            stage_sum: [0.0; STAGE_COUNT],
+            frontier_frames: 0,
+        };
+        recording.note_fill(0.0, 0);
+        recording.note_fill(286.0, 116);
+        recording.note_fill(286.0, 116);
+        recording.note_fill(310.5, 120);
+        assert_eq!(
+            recording.fills,
+            vec![Fill { ms: 286.0, chunks: 116 }, Fill { ms: 310.5, chunks: 120 }],
+        );
+    }
+
+    #[test]
     fn a_recording_sums_its_frames_and_counts_the_frontier() {
         let mut recording = Recording {
             started: Instant::now(),
@@ -344,6 +429,8 @@ mod tests {
             mesh: JobKindStats::default(),
             fill_ms: 0.0,
             fill_chunks: 0,
+            last_fill: (0.0, 0),
+            fills: Vec::new(),
             frame_cpu: Vec::new(),
             stage_sum: [0.0; STAGE_COUNT],
             frontier_frames: 0,

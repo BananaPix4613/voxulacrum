@@ -1,0 +1,26 @@
+// S3: a scripted pan across both zones at r=14 (T4, #91). It serves as
+// reading B, the three-minute hand pan 0.4.0 measured in docs/perf-baseline.md.
+//
+// Due east along z = 64 from the spawn, over terrain no earlier step has
+// loaded: the sandbox's zone 0 to about x = 640, zone 1 to about x = 1,100,
+// then zone 0 again. Four legs of 300 units at 12 units/s, the shipped camera
+// pan speed, each followed by a stop that waits for the fill.
+(
+    name: "S3",
+    package: "sandbox",
+    steps: [
+        Camera(target: (64.0, 32.0, 64.0), zoom: 100.0),
+        Settle(timeout: 120.0),
+        Wait(15.0),
+        Measure([
+            Pan(to: (364.0, 32.0, 64.0), seconds: 25.0),
+            Settle(timeout: 60.0),
+            Pan(to: (664.0, 32.0, 64.0), seconds: 25.0),
+            Settle(timeout: 60.0),
+            Pan(to: (964.0, 32.0, 64.0), seconds: 25.0),
+            Settle(timeout: 60.0),
+            Pan(to: (1264.0, 32.0, 64.0), seconds: 25.0),
+            Settle(timeout: 60.0),
+        ]),
+    ],
+)

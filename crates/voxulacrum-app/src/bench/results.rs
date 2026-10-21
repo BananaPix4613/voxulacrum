@@ -45,6 +45,9 @@ pub struct BenchResult {
     /// loaded.
     pub fill_ms: f32,
     pub fill_chunks: usize,
+    /// Every fill that completed inside the window, in order. A moving view
+    /// opens one at each chunk boundary it crosses, so a pan records many.
+    pub fills: Vec<Fill>,
     /// Streaming and drawing when the window closed.
     pub load_radius: i32,
     pub resident_chunks: usize,
@@ -55,6 +58,14 @@ pub struct BenchResult {
     /// and chunk mesh buffers on the GPU.
     pub cpu_memory_mb: f32,
     pub gpu_memory_mb: f32,
+}
+
+/// One completed fill: milliseconds from the view changing until the streamed
+/// set was complete, and how many chunks it had to load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Fill {
+    pub ms: f32,
+    pub chunks: usize,
 }
 
 /// Jobs of one kind that finished inside a window, and their mean duration.
@@ -132,6 +143,7 @@ mod tests {
             frame_cpu_ms: Summary { mean: 3.5, p95: 4.25, max: 9.0 },
             stage_mean_ms: vec![("input".into(), 0.02), ("render".into(), 12.5)],
             process_cpu_per_second: Some(1.5),
+            fills: vec![Fill { ms: 286.0, chunks: 116 }],
             ..Default::default()
         };
         let path = std::env::temp_dir()
