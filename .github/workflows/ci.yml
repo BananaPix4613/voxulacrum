@@ -24,7 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml pins, so CI builds with the compiler
+      # the benchmark baseline was measured on.
+      - name: Install toolchain
+        run: rustup toolchain install
 
       # rusqlite (bundled) and zstd compile C, so the cache is worth a lot here.
       - uses: Swatinem/rust-cache@v2
