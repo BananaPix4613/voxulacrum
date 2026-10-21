@@ -1,0 +1,17 @@
+// S1: at rest at the launch zoom (r=9), after the fill (T4, #91).
+//
+// The camera stays where the engine starts it. Once nothing is loading, a
+// further 15 s lets seam finalization finish, as the manual procedure in
+// docs/perf-baseline.md does, then 60 s are measured.
+(
+    name: "S1",
+    package: "sandbox",
+    steps: [
+        Camera(target: (64.0, 32.0, 64.0), zoom: 40.0),
+        Settle(timeout: 60.0),
+        Wait(15.0),
+        Measure([
+            Wait(60.0),
+        ]),
+    ],
+)

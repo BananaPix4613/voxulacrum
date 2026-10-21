@@ -28,9 +28,6 @@ mod jobs;
 mod package;
 mod validate;
 mod verify;
-// Not wired to the command line until `--bench` runs scenarios (T4). Remove
-// this allow in that step.
-#[allow(dead_code, unused_imports)]
 mod bench;
 
 pub use app::{run, run_with, RunOptions};

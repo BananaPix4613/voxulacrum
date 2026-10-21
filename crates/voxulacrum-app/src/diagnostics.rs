@@ -105,6 +105,8 @@ pub struct FrameTimings {
     prev_schedule: f32,
     /// Gap between the previous schedule run ending and this one starting.
     outside: f32,
+    /// CPU work of the frame `frame_end` last closed, in milliseconds.
+    last_cpu: f32,
 
     // --- one-second accumulator ---
     acc_start: Instant,
@@ -190,6 +192,7 @@ impl FrameTimings {
             inter_frame: 0.0,
             prev_schedule: 0.0,
             outside: 0.0,
+            last_cpu: 0.0,
             acc_start: now,
             acc_frames: 0,
             acc_stage_sum: [0.0; STAGE_COUNT],
@@ -287,6 +290,7 @@ impl FrameTimings {
         let frame_ms = (now - self.frame_start).as_secs_f32() * 1000.0;
         let cpu_ms = (frame_ms - self.present).max(0.0);
         self.prev_schedule = frame_ms;
+        self.last_cpu = cpu_ms;
 
         self.acc_frames += 1;
         for i in 0..STAGE_COUNT {
@@ -328,6 +332,14 @@ impl FrameTimings {
         if (now - self.acc_start).as_secs_f32() >= 1.0 {
             self.publish(now);
         }
+    }
+
+    /// The CPU work of the frame [`Self::frame_end`] last closed, and its
+    /// per-stage split, in milliseconds. Both hold until the next
+    /// [`Self::frame_begin`], so a system ordered after `frame_end` reads one
+    /// frame exactly, where the published figures cover a second.
+    pub fn last_frame(&self) -> (f32, [f32; STAGE_COUNT]) {
+        (self.last_cpu, self.stage)
     }
 
     /// Mean milliseconds for one sub-span across frontier frames; 0 with no
@@ -511,6 +523,23 @@ mod tests {
         t.frame_end(true);
         assert_eq!(t.frontier_worst_sub[SUB_UPLOAD], 12.5);
         assert_eq!(t.frontier_worst_sub[SUB_SEAM], 0.0);
+    }
+
+    #[test]
+    fn the_last_frame_is_the_one_frame_end_closed() {
+        let mut t = FrameTimings::new();
+        t.frame_begin();
+        t.add_present(1.0e6);
+        t.frame_end(false);
+        // Present longer than the frame clamps CPU work at zero, which makes
+        // the value checkable without a clock.
+        assert_eq!(t.last_frame().0, 0.0);
+        t.frame_begin();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        t.frame_end(false);
+        let (cpu, stages) = t.last_frame();
+        assert!(cpu >= 2.0, "{cpu}");
+        assert_eq!(cpu, stages.iter().sum::<f32>(), "no present, so CPU work is every stage");
     }
 
     #[test]

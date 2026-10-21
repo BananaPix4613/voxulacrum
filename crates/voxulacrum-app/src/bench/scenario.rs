@@ -140,6 +140,18 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_scenarios_parse() {
+        for (text, name) in [
+            (include_str!("../../../../bench/s1-rest-launch.ron"), "S1"),
+            (include_str!("../../../../bench/s2-rest-r14.ron"), "S2"),
+        ] {
+            let parsed = Scenario::from_ron_str(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(parsed.name, name);
+            assert_eq!(parsed.package, "sandbox");
+        }
+    }
+
+    #[test]
     fn whole_seconds_may_be_written_without_a_decimal_point() {
         let parsed = Scenario::from_ron_str(&scenario("Measure([ Wait(60) ])")).unwrap();
         assert_eq!(parsed.steps, vec![Step::Measure(vec![Step::Wait(60.0)])]);
