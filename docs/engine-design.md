@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.12
+**Status:** Baseline reference, v1.13
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -21,6 +21,8 @@
 - v1.11 — Designed **river networks** in §5 ahead of building them, per the 0.4.0 sequencing rule. A coarse world grid of hash-jittered nodes, each linking to the lowest-potential neighbour, forming a forest whose **acyclicity is structural** (every link strictly decreases potential). Flow direction comes from a dedicated **elevation-potential field** rather than the generated surface, because a river network - unlike a structure source, whose density roll gates its probes - has no gate and every chunk would otherwise pay a column probe per nearby node. The channel **floor is the network's, interpolated from node elevations**, not carved into the terrain, which avoids the same pointwise-surface cost; the stated consequence is that a river cannot follow terrain it did not shape. Width derives from potential rather than Strahler order, which would need an unbounded upstream traversal. The channel authors its own per-column pond level through the existing `FluidOutput` mechanism, so a river above `sea_level` holds water. The pass **resolves the network once per chunk** and tests distance per column, which is what bounds the cost; that memoization holds no cross-chunk state and so does not engage §5's rule that memoization must never change output.
 
 - v1.12 — Recorded M2's settled content architecture in §12: **packages and content namespaces**. Content loads as data-only packages (`package.ron` beside fixed-layout content), each with its own namespace; bare names resolve in the holding content's namespace and qualified names reach into any loaded package. The built-in `voxulacrum` package declares the standard libraries beside their kernels. Dependencies load in dependency order, then by id. Tables whose ids saves store (materials, prefabs, foliage) stay with the world's own package until the save-embedded mapping lands. A package's `play.ron` carries its Play-mode policy, and games build on the facade crate alone.
+
+- v1.13 — Designed the **runtime spine** in §12 ahead of building it (roadmap M3, R1). Crates and sides, with two compiler-enforced dependency rules: server-core has no renderer or windowing dependency, and the render crate has no simulation dependency. One **30 Hz tick** with a `SimTick` counter, sub-rates keyed by tick number, a fixed phase order, state that changes only inside a tick, separate simulation and presentation time, and stateless seeded randomness; scheduled, random and block ticks are designed with a trigger for building them. The **client/server boundary**: commands applied at tick boundaries, one update per tick drained by cursor, and `Arc`-shared chunk snapshots in the shape M7 serializes. The **render world** and extract, with the minimal camera description. **Observer residency.** Two **determinism tiers**, with Tier 1 adding `libm` and no fused multiply-add to the rules. Records `target-architecture.md` N4 (integrated server), N5 (tick rates) and N6 (determinism tiers) as settled. Brought into line with it: §1's host principle and §12's editor section, which now follow roadmap P9's editor binary; §12 Runtime architecture, now two schedules; §12 Chunk streaming, now observers and areas of interest; §12 Determinism, now Tier 1; §12 Tick and scheduling framework; §12 Networking's tick rate and its sequencing by milestone; §12 Engine versioning, now by milestone, with the rubric's eleventh row; and the glossary.
 
 ---
 
@@ -70,7 +72,7 @@ Gradual inclines are produced not by per-voxel diagonal geometry but by **distri
 
 - **Data model decisions are settled now.** Implementations grow incrementally; data shapes do not.
 - **Determinism is mandatory.** Same seed + same graph + same coordinates → bit-identical output. All randomness derives from explicit seeded RNGs.
-- **The engine is the host.** The editor is a panel inside the engine, not a separate application. There is one `main` function, one renderer, one chunk store.
+- **The engine is the host** (revised v1.13, following `roadmap.md` P9). Authoring happens inside the engine, on its one renderer: the editor is its own binary built on the engine library, and playtesting launches a game as a separate process the editor attaches to. Each world has one chunk store, owned by its server; clients hold snapshots of it. The headless server is the engine's server-core without a renderer, not a second engine (§12, Runtime spine).
 - **The graph is the world generator.** Editing the active graph edits the live world.
 - **Visibility is queryable world state, not a rendering effect** (added v1.8). Whenever the engine hides geometry — underground visibility, occlusion fades, any future slice mode — the decision lives in world state that the renderer, the interaction system, collision, and audio all read from the same place. If the renderer hides a ceiling but the raycaster still collides with it, players target blocks they cannot see and the game feels broken in ways they cannot articulate. This rules out occlusion implemented purely in shaders: a shader may *consume* the classification but may not *be* it.
 - **One scheduler, one clock family** (added v1.8). All deferred and background work — generation, meshing, lighting, region detection, pathfinding, structures, chunk I/O, simulation — runs on a single job system with declared dependencies and priorities. All periodic simulation derives from one tick framework rather than per-system ad-hoc clocks. Two schedulers means two tuning surfaces that must agree by hand and never do.
@@ -959,36 +961,185 @@ The consequence: **distance-based LOD as described in perspective rendering cont
 
 ### Runtime architecture
 
-The engine uses **`bevy_ecs`** as its runtime (an ECS library extracted from the Bevy engine, used without the rest of Bevy). The engine is not a Bevy app; it owns its own `winit` event loop and `wgpu` device and embeds `bevy_ecs` as the schedule + resource system.
+The engine uses **`bevy_ecs`** as its runtime (an ECS library extracted from the Bevy engine, used without the rest of Bevy). The engine is not a Bevy app; the client owns its own `winit` event loop and `wgpu` device, and each side embeds `bevy_ecs` as its schedule and resource system.
 
-Systems are scheduled through a **`FrameStage`** ordering:
+There are two schedules (revised v1.13; see "Runtime spine" below). The **server** runs the tick phases once per simulation tick. The **client** runs one frame schedule per frame, ordered by **`FrameStage`**:
 
 ```
-FrameStage::Input        — gather window events, tick watchers, apply graph edits
-FrameStage::Simulation   — game logic, AI, fluid simulation, time-of-day
-FrameStage::Meshing      — feed dirty chunks to mesher worker pool
-FrameStage::UniformWrite — upload per-frame GPU data
-FrameStage::Render       — execute the render graph
-FrameStage::PostFrame    — eviction, persistence flush, cleanup
+FrameStage::Input     — gather window events; build the next InputFrame and commands
+FrameStage::Tick      — drive the server's ticks (integrated client only)
+FrameStage::Sync      — drain server updates; update chunk views; schedule and poll meshing
+FrameStage::Extract   — fill the render world, including finished meshes
+FrameStage::Render    — run the render schedule on the render world: upload, render graph, egui, present
+FrameStage::PostFrame — client housekeeping
 ```
 
-This ordering is the engine's scheduling contract; new systems must declare which stage they run in. Resources (the chunk store, graph registry, material registry, render context, etc.) live as ECS resources accessed through system parameters.
+These orderings are the engine's scheduling contract: a new system declares its side, and the tick phase or frame stage it runs in. The stage names may change as M3 builds them; the order is the contract. Resources (the chunk store, graph registry, material registry, render context, etc.) live as ECS resources accessed through system parameters, each in the world of the side that owns it.
 
-The choice of `bevy_ecs` is an implementation detail of the runtime — it does not affect the data model, the graph hierarchy, or any other system described in this document. Any compatible ECS could substitute. The choice is documented here because every cross-cutting system (hot reload, streaming, persistence) integrates through the schedule and must know about `FrameStage` ordering.
+**Interim shape:** until the render world and the client/server boundary land (roadmap M3, R4 and R5), one schedule runs both sides on the main thread: `Input → Simulation → Meshing → UniformWrite → Render → PostFrame`. The player step, fluids, climate, time of day, picking and the editor tools run in `Simulation`; streaming, seam finalization and meshing run in `Meshing`.
+
+The choice of `bevy_ecs` is an implementation detail of the runtime — it does not affect the data model, the graph hierarchy, or any other system described in this document. Any compatible ECS could substitute. The choice is documented here because every cross-cutting system (hot reload, streaming, persistence) integrates through a schedule and must know its ordering.
+
+### Runtime spine (added v1.13)
+
+How the engine runs: which crate holds what and which side runs it, how time advances, what crosses between client and server, how rendering gets its data, and which results must be identical on every machine. This section records three decisions from the October 2026 design review as settled (`target-architecture.md` N4, N5 and N6): **singleplayer is an integrated server**, with client and server in one process, so every feature is multiplayer-correct the day it is written (roadmap P6); **simulation runs on one 30 Hz tick**; and **determinism comes in two tiers**. Roadmap M3 builds it. The shapes it replaces are listed under "Interim shapes" at the end.
+
+#### Crates and sides
+
+Every engine API belongs to one side. **Shared** code is the world and the simulation, and runs on both sides: that is what makes client prediction possible (M7), and what lets clients generate terrain locally. **Client** code presents: rendering, audio, UI, input devices and cameras. **Server** code holds authority: command validation and interest management.
+
+| Crate | Side | Holds |
+|---|---|---|
+| `voxel-core`, `nodegraph-ir`, `nodegraph-eval`, `nodegraph-hotreload` | Shared | Voxel and chunk primitives; the graph IR, evaluator and file watcher |
+| `voxulacrum-server-core` | Shared, with server-only code in a `pub(crate)` module | World and chunk state, generation glue, fluids, persistence, the mutation door, the event bus, residency, the tick framework, `player_step`, the job system, packages and registries, and the boundary types |
+| `voxulacrum-render` | Client | wgpu, the render passes and the render world |
+| `voxulacrum-app` | Client | Window, input, camera modules, editor panels, extract and mesh scheduling |
+| `nodegraph-editor` | Client | The graph canvas |
+| `voxulacrum` | Facade | The only surface games use; re-exports server-core's boundary types |
+| `voxulacrum-server` | Server (binary) | The headless loop, over server-core alone |
+
+Two dependency rules make the boundaries compiler-enforced rather than conventions:
+
+- **Server-core never depends on `wgpu`, `naga`, `winit`, `raw-window-handle`, `egui` or `eframe`**, directly or transitively. CI checks the resolved dependency graph and builds server-core on a Linux runner with no windowing or GPU packages installed, which a Windows build cannot prove.
+- **The render crate does not depend on server-core.** Render code therefore cannot name a simulation type, which is what "rendering reads only the render world" means in practice.
+
+Shared and server code share one crate until M7, because no server-only code exists before then; the split comes when M7 needs a client build without it. This departs from the design review's three crates (shared, client and server), one of which would have had nothing in it. `bevy_ecs` is allowed on every side, with its default features off. The editor binary (roadmap P9) is a client like any other.
+
+#### Time
+
+One tick-rate constant, `TICK_RATE_HZ = 30`, and a tick counter, `SimTick(u64)`, that identifies every tick and later timestamps network messages, replays and scheduled updates. Code writes durations in seconds, or in ticks derived from that constant, and never in a bare 30; the tests also run at 20 Hz to keep that true.
+
+**Sub-rates are keyed by tick number, never free-running.** Fluids step on every third tick (10 Hz). Physics will run two substeps per tick (60 Hz) once it exists (M8). Block updates and growth run at 10 Hz or lower. A sub-rate system that would exceed its budget defers a whole step, and decides that from world state, never from frame timing. The fluid throttle that drops ticks when a frame runs long is the failure this rules out.
+
+**A tick runs its phases in a fixed order:**
+
+1. Apply queued commands through the mutation door, sorted by client and sequence number.
+2. Step each player with its input for this tick.
+3. Run scheduled, random and block ticks (designed below; not built yet).
+4. Run sub-rate systems by tick number: fluids when `tick % 3 == 0`.
+5. Advance world time: time of day and wind are functions of the tick.
+6. Update residency: apply observer changes, insert finished generation results, evict.
+7. Autosave every N ticks.
+8. Publish this tick's events and changes to the outbox.
+
+Logic networks join in the order `target-architecture.md` gives them (M9): topology updates after phase 1, stepping and write-back between phases 3 and 4. Further field layers such as heat and gas join phase 4 (M10).
+
+**Server state changes only inside a tick.** Between ticks it is read-only, so every tick boundary is a consistent snapshot: it is what the client reads, and what a joining client receives in M7.
+
+**Driving ticks.** The integrated client adds `min(frame_dt, 0.25) × scale` to an accumulator each frame and runs ticks while the accumulator holds a whole tick, at most five per frame. A remainder past the cap is dropped and counted: dropped ticks mean the simulation is running slow, and the tick inspector shows them. The headless server instead sleeps until each tick's deadline and logs overruns.
+
+**Render interpolation.** Extract interpolates between the last two ticks by `alpha = accumulator / tick_dt`, for transforms (the player already works this way) and for world time.
+
+**Time domains.** *Simulation* time is ticks. Pause and time scale apply here, and scale changes how many ticks run per real second, never `dt` per tick, so fixed-step results don't change. *Presentation* time is the client's frame clock: cloud animation, water shader time, mesh debounce and UI animation. The cloud and vapor automaton (`world/climate.rs`) is presentation until the cloud hydrology fix-or-remove decision says otherwise. Audio and UI time arrive later, on the presentation side.
+
+**Randomness** comes from stateless streams, `hash(world_seed, system, tick, key)`. There is no shared generator, so the order in which systems run cannot change a draw.
+
+The **tick inspector** on the Performance panel shows the tick number, ticks run this frame, dropped ticks and the cost of each phase (`roadmap.md` §4.4).
+
+#### Scheduled, random and block ticks
+
+Designed now, built with their first consumer.
+
+- **Scheduled ticks:** a per-chunk queue ordered by `(due_tick, seq)`. Entries persist with their chunk, so the queue is a chunk layer and needs registrable layers (roadmap D4). Entries that fell due while their chunk was unloaded run on its first tick back, in queue order.
+- **Random ticks:** each tick, for each resident chunk inside the simulation range, `K` cells chosen by `hash(world_seed, chunk, tick, i)`. The distribution is uniform within a chunk and doesn't depend on iteration order.
+- **Block ticks** (a neighbor changed): the door's changed cells, batched per tick, with a per-tick budget and a cascade depth limit.
+- **Region ticks:** a coarse sub-rate for distant simulation; the abstract entity tier's clock (`roadmap.md` §6.23).
+
+**Trigger:** the first block that needs a delayed update, or D4's registrable layers. Building the queues before then would be designing against an imagined consumer, the same reason the job system defers declared dependencies (see "The job system" below).
+
+#### The client/server boundary
+
+In M3 the client calls server-core directly, in process. M7 sends the same types over a channel, first an in-memory loopback and then QUIC, so the types are designed to be serialized even though nothing serializes them yet.
+
+**Client to server:** `ClientCommand { client, seq, kind }`.
+
+| Kind | Carries |
+|---|---|
+| `Edit` | A Play-origin mutation intent |
+| `Author` | An Authoring-origin mutation intent: how the editor stamps, pours and regenerates |
+| `Input` | The `InputFrame` for the next tick |
+| `SetInterest` | The client's observer area ("Residency" below) |
+| `Admin` | Mode switch, save, regenerate |
+
+No kind carries `System` origin. System writes (fluid commits, chunk insertion, seam finalization) begin inside server-core, so the door's runtime origin check becomes a compile-time one at the boundary.
+
+**Commands apply at the next tick boundary.** In singleplayer an edit therefore lands up to one tick (33 ms) after it is issued; M7's client prediction covers remote play.
+
+**Server to client:** one `ServerUpdate { tick, events, changed, acks, players, world_time }` per tick, in a tick-stamped outbox that the client drains by cursor. A frame that ran three ticks reads three updates; a frame that ran none reads none. bevy's double-buffered `Events` stay an intra-schedule tool on each side: they age per schedule run, so across the boundary they would lose the first tick's events whenever a frame ran several ticks.
+
+- `events`: the world events this tick published (`roadmap.md` §6.7).
+- `changed`: `(chunk, version, layers)` for every chunk whose data changed this tick. It replaces the rebuild lists the door returns today (`MutationOutcome`), which name render work rather than data.
+- `acks`: each command accepted, or rejected with a reason.
+- `players`: each player's state at this tick.
+
+**Snapshots.** `server.chunk(coord)` returns a `ChunkSnapshot`: the chunk's version, voxels, fluid, scatter, detail paint and tags, plus the generation output only rendering uses (tree segments and canopy lobes). In process every part is an `Arc` clone of copy-on-write data, so a snapshot costs almost nothing. It is also the shape M7 sends when a client subscribes to a chunk: the generated-base hash plus deviations ("Networking" below). The client builds the mesher's padded window from snapshots.
+
+**Stats.** `server.stats()` feeds the job, streaming, mutation-log and tick panels.
+
+**Enforcement.** `World`, `LoadedChunk` and the streaming manager are `pub(crate)` inside server-core; the boundary module is its only public surface. If the app compiles, it went through the boundary.
+
+**The editor** is a client. Its canvas and panels run client-side, and its world changes are `Author` commands. The graph-file watcher runs on the server, because disk is authoritative for the world ("Hot reload" below). The column inspector and field probe evaluate graphs with the client's own `WorldGenerator`, which every client holds anyway because clients generate terrain locally.
+
+#### Render world and extract
+
+Rendering reads only a **render world**: a separate `bevy_ecs` world owned by the render crate. Simulation systems never touch it, and render systems touch nothing else.
+
+- **Per-frame data:** the camera description, lighting and time of day, wind, clip bounds, the visibility mask, player render state, debug lines and HUD data.
+- **Per-chunk entries**, keyed by chunk coordinate: the terrain mesh, water mesh, scatter instances, detail paint, and tree capsules and canopy lobes. Each records the chunk version it was built from. They are derived data (roadmap P17): any of them can be rebuilt from a snapshot at any time, including after a GPU device loss.
+
+**Extract** runs once per frame, after the client drains its updates. It copies the per-frame data and applies `changed` to the per-chunk entries, marking stale ones for rebuild. It never scans every loaded chunk.
+
+**The camera description** has four fields core code reads: view, projection (with view-projection), frustum, and area of interest. A camera module adds a block of its own for its presentation; the isometric module's holds the texel snap offset, rotation and pitch. Nothing outside that module reads the block (roadmap P20). This is the minimal description the engine object model's camera boundary adopts (roadmap B8). Render code still makes orthographic assumptions after M3; V8 (M5) removes them.
+
+**Pipelining**, with the GPU drawing frame N while simulation prepares N+1, is not built in M3. A self-contained render world is what keeps it possible.
+
+#### Residency
+
+The server keeps a chunk resident because some **observer** needs it. An observer is an id and an **area of interest**: a center, a horizontal radius and a vertical range. The local player is observer 0.
+
+- The resident set is the union of all observers' areas plus every chunk with active fluid. Entity load anchors and simulation bubbles join it later.
+- Generation priority stays `(class, distance²)`, measured to the nearest observer.
+- Residency changes happen in tick phase 6.
+
+On the client, a camera module computes its area of interest and sends it with `SetInterest` when it changes; the isometric camera derives its area from the altitude-aware view test ("Chunk streaming" below). The client's **chunk view** reacts to chunks loading, changing and unloading: it takes snapshots, schedules meshing and drops render entries. A headless server takes its observers from its command line or script.
+
+#### Determinism tiers
+
+**Tier 1: bit-identical on every machine.** Generation (every layer), the mutation door's handlers (voxel edits, blueprint stamping, seam finalization) and fluid simulation. Clients regenerate terrain and verify it by hash ("Networking" below), so every cross-machine difference costs an authoritative refetch. The rules are under "Determinism" below; a CI job compares Windows and Linux hashes on every push.
+
+**Tier 2: reproducible on one machine.** `player_step` now; physics, AI and animation later (Rapier's `f32` scenes, M8). This needs a fixed tick, inputs per tick and no wall clock; `f32` is allowed. Server corrections fix clients, and same-machine reproducibility serves replays and tests.
+
+**Not deterministic, by design:** residency timing, since which tick a generated chunk becomes resident depends on when its job finishes; and presentation.
+
+#### Interim shapes
+
+| Today | Target above | Migrates in |
+|---|---|---|
+| `PlayerClock` (30 Hz), `FluidClock` (10 Hz) and `ClimateClock` (wall clock); time of day, wind and autosave on frame time | One tick, derived sub-rates, a presentation clock | R2 |
+| One `FrameStage` schedule runs simulation and rendering on the main thread | Server tick phases; a client frame with extract; a separate render world | R4, R5 |
+| `LoadedChunk` holds GPU buffers and mesh state; the door returns render rebuild lists | Per-chunk render entries; the `changed` feed | R4 |
+| Residency follows one isometric camera, and streaming drives meshing | Observers; the client chunk view | R6 |
+| The whole engine is one app crate | The crates above | R3 |
+| Generation calls the platform's `powf`, `ln`, `sin` and `cos` (tree skeletons, `PoissonDisk`) | `libm` | R7 |
+| The underground visibility flood runs on the client each time the player's head cell changes | Visibility as shared world state, through the region graph | S1 (M5) |
+
+The visibility flood stays client-side through M3 knowingly. The renderer and the player's targeting both run on the client, so they agree, as §1's visibility principle requires; a server that validates targeting (M7) needs the region graph's shared classification.
 
 ### Chunk streaming
 
-The world is effectively infinite; only chunks within a configurable radius of active observers (player camera, AI agents, debug cameras) are resident in memory.
+The world is effectively infinite; only chunks some observer needs are resident in memory. An observer (the local player, a remote client, later an AI agent or a debug camera) declares an area of interest, and the server's resident set is the union of those areas plus every chunk with active fluid (revised v1.13; see "Residency" under Runtime spine).
 
-- **Streaming radius** is configurable per observer; the union of all radii determines the resident set.
-- **Chunk lifecycle**: out-of-radius chunks evict; in-radius chunks load (from persistence if they exist, otherwise generate via the pipeline; §5).
-- **Eviction policy** is LRU within out-of-radius chunks, with a hysteresis band to avoid thrashing at the boundary.
+- **Area of interest** is set per observer, by its camera or controller.
+- **Chunk lifecycle**: chunks outside every area evict; chunks inside one load (from persistence if they exist, otherwise generate via the pipeline; §5).
+- **Eviction policy** is LRU among chunks outside every area, with a hysteresis band to avoid thrashing at the boundary.
 - **Loaded chunks track their resident state** for systems that need to iterate the resident set (mesher, fluid simulation, AI pathfinding).
 - **Background workers** handle chunk generation and meshing without blocking the main thread. Both submit to the single job system below (revised v1.9); neither owns a pool or spawns threads of its own.
 
 Streaming is foundational: every subsystem must tolerate chunks appearing and disappearing on a frame-by-frame basis. Code that assumes all chunks are resident is incorrect.
 
-**The view test is altitude-aware** (added v1.9). Under the isometric projection a ground displacement `d` along the away-axis shifts a point up-screen by `d·sin(pitch)`, while an altitude `Δy` shifts it by `Δy·cos(pitch)` — so altitude is screen-equivalent to `Δy/tan(pitch)` of ground. A residency test comparing a column's *footprint* against the view band therefore misses columns whose footprint lies outside it but whose raised geometry is plainly on screen. The test compares the column's projected **span**. It is column-granular by necessity: a per-chunk test would be tighter, but omitting a middle Y layer leaves the layer above it permanently unmeshable, since meshing requires both Y neighbours resident.
+**Interim shape:** one observer, the isometric camera, whose view the streaming manager evaluates itself; the same manager also submits dirty chunks to the mesher. Roadmap R6 splits it into server residency and a client chunk view.
+
+**The view test is altitude-aware** (added v1.9). Under the isometric projection a ground displacement `d` along the away-axis shifts a point up-screen by `d·sin(pitch)`, while an altitude `Δy` shifts it by `Δy·cos(pitch)` — so altitude is screen-equivalent to `Δy/tan(pitch)` of ground. A residency test comparing a column's *footprint* against the view band therefore misses columns whose footprint lies outside it but whose raised geometry is plainly on screen. The test compares the column's projected **span**. It is column-granular by necessity: a per-chunk test would be tighter, but omitting a middle Y layer leaves the layer above it permanently unmeshable, since meshing requires both Y neighbours resident. The test belongs to the isometric camera module, which turns it into that camera's area of interest (revised v1.13).
 
 ### The job system (added v1.9)
 
@@ -1009,14 +1160,21 @@ The realization of §1's "one scheduler" principle. One scheduler owns *when* an
 
 ### Determinism
 
-Mandatory across all systems. Specific rules:
+Mandatory in **Tier 1**: generation, the mutation door's handlers and fluid simulation, whose results must be bit-identical on every machine, not only on one (revised v1.13; tiers under "Runtime spine" above). Specific rules:
 
 - Determinism is stated over the full generation input set: same seed + same graphs + **same per-region parameters** + same coordinates → bit-identical output (revised v1.8; see "Per-region generation parameters" below).
-- All RNG seeded from explicit context: `hash(world_seed, layer, node_id, world_pos, purpose)`.
+- All RNG seeded from explicit context: `hash(world_seed, layer, node_id, world_pos, purpose)`. Simulation draws add the tick.
 - No use of chunk coordinates alone for RNG (breaks at fade boundaries).
 - No f32 in persistent state where ordering matters (fluid mass is u16).
-- No thread-order-dependent generation.
+- No thread-order-dependent generation, and no wall clock, thread identity or job completion order in any result.
 - Iteration over hash maps stabilized via sorted keys where output ordering matters.
+- **No platform math library** (added v1.13). Transcendental functions (`sin`, `cos`, `tan`, `powf`, `exp`, `ln`, `log2`, `log10`) come from the `libm` crate, and glam's math goes through its `libm` feature, because platforms' math libraries don't promise the same last bit. `sqrt`, `abs`, `floor` and `trunc` are exact everywhere and allowed.
+- **No fused multiply-add**, and no parallel floating-point reductions, whose results depend on how the work was split (added v1.13).
+- Hashes are computed over the persistence encoding, which is fixed-endian and key-sorted (added v1.13).
+
+Clippy's `disallowed_methods` enforces the math rules in Tier-1 crates, and a CI job compares Windows and Linux hashes of every generated layer.
+
+Tier 2 (the player step; later physics, AI and animation) needs only same-machine reproducibility. Simulation as a whole is divergence-tolerant (`roadmap.md` P1): the server owns it, and clients render what it sends.
 
 ### Save format versioning
 
@@ -1034,28 +1192,28 @@ A detailed networking architecture proposal exists as a companion document (`net
 - **Per-chunk base-content hash** on subscribe; mismatch triggers authoritative-fetch fallback. Cross-machine generation divergence (SIMD variants, compiler drift) is self-healing, not fatal.
 - **Single mutation door.** The mutation command API (Phase 8) is the sole entry point for world writes; server-side, it validates and broadcasts authoritative deltas; client-side, it applies predictively with server-corrected reconciliation.
 - **Fluid stays server-only.** Clients render received fluid deltas and interpolate cosmetically. Client-side fluid simulation is not built.
-- **Fixed-timestep player sim as a pure function** `step(state, input, &world) -> state` in shared server-core code. Both client and server run the identical function; this is the one place client and server share simulation.
+- **Fixed-timestep player sim as a pure function** `step(state, input, &world) -> state` in shared server-core code, at the 30 Hz simulation tick. Both client and server run the identical function; this is the one place client and server share simulation.
 - **Snapshot interpolation for other entities** at ~100–150 ms behind real time. No extrapolation — for a builder game, late is better than wrong.
 - **Per-observer streaming.** `ChunkStreamingManager` generalizes from camera-driven to per-observer subscription sets; the local player is observer 0.
 
-**Sequencing** (planned across phases 9 through 13+):
+**Sequencing** (revised v1.13, by roadmap milestone):
 
-1. Player character built networking-aware but standalone. Prerequisites (mutation door, fluid diff/tombstones, fixed-timestep player sim, semantic action input layer) land alongside it.
-2. Server-core crate extraction — a compiler-enforced client/server boundary. Pure refactor.
-3. Observer-set streaming — `ChunkStreamingManager` generalizes.
-4. Loopback milestone — client and server as separate processes on one machine over in-memory channel. This is where 90% of protocol issues surface.
-5. LAN transport, artificial latency/loss testing, internet exposure.
+1. Player character built networking-aware but standalone. Shipped, with the mutation door, the fixed-timestep player sim and the semantic action input layer. Fluid diff with tombstones moved to the format freeze (M4).
+2. Server-core crate extraction — a compiler-enforced client/server boundary. Pure refactor (M3).
+3. Observer-set streaming — `ChunkStreamingManager` generalizes (M3). M3 also runs singleplayer through the same boundary in process, with nothing serialized (Runtime spine above).
+4. Loopback milestone — client and server as separate processes on one machine over in-memory channel. This is where 90% of protocol issues surface (M7).
+5. LAN transport, artificial latency/loss testing, internet exposure (M7).
 
 Legacy summary retained for cross-reference: server is authoritative for generation, fluid simulation, and override application; clients receive chunk deltas, not full chunks; determinism guarantees enable client-side terrain generation. See the companion proposal for wire model, desync taxonomy, and channel/transport recommendations.
 
 ### Engine versioning and release policy (added v1.6)
 
-The companion `roadmap.md` is authoritative for version sequencing, per-version feature gates, and compatibility boundaries. The architectural commitments:
+The companion `roadmap.md` is authoritative for sequencing, milestone exit gates, and compatibility boundaries. Since v1.13 this section plans by milestone, as the roadmap has since v2.0. The architectural commitments:
 
-- **Pre-1.0 scheme**: `0.MINOR.PATCH`. A minor version is a completed arc with exit gates and explicit non-goals; patches are fixes only. Post-1.0, a major version is a breaking change to save compatibility, asset formats, or network protocol that migrations cannot bridge.
-- **Save compatibility boundary**: wipe-on-bump (§3 interim) is permitted through 0.5.x. Per-layer versioning lands at 0.6.0 as the final planned blob-format redesign. From 0.10.0, saves migrate forward; at 1.0, save compatibility is a user-facing promise.
-- **Protocol version = build version** (from 0.7.0): mismatched clients are refused, never partially accommodated.
-- **1.0 is a readiness bar, not a shipped title.** `roadmap.md` §5 defines it as a ten-domain rubric (world authoring, tooling maturity, runtime capability, game-facing API, multiplayer, performance, data durability, extensibility, documentation, distribution). A demonstration title is evidence that the rubric passes, never a substitute for it.
+- **Pre-1.0 scheme**: `0.MINOR.PATCH`. A minor version is cut when a roadmap milestone completes or compatibility changes, whichever comes first; patches are fixes only. Version numbers are assigned when a release is cut, never planned in advance. Post-1.0, a major version is a breaking change to save compatibility, asset formats, or network protocol that migrations cannot bridge.
+- **Save compatibility boundary**: wipe-on-bump (§3 interim) is permitted until the format freeze (M4) completes. Per-layer versioning lands there as the final planned blob-format redesign. From M11, saves migrate forward; at 1.0, save compatibility is a user-facing promise.
+- **Protocol version = build version** (from M7): mismatched clients are refused, never partially accommodated.
+- **1.0 is a readiness bar, not a shipped title.** `roadmap.md` §5 defines it as an eleven-domain rubric (world authoring, tooling maturity, runtime capability, game-facing API, multiplayer, performance, data durability, extensibility, coherence, documentation, distribution). A demonstration title is evidence that the rubric passes, never a substitute for it.
 - **A release is not done without**: workspace version bump, changelog entry, close-of-version audit, design-doc revision for newly-settled architecture, green determinism suite, and recorded perf baselines. Version drift between `Cargo.toml`, the changelog, and announcements is a release-process bug.
 
 ### Performance budgets (added v1.6)
@@ -1094,6 +1252,8 @@ The voxel light field exists regardless of how the renderer works, because an au
 ### Tick and scheduling framework (added v1.8)
 
 One tick framework, per the scheduling principle in §1. It supersedes the current ad-hoc per-system clocks (`PlayerClock`, `FluidClock`, `ClimateClock`) and provides what simulation systems need beyond a fixed step: scheduled block updates, random ticks over resident regions with a defined distribution, sub-rate clocks derived from the primary tick rather than free-running, and a coarse region tick for distant simulation. It is replicated-clock-aware from the start so server and client agree on tick identity.
+
+**Settled in v1.13** as part of the runtime spine (see "Time" and "Scheduled, random and block ticks" under Runtime spine above): one 30 Hz tick with a `SimTick` counter, sub-rates keyed by tick number, a fixed phase order, separate simulation and presentation time, and stateless seeded randomness. Scheduled, random, block and region ticks are designed there and built with their first consumer.
 
 ### Registry identity and save-embedded mapping (added v1.8)
 
@@ -1183,19 +1343,22 @@ The renderer supports debug modes that swap which mesh attribute drives final co
 
 These are toggleable in the engine's debug UI.
 
-### Editor as engine panel
+### Editor on the engine (revised v1.13)
 
-- The editor lives inside the engine binary.
-- No separate executable, no separate window event loop, no separate renderer.
-- The editor uses egui (or chosen UI framework) hosted by the engine.
+- The editor is its own binary built on the engine library (`roadmap.md` P9). It authors on the engine's one renderer; it is not a separate application with a renderer of its own.
+- It is a client of the runtime spine: its world changes are `Author` commands through the mutation door, the same door hot reload and play use.
+- Playtesting launches the game as a separate process that the editor attaches to over a debug protocol (M8).
+- The editor uses egui, hosted by the engine. egui stays editor tooling; it is not the game UI stack.
 - A graph-type picker selects which graph type is being edited.
-- Edits flow through the same mutation API as hot-reload from disk.
+
+**Interim shape:** the editor still lives inside the one `voxulacrum-app` binary. It becomes its own binary with the debug protocol (M8).
 
 ---
 
 ## 13. Glossary
 
 - **Anchor voxel**: the integer cell that owns a foliage instance for purposes of player interaction.
+- **Area of interest**: the region an observer needs resident: a center, a horizontal radius and a vertical range. The server's resident set is the union of all observers' areas plus chunks with active fluid.
 - **BiomeGraph**: graph type defining terrain density, material, fluid output, and fade behavior for one biome.
 - **BiomeParams**: per-biome typed scalar-metadata sidecar. Addressable by name from the biome manifest entry and by `BiomeParam(name)` nodes inside a `BiomeGraph`. Home for `traversal_smoothing_distance` and future biome-scoped scalars.
 - **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation.
@@ -1203,13 +1366,15 @@ These are toggleable in the engine's debug UI.
 - **DetailGraph**: graph type defining foliage paint and scatter placement, distinct from terrain generation.
 - **DetailLayer**: 2D paint map over a chunk's XZ footprint storing per-column foliage density.
 - **DetailTexel**: a single cell in a DetailLayer: species, density, tint, flags.
+- **Determinism tier**: Tier 1 results are bit-identical on every machine (generation, the mutation door's handlers, fluids); Tier 2 results are reproducible on one machine (the player step, later physics and AI).
 - **Enclosure factor**: per-vertex value indicating how enclosed a position is by surrounding terrain. Used for fog and audio.
+- **Extract**: the once-per-frame client step that fills the render world from server updates and snapshots.
 - **Face axis**: which of the 6 cardinal directions a face belongs to. Determines palette ramp. No diagonal values exist.
 - **Fade factor**: 0–1 weight for blending between neighbor biomes at boundaries.
 - **FluidCell**: a single cell's fluid state: type, mass, flags.
 - **FluidFillMode**: chunk-level default for fluid presence. Enables ocean fast path.
 - **FluidOutput**: `BiomeGraph` terminal for water bodies. Renamed from `FluidProvider` to describe the terminal position, not the role.
-- **FrameStage**: ordered schedule of per-frame work in the bevy_ecs runtime. Stages run in fixed order: Input, Simulation, Meshing, UniformWrite, Render, PostFrame.
+- **FrameStage**: ordered schedule of the client's per-frame work: Input, Tick, Sync, Extract, Render, PostFrame. Until M3's render world and boundary land, one FrameStage schedule (Input, Simulation, Meshing, UniformWrite, Render, PostFrame) runs simulation and rendering together.
 - **Generated content**: chunk data reproducible from seed + graph. Not serialized in detail.
 - **GraphOutput**: terminal node placed inside a producing graph, marking a named typed output that other graphs (via `GraphRef`) can consume.
 - **GraphRef**: source node placed inside a consuming graph, referencing a target graph and one of its `GraphOutput` names. Resolved via the manifest at evaluation time.
@@ -1219,16 +1384,20 @@ These are toggleable in the engine's debug UI.
 - **Manifest**: `world.manifest.json`. Names `sea_level`, seed, and the paths + identities of the WorldGraph, ZoneGraphs, BiomeGraphs (with optional DetailGraph paths and `BiomeParams`), and LibraryGraphs. Resolution root for `GraphRef` and `LibraryRef`.
 - **MaterialRegistry**: data-driven registry mapping stable `MaterialId` values and human-readable names to material definitions. Loaded at startup; extensible by mods.
 - **Mesh disk cache**: persistent cache of meshed chunks keyed by chunk coordinate, graph hash, mesher version, registry hash, and world seed.
+- **Observer**: anything the server keeps chunks resident for, identified by an id and an area of interest. The local player is observer 0.
 - **Overrides**: player-authored edits serialized separately from generated content. Canonical in-memory shape is `ChunkOverrides`; persisted directly.
 - **Pin type**: typed connection between graph nodes. Enforces compatibility at edit time.
 - **Positions**: pin type representing a set of candidate positions (used by scatter placement and any other consumer of a candidate-position set). Formerly named `ScatterPoints`; renamed to describe the general mechanism rather than the scenario.
+- **Render world**: the render crate's own `bevy_ecs` world, filled by extract; the only state render code reads.
 - **ScatterInstance**: a single placed foliage/prop instance with anchor, sub-offset, rotation, prefab reference.
 - **ScatterStore**: per-chunk collection of ScatterInstances indexed by type.
 - **Sea level**: global Y read from the manifest, determining ocean fill.
+- **Server-core**: `voxulacrum-server-core`, the shared crate holding the world, generation glue, simulation, persistence, the mutation door and the tick framework. It has no renderer or windowing dependency.
 - **Slab**: a half-height voxel shape. Either `SlabBottom` (lower half solid) or `SlabTop` (upper half solid). All slab faces are cardinal-axis-aligned.
 - **Slab smoothing**: engine pass during worldgen that inserts slab steps at walkable cube-step transitions, controlled by traversal smoothing distance.
-- **Streaming**: load/evict policy keeping only chunks within observer radius resident. Background workers handle generation and meshing.
+- **Streaming**: load/evict policy keeping only chunks inside some observer's area of interest resident. Background workers handle generation and meshing.
 - **Sub-voxel offset**: fractional position within an anchor voxel, packed as signed bytes.
+- **Tick**: one step of simulation, 1/30 s, identified by its `SimTick` number. All periodic simulation derives from it.
 - **Traversal smoothing distance**: per-biome worldgen parameter controlling how aggressively slab smoothing distributes steps across distance. Produces emergent gradual slopes without diagonal geometry.
 - **Seam finalization**: cross-chunk pass (`world::seam`) resolving slab-smoothing demotions at chunk borders once neighbor data exists; recorded through the override/diff mechanism and marked by a persisted `seam_finalized` flag.
 - **Walkability**: transient worldgen computation identifying voxels the player can stand on; input to slab smoothing, then discarded. Runtime movement, collision, and room detection use direct geometric queries (`WorldView::solid_interval`) instead of a resident mask (revised v1.6).
