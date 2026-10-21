@@ -1,0 +1,35 @@
+// S4: play mode (T4, #91): one fluid pour, then a walk with an edit every 0.5 s.
+//
+// The cursor sits at the window's center, which in Play is the player, so each
+// edit lands on the ground just beyond them, inside reach on level ground. The
+// walk is sideways (screen-right) so the edited voxels lie beside the path, not
+// on it. Breaks and places alternate.
+//
+// The walk is a straight line and stops wherever the terrain blocks it; on the
+// shipped sandbox that is about 209 voxels in. Readings compare as long as
+// `walked` matches between runs. A different `walked` means the run took a
+// different path, and its readings are not comparable with earlier ones.
+//
+// The pour is an Authoring tool, so it comes before Play starts; the second's
+// wait lets it land while Authoring still allows it.
+(
+    name: "S4",
+    package: "sandbox",
+    steps: [
+        Camera(target: (64.0, 32.0, 64.0), zoom: 40.0),
+        Cursor(x: 0.5, y: 0.5),
+        Settle(timeout: 60.0),
+        Wait(15.0),
+        Measure([
+            Press(PourWater),
+            Wait(1.0),
+            Press(TogglePlayMode),
+            Move(
+                direction: (1.0, 0.0),
+                seconds: 119.0,
+                every: 0.5,
+                presses: [PrimaryAction, SecondaryAction],
+            ),
+        ]),
+    ],
+)

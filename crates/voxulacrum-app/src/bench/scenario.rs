@@ -10,6 +10,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::input::GameAction;
+
 /// A benchmark scenario, as read from its file.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Scenario {
@@ -31,6 +33,16 @@ pub enum Step {
     /// Move the camera's target in a straight line from wherever it is to `to`,
     /// at a constant speed, arriving after `seconds`. The zoom stays as it is.
     Pan { to: (f32, f32, f32), seconds: f32 },
+    /// Put the mouse cursor at a fraction of the window, `x` from the left and
+    /// `y` from the top. It stays there: a benchmark ignores the real mouse.
+    Cursor { x: f32, y: f32 },
+    /// Press an input action once, as its key would.
+    Press(GameAction),
+    /// Hold the screen-relative movement intent `direction` (x right, y
+    /// forward, at most length 1, as the keys give it) for `seconds`, pressing
+    /// the next action of `presses` in turn every `every` seconds. It walks the
+    /// player in Play mode and pans the camera in Authoring.
+    Move { direction: (f32, f32), seconds: f32, every: f32, presses: Vec<GameAction> },
     /// Wait until the engine is at rest: nothing missing from the streamed set,
     /// and no generation or meshing outstanding. The run fails if that takes
     /// longer than `timeout` seconds.
@@ -88,6 +100,21 @@ impl Step {
                 finite(at, "Pan to", *to)?;
                 positive(at, "Pan seconds", *seconds)
             }
+            Step::Cursor { x, y } => {
+                fraction(at, "Cursor x", *x)?;
+                fraction(at, "Cursor y", *y)
+            }
+            Step::Press(_) => Ok(()),
+            Step::Move { direction, seconds, every, .. } => {
+                let (x, y) = *direction;
+                if !(x.is_finite() && y.is_finite() && x * x + y * y <= 1.0 + 1e-6) {
+                    return Err(format!(
+                        "{at}: Move direction must be finite and at most length 1, got {direction:?}"
+                    ));
+                }
+                positive(at, "Move seconds", *seconds)?;
+                positive(at, "Move every", *every)
+            }
             Step::Settle { timeout } => positive(at, "Settle timeout", *timeout),
             Step::Wait(seconds) => positive(at, "Wait", *seconds),
             Step::Measure(steps) => {
@@ -112,6 +139,14 @@ fn finite(at: &str, what: &str, point: (f32, f32, f32)) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{at}: {what} must be finite, got {point:?}"))
+    }
+}
+
+fn fraction(at: &str, what: &str, value: f32) -> Result<(), String> {
+    if (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("{at}: {what} must be between 0 and 1, got {value}"))
     }
 }
 
@@ -158,6 +193,7 @@ mod tests {
             (include_str!("../../../../bench/s1-rest-launch.ron"), "S1"),
             (include_str!("../../../../bench/s2-rest-r14.ron"), "S2"),
             (include_str!("../../../../bench/s3-pan-r14.ron"), "S3"),
+            (include_str!("../../../../bench/s4-play.ron"), "S4"),
         ] {
             let parsed = Scenario::from_ron_str(text).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(parsed.name, name);
@@ -182,6 +218,43 @@ mod tests {
         let err = Scenario::from_ron_str(&scenario("Measure([ Pan(to: (0.0, 0.0, 0.0), seconds: 0.0) ])"))
             .unwrap_err();
         assert!(err.contains("Pan seconds"), "{err}");
+    }
+
+    #[test]
+    fn play_steps_parse() {
+        let text = scenario(
+            "Cursor(x: 0.5, y: 0.5), Measure([ Press(TogglePlayMode), \
+             Move(direction: (1.0, 0.0), seconds: 2.0, every: 0.5, presses: [PrimaryAction, CycleTool(1)]) ])",
+        );
+        let parsed = Scenario::from_ron_str(&text).unwrap();
+        assert_eq!(
+            parsed.steps,
+            vec![
+                Step::Cursor { x: 0.5, y: 0.5 },
+                Step::Measure(vec![
+                    Step::Press(GameAction::TogglePlayMode),
+                    Step::Move {
+                        direction: (1.0, 0.0),
+                        seconds: 2.0,
+                        every: 0.5,
+                        presses: vec![GameAction::PrimaryAction, GameAction::CycleTool(1)],
+                    },
+                ]),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_cursor_outside_the_window_is_refused() {
+        let err = Scenario::from_ron_str(&scenario("Cursor(x: 1.5, y: 0.5), Measure([ Wait(1.0) ])")).unwrap_err();
+        assert!(err.contains("Cursor x"), "{err}");
+    }
+
+    #[test]
+    fn a_move_faster_than_the_keys_is_refused() {
+        let text = scenario("Measure([ Move(direction: (1.0, 1.0), seconds: 1.0, every: 0.5, presses: []) ])");
+        let err = Scenario::from_ron_str(&text).unwrap_err();
+        assert!(err.contains("at most length 1"), "{err}");
     }
 
     #[test]

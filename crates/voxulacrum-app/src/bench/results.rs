@@ -48,6 +48,16 @@ pub struct BenchResult {
     /// Every fill that completed inside the window, in order. A moving view
     /// opens one at each chunk boundary it crosses, so a pan records many.
     pub fills: Vec<Fill>,
+    /// Input actions the scenario pressed inside the window.
+    pub presses: u32,
+    /// Commands from actors (Authoring and Play origins: edits, pours, stamps)
+    /// the mutation door accepted inside the window. Set against `presses`, it
+    /// shows whether scripted edits landed: one aimed out of reach does nothing.
+    pub actor_commands: u64,
+    /// Straight-line distance across the ground between where the player was
+    /// first and last seen inside the window; 0 with no player. A walk that
+    /// stalls against a cliff shows here.
+    pub walked: f32,
     /// Streaming and drawing when the window closed.
     pub load_radius: i32,
     pub resident_chunks: usize,
@@ -98,7 +108,7 @@ impl BenchResult {
         }
         std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
     }
-    
+
     /// Two lines for the console: the headline figures, and where the full
     /// results went.
     pub fn report(&self, path: &Path) -> String {

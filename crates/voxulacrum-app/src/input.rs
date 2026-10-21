@@ -370,6 +370,24 @@ impl InputState {
         self.actions.get(&action).map_or(0.0, |s| s.value)
     }
 
+    /// Press `action` for this frame, as if its key had just gone down. For a
+    /// driver that plays without a keyboard, such as the benchmark, called after
+    /// `process_input_system`, which releases the action again next frame.
+    pub fn press(&mut self, action: GameAction) {
+        let state = self.actions.entry(action).or_default();
+        if !state.pressed {
+            state.just_pressed = true;
+        }
+        state.pressed = true;
+        state.value = 1.0;
+    }
+
+    /// Set this frame's movement intent, as [`Self::move_vector`] reports it.
+    /// For the same drivers as [`Self::press`]; the keys set it again next frame.
+    pub fn set_move_vector(&mut self, mv: Vec2) {
+        self.move_vector = mv;
+    }
+
     /// Reset transient flags at the start of each frame.
     fn begin_frame(&mut self) {
         for state in self.actions.values_mut() {
@@ -637,6 +655,16 @@ mod tests {
         assert_eq!(conflicts(&InputMap::default()), Vec::<String>::new());
     }
 
+    #[test]
+    fn a_pressed_action_reads_as_just_pressed_for_one_frame() {
+        let mut state = InputState::new();
+        state.press(GameAction::PourWater);
+        assert!(state.just_pressed(GameAction::PourWater));
+        assert!(state.pressed(GameAction::PourWater));
+        state.begin_frame();
+        assert!(!state.just_pressed(GameAction::PourWater), "an edge lasts one frame");
+    }
+    
     #[test]
     fn no_key_in_the_shipped_input_ron_triggers_two_actions() {
         let path = crate::paths::asset_root().join("assets").join("input.ron");
