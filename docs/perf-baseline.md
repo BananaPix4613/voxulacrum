@@ -563,6 +563,174 @@ before calling the difference a regression.
 
 ---
 
+## M3 — CPU baseline
+
+**Measured:** 2026-10-21, branch `perf/scripted-benchmark` (T4, #91), commit
+`d025a6a`. This is the baseline M3's exit gate compares singleplayer against:
+v0.5.0 behavior, measured before any R2 or R4 code merges. Every reading comes
+from `--bench`, not from the Performance panel.
+
+### Conditions
+
+| | |
+|---|---|
+| Machine | Lenovo ThinkPad P16 Gen 3, as in 0.3.0 |
+| CPU | Intel Core Ultra 7 155H (20 usable worker threads) |
+| Discrete GPU | NVIDIA RTX 500 Ada Generation Laptop GPU, Vulkan (the default) |
+| Integrated GPU | Intel(R) Graphics, Vulkan (`--gpu low-power`) |
+| Window | 1280×720, not resizable during a run; display 60 Hz |
+| Power | AC, Windows Best performance mode (Balanced only where stated) |
+| Build | release: `opt-level = 3`, `lto = "thin"`, `codegen-units = 1` |
+| Toolchain | Rust 1.92.0, pinned by `rust-toolchain.toml` |
+| Present mode | `Fifo` (vsync) |
+| World | the sandbox package, regenerated in `saves/bench` for every run; engine default parameters; mesh cache off |
+| Runs | 5 per scenario on the discrete GPU, 3 on the integrated; each run its own process, 30 s apart |
+
+### Scenarios
+
+| | File | What it measures |
+|---|---|---|
+| S1 | `bench/s1-rest-launch.ron` | 60 s at rest at the launch zoom (r=9), after the fill and 15 s of settling |
+| S2 | `bench/s2-rest-r14.ron` | The same at r=14, the widest supported zoom |
+| S3 | `bench/s3-pan-r14.ron` | Four 300-unit pans east across both zones at r=14, 12 units/s, each followed by a stop that waits for the fill. Serves as reading B |
+| S4 | `bench/s4-play.ron` | One fluid pour, then Play: a 119 s walk with a break or place every 0.5 s |
+
+### Baseline: discrete GPU, median of five runs
+
+Spread is `(max - min) / median` across the runs.
+
+| | S1 | S2 | S3 | S4 |
+|---|---|---|---|---|
+| Frame CPU mean | **2.12 ms** (5.5%) | **3.01 ms** (55.0%) | **5.16 ms** (2.7%) | **2.70 ms** (9.7%) |
+| Frame CPU p95 | 2.78 ms (4.7%) | 3.98 ms (95.2%) | 14.92 ms (2.6%) | 6.45 ms (40.6%) |
+| Frame CPU max | 27.45 ms (24.4%) | 106.64 ms (12.1%) | 141.95 ms (14.3%) | 46.09 ms (61.8%) |
+| Process CPU | 0.14 s/s (42.7%) | 0.25 s/s (52.5%) | 3.11 s/s (3.4%) | 0.49 s/s (98.5%) |
+| `generate` mean | | | 84.69 ms (1.5%) | 74.47 ms (14.9%) |
+| `mesh` mean | | | 0.51 ms (5.1%) | 0.46 ms (19.4%) |
+| Fill mean | | | 640.16 ms (0.9%) | 448.28 ms (3.9%) |
+
+Per run, frame CPU mean, in ms:
+
+```
+S1   2.13  2.11  2.12  2.10  2.21
+S2   4.60  3.01  3.01  2.98  2.95
+S3   5.10  5.24  5.16  5.14  5.21
+S4   2.69  2.95  2.69  2.74  2.70
+```
+
+**Most of the large spreads come from one run each.** S2's run 1 read
+4.60 ms against 2.95–3.01 ms for the other four; it started right after
+`cargo run` rebuilt the binary, which is a plausible cause but untested. S1's
+run 5 read 2.21 ms against 2.10–2.13 ms. The maxima are single frames and spread
+as single frames do. Process CPU at rest is a fraction of one core, so small
+absolute changes are large relative ones.
+
+Only the console tables of these runs were kept: their results files were
+overwritten by the integrated-GPU set before being copied. Per-run detail (fill
+sizes, S4's `walked`) comes from the integrated runs below, where it is the
+same path.
+
+### S1's spread is over 2%; a revised comparison method is proposed
+
+The issue asks for S1's run-to-run spread under 2%. On frame CPU mean it is
+5.5%, set by run 5 alone; the other four span 1.4%. A spread measured as the
+range of five runs is decided by the single worst run, so it will keep
+failing on runs that are otherwise steady. **Proposed, for agreement before R5
+closes:**
+
+1. The gate compares the **median of five runs** of frame CPU mean against the
+   baseline median above, never a single run.
+2. Spread is reported as the **median absolute deviation** over the median.
+   Frame CPU mean on that measure: S1 0.5%, S2 1.0%, S3 1.0%, S4 0.4%.
+3. Runs start from the built binary (`target\release\voxulacrum-app.exe`) so
+   that no rebuild precedes a run.
+
+### Integrated GPU: median of three runs
+
+Reported, not gating.
+
+| | S1 | S2 | S3 | S4 |
+|---|---|---|---|---|
+| Frame CPU mean | 2.86 ms (1.9%) | 11.49 ms (1.6%) | 14.65 ms (2.1%) | 3.88 ms (3.9%) |
+| Frame CPU p95 | 3.62 ms (2.1%) | 32.98 ms (1.3%) | 42.56 ms (2.3%) | 8.51 ms (6.0%) |
+| Frame CPU max | 34.51 ms (10.4%) | 142.35 ms (10.2%) | 167.75 ms (4.2%) | 89.66 ms (11.7%) |
+| Process CPU | 0.21 s/s (1.7%) | 0.22 s/s (15.3%) | 2.85 s/s (0.4%) | 0.52 s/s (3.2%) |
+| `generate` mean | | | 114.82 ms (0.7%) | 104.76 ms (2.7%) |
+| `mesh` mean | | | 1.22 ms (11.5%) | 0.81 ms (19.5%) |
+| Fill mean | | | 956.61 ms (0.8%) | 706.25 ms (9.8%) |
+
+S2 records about 1,870 frames in 60 s, i.e. 31 fps, as M2 found. S3 holds
+about 32 fps across its pans.
+
+**CPU-only work is slower while the integrated GPU renders.** `generate` runs
+on worker threads and never touches the GPU, yet its mean is 114.8 ms here
+against 84.7 ms on the discrete GPU, and fill is 957 ms against 640 ms. This
+supports, without proving, M2's untested explanation for the integrated GPU's
+extra CPU work: the CPU and the integrated GPU share one package power budget.
+
+### S3 beside 0.4.0's reading B
+
+| | 0.4.0, reading B | M3 baseline, S3 |
+|---|---|---|
+| `generate` mean | 9.3 ms | **84.7 ms** |
+| `mesh` mean | 16.3 ms | **0.51 ms** |
+| Fill | 286 ms for 116 chunks, one fill after the camera stopped | 640 ms mean over every fill in the window, about 100 chunks each |
+
+The two fill figures are not like for like. Reading B is one fill after a stop;
+S3 records every fill, including the many that complete while the camera is
+still moving. The chunks per fill are the integrated runs' median, which take
+the same path.
+
+**`generate`: about 9× reading B, and unchanged since 0.4.1.** The job mean
+measures execution only, not time in the queue, and that definition has not
+changed since 0.4.0. Run on one thread, `--verify-generation 128` takes
+77.6 ms per generation on v0.4.1 and 68.9 ms on this build, and both produce
+aggregate hash `0xa8ea564c2743e2d8`: the same world at the same cost. (The
+per-generation figure includes air chunks and startup, so it compares builds,
+not chunks.) The increase therefore happened inside 0.4.0, after reading B was
+taken following Substep 11 and before the release. It was not narrowed
+further: v0.4.0 depends on `fastnoise2`, which needs a native toolchain to
+build. It is not an M2 or M3 regression, and it does not affect M3's gate,
+which compares against this baseline.
+
+**`mesh`: about 30× below reading B.** A decrease, so not a regression, and not
+attributed.
+
+### 0.4.0's 4.1 ms and M2's 10.7 ms at r=14 at rest
+
+| | 0.4.0, panel | M2, panel, Balanced | S2, Best performance, median of 5 | S2, Balanced, median of 3 |
+|---|---|---|---|---|
+| Frame CPU | 4.1 ms worst | 10.7 ms worst | mean 3.01, p95 3.98, max 106.64 ms | mean 3.08, p95 4.11, max 110.67 ms |
+| `sim` mean | 1.24 ms | 2.90 ms | not kept | 1.22–1.35 ms |
+
+**Shown to come from measurement conditions, not code.** Power mode is not the
+cause: Balanced and Best performance differ by 2–3% on every figure, inside
+the run-to-run noise. The instrument is. Every S2 run holds frames over 100 ms
+at rest, against a p95 near 4 ms. The panel's `CPU worst` is the maximum of a
+single second, so it reads near the p95 when no spike falls in that second and
+anything up to ~110 ms when one does. 0.4.0's 4.1 ms and M2's 10.7 ms are two
+samples of the same distribution.
+
+`sim` on this build matches 0.4.0. M2's 2.90 ms was read on `saves/default`, an
+established world, where a benchmark starts from a fresh one; that is the
+likely cause, untested.
+
+### Carried forward
+
+- **At-rest frames over 100 ms at r=14.** S2's maximum is 100–113 ms in every
+  discrete run and 141–156 ms on the integrated GPU, against a p95 under
+  4.2 ms; S1's is 27–33 ms. Rare, present in every run, unattributed. The
+  harness keeps no per-frame series or stage split for the frame that set the
+  maximum.
+- **`generate` at 70–85 ms a chunk**, from 0.4.0's development. Fill holds the
+  2 s budget in S3, but M2 measured a 3.4 s startup fill at r=14.
+- **S4's walk stalls about 209 voxels in**, against terrain. It stalls at the
+  same place each run (the integrated runs read 208.9 three times), so
+  readings compare; `walked` is the check.
+- **The revised comparison method** above, to agree before R5 closes.
+
+---
+
 ## Measurement hazards
 
 Recorded because each one produced a wrong conclusion during 0.3.0 before being
@@ -584,6 +752,11 @@ caught.
    mixing near-zero non-measurements into the data and making it non-monotonic.
    It now records only settles that actually opened a deficit, and reports the
    chunk count so a reading is interpretable.
+5. **A single second's `CPU worst`.** At r=14 at rest, frame CPU p95 is under
+   4.2 ms, yet every 60-second window also holds a frame over 100 ms. A panel
+   reading of `CPU worst` reports whichever second it caught: 0.4.0 read 4.1 ms
+   and M2 read 10.7 ms from the same distribution (M3 section). Compare
+   `--bench` medians, not panel maxima.
 
 ---
 
