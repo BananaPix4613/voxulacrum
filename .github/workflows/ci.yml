@@ -139,12 +139,11 @@ jobs:
           path: manifests
           merge-multiple: true
 
-      # Reports without failing until R7 (#95) moves generation's
-      # transcendental math to libm: tree skeletons call the platform's powf,
-      # ln, sin and cos, so tree-bearing chunks are expected to differ until
-      # then. R7 removes this continue-on-error, which makes the gate real.
+      # The gate: Tier 1 must be bit-identical on every machine. Generation
+      # still calls the platform's powf, ln, sin and cos for tree skeletons
+      # until R7 (#95) moves them to libm, so a runner image update could fail
+      # this before then. That would be the defect R7 removes, not a flaky check.
       - name: Windows against Linux
-        continue-on-error: true
         shell: bash
         run: |
           echo '### Windows against Linux' >> "$GITHUB_STEP_SUMMARY"

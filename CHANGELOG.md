@@ -18,9 +18,10 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4 and B8 are merged. The runtime spine and the
-engine object model are designed in `engine-design.md`, and the CPU baseline
-M3's exit gate compares against is recorded.
+Milestone M3, in progress: R1, T4, B8 and T7 are merged. The runtime spine and
+the engine object model are designed in `engine-design.md`, the CPU baseline
+M3's exit gate compares against is recorded, and CI compares Tier-1 results
+across Windows, Linux and macOS.
 
 ### Added
 
@@ -48,6 +49,16 @@ M3's exit gate compares against is recorded.
   names from packages it depends on; a texture pack may restyle but never change
   behavior; and two package kinds, `Library` and `ResourcePack`, join `Game` and
   `Mod`. Design only: nothing loads differently yet.
+- **Cross-platform determinism job** (T7, #94) — CI now checks that Tier-1
+  results are bit-identical across machines, not only within one run. Windows,
+  Linux and macOS runners each write `--determinism-manifest <file>`: a hash of
+  every layer of the 512 chunks `--verify-generation` samples, taken over the
+  persistence encoding, plus a fluid pour stepped 200 times and a run of edits
+  ending in a blueprint stamp. The new `determinism-diff` tool compares two
+  manifests and names the first differing chunk and layer. Windows against
+  Linux fails the build; macOS reports. A run also fails if its sample holds no
+  chunk with fluid, trees, structures, two biomes or caves, or if a scenario
+  did not exercise what it is for. The first run was identical on all three.
 
 ### Changed
 

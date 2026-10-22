@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.14
+**Status:** Baseline reference, v1.15
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -24,6 +24,7 @@
 
 - v1.13 — Designed the **runtime spine** in §12 ahead of building it (roadmap M3, R1). Crates and sides, with two compiler-enforced dependency rules: server-core has no renderer or windowing dependency, and the render crate has no simulation dependency. One **30 Hz tick** with a `SimTick` counter, sub-rates keyed by tick number, a fixed phase order, state that changes only inside a tick, separate simulation and presentation time, and stateless seeded randomness; scheduled, random and block ticks are designed with a trigger for building them. The **client/server boundary**: commands applied at tick boundaries, one update per tick drained by cursor, and `Arc`-shared chunk snapshots in the shape M7 serializes. The **render world** and extract, with the minimal camera description. **Observer residency.** Two **determinism tiers**, with Tier 1 adding `libm` and no fused multiply-add to the rules. Records `target-architecture.md` N4 (integrated server), N5 (tick rates) and N6 (determinism tiers) as settled. Brought into line with it: §1's host principle and §12's editor section, which now follow roadmap P9's editor binary; §12 Runtime architecture, now two schedules; §12 Chunk streaming, now observers and areas of interest; §12 Determinism, now Tier 1; §12 Tick and scheduling framework; §12 Networking's tick rate and its sequencing by milestone; §12 Engine versioning, now by milestone, with the rubric's eleventh row; and the glossary.
 - v1.14 — Designed the **engine object model** in §12 ahead of the items that build its parts (roadmap M3, B8). One word per concept, retiring the overloaded uses of region, layer, tag, block and prefab. Definitions of the seventeen primitives, with where the code is today. A **catalog of asset types**, each with its owner (core, kit or game), registry, side, simulation and presentation fields, override rule and milestone; game content (items, recipes, loot) is built from generic data tables. Assets with both kinds of field load as a shared **definition** and a client **appearance** under one name, and overriding always replaces a whole record. Every registry and code hook listed as an **extension point** with its deliveries, side and determinism tier, including the **worldgen kernel registry** and its rules. **Override rules**: assets by name, never by path; a package replaces only names from packages it depends on, and unrelated packages replacing one name is a load error; tags merge; shared content is covered by the join handshake and presentation is not. **Package kinds** `Library` and `ResourcePack` added beside `Game` and `Mod`. The **shader reach** ladder, with who may use each rung and what it promises. The **camera boundary**, adopting the Runtime spine's description, with everything particular to a camera moved to kit camera modules. Records the three v2.1 decisions roadmap §8 deferred to this item: the foliage stack is interim (§6 now says so), the camera is a module, and there is one object model. §2's material registry now points to it, and §12's packages section corrects its claim that nothing persists library ids: chunk tags do, along with zone and biome ids. Glossary extended.
+- v1.15 — Recorded the **cross-platform determinism job** (roadmap M3, T7) in §12 Determinism: what its manifest hashes, the content and scenario checks that keep a comparison from passing vacuously, and which platforms gate. The rule that hashes use the persistence encoding now says the generated fluid, scatter and detail layers have encodings for hashing alone. Runtime spine's interim shapes gain the harness living in the app binary, which keeps the Linux runner installing windowing and GPU packages until R3c moves it to the headless server; the issue had named R3b for that.
 
 ---
 
@@ -1110,7 +1111,7 @@ On the client, a camera module computes its area of interest and sends it with `
 
 #### Determinism tiers
 
-**Tier 1: bit-identical on every machine.** Generation (every layer), the mutation door's handlers (voxel edits, blueprint stamping, seam finalization) and fluid simulation. Clients regenerate terrain and verify it by hash ("Networking" below), so every cross-machine difference costs an authoritative refetch. The rules are under "Determinism" below; a CI job compares Windows and Linux hashes on every push.
+**Tier 1: bit-identical on every machine.** Generation (every layer), the mutation door's handlers (voxel edits, blueprint stamping, seam finalization) and fluid simulation. Clients regenerate terrain and verify it by hash ("Networking" below), so every cross-machine difference costs an authoritative refetch. The rules are under "Determinism" below; a CI job compares Windows and Linux hashes on every push (T7).
 
 **Tier 2: reproducible on one machine.** `player_step` now; physics, AI and animation later (Rapier's `f32` scenes, M8). This needs a fixed tick, inputs per tick and no wall clock; `f32` is allowed. Server corrections fix clients, and same-machine reproducibility serves replays and tests.
 
@@ -1126,6 +1127,7 @@ On the client, a camera module computes its area of interest and sends it with `
 | Residency follows one isometric camera, and streaming drives meshing | Observers; the client chunk view | R6 |
 | The whole engine is one app crate | The crates above | R3 |
 | Generation calls the platform's `powf`, `ln`, `sin` and `cos` (tree skeletons, `PoissonDisk`) | `libm` | R7 |
+| The app binary writes the determinism manifest (`--determinism-manifest`), so the Linux CI runner installs windowing and GPU packages to build it | `voxulacrum-server` writes it, on a runner that installs nothing | R3c |
 | The underground visibility flood runs on the client each time the player's head cell changes | Visibility as shared world state, through the region graph | S1 (M5) |
 
 The visibility flood stays client-side through M3 knowingly. The renderer and the player's targeting both run on the client, so they agree, as §1's visibility principle requires; a server that validates targeting (M7) needs the region graph's shared classification.
@@ -1175,9 +1177,11 @@ Mandatory in **Tier 1**: generation, the mutation door's handlers and fluid simu
 - Iteration over hash maps stabilized via sorted keys where output ordering matters.
 - **No platform math library** (added v1.13). Transcendental functions (`sin`, `cos`, `tan`, `powf`, `exp`, `ln`, `log2`, `log10`) come from the `libm` crate, and glam's math goes through its `libm` feature, because platforms' math libraries don't promise the same last bit. `sqrt`, `abs`, `floor` and `trunc` are exact everywhere and allowed.
 - **No fused multiply-add**, and no parallel floating-point reductions, whose results depend on how the work was split (added v1.13).
-- Hashes are computed over the persistence encoding, which is fixed-endian and key-sorted (added v1.13).
+- Hashes are computed over the persistence encoding, which is fixed-endian and key-sorted (added v1.13). Voxels, tags and edit records use the blob's own sections. A chunk's generated fluid, scatter and detail paint are never saved, since the chunk regenerates them, so their encodings exist for hashing alone, built from the same entry writers as the override sections (`persistence::write_fluid_layer` and its siblings; added v1.15).
 
-Clippy's `disallowed_methods` enforces the math rules in Tier-1 crates, and a CI job compares Windows and Linux hashes of every generated layer.
+Clippy's `disallowed_methods` enforces the math rules in Tier-1 crates (R7).
+
+**The cross-platform job** (T7, added v1.15). Every push writes a manifest of Tier-1 hashes on Windows, Linux and macOS (`--determinism-manifest`) and compares them (`determinism-diff`), which names the first differing chunk and layer. The manifest holds every layer of the 512 chunks `--verify-generation` samples, a fluid pour stepped 200 times, and a run of voxel edits ending in a rotated blueprint stamp, each hashed after every batch. The run fails, before any comparison, if its sample holds no chunk with fluid cells, trees, structures, two biomes or caves, or if a scenario did not do what it is for (water crossing a seam, a chunk promoted to a full save, a stamp across chunks), since a comparison proves nothing about content it does not contain. Windows against Linux fails the build; macOS reports but does not gate. `--verify-generation` keeps its own check, which compares a run with itself.
 
 Tier 2 (the player step; later physics, AI and animation) needs only same-machine reproducibility. Simulation as a whole is divergence-tolerant (`roadmap.md` P1): the server owns it, and clients render what it sends.
 
