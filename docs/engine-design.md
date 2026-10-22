@@ -1274,6 +1274,62 @@ Content loads as **packages**: a directory with a `package.ron` manifest at its 
 - **Play policy is package data.** A package's `play.ron` holds the player's body, movement and reach, the spawn rule and the build tool. The controller, targeting and tools are engine mechanisms; a package without `play.ron` has no Play mode.
 - **Games build on the facade crate alone,** in their own repositories, and CI checks it (`boundary-check`, including `--manifest-path` for a workspace outside the engine).
 
+### Engine object model (added v1.14)
+
+What the engine is made of, as content and game code see it: the primitives, the asset types, the registries that are its extension points, and the rules by which packages add to and replace each other's assets. Several items lock parts of this in (the render world's camera description in R4, material definitions and textures in V5 and V7, registration from game code in B9 and B10, and the save format at M4), so it is designed once, here, before any of them invents its own answer (roadmap B8). This section settles concepts and rules. Each item that builds a type owns its data layout. Where the code differs today, the difference is listed under "Interim shapes" at the end.
+
+#### Terms
+
+Several words had come to mean more than one thing. In this document each means one:
+
+- **Region** is a world region (defined below). A node of the region graph is an **air region**; the region graph keeps its name.
+- **Layer** is a chunk layer. Detail paint's `DetailLayer` is a channel inside the detail-paint layer.
+- **Tag** is a registry tag (defined below). §3's per-chunk records of contributing zones, biomes and libraries are **chunk tags**.
+- **Block** is a spatial unit, never a type. What a voxel is made of is its material.
+- **Prefab** retires with the interim foliage stack (§6). A data-defined entity is an **entity type**; a piece of voxel content is a clip.
+- Where a package sits among the packages a world loads is its **load order**.
+- A type's **owner** is the layer of the engine/game split that provides it (`target-architecture.md`, "Engine, kit, game and mods"): the **core** (the engine behind the facade), the **kit** (opinionated systems in the engine repository, built on the facade alone, which a game may use or replace), or the **game** (its own repository, loaded as a package).
+- A type's **side** is shared, client or server, as under "Crates and sides" in the Runtime spine above.
+
+#### Primitives
+
+Each definition states the target. The line after it says where the code is today, where that differs.
+
+- **Voxel.** The unit of storage, collision and simulation: a 0.5 m cube (§8 D1). A voxel holds one palette entry, which is either a material with that material's properties, or a part of a fixture. **Properties** are a material's states: a few named values with declared semantic types (an axis, a horizontal direction), which is what lets a clip rotate them correctly (D9). Visual variants are not properties: they are presentation, chosen by position hash (V7), and never stored. A voxel is geometry and nothing else (§2); fluid, paint and scatter live in their own layers.
+  *Today:* a 1 m cell holding a `ShapeId` and a `MaterialId`, with no properties.
+- **Block.** A 2×2×2 group of voxels on the 1 m lattice. Players build and generation writes at block scale by default, and a block whose eight voxels match is stored once (two-level storage, D2). Texture coordinates anchor to this lattice (V5). A block is not a type and has no registry.
+  *Today:* the voxel is 1 m, so a block and a voxel coincide.
+- **Chunk.** A cube of 32³ voxels (16 m) within a grid: the unit of residency, generation, persistence, meshing and change reporting. Chunks are cubic and stream vertically (D10). Each carries chunk layers and a version, which the server's `changed` feed reports (Runtime spine).
+  *Today:* 32³ 1 m cells, loaded in fixed vertical columns.
+- **Layer.** One kind of per-chunk data with its own coverage, update cadence, serializer and version (§3): voxels, fluid, detail paint, scatter, decals, light and scheduled-tick queues, and package-defined layers such as heat or gas. Each splits into generated content and overrides (§9). Layers are registrable (D4).
+  *Today:* a fixed set, versioned together under `BLOB_VERSION`.
+- **Grid.** A set of chunks with a transform. Every world system addresses a grid through a handle rather than reaching a world singleton (§8 D3). The terrain is the large, static, axis-aligned grid. Detached grids may be static (D8, M4) or move, as kinematic, dynamic or powered grids (M9).
+  *Today:* one implicit world.
+- **Clip.** A piece of voxel content outside any grid: a palette by name, voxels in the chunk's two-level layout, a structure-void mask, fixtures, block-entity data, ports, sockets, optional entities and metadata (D9). One format carries worldgen structures, blueprints, copy and paste, packed vehicles, extract output and test fixtures, and it transforms through all 48 orientations.
+  *Today:* blueprint v1, yaw-only, with cells naming their material.
+- **Fixture.** An indivisible object occupying a footprint of voxels, such as a door, a table or a machine (D11). Each footprint voxel records its fixture and its offset in it, so any voxel finds the anchor in one step, and breaking any of them removes the whole fixture. A fixture type declares its footprint, port table and orientation rules. Placement is voxel-aligned.
+  *Today:* none.
+- **Sub-voxel model.** A model with a collision shape, anchored at one voxel, for things smaller than a voxel or not made of cubes: a torch, a fence post, a flower (D11). Sub-voxel models replace the procedural scatter props.
+  *Today:* `PrefabShape` props in the scatter layer.
+- **Entity.** Anything dynamic that isn't voxels. Entities live in one global ECS store rather than in chunks, are found through a separate spatial index, persist by region and keep a stable id across save, load and network (roadmap §6.3). An entity type defines one in data (M8).
+  *Today:* the player, and nothing else.
+- **Assembly.** A composite entity: a root and a tree of parts (grids, models, sprites, bare bodies, effect anchors) joined by physics joints, each part with its own components, defined in data with its IK chains and locomotion controller (M9).
+  *Today:* none.
+- **Region.** A world region: an aligned group of chunks within one world instance. It is the unit that owns per-region generation parameters (§8 D4), entity persistence, the region tick and region transformation (roadmap §6.26). D5 sets its size.
+  *Today:* none; generation is a function of seed, graphs and coordinates only.
+- **World instance.** One world: a seed, a generation configuration and its grids, with its own residency and persistence, sharing the session's registries with any other instance (roadmap §6.27). Persistence is keyed by instance from M4 (D5), and sub-dimensions build on it in M10.
+  *Today:* one world per save directory.
+- **Package.** The unit that content, and later code, loads as: a directory with a `package.ron` manifest and its content in a fixed layout ("Packages and content namespaces" above). Its kind decides what it may do ("Package kinds" below).
+  *Today:* data-only; code modules are refused until M11.
+- **Registry.** The table of one asset type, keyed by namespaced name. Numeric ids are assigned at load as an interning detail, entries come from packages in load order, and any save that stores ids embeds the name-to-id mapping ("Registry identity and save-embedded mapping" above). Every registry is an extension point ("Extension points" below).
+  *Today:* materials, prefabs, foliage, libraries, blueprints and species. The first three are numbered by hand in their files.
+- **Tag.** A named set of entries from one registry, such as `sandbox:flammable` over materials, so a rule can match a category instead of listing names. A tag is an asset in its own right. Unlike other assets, a tag merges: each package's entries add to it (override rules below).
+  *Today:* none.
+- **Event.** A typed notice that something happened. Events go to subscribers, never to call sites (roadmap §6.7). The server publishes each tick's events in that tick's `ServerUpdate` (Runtime spine). An event type declares its side and, from M7, whether it replicates. Game code subscribes from M3 (B9) and may declare event types of its own.
+  *Today:* `WorldEvent`, nine variants, all local, published one frame late.
+- **Command.** A validated request to change state. It carries an origin and is applied only through the mutation door, at a tick boundary (roadmap P5). The door is where validation, the mode gate, persistence marking, event emission and, from M7, replication happen. Every system's writes take this shape, not only voxel edits (`target-architecture.md`, "Five API verbs"). A client sends commands as the `ClientCommand` kinds (Runtime spine).
+  *Today:* `MutationCommand` with `Authoring`, `PlayTime` and `System` origins, applied at once rather than at a tick boundary.
+
 ### Per-region generation parameters (added v1.8)
 
 Generation is currently a pure function of `(seed, graphs, coords)`. That is sufficient for a world whose rules never change, and insufficient for one that can be reshaped after it has been generated and edited — a region-scale transformation in the Terraria-hardmode sense. The generalization:
