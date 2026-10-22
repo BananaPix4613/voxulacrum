@@ -28,6 +28,7 @@ mod jobs;
 mod package;
 mod validate;
 mod verify;
+mod determinism;
 mod bench;
 
 pub use app::{run, run_with, RunOptions};

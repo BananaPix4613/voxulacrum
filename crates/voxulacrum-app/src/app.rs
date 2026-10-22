@@ -11,7 +11,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::{
     bench, core_budget, diagnostics, graph_reload, interaction, jobs, libraries, materials,
-    paths, player, prefabs, rendering, simulation, ui, validate, verify, world,
+    paths, player, prefabs, rendering, simulation, ui, validate, verify, world, determinism,
 };
 use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::render_context::RenderContext;
@@ -956,12 +956,13 @@ pub fn run() {
     run_with(RunOptions::default());
 }
 
-/// Runs the engine. `--validate-graphs` and `--verify-generation` run headless
-/// and exit; otherwise this opens the window and enters the event loop.
-/// `--bench <scenario>` runs a benchmark scenario in the window, writes its
-/// results and exits (`docs/perf-baseline.md`); with `--runs <n>` it runs the
-/// scenario `n` times, each in a child process, and summarizes them. Exits
-/// with code 1 if the package fails to load or a benchmark fails.
+/// Runs the engine. `--validate-graphs`, `--verify-generation` and
+/// `--determinism-manifest` run headless and exit; otherwise this opens the
+/// window and enters the event loop. `--bench <scenario>` runs a benchmark
+/// scenario in the window, writes its results and exits
+/// (`docs/perf-baseline.md`); with `--runs <n>` it runs the scenario `n` times,
+/// each in a child process, and summarizes them. Exits with code 1 if the
+/// package fails to load or a benchmark fails.
 pub fn run_with(options: RunOptions) {
     env_logger::init();
     
@@ -1038,6 +1039,9 @@ pub fn run_with(options: RunOptions) {
         std::process::exit(code);
     }
     if let Some(code) = verify::run_from_args(&args) {
+        std::process::exit(code);
+    }
+    if let Some(code) = determinism::run_from_args(&args) {
         std::process::exit(code);
     }
     let bench_setup = match bench::BenchSetup::from_args(&args, &package_id) {

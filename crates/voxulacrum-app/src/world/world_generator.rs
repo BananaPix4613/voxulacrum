@@ -292,6 +292,7 @@ impl WorldGenerator {
                     smoothing_distances: Box::new([0u8; super::slab_smoothing::COLUMN_COUNT]),
                     segments: Vec::new(),
                     lobes: Vec::new(),
+                    stamp_counts: nodegraph_eval::feature::StampCounts::default(),
                 };
             }
         };
@@ -352,6 +353,7 @@ impl WorldGenerator {
             smoothing_distances,
             segments: eval.segments,
             lobes: eval.lobes,
+            stamp_counts: eval.stamp_counts,
         }
     }
 
@@ -508,6 +510,9 @@ pub struct GeneratedChunk {
     pub segments: Vec<nodegraph_eval::feature::BranchSegment>,
     /// Canopy lobes this chunk owns. Derived, never persisted, same as segments.
     pub lobes: Vec<nodegraph_eval::feature::CanopyLobe>,
+    /// Features of each payload that wrote into this chunk's voxels. Derived,
+    /// never persisted, same as segments.
+    pub stamp_counts: nodegraph_eval::feature::StampCounts,
 }
 
 /// Identifies one editable source in the world hierarchy, for routing edits and

@@ -46,7 +46,9 @@ use crate::world::world_generator::{world_manifest_path, WorldGenerator};
 /// tests and `world_eval`'s seam test are that for stage 8 - and whoever adds
 /// one should check that the anchor actually moves when the content is disabled,
 /// rather than assuming coverage.
-const DEFAULT_COUNT: usize = 512;
+///
+/// The determinism manifest (`determinism`) hashes the same sample.
+pub(crate) const DEFAULT_COUNT: usize = 512;
 /// Chunk-Y layers to cover, matching the engine's default streaming range.
 const LAYERS: i32 = 4;
 /// Coordinates re-generated in reverse for the order-independence check. A
@@ -83,7 +85,7 @@ pub fn run_from_args(args: &[String]) -> Option<i32> {
 /// A deterministic block of chunk coordinates: a square XZ patch repeated over
 /// every chunk-Y layer, so the sample covers surface, subsurface and air rather
 /// than a strip of one.
-fn positions(count: usize) -> Vec<IVec3> {
+pub(crate) fn positions(count: usize) -> Vec<IVec3> {
     let per_layer = count.div_ceil(LAYERS as usize);
     let side = (per_layer as f64).sqrt().ceil() as i32;
     let half = side / 2;
