@@ -132,10 +132,10 @@ pub struct ResolvedBoundary {
     pub outputs: Vec<ResolvedPin>,
 }
 
-/// A node's effective pin on one side, unifying static [`PinSpec`]s and resolved
-/// dynamic pins ([`ResolvedPin`]). Borrows its name from whichever backs it, so
-/// producing one never allocates. This is the pin identity `connect`,
-/// `validate`, and the editor operate on.
+/// A node's effective pin on one side, unifying static
+/// [`PinSpec`](crate::PinSpec)s and resolved dynamic pins ([`ResolvedPin`]).
+/// Borrows its name from whichever backs it, so producing one never allocates.
+/// This is the pin identity `connect`, `validate`, and the editor operate on.
 #[derive(Copy, Clone, Debug)]
 pub struct EffectivePin<'a> {
     /// Pin name.
