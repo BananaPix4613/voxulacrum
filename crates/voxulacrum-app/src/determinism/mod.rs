@@ -2,7 +2,7 @@
 //!
 //! `--determinism-manifest <file>` writes, as JSON, a hash of every Tier-1
 //! result this machine produces (design §12, "Determinism tiers"). CI writes one
-//! one each of its runners and compares them. `--verify-generation` compares a
+//! on each of its runners and compares them. `--verify-generation` compares a
 //! run only with itself, so it cannot see a result that differs between
 //! machines.
 //!
@@ -16,12 +16,18 @@
 //! sample does not hold, so the run also counts each `ChunkKind` and fails,
 //! after writing the manifest, if any kind has no chunk.
 //!
+//! **The scenarios** (`scenarios`) are the Tier-1 results generation alone does
+//! not reach: a fluid pour stepped through the simulation, and voxel edits and
+//! a blueprint stamp through the mutation door. Each runs on a block of chunks
+//! it generates itself, and fails the run if it did not exercise what it is for.
+//!
 //! Like `--verify-generation`, this runs from the normal binary before the event
 //! loop exists, so it needs no window or GPU, and it generates on rayon's global
 //! pool outside the frame schedule. R3c moves it to the headless server binary.
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use glam::IVec3;
 use nodegraph_eval::feature::StampCounts;
@@ -37,6 +43,8 @@ use crate::world::world_generator::{world_manifest_path, GeneratedChunk, WorldGe
 /// Version of the manifest's shape. The compare tool refuses two manifests of
 /// different formats rather than comparing fields that mean different things.
 const FORMAT: u32 = 1;
+
+mod scenarios;
 
 /// Handle `--determinism-manifest <file>`.
 ///
@@ -208,7 +216,7 @@ fn generated_record(pos: IVec3, chunk: &GeneratedChunk) -> Record {
 fn write_manifest(path: &Path) -> i32 {
     let world = world_manifest_path();
     let generator = match WorldGenerator::from_manifest(&world) {
-        Ok(g) => g,
+        Ok(g) => Arc::new(g),
         Err(e) => {
             eprintln!("determinism-manifest: FAILED to load world manifest: {e}");
             return 2;
@@ -229,13 +237,28 @@ fn write_manifest(path: &Path) -> i32 {
         .map(|kind| (kind, records.iter().filter(|r| r.kinds.contains(&kind.name())).count()))
         .collect();
 
+    // Each scenario generates its own block of chunks, so neither sees the
+    // other's changes.
+    let materials = crate::materials::load_registry();
+    let mut sections = vec![Section { name: "generation", records }];
+    let mut failures = Vec::new();
+    for (name, outcome) in [
+        ("fluid", scenarios::fluid(&generator, &materials)),
+        ("edits", scenarios::edits(&generator, &materials)),
+    ] {
+        match outcome {
+            Ok(records) => sections.push(Section { name, records }),
+            Err(e) => failures.push(e),
+        }
+    }
+
     let manifest = Manifest {
         format: FORMAT,
         namespace: crate::paths::namespace().to_string(),
         seed: generator.world_seed(),
         platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         kinds: counts.iter().map(|&(kind, n)| (kind.name(), n)).collect(),
-        sections: vec![Section { name: "generation", records }],
+        sections,
     };
     let json = serde_json::to_string_pretty(&manifest).expect("the manifest serializes");
     if let Err(e) = std::fs::write(path, json) {
@@ -257,6 +280,11 @@ fn write_manifest(path: &Path) -> i32 {
             "determinism-manifest: FAILED - the sample holds no chunk of {missing} kind(s), \
              so a comparison would prove nothing about them",
         );
+    }
+    for failure in &failures {
+        eprintln!("determinism-manifest: FAILED - {failure}");
+    }
+    if missing > 0 || !failures.is_empty() {
         return 1;
     }
     println!("determinism-manifest: ok");
