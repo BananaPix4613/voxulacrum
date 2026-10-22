@@ -18,11 +18,11 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8, T7 and R7 are merged. The runtime spine
-and the engine object model are designed in `engine-design.md`, the CPU baseline
-M3's exit gate compares against is recorded, CI compares Tier-1 results across
-Windows, Linux and macOS, and generation no longer calls the platform's math
-library.
+Milestone M3, in progress: R1, T4, B8, T7, R7 and F8 are merged. The runtime
+spine and the engine object model are designed in `engine-design.md`, the CPU
+baseline M3's exit gate compares against is recorded, CI compares Tier-1
+results across Windows, Linux and macOS, generation no longer calls the
+platform's math library, and the API docs build without warnings.
 
 ### Added
 
@@ -81,6 +81,14 @@ library.
   skeleton nodes now differ in their last bits, far below a voxel, and no layer
   of the 512 sampled chunks changed, 131 of them tree-bearing. Saves need
   nothing.
+
+### Fixed
+
+- **The API docs build cleanly** (F8, #87) — `cargo doc --workspace --no-deps`
+  no longer warns. `EffectivePin`'s doc linked `PinSpec` from a module where it
+  isn't in scope, and three public docs in `nodegraph-eval`'s skeleton module
+  linked the private `solve`. CI now builds the docs with `-D warnings`, so a
+  broken or private doc link fails the build.
 
 ---
 
