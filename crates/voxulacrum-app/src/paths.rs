@@ -50,7 +50,7 @@ pub fn default_package_root() -> PathBuf {
     packages_dir().join("sandbox")
 }
 
-/// Load content from `packages`, in [`Package::load_order`]'s order, and keep
+/// Load content from `packages`, in [`Package::load_world`]'s order, and keep
 /// this world's saves in the last one's save directory. Called once, at
 /// startup, before any content is read.
 pub fn set_packages(packages: Vec<Package>) {
@@ -63,10 +63,8 @@ pub fn set_packages(packages: Vec<Package>) {
 /// the default package and its dependencies if none was set.
 pub fn packages() -> &'static [Package] {
     PACKAGES.get_or_init(|| {
-        let root = default_package_root();
-        Package::load(&root)
-            .and_then(|package| Package::load_order(package, &packages_dir()))
-            .unwrap_or_else(|e| panic!("the default package at {}: {e}", root.display()))
+        Package::load_world(&default_package_root(), &packages_dir())
+            .unwrap_or_else(|e| panic!("the default package failed to load: {e}"))
     })
 }
 

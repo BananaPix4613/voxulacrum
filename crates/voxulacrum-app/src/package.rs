@@ -10,7 +10,7 @@
 //! This loader takes data-only packages: one that declares code modules is
 //! refused until the WebAssembly runtime exists (M11). A package's
 //! dependencies are found in `packages/<id>/` and ordered ahead of it
-//! ([`Package::load_order`]). The engine package, `voxulacrum`, is built in.
+//! ([`Package::load_world`]). The engine package, `voxulacrum`, is built in.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -77,33 +77,47 @@ pub struct Package {
 const ROOT_ONLY: [&str; 3] = ["materials.ron", "prefabs.ron", "foliage.ron"];
 
 impl Package {
-    /// Load and validate the package at `root` for this engine build.
-    pub fn load(root: &Path) -> Result<Self, String> {
-        Self::load_for(root, &engine_version())
+    /// Every package a world started from the package at `root` loads, for
+    /// this engine build, in load order: each dependency before the packages
+    /// that need it, ties broken by id, and `root` last. A dependency is found
+    /// at `<packages_dir>/<id>/`. The engine package is built in, so depending
+    /// on `voxulacrum` checks this engine's version and loads nothing. A
+    /// package that names no world is refused.
+    ///
+    /// Each error starts with the world package's manifest path and names any
+    /// other path it concerns once, so a caller prints it as it is.
+    pub fn load_world(root: &Path, packages_dir: &Path) -> Result<Vec<Self>, String> {
+        Self::load_world_for(root, packages_dir, &engine_version())
     }
 
+    fn load_world_for(root: &Path, packages_dir: &Path, engine: &Version) -> Result<Vec<Self>, String> {
+        let package = Self::load_for(root, engine)?;
+        let path = root.join(MANIFEST_FILE);
+        if package.manifest.world.is_none() {
+            return Err(format!("{}: names no world to start", path.display()));
+        }
+        Self::load_order_for(package, packages_dir, engine).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Load and validate the package at `root` for an engine at version
+    /// `engine`. Each error starts with the manifest's path.
     fn load_for(root: &Path, engine: &Version) -> Result<Self, String> {
         let path = root.join(MANIFEST_FILE);
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let manifest = PackageManifest::parse(&text, engine)?;
-        let package = Self { root: root.to_path_buf(), manifest };
-        if let Some(world) = package.world_manifest() {
-            if !world.is_file() {
-                return Err(format!("world {} does not exist", world.display()));
+        let in_manifest = |e: String| format!("{}: {e}", path.display());
+        let text = std::fs::read_to_string(&path).map_err(|e| in_manifest(e.to_string()))?;
+        let manifest = PackageManifest::parse(&text, engine).map_err(in_manifest)?;
+        // Named as the manifest writes it, since the manifest's path already
+        // names the root.
+        if let Some(world) = &manifest.world {
+            if !root.join(world).is_file() {
+                return Err(in_manifest(format!("world {} does not exist", world.display())));
             }
         }
-        Ok(package)
+        Ok(Self { root: root.to_path_buf(), manifest })
     }
 
-    /// Every package a world started from `root` loads, in load order: each
-    /// dependency before the packages that need it, ties broken by id, and
-    /// `root` last. A dependency is found at `<packages_dir>/<id>/`. The engine
-    /// package is built in, so depending on `voxulacrum` checks this engine's
-    /// version and loads nothing.
-    pub fn load_order(root: Package, packages_dir: &Path) -> Result<Vec<Package>, String> {
-        Self::load_order_for(root, packages_dir, &engine_version())
-    }
-
+    /// Load and order every package reachable from `root`, as
+    /// [`load_world`](Self::load_world) describes.
     fn load_order_for(root: Package, packages_dir: &Path, engine: &Version) -> Result<Vec<Package>, String> {
         // Load every package reachable from `root`, checking each requirement
         // against the version that loaded.
@@ -394,7 +408,8 @@ mod tests {
             .unwrap();
         let err = Package::load_for(&root, &engine()).unwrap_err();
         let _ = std::fs::remove_dir_all(&root);
-        assert!(err.contains("does not exist"), "{err}");
+        let expected = format!("{}: world graphs/world.manifest.json does not exist", root.join(MANIFEST_FILE).display());
+        assert_eq!(err, expected);
     }
 
     /// A scratch directory for one test, emptied first.
@@ -412,6 +427,19 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let text = format!(
             r#"( id: "{id}", version: "{version}", kind: Mod, engine: "^0.4", dependencies: [{dependencies}] )"#
+        );
+        std::fs::write(root.join(MANIFEST_FILE), text).unwrap();
+        root
+    }
+
+    /// Write a game package `id` that starts a world into `dir`, with
+    /// `dependencies` as the body of its RON list, and return its root.
+    fn write_world(dir: &Path, id: &str, dependencies: &str) -> PathBuf {
+        let root = dir.join(id);
+        std::fs::create_dir_all(root.join("graphs")).unwrap();
+        std::fs::write(root.join("graphs").join("world.manifest.json"), "").unwrap();
+        let text = format!(
+            r#"( id: "{id}", version: "0.1.0", kind: Game, engine: "^0.4", world: "graphs/world.manifest.json", dependencies: [{dependencies}] )"#
         );
         std::fs::write(root.join(MANIFEST_FILE), text).unwrap();
         root
@@ -511,5 +539,40 @@ mod tests {
         let err = order(&dir, "game").unwrap_err();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(err.contains("base and game both use namespace `game`"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_manifest_is_named_once() {
+        let dir = scratch("missing-manifest");
+        let root = dir.join("absent");
+        let err = Package::load_world_for(&root, &dir, &engine()).unwrap_err();
+        let path = root.join(MANIFEST_FILE);
+        // The same read's error, so the expected text matches on every platform.
+        let io = std::fs::read_to_string(&path).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(err, format!("{}: {io}", path.display()));
+    }
+
+    #[test]
+    fn a_package_that_names_no_world_is_refused() {
+        let dir = scratch("no-world");
+        let root = write_package(&dir, "base", "1.0.0", "");
+        let err = Package::load_world_for(&root, &dir, &engine()).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(err, format!("{}: names no world to start", root.join(MANIFEST_FILE).display()));
+    }
+
+    #[test]
+    fn a_dependency_error_names_the_world_manifest_then_the_dependency() {
+        let dir = scratch("world-dependency");
+        let root = write_world(&dir, "game", r#"(id: "absent", version: "^1")"#);
+        let err = Package::load_world_for(&root, &dir, &engine()).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        let expected = format!(
+            "{}: game depends on absent: no package at {}",
+            root.join(MANIFEST_FILE).display(),
+            dir.join("absent").display()
+        );
+        assert_eq!(err, expected);
     }
 }
