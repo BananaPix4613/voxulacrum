@@ -1,7 +1,7 @@
 # Voxulacrum Engine Roadmap — 0.4.0 through 1.0
 
 **Status:** Authoritative planning reference, v2.2
-**Companions:** `engine-design.md` (v1.13 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
+**Companions:** `engine-design.md` (v1.14 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
 **Tracker:** every work item is a GitHub issue, grouped by [milestone](https://github.com/BananaPix4613/voxulacrum/milestones) and tracked on the *Voxulacrum engine* project board (§9.3).
 **Purpose:** Make the technical goals visible, fix the working discipline, and sequence every core capability the engine needs before it is a *ready product* — an engine another person (or future you) can build a title on without engine surgery.
 
@@ -239,6 +239,7 @@ Point and interval solidity (`WorldView::solid_interval`, slab-aware), material/
 
 Plus: stable entity IDs across save/load and network, component conventions (position, velocity, collider, renderable, replicated), lifetime and ownership rules, and data-driven entity type definitions so a game adds a type by authoring rather than writing an ECS bundle.
 **State:** the player is the only entity; no framework above it. The single largest gap for game implementation. **M8**.
+**Object model:** entity types, components, animations and assemblies as asset types and extension points: [`engine-design.md` §12, "Engine object model", Asset types](engine-design.md#asset-types).
 
 ### 6.4 Character controller & physics
 Fixed-timestep pure-function stepping, slab-aware **swept** AABB resolution (not discrete — tunneling is a swept-collision problem), auto-step, gravity and terminal velocity, fluid buoyancy and swimming, sub-tick ordering when moving geometry displaces entities, and an exposed parameter block so a game tunes a controller rather than rewriting one. Reusable by non-player actors.
@@ -255,6 +256,7 @@ Reach-limited cursor and forward raycast; target resolution across voxels, scatt
 ### 6.6 Blueprint & prefab system
 A real format: voxel template (shapes and materials, slabs included), anchor offset, footprint, destruction policy, sway weights, variant sets, placement rules, and a **protected-volume flag** that region transformation (§6.26) must respect — the mechanism that lets authored vaults survive a self-modifying world. Runtime: capture a region to a blueprint, stamp through the mutation door with priority resolution, reference blueprints from graphs for worldgen structures.
 **State:** blueprint format v1, in-world capture and stamping shipped in 0.4.0. It becomes the voxel clip format in **M4** (D9), adding sockets, masks, fixtures, ports and all 48 orientations; game-side runtime use (build copy/paste, packing grids) — **M8**/**M9**.
+**Object model:** blueprints are interim; clips, fixtures and sub-voxel models are defined as primitives: [`engine-design.md` §12, "Engine object model", Primitives](engine-design.md#primitives).
 
 ### 6.7 Event & messaging layer (world mutation event bus)
 **How systems talk without coupling.** Typed engine events with subscription: voxel changed, chunk loaded/unloaded, entity spawned/despawned, fluid entered cell, region graph changed, **region parameters changed** (§6.26), player mode changed, world time crossed threshold, interaction performed. Ordering guarantees relative to `FrameStage`, and a declared local-vs-replicated policy per event type.
@@ -266,10 +268,12 @@ Registries for materials, prefabs, palettes, sounds, entity types, interaction k
 **Identity discipline (new requirement, and a latent defect today):** the authoring and *persistence* identity is a **stable namespaced string** (`voxulacrum:oak_slab`); numeric IDs are a runtime interning detail, and **every save embeds its own name↔ID mapping**. Numeric IDs baked into region files without a mapping are why modded Minecraft worlds corrupted for a decade — and the engine currently does exactly that. Fix lands with the format freeze, **M4** (D3 item in §9.3).
 Plus engine configuration: graphics, audio, input, and accessibility settings with persistence and defaults.
 **State:** materials and prefabs on the registry pattern; the material table is currently defined three times (F5 reduces it to one). Namespaced identity and a uniform registry trait — **M2**; save mapping — **M4**; remaining registries with their subsystems — **M8**/**M10**.
+**Object model:** every registry as an extension point, and the rules by which packages add to and replace each other's assets: [`engine-design.md` §12, "Engine object model", Override and layering rules](engine-design.md#override-and-layering-rules).
 
 ### 6.9 Behavior definition & scripting
 For 1.0: game rules are **native Rust against the facade crate**, plus **data-driven definitions** (entity types, interaction kinds, spawn tables, weighted selection tables, reaction tables) in RON. Mods are **WebAssembly components** against a game's mod API, ahead-of-time compiled per platform so consoles stay possible. The **package boundary is drawn at M2**, because drawing it is what forces clean engine/content separation; the runtime follows in M11.
 **State:** game code is native Rust against the facade; data-driven definitions — **M8**. The package boundary that mods plug into — **M2**. The WebAssembly mod runtime — **M11**, and it may follow 1.0.
+**Object model:** the three deliveries (data, native, WebAssembly) per extension point, and the package kinds: [`engine-design.md` §12, "Engine object model", Extension points](engine-design.md#extension-points).
 
 ### 6.10 AI & navigation primitives
 Geometric walkability queries; **hierarchical pathfinding** — coarse routing over the region graph (§6.22), fine path within a region (flat voxel A* over long distances is brutal at this world scale); streaming-aware path invalidation; spatial queries (nearest entity, entities in radius) served by §6.3's loose grid; a steering/locomotion helper.
@@ -280,6 +284,7 @@ Geometric walkability queries; **hierarchical pathfinding** — coarse routing o
 Camera modes (follow, free, cinematic, fixed), zoom bands with pixel snapping preserved, target switching and blending, shake/impulse hooks, screen↔world projection helpers.
 **Follow behavior requirement:** tight vertical tracking of a player whose Y changes constantly makes the world bob nauseatingly. Camera Y must track a **quantized floor level** — last grounded Y, moved only past a threshold, eased over ~200 ms — and ideally anchor to the current **enclosure region's floor**, which holds perfectly still while the player moves around inside a building. Horizontal follow uses an asymmetric screen-space deadzone extended in the movement direction, defined in camera space.
 **State:** interpolated, texel-snapped follow shipped; free camera in authoring mode; Q/E rotation in 90° steps. Quantized-floor follow and region anchoring — **M5**; mode framework and game-facing control — **M8**.
+**Object model:** the camera description the core takes, and what belongs to camera modules: [`engine-design.md` §12, "Engine object model", Camera boundary](engine-design.md#camera-boundary).
 
 ### 6.12 UI framework
 **The single most common way projects of this size stall.** The external review puts it at 30–40% of total development time and identifies ad-hoc UI as the month-eight killer. Two rules that must be structural rather than retrofitted:
@@ -288,20 +293,24 @@ Camera modes (follow, free, cinematic, fixed), zoom bands with pixel snapping pr
 
 Needed: an in-game UI layer at pixel-art scale (egui remains editor tooling permanently — it is not the game UI stack), layout with resolution scaling, controller navigation, data binding, HUD element registration, menu/screen stack with input focus and pause semantics, and world-space anchors (nameplates, prompts).
 **State:** a minimal play HUD, which a package switches on in `play.ron` (B7). HUD drawn by game code, and everything above — **M8**, scoped as one of that milestone's two largest items.
+**Object model:** UI layouts, themes, string tables, fonts and icons as asset types: [`engine-design.md` §12, "Engine object model", Asset types](engine-design.md#asset-types).
 
 ### 6.13 Input & bindings
 `GameAction` enum, `input.ron` maps, edge/held/continuous triggers, context stacks (gameplay vs. menu vs. editor), gamepad support, runtime rebinding.
 **State:** semantic layer and map file shipped (keys and scroll only). Context stacks, gamepad, runtime rebinding — **M5** (E1); rebinding UI — **M8**.
+**Object model:** input actions (shared) and input bindings (client, replaceable) as asset types: [`engine-design.md` §12, "Engine object model", Asset types](engine-design.md#asset-types).
 
 ### 6.14 Audio API
 Positional one-shots and loops; surface-material-driven footsteps and impacts via the registry; ambience beds by biome, depth, weather, and time; **occlusion-aware attenuation reusing the region graph**; mix buses with settings-backed volumes; voice limits; streaming versus cached decisions; and network-appropriate behavior (sounds triggered by replicated events, not simulated twice).
 **Listener placement — a real decision for this camera:** at the camera, audio is spatially correct but emotionally detached; at the player, it is gameplay-correct but panning will not match the screen. Settled answer: **listener at the player, panning computed in camera space.**
 **Soundscape and music direction:** the ambience this engine is aimed at comes substantially from *silence and rare arrival*, not from a playlist — so the music layer is a **state-driven director** (biome, depth, weather, time, tension) rather than a track queue. This belongs in the engine because its inputs are engine state.
 **State:** nothing. Foundation — **M6**; game-facing API, soundscape, director, mixing — **M8**.
+**Object model:** sounds, sound events, music states and soundscapes as asset types: [`engine-design.md` §12, "Engine object model", Asset types](engine-design.md#asset-types).
 
 ### 6.15 VFX & particles
 A particle system that follows whatever presentation preset the game chooses (quantized and palette-driven under strict pixel art, P19): block-break debris, fluid splashes, dust, footstep puffs, ambient motes, weather precipitation, fire and smoke. Emitters attachable to entities, voxel positions, and events; pooled and budgeted; replicated as events rather than per-particle state. Budget generously — under this camera, particles carry much of the atmosphere that perspective and camera motion would otherwise provide.
 **State:** nothing. Design and build — **M6**; game-facing emitter API — **M8**.
+**Object model:** particle effects, sprites and decals as asset types: [`engine-design.md` §12, "Engine object model", Asset types](engine-design.md#asset-types).
 
 ### 6.16 World time, weather & ambience
 Day-night cycle as replicated simulation state driving palette bands and lighting; calendar and season hooks; a weather state machine with per-biome eligibility; wind as a shared value driving foliage sway, particles, and audio; and an **interior/exterior determination** sourced from the region graph so weather and temperature stop at a roof.
@@ -320,6 +329,7 @@ Documented patterns: server-authoritative component replication, event replicati
 **Generalize "holds item stacks" exactly once.** Player inventory, chests, machine slots, and entity inventories are one interface. The base abstraction must include **programmatic insert/extract with per-slot filtering** from the start — automation-style content needs it, and retrofitting it means editing thirty call sites. Plus slots, stacks, capacity, transfer operations, hotbar binding to actions, container entities, and item definitions as registry data.
 Recipes, progression, and balance stay game-side.
 **State:** a material-cycling swatch. **M8**.
+**Object model:** items, recipes and loot as game content built from data tables: [`engine-design.md` §12, "Engine object model", Asset types](engine-design.md#asset-types).
 
 ### 6.20 Debug & development surface for game code
 Registerable console commands, cheat/toggle registry, entity inspector, log capture with filtering, assertion and error conventions, hot-reloadable game data, and a **photo mode** — which for a game selling on ambience is marketing infrastructure, not a toy.
@@ -329,6 +339,7 @@ Registerable console commands, cheat/toggle registry, entity inspector, log capt
 **Localization:** all user-facing text lives in string tables from the first UI work — extraction is nearly free at the start and expensive after a thousand hardcoded strings. Asset lint enforces it (§4.5). Translations ship whenever.
 **Accessibility:** colorblind-safe palette variants (load-bearing for any game using palette quantization, P19), text scaling, motion and screen-shake reduction, remappable input including gamepad, and adjustable interaction assist (the ledge-snap and step-up forgiveness in §6.4 are accessibility features as much as feel features).
 **State:** nothing. String tables enforced from **M8** (first game UI); accessibility options — **M11**.
+**Object model:** string tables as an asset type a resource pack may add a locale to: [`engine-design.md` §12, "Engine object model", Asset types](engine-design.md#asset-types).
 
 ### 6.22 Region graph (enclosure & connectivity as shared world state)
 **Adopted from the external review, and the highest-value structural addition it offered.** A parallel field over air voxels assigning each to a connected region, with per-chunk connectivity summaries joined across chunk borders and updated incrementally — never globally refilled. Regions carry derived state: enclosed or sky-connected, revealed, volume, boundary faces.
@@ -392,6 +403,7 @@ Multiple world instances (sub-dimensions) with per-instance seed and generation 
 
 This exists for a specific reason beyond "dimensions are a genre staple": **procedural generation structurally cannot deliver authored, shared secrets.** A fixed-seed sub-dimension identical for every player restores that, and combined with **protected volumes** (authored vaults placed procedurally but exempt from region transformation) it gives hand-authored content a home inside a self-modifying procedural world.
 **State:** nothing; single-world assumption throughout. Persistence keying — **M4** (D5); build — **M10**.
+**Object model:** world instances and world regions defined as primitives: [`engine-design.md` §12, "Engine object model", Primitives](engine-design.md#primitives).
 
 ### 6.28 Interactive simulation framework
 The substrate for material simulation beyond fluids, and the engine-side half of what makes a survival sandbox feel reactive.
@@ -406,6 +418,7 @@ The engine's fluid simulation already uses two-phase updates and active sets —
 ### 6.29 Grid abstraction *(§8 D3 adopted)*
 Systems addressed against a grid handle rather than a world singleton, so that finite detached voxel grids — static ruins, moving platforms, buildable vehicles — become a policy difference rather than a different kind of thing. Consumers: raycasting, collision, lighting, meshing, region detection, pathfinding, targeting, block updates.
 **State:** §8 D3 is adopted, including moving grids. Grid handles with static grids — **M4** (D8); moving grids, split/extract/merge/bake operations, debris, and assemblies — **M9**.
+**Object model:** grids defined as a primitive: [`engine-design.md` §12, "Engine object model", Primitives](engine-design.md#primitives).
 
 ### 6.30 API conformance set (how R4 is proven)
 A fixed set of small game features, each exercising a different slice of the above, implemented **without modifying engine crates** and kept building in CI from M8 onward:
@@ -493,7 +506,7 @@ Architectural choices whose cost rises sharply at a named milestone. Each is dec
 
 **Further decisions recorded in v2.0** (detail in `target-architecture.md`): engine/game separation with a facade crate and a separate game repository (M2); P8 and P9 revised (§2); the integrated server and the tick framework pulled forward (M3); tick rates of 30 Hz simulation, 60 Hz physics substeps and 10 Hz fluids (M3); determinism tiers with `libm` in generation (M3); Rapier in f32 physics scenes per activity cluster (M8); i32 voxel coordinates kept (M4); cubic vertical streaming with no fixed world height (M4); worldgen client-side by default with a private-seed server option (M7); mods as ahead-of-time compiled WebAssembly components with the package boundary drawn at M2 (runtime in M11); no house style, with presentation presets and lighting models (M5); logic at voxel scale through ports and a network service (M9); tiny debris as instanced cubes rather than grids (M9); inventory units deferred to the game.
 
-**Recorded in v2.1** (October 2026, detail in `engine-design.md` once B8 lands):
+**Recorded in v2.1** (October 2026; detail in [`engine-design.md` §12, "Engine object model"](engine-design.md#engine-object-model-added-v114), added by B8):
 - **Foliage and trees are interim.** The current stack (the procedural `PrefabShape` props, skeleton trees drawn as capsule impostors, canopy cores, the tier-1 detail-paint schema and `render_delegated`) gets no new work. Its replacements are voxel clips (D9) for voxel trees and structures, fixtures and sub-voxel models (D11) for non-cube props, registered layers (D4) for detail and scatter, and sprites, depth sprites and billboard clumps (M6) for grass and canopies. The skeleton generator stays, as a generator that outputs voxels.
 - **The camera is a module.** The isometric orthographic camera moves to the kit, and the core takes a camera description (P8, P20, V8).
 - **One object model.** Primitives, asset types, extension points and override rules are designed together (B8) before R4, V5 and M4 depend on them. Assets are named, never addressed by path; presentation fields may be overridden by client-only packages, simulation fields may not.

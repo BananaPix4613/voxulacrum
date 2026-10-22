@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.13
+**Status:** Baseline reference, v1.14
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -23,6 +23,7 @@
 - v1.12 — Recorded M2's settled content architecture in §12: **packages and content namespaces**. Content loads as data-only packages (`package.ron` beside fixed-layout content), each with its own namespace; bare names resolve in the holding content's namespace and qualified names reach into any loaded package. The built-in `voxulacrum` package declares the standard libraries beside their kernels. Dependencies load in dependency order, then by id. Tables whose ids saves store (materials, prefabs, foliage) stay with the world's own package until the save-embedded mapping lands. A package's `play.ron` carries its Play-mode policy, and games build on the facade crate alone.
 
 - v1.13 — Designed the **runtime spine** in §12 ahead of building it (roadmap M3, R1). Crates and sides, with two compiler-enforced dependency rules: server-core has no renderer or windowing dependency, and the render crate has no simulation dependency. One **30 Hz tick** with a `SimTick` counter, sub-rates keyed by tick number, a fixed phase order, state that changes only inside a tick, separate simulation and presentation time, and stateless seeded randomness; scheduled, random and block ticks are designed with a trigger for building them. The **client/server boundary**: commands applied at tick boundaries, one update per tick drained by cursor, and `Arc`-shared chunk snapshots in the shape M7 serializes. The **render world** and extract, with the minimal camera description. **Observer residency.** Two **determinism tiers**, with Tier 1 adding `libm` and no fused multiply-add to the rules. Records `target-architecture.md` N4 (integrated server), N5 (tick rates) and N6 (determinism tiers) as settled. Brought into line with it: §1's host principle and §12's editor section, which now follow roadmap P9's editor binary; §12 Runtime architecture, now two schedules; §12 Chunk streaming, now observers and areas of interest; §12 Determinism, now Tier 1; §12 Tick and scheduling framework; §12 Networking's tick rate and its sequencing by milestone; §12 Engine versioning, now by milestone, with the rubric's eleventh row; and the glossary.
+- v1.14 — Designed the **engine object model** in §12 ahead of the items that build its parts (roadmap M3, B8). One word per concept, retiring the overloaded uses of region, layer, tag, block and prefab. Definitions of the seventeen primitives, with where the code is today. A **catalog of asset types**, each with its owner (core, kit or game), registry, side, simulation and presentation fields, override rule and milestone; game content (items, recipes, loot) is built from generic data tables. Assets with both kinds of field load as a shared **definition** and a client **appearance** under one name, and overriding always replaces a whole record. Every registry and code hook listed as an **extension point** with its deliveries, side and determinism tier, including the **worldgen kernel registry** and its rules. **Override rules**: assets by name, never by path; a package replaces only names from packages it depends on, and unrelated packages replacing one name is a load error; tags merge; shared content is covered by the join handshake and presentation is not. **Package kinds** `Library` and `ResourcePack` added beside `Game` and `Mod`. The **shader reach** ladder, with who may use each rung and what it promises. The **camera boundary**, adopting the Runtime spine's description, with everything particular to a camera moved to kit camera modules. Records the three v2.1 decisions roadmap §8 deferred to this item: the foliage stack is interim (§6 now says so), the camera is a module, and there is one object model. §2's material registry now points to it, and §12's packages section corrects its claim that nothing persists library ids: chunk tags do, along with zone and biome ids. Glossary extended.
 
 ---
 
@@ -121,6 +122,8 @@ A full-height surface that mixes two materials at a half-cube boundary is repres
 - **Name resolution happens at load time.** Graphs reference materials by name (`"stone"`, `"grass_top"`); the loader resolves names to stable IDs and stores the resolved IDs in the in-memory graph.
 - **The registry is consumed by everything that needs to interpret materials**: the worldgen evaluator, the mesher (for `material_id` baking), the renderer (for palette lookup), the audio system (for surface sounds), and mod loaders (which can register additional materials).
 - **The initial registry content** ships as engine data and may be extended by mods. Material identity is not hardcoded in any system; everything goes through the registry.
+
+The first bullet is superseded: identity is a namespaced name, and saves carry a name-to-id mapping (§12, "Registry identity and save-embedded mapping"). The material's full shape, with its properties, its split into a definition and an appearance, and the rules for replacing it, is under "Engine object model" in §12 (added v1.14).
 
 ---
 
@@ -548,6 +551,8 @@ The **half-step-only behavior at value ≥ 1** produces the current stable "soft
 ## 6. Foliage System
 
 Foliage is **instanced geometry rendered in tandem with the voxel world**, not voxel data. It exists in three tiers.
+
+**Interim shape** (added v1.14, following roadmap §8 v2.1). This section describes the foliage stack as built, and that stack is interim: it gets no new work. Voxel trees and structures become clips, non-cube props become fixtures and sub-voxel models, detail paint and scatter become registered layers, and grass and canopies become sprites, depth sprites and billboard clumps (§12, "Engine object model", which lists the migration under its interim shapes).
 
 ### Tier 1 — Detail scatter (grass, ferns, small flowers)
 
@@ -1270,9 +1275,308 @@ Content loads as **packages**: a directory with a `package.ron` manifest at its 
 - **Every registry entry is `namespace:name`.** A bare name in content resolves in the namespace of the content holding it; a qualified name reaches into another loaded package. This is the in-memory half of the identity rule above; the save-embedded mapping is the other half.
 - **The engine package.** A built-in package, `voxulacrum`, declares one standard library per native kernel, beside the kernel's own code, so the boundary cannot drift from the computation and content never repeats the declaration. Its id and namespace are reserved.
 - **Dependencies** load from `packages/<id>/` before the packages that need them, in dependency order and then by id, so the same list loads the same way everywhere. Missing, cyclic, wrong-version and namespace-sharing dependencies are refused.
-- **Tables whose ids saves store stay with the world's own package.** Materials, prefabs and foliage are authored with numeric ids that voxels, scatter instances and paint edits persist, so two packages cannot merge them until the save carries its mapping; a dependency that ships one is refused. Libraries, blueprints and species, whose ids nothing persists, merge across packages.
+- **Tables whose ids saves store stay with the world's own package.** Materials, prefabs and foliage are authored with numeric ids that voxels, scatter instances and paint edits persist, so two packages cannot merge them until the save carries its mapping; a dependency that ships one is refused. Libraries, blueprints and species merge across packages. Chunk tags do persist library ids, numbered after the libraries loaded before them, so adding a dependency renumbers them; they also persist the manifest's numeric zone and biome ids. Tags only drive invalidation, which is why nothing has broken, but D3's mapping must cover them (corrected v1.14).
 - **Play policy is package data.** A package's `play.ron` holds the player's body, movement and reach, the spawn rule and the build tool. The controller, targeting and tools are engine mechanisms; a package without `play.ron` has no Play mode.
 - **Games build on the facade crate alone,** in their own repositories, and CI checks it (`boundary-check`, including `--manifest-path` for a workspace outside the engine).
+
+### Engine object model (added v1.14)
+
+What the engine is made of, as content and game code see it: the primitives, the asset types, the registries that are its extension points, and the rules by which packages add to and replace each other's assets. Several items lock parts of this in (the render world's camera description in R4, material definitions and textures in V5 and V7, registration from game code in B9 and B10, and the save format at M4), so it is designed once, here, before any of them invents its own answer (roadmap B8). This section settles concepts and rules. Each item that builds a type owns its data layout. Where the code differs today, the difference is listed under "Interim shapes" at the end.
+
+#### Terms
+
+Several words had come to mean more than one thing. In this document each means one:
+
+- **Region** is a world region (defined below). A node of the region graph is an **air region**; the region graph keeps its name.
+- **Layer** is a chunk layer. Detail paint's `DetailLayer` is a channel inside the detail-paint layer.
+- **Tag** is a registry tag (defined below). §3's per-chunk records of contributing zones, biomes and libraries are **chunk tags**.
+- **Block** is a spatial unit, never a type. What a voxel is made of is its material.
+- **Prefab** retires with the interim foliage stack (§6). A data-defined entity is an **entity type**; a piece of voxel content is a clip.
+- Where a package sits among the packages a world loads is its **load order**.
+- A type's **owner** is the layer of the engine/game split that provides it (`target-architecture.md`, "Engine, kit, game and mods"): the **core** (the engine behind the facade), the **kit** (opinionated systems in the engine repository, built on the facade alone, which a game may use or replace), or the **game** (its own repository, loaded as a package).
+- A type's **side** is shared, client or server, as under "Crates and sides" in the Runtime spine above.
+
+#### Primitives
+
+Each definition states the target. The line after it says where the code is today, where that differs.
+
+- **Voxel.** The unit of storage, collision and simulation: a 0.5 m cube (§8 D1). A voxel holds one palette entry, which is either a material with that material's properties, or a part of a fixture. **Properties** are a material's states: a few named values with declared semantic types (an axis, a horizontal direction), which is what lets a clip rotate them correctly (D9). Visual variants are not properties: they are presentation, chosen by position hash (V7), and never stored. A voxel is geometry and nothing else (§2); fluid, paint and scatter live in their own layers.
+  *Today:* a 1 m cell holding a `ShapeId` and a `MaterialId`, with no properties.
+- **Block.** A 2×2×2 group of voxels on the 1 m lattice. Players build and generation writes at block scale by default, and a block whose eight voxels match is stored once (two-level storage, D2). Texture coordinates anchor to this lattice (V5). A block is not a type and has no registry.
+  *Today:* the voxel is 1 m, so a block and a voxel coincide.
+- **Chunk.** A cube of 32³ voxels (16 m) within a grid: the unit of residency, generation, persistence, meshing and change reporting. Chunks are cubic and stream vertically (D10). Each carries chunk layers and a version, which the server's `changed` feed reports (Runtime spine).
+  *Today:* 32³ 1 m cells, loaded in fixed vertical columns.
+- **Layer.** One kind of per-chunk data with its own coverage, update cadence, serializer and version (§3): voxels, fluid, detail paint, scatter, decals, light and scheduled-tick queues, and package-defined layers such as heat or gas. Each splits into generated content and overrides (§9). Layers are registrable (D4).
+  *Today:* a fixed set, versioned together under `BLOB_VERSION`.
+- **Grid.** A set of chunks with a transform. Every world system addresses a grid through a handle rather than reaching a world singleton (§8 D3). The terrain is the large, static, axis-aligned grid. Detached grids may be static (D8, M4) or move, as kinematic, dynamic or powered grids (M9).
+  *Today:* one implicit world.
+- **Clip.** A piece of voxel content outside any grid: a palette by name, voxels in the chunk's two-level layout, a structure-void mask, fixtures, block-entity data, ports, sockets, optional entities and metadata (D9). One format carries worldgen structures, blueprints, copy and paste, packed vehicles, extract output and test fixtures, and it transforms through all 48 orientations.
+  *Today:* blueprint v1, yaw-only, with cells naming their material.
+- **Fixture.** An indivisible object occupying a footprint of voxels, such as a door, a table or a machine (D11). Each footprint voxel records its fixture and its offset in it, so any voxel finds the anchor in one step, and breaking any of them removes the whole fixture. A fixture type declares its footprint, port table and orientation rules. Placement is voxel-aligned.
+  *Today:* none.
+- **Sub-voxel model.** A model with a collision shape, anchored at one voxel, for things smaller than a voxel or not made of cubes: a torch, a fence post, a flower (D11). Sub-voxel models replace the procedural scatter props.
+  *Today:* `PrefabShape` props in the scatter layer.
+- **Entity.** Anything dynamic that isn't voxels. Entities live in one global ECS store rather than in chunks, are found through a separate spatial index, persist by region and keep a stable id across save, load and network (roadmap §6.3). An entity type defines one in data (M8).
+  *Today:* the player, and nothing else.
+- **Assembly.** A composite entity: a root and a tree of parts (grids, models, sprites, bare bodies, effect anchors) joined by physics joints, each part with its own components, defined in data with its IK chains and locomotion controller (M9).
+  *Today:* none.
+- **Region.** A world region: an aligned group of chunks within one world instance. It is the unit that owns per-region generation parameters (§8 D4), entity persistence, the region tick and region transformation (roadmap §6.26). D5 sets its size.
+  *Today:* none; generation is a function of seed, graphs and coordinates only.
+- **World instance.** One world: a seed, a generation configuration and its grids, with its own residency and persistence, sharing the session's registries with any other instance (roadmap §6.27). Persistence is keyed by instance from M4 (D5), and sub-dimensions build on it in M10.
+  *Today:* one world per save directory.
+- **Package.** The unit that content, and later code, loads as: a directory with a `package.ron` manifest and its content in a fixed layout ("Packages and content namespaces" above). Its kind decides what it may do ("Package kinds" below).
+  *Today:* data-only; code modules are refused until M11.
+- **Registry.** The table of one asset type, keyed by namespaced name. Numeric ids are assigned at load as an interning detail, entries come from packages in load order, and any save that stores ids embeds the name-to-id mapping ("Registry identity and save-embedded mapping" above). Every registry is an extension point ("Extension points" below).
+  *Today:* materials, prefabs, foliage, libraries, blueprints and species. The first three are numbered by hand in their files.
+- **Tag.** A named set of entries from one registry, such as `sandbox:flammable` over materials, so a rule can match a category instead of listing names. A tag is an asset in its own right. Unlike other assets, a tag merges: each package's entries add to it (override rules below).
+  *Today:* none.
+- **Event.** A typed notice that something happened. Events go to subscribers, never to call sites (roadmap §6.7). The server publishes each tick's events in that tick's `ServerUpdate` (Runtime spine). An event type declares its side and, from M7, whether it replicates. Game code subscribes from M3 (B9) and may declare event types of its own.
+  *Today:* `WorldEvent`, nine variants, all local, published one frame late.
+- **Command.** A validated request to change state. It carries an origin and is applied only through the mutation door, at a tick boundary (roadmap P5). The door is where validation, the mode gate, persistence marking, event emission and, from M7, replication happen. Every system's writes take this shape, not only voxel edits (`target-architecture.md`, "Five API verbs"). A client sends commands as the `ClientCommand` kinds (Runtime spine).
+  *Today:* `MutationCommand` with `Authoring`, `PlayTime` and `System` origins, applied at once rather than at a tick boundary.
+
+#### Asset types
+
+Every type content can name, grouped as in B8's starting catalog. Voxels, blocks, chunks, grids, regions and world instances are runtime structures rather than assets: content reaches them through the types below, so a packed grid is a clip and a world instance starts from a world definition.
+
+A type with both simulation and presentation fields loads as **two records under one name**: a **definition**, shared and covered by the join handshake's content hashes, and an **appearance**, client-only. One authored entry may hold both. Overriding always replaces a whole record, never single fields, so the two halves are what let a texture pack restyle a material without being able to change how it behaves. A side of "shared + client" below means that split.
+
+The override column uses these terms; the rules behind them are under "Override and layering rules" below.
+
+- **Replace:** a package that depends on the asset's package may replace the whole record by name.
+- **Replace; appearance open:** the definition as Replace; the appearance may also be replaced by a resource pack.
+- **Open:** presentation only, replaceable as Replace and also by resource packs.
+- **Merge:** each package's entries add to it, and a package that depends on its owner may replace it whole.
+- **Add only:** new entries only. An existing entry's meaning is part of a save or wire format, so replacing it would reinterpret data.
+- **Game only:** added or replaced by the game package alone.
+- **None:** never replaced.
+
+The milestone is when a type is built. For a type that exists, it is the item that next reshapes it. A row marked *interim* is replaced by the type it names and gets no new work.
+
+**World data**
+
+| Type | Owner | Registry | Side | Simulation fields | Presentation fields | Override | Milestone |
+|---|---|---|---|---|---|---|---|
+| Material | core | materials | shared + client | solid, opaque, hardness, permeability, supports flora, gameplay light emission, physics material, properties, tags | color, textures, palette ramp, surface function, filtering, variants, edge sharpness, surface sounds | Replace; appearance open | Exists; save mapping M4 (D3); split into definition and appearance M5 (V5) |
+| Material properties (block states) | core | none: declared on their material | shared | named values with semantic types | none | with their material | M4 (D2, D9) |
+| Visual variant | core | none: part of a material's appearance | client | none | per-face alternatives chosen by position hash | with the appearance | M5 (V7) |
+| Physics material | core | none: fields of a material definition or a collider | shared | friction, restitution, buoyancy | none | with its owner | M8 |
+| Chunk layer type | core mechanism; kit and games register | layers | declared per layer, shared by default | coverage, serializer, version | none | Add only | M4 (D4) |
+| Fixture type | core mechanism; game content | fixtures | shared + client | footprint, anchor, port table, orientation rules, block-entity schema | model, textures | Replace; appearance open | M4 (D11) |
+| Sub-voxel model type | core mechanism; game content | sub-voxel models | shared + client | collision shape, anchor rule, destruction policy | model, sway | Replace; appearance open | M4 (D11) |
+| Clip | core | clips | shared | voxels, mask, fixtures, block-entity data, ports, sockets, entities, protected-volume flag | thumbnail | Replace | M4 (D9) |
+| Registry tag | core | tags, one set per registry | shared | member names | none | Merge | M8, or earlier with its first consumer |
+| World definition | core | worlds | shared | seed, sea level, graphs, zones, biomes, default region parameters | none | Replace | Exists as `world.manifest.json`; named M4; several per package M10 |
+| Detail channel and species (`foliage.ron`), *interim* | core | foliage | shared + client | ids, density meaning | color | Replace; appearance open, once D3 lets a dependency ship it | Exists; a registered layer M4 (D4); replaced by sprites and billboard clumps M6 |
+| Scatter prop (`prefabs.ron`), *interim* | core | prefabs | shared + client | id, footprint | procedural shape, color, scale | None; it retires | Exists; replaced by sub-voxel models M4 (D11) and sprites M6 |
+
+**Visual.** Every visual type is client-side presentation, except a decal type, whose placements are world state.
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Palette | core | palettes | client | colors for the palette pass | Open | Exists, by path; named M5 (V2) |
+| Shader | core | shaders | client | WGSL source | Game only | Exists, by path; named M5 (V3) |
+| Texture | core | textures | client | image, resolution, frames, filtering hint, optional normal and emissive maps | Open | M5 (V7) |
+| Surface function | core mechanism; game content | surface functions | client | shader function filling albedo, normal, emission and material id | Replace | M5 (V5) |
+| Lighting model | core mechanism; built-ins in core | lighting models | client | shader function and its parameters | Game only | M5 (V5) |
+| Render pass | core mechanism; game content | render passes | client | shader, insertion point, inputs | Replace; a mod only at the post-process points | M5 (V6) |
+| Presentation preset | core; example presets in the kit | presentation presets | client | render resolution, snapping, filtering, anti-aliasing, palette pass, outlines, lighting model, post-process profile | Open | M5 (V2) |
+| Post-process profile | core | none: part of a presentation preset | client | post-pass parameters | with its preset | M5 (V2) |
+| Sprite, depth sprite, billboard clump | core | sprites | client | image, depth and normal maps, pivot | Open | M6 |
+| Particle effect | core | particle effects | client | emitter, spawn rules, budget class | Open | M6; game-facing M8 |
+| Decal type | core | decals | shared + client | definition: faces it may mark; appearance: texture | Replace; appearance open | M6 |
+| Sky and atmosphere profile | core | atmospheres | client | sky gradient, sun, clouds, fog | Open | M6 |
+| Model | core | models | client | mesh, material slots, skeleton (glTF) | Open | M8; sub-voxel models name one from M4 |
+
+**Generation.** Everything here is shared and Tier 1, because clients generate terrain themselves and verify it by hash.
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Graph (world, zone, biome, detail) | core | graphs | shared | nodes, parameters | Replace | Exists, by path; named M4 |
+| Graph library | core | libraries | shared | boundary, and a body or a kernel | Replace; the engine package's kernel-backed declarations: None | Exists |
+| Worldgen kernel | core mechanism; packages register | kernels | shared | native function, boundary, version | Replace; the engine's own: None | M4 (B10) |
+| Biome | core | biomes | shared + client | definition: graph, detail graph, parameters; appearance: tint, atmosphere | Replace; appearance open | Exists as manifest entries with numeric ids; named M4 |
+| Zone | core | zones | shared | graph | Replace | Exists as manifest entries with numeric ids; named M4 |
+| Blueprint, *interim* | core | blueprints | shared | anchor, cells, destruction policy, protected-volume flag | Replace | Exists; becomes a clip M4 (D9) |
+| Tree species | core | species | shared | skeleton generator parameters | Replace | Exists; the generator outputs clips M4 (D9) |
+| Macro tile layer | core | none yet | shared | continent, range and drainage parameters | Replace | Unscheduled (`macro-terrain-research.md`) |
+
+**Entities and behavior**
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Play policy (`play.ron`) | kit | none: one per package | shared | body, movement, reach, spawn rule, build tool | Replace | Exists; kit controller parameters M5 (E2) |
+| Entity type (entity templates) | core mechanism; game content | entity types | shared + client | definition: components, collider, replication, persistence and tier rules; appearance: model or sprite, animations, sounds | Replace; appearance open | M8 |
+| Component type | core mechanism; registered from code | components | declared per component | schema, saved or not, replication rule, version | Add only | M8 |
+| Animation clip and graph | core | animations | shared + client | definition: state machine, root motion, events, hitbox tracks; appearance: pose tracks | Replace; appearance open | M8; IK chains M9 |
+| Assembly definition | core mechanism; game content | assemblies | shared + client | definition: parts, joints, IK chains, locomotion controller; appearance: part visuals | Replace; appearance open | M9 |
+| AI agent profile | core | agent profiles | server | size, step, jump, drop, capabilities | Replace | M9 |
+| Behavior definition | kit | behaviors | server | a behavior tree, utility scorer or state machine in data | Replace | M9 |
+| Interaction kind | kit | interaction kinds | shared | targeting and placement rules | Replace | M8 |
+| Logic channel and network type | core mechanism; game content | channels, network types | shared | channel name; solver, solve mode, unload policy | Add only | M9 |
+| Reaction table | core schema; game content | a data table | shared | ignition, heat capacity, phase change per material | Replace | M10 |
+| Data table type | core mechanism; declared by the kit or game | one registry per declared type | declared per type | the record schema; records follow it | Add only for the type; Replace for its records | M8 |
+
+**Audio and UI.** Everything here is client-side presentation. Sounds play from replicated events, never from a second simulation (roadmap §6.14).
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Sound | core | sounds | client | audio data, streaming hint | Open | M6 |
+| Sound event | core | sound events | client | sounds, variation, bus, voice limit | Open | M6; game-facing M8 |
+| Music state and soundscape | core | music states, soundscapes | client | director states, tracks, ambience beds | Open | M8 |
+| UI layout | core mechanism; game content | UI layouts | client | layout, data bindings, named extension points | Replace | M8 |
+| UI theme | core | themes | client | styles | Open | M8 |
+| String table | core | strings | client | text per locale | Open; a resource pack may add a locale | M8 |
+| Font | core | fonts | client | font data | Open | M8 |
+| Icon and cursor | core | icons | client | images | Open | M8 |
+
+**Packaging and configuration**
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Package manifest | core | none: one per package | read by both | id, namespace, kind, version, engine range, dependencies, modules | None | Exists (B6) |
+| Input action | core mechanism; games register | input actions | shared: action names travel in the `InputFrame` | name, value type, context | Add only | M5 (E1) |
+| Input bindings | core | none: one default set per package, then the player's own | client | default keys and buttons per action | Open; the player's rebinding wins | Exists, by path (`assets/input.ron`); M5 (E1) |
+| Parameter preset, *interim* | core | none: files under `params/` | client | the engine's tuning parameters | None; not package content | Exists; becomes presentation presets and settings M5 (V2) |
+| WebAssembly module | core | none: listed in its package's manifest | declared per module | code | None; replaced by its package's next version | M11 |
+| Capability | core | none: requested per module | per module | own data folder, listed network domains, clipboard | None | M11 |
+
+**Game content.** These belong to a game (roadmap §3, "The engine/game boundary"), so the engine has no type for them. Each is built from a generic engine type:
+
+| Content | Built from |
+|---|---|
+| Items | a data table whose record type the kit's inventory framework declares (roadmap §6.19), plus an entity type for an item lying in the world |
+| Recipes and crafting | a data table the game declares |
+| Loot tables | a data table using the kit's weighted selection |
+| Spawn tables | a data table the kit declares (roadmap §6.9), read by spawning |
+| Creature behaviors | behavior definitions and entity types |
+| Progression, quests and dialogue | data tables and string tables |
+| Combat rules and balance | game code and data tables |
+
+#### Extension points
+
+Every registry is an extension point, and so are the code hooks that have no registry of their own. Each is filled through one or more **deliveries**:
+
+- **Data:** content files in a package. Available now for the types that exist.
+- **Native:** a Rust crate built on the facade, which is how a game's own code arrives. Systems and event subscriptions from M3 (B9); registration into registries from M4 (B10).
+- **WebAssembly:** a module in a package, against a game's mod API (roadmap §6.9). From M11, and never for anything that must be compiled into the engine.
+
+A data-only package can fill only what data can describe; a type whose entries carry code (a layer's serializer, a kernel, a system) needs native code or a module. The **tier** is the determinism tier the type's results must meet (Runtime spine, "Determinism tiers"); "none" is presentation, which only has to look right.
+
+| Registry or hook | Delivery | Side | Tier | From |
+|---|---|---|---|---|
+| Materials | data, native, WebAssembly | shared + client | 1 (definition); none (appearance) | exists |
+| Tags | data, native | shared | that of the registry tagged | M8 |
+| Chunk layers | native, WebAssembly | declared per layer | 1 for layers generation or the door writes; declared otherwise | M4 (D4, B10) |
+| Fixtures, sub-voxel models | data; native for fixture behavior | shared + client | 1 | M4 (D11) |
+| Clips | data; native for capture | shared | 1 | M4 (D9) |
+| World definitions, graphs, biomes, zones | data | shared | 1 | exists |
+| Graph libraries | data | shared | 1 | exists |
+| Worldgen kernels | native, WebAssembly | shared | 1 | M4 (B10) |
+| Blueprints, species, foliage, prefabs (interim) | data | shared | 1 | exists |
+| Palettes, textures, sprites, particle effects, atmospheres, models, presentation presets | data | client | none | M5 to M8 |
+| Shaders, surface functions, lighting models | data (WGSL, validated with naga) | client | none | M5 (V3, V5) |
+| Render passes | data (WGSL), native | client | none | M5 (V6) |
+| Decals | data | shared + client | 1 (placement); none (appearance) | M6 |
+| Camera modules | native | client | none | M5 (V8) |
+| Entity types, animations, assemblies | data, native | shared + client | 2 (definition); none (appearance) | M8, M9 |
+| Components | native, WebAssembly | declared per component | 2 | M8 |
+| Systems | native from M3, WebAssembly | declared per system | 2; a system changes world state only through commands | M3 (B9) |
+| Event types | native, WebAssembly | declared per type | 2 | M8 |
+| Command kinds | native, WebAssembly | server-validated | 2; the door's voxel handlers stay 1 | M8 |
+| Interaction kinds | data, native | shared | 2 | M8 |
+| Agent profiles, behaviors | data; native for custom behavior nodes | server | 2 | M9 |
+| Logic channels, network types | data for channels; native for solvers | shared | 1 | M9 |
+| Data table types and their records | native or WebAssembly declare a type; data fills it | declared per type | declared per type | M8 |
+| Input actions | data, native | shared | 2 | M5 (E1) |
+| Input bindings | data | client | none | exists |
+| Console commands and variables | native | declared per command | none | M5 (T1) |
+| Sounds, sound events, music, soundscapes | data | client | none | M6, M8 |
+| UI layouts, themes, strings, fonts, icons | data; native for UI layouts | client | none | M8 |
+| Platform services | native | client | none | M11 |
+
+**The worldgen kernel registry.** A kernel is native computation behind a library boundary ("Standard libraries", §4). A registered kernel must be a pure function of its inputs and the seed: no state between calls, no wall clock, no thread identity. It follows the Tier 1 rules under "Determinism" above (`libm` for transcendental functions, no fused multiply-add, no parallel float reductions), and it carries a version. The version feeds the content hash a client checks at join, so changing what a kernel computes without bumping it is a defect the handshake cannot catch. The engine's own kernels are the engine package's and cannot be replaced. WebAssembly kernels (M11) additionally run with NaN canonicalization on and relaxed SIMD off, the two places WebAssembly floating point is allowed to differ between machines.
+
+#### Override and layering rules
+
+- **Assets are referenced by namespaced name, never by file path.** A path appears only inside a package, where its fixed layout maps files to the names they define. A reference in content, in a save or on the wire is always a name (the numeric id is its interned form within a session).
+- **Load order** is the existing one: dependencies before the packages that need them, then by id ("Packages and content namespaces" above). Resource packs load after every other package, in the order the player chooses.
+- **A package adds names only in its own namespace.** Writing a bare name defines it there.
+- **A package may replace a name from a package it depends on**, directly or through other dependencies, by writing its qualified name. The replacement takes the whole record ("Asset types" above). Because a replacing package always loads after the package it replaces, the later one in load order wins. What the dependency requirement adds is that two packages replacing the same name, where neither depends on the other, is a load error naming both packages and the name, rather than a winner picked by id order. A game that wants both resolves it by depending on both and replacing the name itself.
+- **Kinds limit what a package may replace** ("Package kinds" below). A library replaces nothing; a resource pack replaces only appearances and Open types.
+- **Tags merge.** Each package's entries add to a tag in load order. A package that depends on the tag's owner may instead replace the tag whole, which it states explicitly.
+- **Add-only and None types are never replaced**, by any package.
+- **Replacing keeps identity.** A replaced record keeps its name, so its saved id still maps to it (D3). Removing the package that replaced it restores the original. Removing the package that defined it leaves placeholders that keep the name (roadmap P18, D7).
+- **Simulation must match the server; presentation need not.** For every shared registry, the server's join handshake carries a content hash of the resolved records, after every replacement. Appearances and client-only types are outside it, so a client's resource pack never fails a join and never changes what the world does.
+- **Until D3 lands**, materials, prefabs and foliage stay with the world's own package ("Packages and content namespaces" above), so nothing replaces them yet.
+
+#### Package kinds
+
+| Kind | Starts a world | Loads as | Adds names | Replaces | Side |
+|---|---|---|---|---|---|
+| `Game` | yes, the one it names | the root package, or a dependency of the mods for it | yes | names from its dependencies | any |
+| `Mod` | no | a package the player enables, or a dependency | yes | names from its dependencies | any |
+| `Library` | no | a dependency only | yes | nothing | any |
+| `ResourcePack` | no | a client-side layer the player orders | appearances and Open types | appearances and Open types from any loaded package | client only |
+
+**Why `Library`.** Shared content and code (a block set, a kernel collection, a UI kit) need a kind that others depend on without it changing them. Because a library cannot replace anything, taking a newer library can add names to a world but never alter one, and a library never shows up in a player's mod list as something to switch on.
+
+**Why `ResourcePack` is a kind rather than a flag.** Every rule that applies to it differs from the others: its load order comes from the player rather than from dependencies, it is client-only, it may replace only presentation, it is outside the handshake's content hash, and it can be swapped while a world runs, reloading client registries only. A flag on `Mod` would need each of those as an exception. A resource pack names no dependencies; a replacement naming something no loaded package defines is reported and skipped, so an out-of-date pack degrades rather than refusing to load.
+
+Only a `Game` may name a world. The finer per-module sides and client requirements of `target-architecture.md` ("Packages, fault isolation and API stability") arrive with code modules in M11, inside these kinds.
+
+#### Shader reach
+
+How far a package can change rendering, as a ladder from least to most invasive. Each rung is a different promise, so each has its own users and its own stability.
+
+| Rung | Games | Mods | Resource packs | Stability |
+|---|---|---|---|---|
+| 1. Presets and parameters (V2) | yes | yes | yes | stable from M8 |
+| 2a. Surface functions (V5) | yes | yes | no | a versioned function signature, stable from M8 |
+| 2b. Lighting functions (V5) | yes | no | no | as 2a |
+| 3. Passes at named insertion points (V6) | at every point | before post and after post only | no | point names stable from M8; the inputs each point offers are versioned |
+| 4. Replacing a default shader by name | yes | no | no | internal: no promise, and expected to break on engine updates |
+| 5. Replacing a whole render stage | not offered | no | no | none |
+
+**Why the line falls here.** Rungs 1 to 3 are what P19 needs: strict pixel art, textured 3D and hybrids are presets, surface functions and lighting models over one pipeline, and a surface function fills albedo, normal, emission and material id while the engine keeps doing lighting, shadows, edges and the palette pass around it. That keeps the pipeline free to change underneath, which is why those rungs can carry a promise. Mods stop short of lighting and of passes inside the scene: their WGSL is validated with naga, and confining it to surface functions and post-process passes keeps a mod from breaking an invariant other systems depend on, such as the visibility classification, which a shader may consume but never be (§1). Resource packs change data only, never code. Rung 4 exposes engine shader source that changes with every release, so a game may use it at its own risk and nothing else may. Rung 5 is not a surface at all: a game that needs a stage replaced is showing a missing hook, and the answer is the hook (roadmap P12), not a fork of the renderer behind the facade.
+
+#### Camera boundary
+
+The core makes no camera assumption (roadmap P20). It takes a **camera description** per view and nothing else, which is the minimal description the Runtime spine's render world already records:
+
+- **View** and **projection**, with the view-projection.
+- **Frustum**, for culling.
+- **Area of interest**: a center, a horizontal radius and a vertical range, which the client sends as its observer area (`SetInterest`).
+
+Core systems read only these. Streaming takes the area of interest through observers ("Residency" above); culling and shadows take the frustum; picking takes the view-projection; level of detail and audio take positions from the description, never from a projection type. One view is active through M5; render-to-texture (minimaps, portraits, item icons) adds views, each with its own description.
+
+**Camera modules** are kit code, registered natively on the client ("Extension points" above). A module turns input and game state into a description, and keeps a block of its own that only it reads. Everything that makes a camera a particular kind of camera lives there:
+
+- framing and projection choice (isometric, dimetric, orthographic, perspective);
+- texel snapping and the sub-pixel offset it hands the upscale pass;
+- rotation steps and their easing;
+- cutaway and underground visibility policy, meaning which world-state classification to apply and when, since the classification itself is world state (§1);
+- follow behavior, such as the floor-anchored follow of roadmap §6.11;
+- the audio listener position;
+- deriving its area of interest, such as the isometric camera's altitude-aware view test ("Chunk streaming" above).
+
+The isometric camera is the kit's default module, and P8's rule of no head-on resting views is its rule, not the engine's. Observers are not cameras: a headless server takes its observers from its command line or script. The testbed's perspective camera (V8) is what keeps the boundary honest.
+
+#### Interim shapes
+
+| Today | Target above | Migrates in |
+|---|---|---|
+| One material record mixes presentation fields (`color`, `render_delegated`) with simulation fields; `hardness`, `permeable`, `supports_flora` and `sharpness` are loaded but no system reads them | A definition and an appearance under one name | V5 (M5) |
+| Materials, prefabs and foliage are numbered by hand and come only from the world's own package | Any package, identity by name, with replacement | D3 (M4) |
+| Chunk tags persist numeric zone, biome and library ids with no mapping | Covered by the save's mapping | D3 (M4) |
+| `world.manifest.json` names graphs by path, and zones and biomes by number | World definitions, graphs, zones and biomes named | M4; no item owns it yet |
+| Shaders, palettes, input bindings and parameter presets are engine files read by path under the asset root, in no package | Named assets in the engine package, added to and replaced as the catalog says | V3, V2 and E1 (M5) |
+| `PackageKind` has `Game` and `Mod`, nothing branches on it, any kind may name a world, and no package can replace another's asset | Four kinds and the override rules above | Before V7 (M5), whose gate is the first client-only override |
+| Library kernels are the closed `LibraryKernel` enum | The kernel registry | B10 (M4) |
+| The foliage stack: procedural `PrefabShape` props, skeleton trees drawn as capsule impostors, canopy cores, the tier-1 detail-paint schema and `render_delegated` | Clips (D9) for voxel trees and structures, fixtures and sub-voxel models (D11) for props, registered layers (D4) for detail and scatter, sprites, depth sprites and billboard clumps for grass and canopies | M4, M6 |
+| One isometric camera in the app; streaming evaluates its view itself, and render code assumes an orthographic projection | Camera modules in the kit over the camera description | R4 and R6 (M3), V8 (M5) |
+
+The foliage stack gets no new work in the meantime (roadmap §8, v2.1). The skeleton generator stays, as a generator that outputs clips.
 
 ### Per-region generation parameters (added v1.8)
 
@@ -1357,20 +1661,30 @@ These are toggleable in the engine's debug UI.
 
 ## 13. Glossary
 
+- **Air region**: a connected volume of air, one node of the region graph. Always qualified, because a bare "region" is a world region.
 - **Anchor voxel**: the integer cell that owns a foliage instance for purposes of player interaction.
+- **Appearance**: the client-only half of an asset that has both kinds of field, holding its presentation. Replaceable by resource packs; outside the join handshake's content hash.
 - **Area of interest**: the region an observer needs resident: a center, a horizontal radius and a vertical range. The server's resident set is the union of all observers' areas plus chunks with active fluid.
 - **BiomeGraph**: graph type defining terrain density, material, fluid output, and fade behavior for one biome.
 - **BiomeParams**: per-biome typed scalar-metadata sidecar. Addressable by name from the biome manifest entry and by `BiomeParam(name)` nodes inside a `BiomeGraph`. Home for `traversal_smoothing_distance` and future biome-scoped scalars.
-- **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation.
+- **Block**: a 2×2×2 group of 0.5 m voxels on the 1 m lattice. A spatial unit, never a type.
+- **Camera description**: what the core takes from a camera, per view: view, projection with view-projection, frustum and area of interest.
+- **Camera module**: kit code that turns input and game state into a camera description, and owns everything particular to one kind of camera. The isometric camera is the default one.
+- **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation. Called chunk tags, to keep them apart from registry tags.
+- **Clip**: one format for any piece of voxel content outside a grid: structures, blueprints, copy and paste, packed vehicles, test fixtures.
 - **CSE cache**: chunk-scoped cache that ensures each node's output is computed at most once per chunk evaluation.
+- **Data table**: a record type the kit or a game declares with a schema, side and tier, filled by packages with named records. What game content such as items, recipes and loot is built from.
+- **Definition**: the shared half of an asset, holding its simulation fields. Covered by the join handshake's content hash.
 - **DetailGraph**: graph type defining foliage paint and scatter placement, distinct from terrain generation.
 - **DetailLayer**: 2D paint map over a chunk's XZ footprint storing per-column foliage density.
 - **DetailTexel**: a single cell in a DetailLayer: species, density, tint, flags.
 - **Determinism tier**: Tier 1 results are bit-identical on every machine (generation, the mutation door's handlers, fluids); Tier 2 results are reproducible on one machine (the player step, later physics and AI).
 - **Enclosure factor**: per-vertex value indicating how enclosed a position is by surrounding terrain. Used for fog and audio.
+- **Extension point**: a registry or code hook a package or game fills, through data, native code on the facade, or a WebAssembly module.
 - **Extract**: the once-per-frame client step that fills the render world from server updates and snapshots.
 - **Face axis**: which of the 6 cardinal directions a face belongs to. Determines palette ramp. No diagonal values exist.
 - **Fade factor**: 0–1 weight for blending between neighbor biomes at boundaries.
+- **Fixture**: an indivisible object occupying a footprint of voxels; breaking any footprint voxel removes it whole.
 - **FluidCell**: a single cell's fluid state: type, mass, flags.
 - **FluidFillMode**: chunk-level default for fluid presence. Enables ocean fast path.
 - **FluidOutput**: `BiomeGraph` terminal for water bodies. Renamed from `FluidProvider` to describe the terminal position, not the role.
@@ -1381,14 +1695,18 @@ These are toggleable in the engine's debug UI.
 - **LibraryGraph**: reusable subgraph referenced by any other graph type. Declares typed named inputs and outputs at its boundary.
 - **LibraryKernel**: enum matching each standard library's identity to a native implementation. Backs standard libraries whose authored file captures identity and boundary but delegates computation to native code.
 - **LibraryRef**: node referencing a `LibraryGraph` by ID. Exposes the referenced library's boundary as dynamic pin descriptors on the referring node.
+- **Load order**: the order a world's packages load in: dependencies first, then by id, then resource packs in the player's order.
 - **Manifest**: `world.manifest.json`. Names `sea_level`, seed, and the paths + identities of the WorldGraph, ZoneGraphs, BiomeGraphs (with optional DetailGraph paths and `BiomeParams`), and LibraryGraphs. Resolution root for `GraphRef` and `LibraryRef`.
 - **MaterialRegistry**: data-driven registry mapping stable `MaterialId` values and human-readable names to material definitions. Loaded at startup; extensible by mods.
 - **Mesh disk cache**: persistent cache of meshed chunks keyed by chunk coordinate, graph hash, mesher version, registry hash, and world seed.
 - **Observer**: anything the server keeps chunks resident for, identified by an id and an area of interest. The local player is observer 0.
 - **Overrides**: player-authored edits serialized separately from generated content. Canonical in-memory shape is `ChunkOverrides`; persisted directly.
+- **Owner**: which part of the engine/game split provides a type: the core, the kit, or the game.
 - **Pin type**: typed connection between graph nodes. Enforces compatibility at edit time.
 - **Positions**: pin type representing a set of candidate positions (used by scatter placement and any other consumer of a candidate-position set). Formerly named `ScatterPoints`; renamed to describe the general mechanism rather than the scenario.
+- **Registry tag**: a named set of entries from one registry, which packages add to rather than replace.
 - **Render world**: the render crate's own `bevy_ecs` world, filled by extract; the only state render code reads.
+- **Resource pack**: a client-only package kind that may replace only presentation, loads in the player's order, and is outside the join handshake.
 - **ScatterInstance**: a single placed foliage/prop instance with anchor, sub-offset, rotation, prefab reference.
 - **ScatterStore**: per-chunk collection of ScatterInstances indexed by type.
 - **Sea level**: global Y read from the manifest, determining ocean fill.
@@ -1396,11 +1714,13 @@ These are toggleable in the engine's debug UI.
 - **Slab**: a half-height voxel shape. Either `SlabBottom` (lower half solid) or `SlabTop` (upper half solid). All slab faces are cardinal-axis-aligned.
 - **Slab smoothing**: engine pass during worldgen that inserts slab steps at walkable cube-step transitions, controlled by traversal smoothing distance.
 - **Streaming**: load/evict policy keeping only chunks inside some observer's area of interest resident. Background workers handle generation and meshing.
+- **Sub-voxel model**: a model with a collision shape, anchored at one voxel, for things smaller than a voxel or not made of cubes.
 - **Sub-voxel offset**: fractional position within an anchor voxel, packed as signed bytes.
 - **Tick**: one step of simulation, 1/30 s, identified by its `SimTick` number. All periodic simulation derives from it.
 - **Traversal smoothing distance**: per-biome worldgen parameter controlling how aggressively slab smoothing distributes steps across distance. Produces emergent gradual slopes without diagonal geometry.
 - **Seam finalization**: cross-chunk pass (`world::seam`) resolving slab-smoothing demotions at chunk borders once neighbor data exists; recorded through the override/diff mechanism and marked by a persisted `seam_finalized` flag.
 - **Walkability**: transient worldgen computation identifying voxels the player can stand on; input to slab smoothing, then discarded. Runtime movement, collision, and room detection use direct geometric queries (`WorldView::solid_interval`) instead of a resident mask (revised v1.6).
+- **World region**: an aligned group of chunks that owns per-region generation parameters, entity persistence, the region tick and region transformation. What a bare "region" means.
 - **WorldGraph**: top-level singleton graph defining climate, zone selection, and global constants.
 - **ZoneGraph**: graph type defining biome distribution, cave rules, structures, and rivers within a Zone.
 
