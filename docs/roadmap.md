@@ -169,6 +169,7 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 |---|---|---|
 | **`FrameTimings`**, job inspector, streaming readout, cache hit/miss, memory/residency panel, determinism checker, mutation log | 0.3.0 | Shipped |
 | **GPU selection** (`--gpu low-power`) and the adapter named on the Performance panel | 0.5.0 | Shipped |
+| **Scripted benchmark** (`--bench <scenario>`, `--runs <n>`): a fixed camera path and input, every frame recorded, medians and spread across runs | M3 (T4) | Shipped |
 | **GPU time** on the Performance panel (timestamp queries) | M5 (T3) | |
 | **In-engine console** — registered commands and variables | M5 (T1) | |
 | **Debug protocol** — the editor attaches to a running game or modded build | M8 | |
@@ -452,7 +453,8 @@ Pre-1.0: `0.MINOR.PATCH`, cut from `master`. A **minor** is cut when a milestone
 - **Entities** (from M8) and **dynamic grids** (from M9): budgets per observer with a documented degradation path; server defaults of 10 large, 40 medium and 100 small visible grids.
 - **Simulation** (from M10): active-cell budget per tick with graceful throttling; a fully burning forest degrades rate, never frame time.
 
-Measurement stays release-only and at rest, as `perf-baseline.md` describes.
+Measurement stays release-only. From M3 it is taken with the scripted benchmark
+(`--bench`), at rest and while streaming, as `perf-baseline.md` describes.
 
 ### 7.4 Release checklist (every cut)
 

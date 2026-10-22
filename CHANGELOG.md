@@ -16,6 +16,39 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ---
 
+## [Unreleased] — Runtime spine
+
+Milestone M3, in progress: R1 and T4 are merged. The runtime spine is designed
+in `engine-design.md`, and the CPU baseline M3's exit gate compares against is
+recorded.
+
+### Added
+
+- **Scripted benchmarks** (T4, #91) — `--bench <scenario>` runs a release build
+  through a RON scenario in `bench/`: camera placements and pans, waits for the
+  engine to settle, input actions and held movement, around one measured
+  window. It records each frame's CPU work and writes the mean, p95 and maximum,
+  process CPU per second, job means and every fill to
+  `target/bench/<name>.json`, then exits. A run starts from a fresh world in
+  `saves/bench` with the engine's default parameters and no mesh cache, keeps
+  its window size, and ignores the keyboard and mouse. Debug builds are
+  refused. `--runs <n>` repeats it, each run in its own process and
+  `--cooldown <seconds>` apart (30 by default), and prints and writes each
+  figure's median and spread. Four scenarios ship: S1 and S2 at rest at the
+  launch and widest zooms, S3 a pan across both zones, S4 play with edits and a
+  fluid pour.
+- **The M3 CPU baseline** (T4, #91) in `perf-baseline.md`: five runs of each
+  scenario on the discrete GPU and three on the integrated. Median frame CPU
+  mean is 2.12, 3.01, 5.16 and 2.70 ms for S1 to S4.
+
+### Changed
+
+- **The toolchain is pinned** (T4, #91). `rust-toolchain.toml` names Rust
+  1.92.0, and CI and release builds install it instead of the latest stable, so
+  a baseline reading never moves with a compiler update.
+
+---
+
 ## [0.5.0] — Engine/game boundary
 
 Milestone M2. The engine has separated from the game that grew inside it. It is

@@ -28,5 +28,6 @@ mod jobs;
 mod package;
 mod validate;
 mod verify;
+mod bench;
 
 pub use app::{run, run_with, RunOptions};

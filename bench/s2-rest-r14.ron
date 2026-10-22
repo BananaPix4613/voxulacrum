@@ -1,0 +1,16 @@
+// S2: at rest at r=14, the widest supported zoom, after the fill (T4, #91).
+//
+// Zoom 100 is the shipped `zoom_max`. The fill is the zoom-out from the launch
+// view; then the same 15 s pause and 60 s window as S1.
+(
+    name: "S2",
+    package: "sandbox",
+    steps: [
+        Camera(target: (64.0, 32.0, 64.0), zoom: 100.0),
+        Settle(timeout: 120.0),
+        Wait(15.0),
+        Measure([
+            Wait(60.0),
+        ]),
+    ],
+)

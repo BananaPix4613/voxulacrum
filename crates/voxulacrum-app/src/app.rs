@@ -10,8 +10,8 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::{
-    core_budget, diagnostics, graph_reload, interaction, jobs, libraries, materials, paths,
-    player, prefabs, rendering, simulation, ui, validate, verify, world,
+    bench, core_budget, diagnostics, graph_reload, interaction, jobs, libraries, materials,
+    paths, player, prefabs, rendering, simulation, ui, validate, verify, world,
 };
 use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::render_context::RenderContext;
@@ -127,7 +127,12 @@ pub fn compute_render_dimensions(
 // ECS initialization
 // ---------------------------------------------------------------------------
 
-fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>, gpu: wgpu::PowerPreference) -> (World, Schedule) {
+fn init_ecs(
+    window: Arc<Window>,
+    play: Option<crate::play::PlaySettings>,
+    gpu: wgpu::PowerPreference,
+    bench_setup: Option<bench::BenchSetup>,
+) -> (World, Schedule) {
     let mut ecs = World::new();
 
     // --- wgpu initialization ---
@@ -196,8 +201,11 @@ fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>, gpu: w
     // Params. The presets directory is anchored like the other asset paths, not
     // to the working directory.
     let presets_dir = paths::presets_dir();
-    let initial_params = EngineParams::load(&presets_dir.join("default.json"))
-        .unwrap_or_default();
+    let initial_params = if bench_setup.is_some() {
+        bench::params()
+    } else {
+        EngineParams::load(&presets_dir.join("default.json")).unwrap_or_default()
+    };
 
     let mut camera = IsometricCamera::new(&initial_params.camera);
     camera.resize(surface_state.surface_config.width, surface_state.surface_config.height);
@@ -412,7 +420,9 @@ fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>, gpu: w
     // spawn-area edits were discarded and then overwritten on the next save),
     // and `open` performs the VOXEL_FORMAT_VERSION save wipe, which must happen
     // before anything reads a record. The save name follows the content root.
-    let persistence = match WorldPersistence::open(paths::save_name(), generator.world_seed()) {
+    // A benchmark keeps its world apart from the package's saves.
+    let save_name = if bench_setup.is_some() { bench::SAVE_NAME } else { paths::save_name() };
+    let persistence = match WorldPersistence::open(save_name, generator.world_seed()) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("Persistence init failed: {e}. Running without saves.");
@@ -621,7 +631,11 @@ fn init_ecs(window: Arc<Window>, play: Option<crate::play::PlaySettings>, gpu: w
     // Build the schedule
     // -----------------------------------------------------------------------
 
-    let schedule = build_frame_schedule();
+    let mut schedule = build_frame_schedule();
+    if let Some(setup) = bench_setup {
+        ecs.insert_resource(bench::BenchRun::new(setup));
+        bench::add_systems(&mut schedule);
+    }
 
     (ecs, schedule)
 }
@@ -638,16 +652,26 @@ struct App {
     play: Option<crate::play::PlaySettings>,
     /// The GPU power preference the command line asked for.
     gpu: wgpu::PowerPreference,
+    /// The benchmark the command line asked for, until the ECS world takes it.
+    bench: Option<bench::BenchSetup>,
+    /// The process's exit code once the event loop ends: a benchmark's outcome.
+    exit_code: i32,
 }
 
 impl App {
-    fn new(play: Option<crate::play::PlaySettings>, gpu: wgpu::PowerPreference) -> Self {
+    fn new(
+        play: Option<crate::play::PlaySettings>,
+        gpu: wgpu::PowerPreference,
+        bench: Option<bench::BenchSetup>,
+    ) -> Self {
         Self {
             ecs_world: None,
             schedule: None,
             exiting: false,
             play,
             gpu,
+            bench,
+            exit_code: 0,
         }
     }
 }
@@ -660,9 +684,12 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // A benchmark's window keeps its launch size, which its readings
+        // depend on.
         let attrs = WindowAttributes::default()
             .with_title("Voxulacrum")
-            .with_inner_size(winit::dpi::PhysicalSize::new(1280u32, 720u32));
+            .with_inner_size(winit::dpi::PhysicalSize::new(1280u32, 720u32))
+            .with_resizable(self.bench.is_none());
 
         let window = Arc::new(
             event_loop
@@ -670,7 +697,7 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        let (ecs_world, schedule) = init_ecs(window, self.play.take(), self.gpu);
+        let (ecs_world, schedule) = init_ecs(window, self.play.take(), self.gpu, self.bench.take());
         self.ecs_world = Some(ecs_world);
         self.schedule = Some(schedule);
         log::info!("ECS world initialized.");
@@ -687,8 +714,25 @@ impl ApplicationHandler for App {
         }
         let Some(ecs) = &mut self.ecs_world else { return; };
 
+        // A benchmark ignores the keyboard and mouse, so nothing typed or moved
+        // during a run changes what it measures.
+        let user_input = matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+        );
+        if user_input && ecs.contains_resource::<bench::BenchRun>() {
+            return;
+        }
+
         match event {
             WindowEvent::CloseRequested => {
+                if ecs.contains_resource::<bench::BenchRun>() {
+                    eprintln!("bench: the window closed before the run finished; no results written");
+                    self.exit_code = 1;
+                }
                 // Save dirty chunks to persistence DB
                 {
                     let persistence = ecs.remove_resource::<WorldPersistence>();
@@ -837,6 +881,18 @@ impl ApplicationHandler for App {
                         .unwrap()
                         .run(self.ecs_world.as_mut().unwrap());
                 }
+                // A finished benchmark ends the process. Its world is
+                // throwaway, so nothing is saved on the way out.
+                let finished = self
+                    .ecs_world
+                    .as_ref()
+                    .and_then(|ecs| ecs.get_resource::<bench::BenchRun>())
+                    .and_then(|run| run.exit_code());
+                if let Some(code) = finished {
+                    self.exit_code = code;
+                    self.exiting = true;
+                    event_loop.exit();
+                }
             }
 
             ref other => {
@@ -901,8 +957,11 @@ pub fn run() {
 }
 
 /// Runs the engine. `--validate-graphs` and `--verify-generation` run headless
-/// and exit; otherwise this opens the window and enters the event loop. Exits
-/// with code 1 if the package fails to load.
+/// and exit; otherwise this opens the window and enters the event loop.
+/// `--bench <scenario>` runs a benchmark scenario in the window, writes its
+/// results and exits (`docs/perf-baseline.md`); with `--runs <n>` it runs the
+/// scenario `n` times, each in a child process, and summarizes them. Exits
+/// with code 1 if the package fails to load or a benchmark fails.
 pub fn run_with(options: RunOptions) {
     env_logger::init();
     
@@ -951,6 +1010,8 @@ pub fn run_with(options: RunOptions) {
     if play.is_none() {
         log::info!("{} has no {}: Play mode is off", m.id, crate::play::PLAY_FILE);
     }
+    // Read before `set_packages` takes the load order, which `m` borrows.
+    let package_id = m.id.clone();
     paths::set_packages(packages);
     if let Some(play) = &mut play {
         let registry = crate::materials::load_registry();
@@ -979,12 +1040,44 @@ pub fn run_with(options: RunOptions) {
     if let Some(code) = verify::run_from_args(&args) {
         std::process::exit(code);
     }
+    let bench_setup = match bench::BenchSetup::from_args(&args, &package_id) {
+        Ok(setup) => setup,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    // A repeated benchmark opens no window of its own: it runs each pass as a
+    // child process and exits once they are done.
+    match (bench::repeat::Repeat::from_args(&args), &bench_setup) {
+        (Err(e), _) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        (Ok(Some(repeat)), Some(setup)) => {
+            std::process::exit(bench::repeat::run(repeat, &args, setup));
+        }
+        (Ok(Some(_)), None) => {
+            eprintln!("error: --runs repeats a benchmark, so it needs --bench <scenario>");
+            std::process::exit(1);
+        }
+        (Ok(None), _) => {}
+    }
+    if bench_setup.is_some() {
+        if let Err(e) = bench::clear_save() {
+            eprintln!("error: the benchmark's save could not be cleared: {e}");
+            std::process::exit(1);
+        }
+    }
     
     log::info!("Voxulacrum engine starting...");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    let mut app = App::new(play, gpu);
+    let mut app = App::new(play, gpu, bench_setup);
     event_loop.run_app(&mut app).expect("Event loop failed");
+    if app.exit_code != 0 {
+        std::process::exit(app.exit_code);
+    }
 }
 
 

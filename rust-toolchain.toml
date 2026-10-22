@@ -1,0 +1,8 @@
+# The compiler every build uses, CI included (T4, #91). Pinned so a change in
+# the benchmark baseline in docs/perf-baseline.md never comes from a compiler
+# update. Moving to a newer one is a deliberate change to this file, with the
+# baseline measured again on it.
+[toolchain]
+channel = "1.92.0"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-src", "rust-analyzer"]
