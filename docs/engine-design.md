@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.13
+**Status:** Baseline reference, v1.14
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -23,6 +23,7 @@
 - v1.12 — Recorded M2's settled content architecture in §12: **packages and content namespaces**. Content loads as data-only packages (`package.ron` beside fixed-layout content), each with its own namespace; bare names resolve in the holding content's namespace and qualified names reach into any loaded package. The built-in `voxulacrum` package declares the standard libraries beside their kernels. Dependencies load in dependency order, then by id. Tables whose ids saves store (materials, prefabs, foliage) stay with the world's own package until the save-embedded mapping lands. A package's `play.ron` carries its Play-mode policy, and games build on the facade crate alone.
 
 - v1.13 — Designed the **runtime spine** in §12 ahead of building it (roadmap M3, R1). Crates and sides, with two compiler-enforced dependency rules: server-core has no renderer or windowing dependency, and the render crate has no simulation dependency. One **30 Hz tick** with a `SimTick` counter, sub-rates keyed by tick number, a fixed phase order, state that changes only inside a tick, separate simulation and presentation time, and stateless seeded randomness; scheduled, random and block ticks are designed with a trigger for building them. The **client/server boundary**: commands applied at tick boundaries, one update per tick drained by cursor, and `Arc`-shared chunk snapshots in the shape M7 serializes. The **render world** and extract, with the minimal camera description. **Observer residency.** Two **determinism tiers**, with Tier 1 adding `libm` and no fused multiply-add to the rules. Records `target-architecture.md` N4 (integrated server), N5 (tick rates) and N6 (determinism tiers) as settled. Brought into line with it: §1's host principle and §12's editor section, which now follow roadmap P9's editor binary; §12 Runtime architecture, now two schedules; §12 Chunk streaming, now observers and areas of interest; §12 Determinism, now Tier 1; §12 Tick and scheduling framework; §12 Networking's tick rate and its sequencing by milestone; §12 Engine versioning, now by milestone, with the rubric's eleventh row; and the glossary.
+- v1.14 — Designed the **engine object model** in §12 ahead of the items that build its parts (roadmap M3, B8). One word per concept, retiring the overloaded uses of region, layer, tag, block and prefab. Definitions of the seventeen primitives, with where the code is today. A **catalog of asset types**, each with its owner (core, kit or game), registry, side, simulation and presentation fields, override rule and milestone; game content (items, recipes, loot) is built from generic data tables. Assets with both kinds of field load as a shared **definition** and a client **appearance** under one name, and overriding always replaces a whole record. Every registry and code hook listed as an **extension point** with its deliveries, side and determinism tier, including the **worldgen kernel registry** and its rules. **Override rules**: assets by name, never by path; a package replaces only names from packages it depends on, and unrelated packages replacing one name is a load error; tags merge; shared content is covered by the join handshake and presentation is not. **Package kinds** `Library` and `ResourcePack` added beside `Game` and `Mod`. The **shader reach** ladder, with who may use each rung and what it promises. The **camera boundary**, adopting the Runtime spine's description, with everything particular to a camera moved to kit camera modules. Records the three v2.1 decisions roadmap §8 deferred to this item: the foliage stack is interim (§6 now says so), the camera is a module, and there is one object model. §2's material registry now points to it, and §12's packages section corrects its claim that nothing persists library ids: chunk tags do, along with zone and biome ids. Glossary extended.
 
 ---
 
@@ -1660,20 +1661,30 @@ These are toggleable in the engine's debug UI.
 
 ## 13. Glossary
 
+- **Air region**: a connected volume of air, one node of the region graph. Always qualified, because a bare "region" is a world region.
 - **Anchor voxel**: the integer cell that owns a foliage instance for purposes of player interaction.
+- **Appearance**: the client-only half of an asset that has both kinds of field, holding its presentation. Replaceable by resource packs; outside the join handshake's content hash.
 - **Area of interest**: the region an observer needs resident: a center, a horizontal radius and a vertical range. The server's resident set is the union of all observers' areas plus chunks with active fluid.
 - **BiomeGraph**: graph type defining terrain density, material, fluid output, and fade behavior for one biome.
 - **BiomeParams**: per-biome typed scalar-metadata sidecar. Addressable by name from the biome manifest entry and by `BiomeParam(name)` nodes inside a `BiomeGraph`. Home for `traversal_smoothing_distance` and future biome-scoped scalars.
-- **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation.
+- **Block**: a 2×2×2 group of 0.5 m voxels on the 1 m lattice. A spatial unit, never a type.
+- **Camera description**: what the core takes from a camera, per view: view, projection with view-projection, frustum and area of interest.
+- **Camera module**: kit code that turns input and game state into a camera description, and owns everything particular to one kind of camera. The isometric camera is the default one.
+- **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation. Called chunk tags, to keep them apart from registry tags.
+- **Clip**: one format for any piece of voxel content outside a grid: structures, blueprints, copy and paste, packed vehicles, test fixtures.
 - **CSE cache**: chunk-scoped cache that ensures each node's output is computed at most once per chunk evaluation.
+- **Data table**: a record type the kit or a game declares with a schema, side and tier, filled by packages with named records. What game content such as items, recipes and loot is built from.
+- **Definition**: the shared half of an asset, holding its simulation fields. Covered by the join handshake's content hash.
 - **DetailGraph**: graph type defining foliage paint and scatter placement, distinct from terrain generation.
 - **DetailLayer**: 2D paint map over a chunk's XZ footprint storing per-column foliage density.
 - **DetailTexel**: a single cell in a DetailLayer: species, density, tint, flags.
 - **Determinism tier**: Tier 1 results are bit-identical on every machine (generation, the mutation door's handlers, fluids); Tier 2 results are reproducible on one machine (the player step, later physics and AI).
 - **Enclosure factor**: per-vertex value indicating how enclosed a position is by surrounding terrain. Used for fog and audio.
+- **Extension point**: a registry or code hook a package or game fills, through data, native code on the facade, or a WebAssembly module.
 - **Extract**: the once-per-frame client step that fills the render world from server updates and snapshots.
 - **Face axis**: which of the 6 cardinal directions a face belongs to. Determines palette ramp. No diagonal values exist.
 - **Fade factor**: 0–1 weight for blending between neighbor biomes at boundaries.
+- **Fixture**: an indivisible object occupying a footprint of voxels; breaking any footprint voxel removes it whole.
 - **FluidCell**: a single cell's fluid state: type, mass, flags.
 - **FluidFillMode**: chunk-level default for fluid presence. Enables ocean fast path.
 - **FluidOutput**: `BiomeGraph` terminal for water bodies. Renamed from `FluidProvider` to describe the terminal position, not the role.
@@ -1684,14 +1695,18 @@ These are toggleable in the engine's debug UI.
 - **LibraryGraph**: reusable subgraph referenced by any other graph type. Declares typed named inputs and outputs at its boundary.
 - **LibraryKernel**: enum matching each standard library's identity to a native implementation. Backs standard libraries whose authored file captures identity and boundary but delegates computation to native code.
 - **LibraryRef**: node referencing a `LibraryGraph` by ID. Exposes the referenced library's boundary as dynamic pin descriptors on the referring node.
+- **Load order**: the order a world's packages load in: dependencies first, then by id, then resource packs in the player's order.
 - **Manifest**: `world.manifest.json`. Names `sea_level`, seed, and the paths + identities of the WorldGraph, ZoneGraphs, BiomeGraphs (with optional DetailGraph paths and `BiomeParams`), and LibraryGraphs. Resolution root for `GraphRef` and `LibraryRef`.
 - **MaterialRegistry**: data-driven registry mapping stable `MaterialId` values and human-readable names to material definitions. Loaded at startup; extensible by mods.
 - **Mesh disk cache**: persistent cache of meshed chunks keyed by chunk coordinate, graph hash, mesher version, registry hash, and world seed.
 - **Observer**: anything the server keeps chunks resident for, identified by an id and an area of interest. The local player is observer 0.
 - **Overrides**: player-authored edits serialized separately from generated content. Canonical in-memory shape is `ChunkOverrides`; persisted directly.
+- **Owner**: which part of the engine/game split provides a type: the core, the kit, or the game.
 - **Pin type**: typed connection between graph nodes. Enforces compatibility at edit time.
 - **Positions**: pin type representing a set of candidate positions (used by scatter placement and any other consumer of a candidate-position set). Formerly named `ScatterPoints`; renamed to describe the general mechanism rather than the scenario.
+- **Registry tag**: a named set of entries from one registry, which packages add to rather than replace.
 - **Render world**: the render crate's own `bevy_ecs` world, filled by extract; the only state render code reads.
+- **Resource pack**: a client-only package kind that may replace only presentation, loads in the player's order, and is outside the join handshake.
 - **ScatterInstance**: a single placed foliage/prop instance with anchor, sub-offset, rotation, prefab reference.
 - **ScatterStore**: per-chunk collection of ScatterInstances indexed by type.
 - **Sea level**: global Y read from the manifest, determining ocean fill.
@@ -1699,11 +1714,13 @@ These are toggleable in the engine's debug UI.
 - **Slab**: a half-height voxel shape. Either `SlabBottom` (lower half solid) or `SlabTop` (upper half solid). All slab faces are cardinal-axis-aligned.
 - **Slab smoothing**: engine pass during worldgen that inserts slab steps at walkable cube-step transitions, controlled by traversal smoothing distance.
 - **Streaming**: load/evict policy keeping only chunks inside some observer's area of interest resident. Background workers handle generation and meshing.
+- **Sub-voxel model**: a model with a collision shape, anchored at one voxel, for things smaller than a voxel or not made of cubes.
 - **Sub-voxel offset**: fractional position within an anchor voxel, packed as signed bytes.
 - **Tick**: one step of simulation, 1/30 s, identified by its `SimTick` number. All periodic simulation derives from it.
 - **Traversal smoothing distance**: per-biome worldgen parameter controlling how aggressively slab smoothing distributes steps across distance. Produces emergent gradual slopes without diagonal geometry.
 - **Seam finalization**: cross-chunk pass (`world::seam`) resolving slab-smoothing demotions at chunk borders once neighbor data exists; recorded through the override/diff mechanism and marked by a persisted `seam_finalized` flag.
 - **Walkability**: transient worldgen computation identifying voxels the player can stand on; input to slab smoothing, then discarded. Runtime movement, collision, and room detection use direct geometric queries (`WorldView::solid_interval`) instead of a resident mask (revised v1.6).
+- **World region**: an aligned group of chunks that owns per-region generation parameters, entity persistence, the region tick and region transformation. What a bare "region" means.
 - **WorldGraph**: top-level singleton graph defining climate, zone selection, and global constants.
 - **ZoneGraph**: graph type defining biome distribution, cave rules, structures, and rivers within a Zone.
 

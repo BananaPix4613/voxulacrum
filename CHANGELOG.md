@@ -18,9 +18,9 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1 and T4 are merged. The runtime spine is designed
-in `engine-design.md`, and the CPU baseline M3's exit gate compares against is
-recorded.
+Milestone M3, in progress: R1, T4 and B8 are merged. The runtime spine and the
+engine object model are designed in `engine-design.md`, and the CPU baseline
+M3's exit gate compares against is recorded.
 
 ### Added
 
@@ -40,6 +40,14 @@ recorded.
 - **The M3 CPU baseline** (T4, #91) in `perf-baseline.md`: five runs of each
   scenario on the discrete GPU and three on the integrated. Median frame CPU
   mean is 2.12, 3.01, 5.16 and 2.70 ms for S1 to S4.
+- **The engine object model** (B8, #80) — `engine-design.md` §12 now names
+  every primitive and asset type the engine has or plans, with each type's
+  owner, side, override rule and milestone, and lists every registry as an
+  extension point. For a game or package author it sets the rules ahead of the
+  code: assets are named, never addressed by path; a package replaces only
+  names from packages it depends on; a texture pack may restyle but never change
+  behavior; and two package kinds, `Library` and `ResourcePack`, join `Game` and
+  `Mod`. Design only: nothing loads differently yet.
 
 ### Changed
 
