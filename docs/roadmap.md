@@ -1,7 +1,7 @@
 # Voxulacrum Engine Roadmap — 0.4.0 through 1.0
 
 **Status:** Authoritative planning reference, v2.2
-**Companions:** `engine-design.md` (v1.14 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
+**Companions:** `engine-design.md` (v1.15 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
 **Tracker:** every work item is a GitHub issue, grouped by [milestone](https://github.com/BananaPix4613/voxulacrum/milestones) and tracked on the *Voxulacrum engine* project board (§9.3).
 **Purpose:** Make the technical goals visible, fix the working discipline, and sequence every core capability the engine needs before it is a *ready product* — an engine another person (or future you) can build a title on without engine surgery.
 
@@ -187,7 +187,7 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 | **Headless generation CLI** (`--verify-generation`) | Shipped 0.3.0 |
 | **Graph validation CLI** (`--validate-graphs`) | Shipped 0.4.0 |
 | **Facade dependency check** — games and the testbed may depend only on the facade crate | Shipped 0.5.0, for the engine workspace and, with `--manifest-path`, for a game's |
-| **Cross-platform determinism job** (Windows and Linux runners) | M3 (T7) |
+| **Cross-platform determinism job** (Windows and Linux runners) | Shipped in M3 (T7): Windows and Linux gate, macOS reports |
 | **Asset lint** — registry ID collisions, dangling references, missing files, hardcoded user-facing strings | M5 |
 | **Golden-image render regression** | M5 |
 | **Perf regression job**, including the integrated-GPU minimum spec | M5 |

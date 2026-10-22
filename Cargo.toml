@@ -9,6 +9,7 @@ members = [
     "crates/voxulacrum-app",
     "crates/voxulacrum",
     "crates/boundary-check",
+    "crates/determinism-diff",
     "crates/testbed",
 ]
 
@@ -19,6 +20,7 @@ members = [
 engine-crates = [
     "voxel-core", "nodegraph-ir", "nodegraph-eval", "nodegraph-hotreload",
     "nodegraph-editor", "voxulacrum-app", "voxulacrum", "boundary-check",
+    "determinism-diff",
 ]
 
 [workspace.package]

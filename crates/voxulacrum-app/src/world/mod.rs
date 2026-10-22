@@ -133,12 +133,27 @@ impl World {
                 .collect()
         });
 
+        Self::from_chunks(chunks, generator, materials, min_y, max_y)
+    }
+
+    /// Assemble a world over an already-built chunk set, in `Authoring` mode,
+    /// with an empty mutation log and event outbox.
+    ///
+    /// The one place a `World` is put together, so every caller that builds its
+    /// own chunk set starts from the same state the startup fill does.
+    pub fn from_chunks(
+        chunks: HashMap<ChunkCoord, LoadedChunk>,
+        generator: Arc<WorldGenerator>,
+        materials: Arc<MaterialRegistry>,
+        min_chunk_y: i32,
+        max_chunk_y: i32,
+    ) -> Self {
         Self {
             chunks,
             generator,
             materials,
-            min_chunk_y: min_y,
-            max_chunk_y: max_y,
+            min_chunk_y,
+            max_chunk_y,
             mode: EngineMode::Authoring,
             mutation_log: MutationLog::default(),
             event_outbox: Vec::new(),
@@ -332,6 +347,41 @@ impl World {
     /// Take this frame's emitted events, for the pump to publish.
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, events::WorldEvent> {
         self.event_outbox.drain(..)
+    }
+
+    /// Run one fluid step (design §7): plan every chunk with active cells from
+    /// the shared pre-step snapshot, reading its face neighbors read-only, then
+    /// commit every plan through the door. Returns `None`, and changes nothing,
+    /// when no cell is active.
+    ///
+    /// The commit is a `System` mutation, because the simulation runs in any
+    /// mode. Plans are gathered in map order, which cannot reach the result:
+    /// each plan writes only its own chunk, and the cross-seam wakes the commit
+    /// applies afterward are set inserts.
+    pub fn step_fluids(&mut self) -> Option<MutationOutcome> {
+        let active: Vec<ChunkCoord> = self
+            .chunks
+            .iter()
+            .filter(|(_, c)| !c.data.fluids.active.is_empty())
+            .map(|(coord, _)| *coord)
+            .collect();
+        if active.is_empty() {
+            return None;
+        }
+        let mut plans: Vec<(ChunkCoord, fluid_sim::ChunkPlan)> = Vec::new();
+        for &coord in &active {
+            let Some(this) = self.chunks.get(&coord) else { continue };
+            let sample = fluid_sim::NeighborSample::new(
+                &this.data.fluids,
+                this.data.voxels.as_ref(),
+                fluid_neighbor_faces(self, coord),
+            );
+            plans.push((coord, fluid_sim::plan_chunk(&this.data.fluids, &sample)));
+        }
+        let outcome = self
+            .execute(MutationCommand::system(WorldMutation::CommitFluidPlans { plans }))
+            .expect("system fluid commit accepted in any mode");
+        Some(outcome)
     }
 
     /// Handler for [`WorldMutation::EditVoxel`]. A convenience over the batched
@@ -1187,6 +1237,23 @@ fn generate_world_background(
     chunks.into_iter().map(|c| (c.data.coord, c)).collect()
 }
 
+/// Read-only `(fluids, storage)` of the six face-neighbors of `coord`, in the
+/// order `NeighborSample` expects: `[-x, +x, -y, +y, -z, +z]`.
+fn fluid_neighbor_faces(
+    world: &World,
+    coord: ChunkCoord,
+) -> [Option<(&layers::FluidLayer, &storage::ChunkStorage)>; 6] {
+    let offs = [(-1i32, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)];
+    let mut faces: [Option<(&layers::FluidLayer, &storage::ChunkStorage)>; 6] = [None; 6];
+    for (i, &(dx, dy, dz)) in offs.iter().enumerate() {
+        let nc = ChunkCoord::new(coord.x + dx, coord.y + dy, coord.z + dz);
+        if let Some(chunk) = world.chunks.get(&nc) {
+            faces[i] = Some((&chunk.data.fluids, chunk.data.voxels.as_ref()));
+        }
+    }
+    faces
+}
+
 /// For each chunk face `pos` lies on, push the neighbor chunk plus the mirror
 /// cell on the far side of that face (a corner cell yields up to three). Pure
 /// geometry; lives here beside the fluid commit handler that consumes it.
@@ -1520,6 +1587,38 @@ mod mutation_tests {
             "bucket ensured so the delta save path snapshots the fluid field",
         );
         assert_eq!(outcome.water_rebuild.as_slice(), &[IVec3::ZERO]);
+    }
+
+    #[test]
+    fn step_fluids_moves_active_water_and_idles_when_none_is_active() {
+        use crate::world::layers::{FluidCell, FluidId};
+
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        assert!(world.step_fluids().is_none(), "no active cell, so no step");
+
+        // One suspended, active water cell in an all-air chunk: it must fall.
+        let cell = LocalPos::new_unchecked(4, 10, 4);
+        {
+            let chunk = world.get_chunk_mut(IVec3::ZERO).unwrap();
+            chunk.data.fluids.cells.insert(
+                cell,
+                FluidCell {
+                    fluid_id: FluidId::WATER,
+                    mass: fluid_gen::FULL_MASS,
+                    flags: 0,
+                },
+            );
+            chunk.data.fluids.activate(cell);
+        }
+
+        let outcome = world.step_fluids().expect("an active cell steps");
+        assert_eq!(outcome.water_rebuild.as_slice(), &[IVec3::ZERO]);
+        let cells = &world.get_chunk(IVec3::ZERO).unwrap().data.fluids.cells;
+        let below = LocalPos::new_unchecked(4, 9, 4);
+        assert!(
+            cells.get(&below).is_some_and(|c| c.mass > 0),
+            "the water fell into the cell below",
+        );
     }
 
     #[test]

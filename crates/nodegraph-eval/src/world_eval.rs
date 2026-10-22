@@ -21,7 +21,7 @@ use crate::eval::Evaluator;
 use crate::EvalError;
 use crate::feature::{
     BranchSegment, CanopyLobe, ColumnProbe, Feature, FeatureCanopy, FeaturePayload,
-    FeatureSource, TreeSource,
+    FeatureSource, StampCounts, TreeSource,
 };
 use crate::field::{ScalarField, CHUNK_DIM};
 use crate::foliage::ChunkFoliage;
@@ -835,6 +835,7 @@ impl WorldEvaluator {
             fluid_levels,
             segments: stamped.segments,
             lobes: stamped.lobes,
+            stamp_counts: stamped.counts,
         })
     }
 
@@ -1191,6 +1192,7 @@ impl WorldEvaluator {
                 features: Vec::new(),
                 segments: Vec::new(),
                 lobes: Vec::new(),
+                counts: StampCounts::default(),
             });
         }
         let range = self.chunk_y_range.clone();
@@ -1215,6 +1217,7 @@ impl WorldEvaluator {
             terrain: Arc::new(stamped.terrain),
             segments: stamped.segments,
             lobes: stamped.lobes,
+            counts: stamped.counts,
             sources,
             features,
         })
@@ -1394,6 +1397,7 @@ struct Stamped {
     features: Vec<Feature>,
     segments: Vec<BranchSegment>,
     lobes: Vec<CanopyLobe>,
+    counts: StampCounts,
 }
 
 /// The result of evaluating the graph set for one chunk: the composited terrain,
@@ -1421,6 +1425,8 @@ pub struct ChunkEvaluation {
     pub segments: Vec<BranchSegment>,
     /// Canopy lobes this chunk owns. Empty unless a tree source reaches it.
     pub lobes: Vec<CanopyLobe>,
+    /// Features of each payload that wrote into this chunk's terrain.
+    pub stamp_counts: StampCounts,
 }
 
 #[cfg(test)]
@@ -1925,6 +1931,10 @@ mod tests {
             }
         }
         assert!(wood > 0, "a zone full of trees produced no wood");
+        assert!(
+            chunk.stamp_counts.trees > 0,
+            "the chunk holds wood but its evaluation counted no tree",
+        );
     }
 
     #[test]

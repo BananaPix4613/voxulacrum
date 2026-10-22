@@ -1,6 +1,7 @@
 //! SQLite-based world persistence with delta compression.
 //! Only player-modified chunks are stored. Base terrain is regenerated from seed.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -12,8 +13,8 @@ use smallvec::SmallVec;
 
 use super::chunk::LoadedChunk;
 use super::layers::{
-    DecalEntry, DetailLayerId, DetailTexel, FluidCell, FluidLayer, FluidId, PrefabId,
-    ScatterFlags, ScatterInstance, StableInstanceId,
+    DecalEntry, DetailLayerId, DetailLayers, DetailTexel, FluidCell, FluidFillMode, FluidLayer,
+    FluidId, PrefabId, ScatterFlags, ScatterInstance, ScatterStore, StableInstanceId,
 };
 use super::overrides::{ChunkOverrides, EditState};
 use super::storage::{ChunkStorage, PopulatedChunk, PalettedBitArray};
@@ -246,26 +247,11 @@ fn write_overrides(buf: &mut Vec<u8>, ovr: &ChunkOverrides) {
     for (layer, index, texel) in detail {
         w_u16(buf, layer);
         w_u16(buf, index);
-        buf.push(texel.species);
-        buf.push(texel.density);
-        buf.push(texel.tint);
-        buf.push(texel.flags);
+        write_detail_texel(buf, &texel);
     }
 
     // 6. fluid_diffs: index u16 + fluid_id u16 + mass u16 + flags u8
-    let mut fluids: Vec<(u16, FluidCell)> = ovr
-        .fluid_diffs
-        .iter()
-        .map(|(pos, cell)| (pos.to_index() as u16, *cell))
-        .collect();
-    fluids.sort_unstable_by_key(|&(index, _)| index);
-    w_u32(buf, fluids.len() as u32);
-    for (index, cell) in fluids {
-        w_u16(buf, index);
-        w_u16(buf, cell.fluid_id.0);
-        w_u16(buf, cell.mass);
-        buf.push(cell.flags);
-    }
+    write_fluid_cells(buf, &ovr.fluid_diffs);
 
     // 7. decal_diffs: index u16 + face u8 + decal_id u16 + flags u8
     let mut decals: Vec<(u16, u8, DecalEntry)> = ovr
@@ -353,7 +339,9 @@ fn read_overrides(r: &mut Reader) -> Result<ChunkOverrides, PersistError> {
     Ok(ovr)
 }
 
-fn write_tags(buf: &mut Vec<u8>, tags: &ChunkTags) {
+/// Chunk tags: zones, biomes and library references, each a `u32` count then
+/// its ids, in the order the tags hold them.
+pub fn write_tags(buf: &mut Vec<u8>, tags: &ChunkTags) {
     w_u32(buf, tags.zones.len()as u32);
     for zone in &tags.zones {
         w_u16(buf, zone.0);
@@ -387,6 +375,100 @@ fn read_tags(r: &mut Reader) -> Result<ChunkTags, PersistError> {
     Ok(ChunkTags { zones, biomes, library_refs })
 }
 
+// -- Layer encoding ----------------------------------------------------------
+//
+// Single chunk layers in the persistence encoding, for hashing. Design §12
+// "Determinism" computes hashes over this encoding, which is fixed-endian and
+// key-sorted, because it is also the wire encoding (P4). Voxels and tags are
+// the blob's own sections. A chunk's generated fluid, scatter and detail paint
+// are never written to a blob, because the chunk regenerates them, so their
+// encodings exist only here. Each is built from the entry writers the override
+// sections use, so a generated cell and an edited one encode alike.
+
+/// A detail texel: species, density, tint and flags, one byte each.
+fn write_detail_texel(buf: &mut Vec<u8>, texel: &DetailTexel) {
+    buf.push(texel.species);
+    buf.push(texel.density);
+    buf.push(texel.tint);
+    buf.push(texel.flags);
+}
+
+/// Fluid cells: a `u32` count, then per cell, sorted by index: index `u16`,
+/// fluid id `u16`, mass `u16` and flags `u8`.
+fn write_fluid_cells(buf: &mut Vec<u8>, cells: &HashMap<LocalPos, FluidCell>) {
+    let mut sorted: Vec<(u16, FluidCell)> = cells
+        .iter()
+        .map(|(pos, cell)| (pos.to_index() as u16, *cell))
+        .collect();
+    sorted.sort_unstable_by_key(|&(index, _)| index);
+    w_u32(buf, sorted.len() as u32);
+    for (index, cell) in sorted {
+        w_u16(buf, index);
+        w_u16(buf, cell.fluid_id.0);
+        w_u16(buf, cell.mass);
+        buf.push(cell.flags);
+    }
+}
+
+/// Voxels as a full record carries them: the variant tag, then either the one
+/// packed voxel or the palette-compressed array (self-delimiting).
+pub fn write_voxels(buf: &mut Vec<u8>, storage: &ChunkStorage) {
+    match storage {
+        ChunkStorage::Uniform { voxel } => {
+            buf.push(TAG_FULL_UNIFORM);
+            w_u32(buf, voxel.pack());
+        }
+        ChunkStorage::Populated(pop) => {
+            buf.push(TAG_FULL_POPULATED);
+            pop.material_id.serialize_to_bytes(buf);
+        }
+    }
+}
+
+/// A fluid layer: its fill mode (`0` for empty, or `1` then the fluid id for
+/// submerged), then its explicit cells. The active set and the stability
+/// counters are runtime state and are left out.
+pub fn write_fluid_layer(buf: &mut Vec<u8>, fluids: &FluidLayer) {
+    match fluids.fill_mode {
+        FluidFillMode::Empty => buf.push(0),
+        FluidFillMode::Submerged(fluid_id) => {
+            buf.push(1);
+            w_u16(buf, fluid_id.0);
+        }
+    }
+    write_fluid_cells(buf, &fluids.cells);
+}
+
+/// Scatter instances: a `u32` count of types, then per type in ascending id
+/// order the type id `u16`, a `u32` instance count and each instance. Instances
+/// keep their stored order, as `scatter_added` does.
+pub fn write_scatter_store(buf: &mut Vec<u8>, scatter: &ScatterStore) {
+    let mut types: Vec<_> = scatter.by_type.iter().collect();
+    types.sort_unstable_by_key(|(type_id, _)| type_id.0);
+    w_u32(buf, types.len() as u32);
+    for (type_id, instances) in types {
+        w_u16(buf, type_id.0);
+        w_u32(buf, instances.len() as u32);
+        for inst in instances {
+            write_scatter_instance(buf, inst);
+        }
+    }
+}
+
+/// Detail paint: a `u32` count of layers, then per layer in ascending id order
+/// the layer id `u16` and every texel in column order.
+pub fn write_detail_layers(buf: &mut Vec<u8>, detail: &DetailLayers) {
+    let mut layers: Vec<_> = detail.layers.iter().collect();
+    layers.sort_by_key(|layer| layer.layer_id.0);
+    w_u32(buf, layers.len() as u32);
+    for layer in layers {
+        w_u16(buf, layer.layer_id.0);
+        for texel in layer.map.iter() {
+            write_detail_texel(buf, texel);
+        }
+    }
+}
+
 /// Serialize a ChunkRecord -> raw bytes (caller zstd-compress).
 pub fn serialize_chunk_record_raw(record: &ChunkRecord) -> Result<Vec<u8>, PersistError> {
     let mut raw = Vec::new();
@@ -397,15 +479,7 @@ pub fn serialize_chunk_record_raw(record: &ChunkRecord) -> Result<Vec<u8>, Persi
             raw.push(TAG_DELTA);
             write_overrides(&mut raw, overrides);
         }
-        ChunkEdits::Full(ChunkStorage::Uniform { voxel }) => {
-            raw.push(TAG_FULL_UNIFORM);
-            w_u32(&mut raw, voxel.pack());
-        }
-        ChunkEdits::Full(ChunkStorage::Populated(pop)) => {
-            raw.push(TAG_FULL_POPULATED);
-            // material: palette-compressed (self-delimiting)
-            pop.material_id.serialize_to_bytes(&mut raw);
-        }
+        ChunkEdits::Full(storage) => write_voxels(&mut raw, storage),
     }
 
     write_tags(&mut raw, &record.tags);
@@ -1187,6 +1261,103 @@ mod tests {
         })
             .unwrap();
         assert_eq!(ra, rb);
+    }
+
+    /// The layer encodings the determinism manifest hashes: identical content
+    /// built in different orders encodes to identical bytes.
+    #[test]
+    fn layer_encodings_are_independent_of_insertion_order() {
+        use crate::world::layers::{DetailLayer, ScatterTypeId};
+
+        let water = |mass| FluidCell { fluid_id: FluidId::WATER, mass, flags: FluidCell::FLAG_SETTLED };
+        let mut fa = FluidLayer::default();
+        for (i, m) in [(5usize, 100u16), (900, 200), (70, 300)] {
+            fa.cells.insert(LocalPos::from_index(i), water(m));
+        }
+        let mut fb = FluidLayer::default();
+        for (i, m) in [(70usize, 300u16), (5, 100), (900, 200)] {
+            fb.cells.insert(LocalPos::from_index(i), water(m));
+        }
+        let (mut ea, mut eb) = (Vec::new(), Vec::new());
+        write_fluid_layer(&mut ea, &fa);
+        write_fluid_layer(&mut eb, &fb);
+        assert_eq!(ea, eb, "fluid cells");
+
+        let inst = |anchor: usize, id: u64| ScatterInstance {
+            anchor: LocalPos::from_index(anchor),
+            stable_id: StableInstanceId(id),
+            ..ScatterInstance::default()
+        };
+        let mut sa = ScatterStore::default();
+        sa.by_type.insert(ScatterTypeId(3), vec![inst(1, 10)]);
+        sa.by_type.insert(ScatterTypeId(1), vec![inst(2, 20), inst(4, 40)]);
+        let mut sb = ScatterStore::default();
+        sb.by_type.insert(ScatterTypeId(1), vec![inst(2, 20), inst(4, 40)]);
+        sb.by_type.insert(ScatterTypeId(3), vec![inst(1, 10)]);
+        let (mut ea, mut eb) = (Vec::new(), Vec::new());
+        write_scatter_store(&mut ea, &sa);
+        write_scatter_store(&mut eb, &sb);
+        assert_eq!(ea, eb, "scatter types");
+
+        let painted = |id: u16| {
+            let mut layer = DetailLayer::new(DetailLayerId(id));
+            layer.map[7] = DetailTexel { species: id as u8 + 1, density: 9, tint: 0, flags: 0 };
+            layer
+        };
+        let mut da = DetailLayers::default();
+        da.layers.push(painted(2));
+        da.layers.push(painted(0));
+        let mut db = DetailLayers::default();
+        db.layers.push(painted(0));
+        db.layers.push(painted(2));
+        let (mut ea, mut eb) = (Vec::new(), Vec::new());
+        write_detail_layers(&mut ea, &da);
+        write_detail_layers(&mut eb, &db);
+        assert_eq!(ea, eb, "detail layers");
+    }
+
+    /// The fluid encoding is the fill mode and the cells: the simulation's
+    /// runtime state is left out, and the fill mode is in.
+    #[test]
+    fn fluid_layer_encoding_leaves_out_runtime_state() {
+        let p = LocalPos::from_index(42);
+        let mut settled = FluidLayer::default();
+        settled.cells.insert(p, FluidCell { fluid_id: FluidId::WATER, mass: 500, flags: 0 });
+        let mut ticking = settled.clone();
+        ticking.active.insert(p);
+        ticking.stable_ticks.insert(p, 3);
+        let mut submerged = settled.clone();
+        submerged.fill_mode = FluidFillMode::Submerged(FluidId::WATER);
+
+        let encode = |f: &FluidLayer| {
+            let mut buf = Vec::new();
+            write_fluid_layer(&mut buf, f);
+            buf
+        };
+        assert_eq!(encode(&settled), encode(&ticking), "active set and counters are not encoded");
+        assert_ne!(encode(&settled), encode(&submerged), "the fill mode is encoded");
+    }
+
+    /// A full record's voxels are the voxel layer encoding, byte for byte, so a
+    /// hash of the layer is a hash of what the record carries.
+    #[test]
+    fn a_full_record_carries_the_voxel_layer_encoding() {
+        let mut material_id = PalettedBitArray::new(Voxel::EMPTY.pack());
+        material_id.set(100, vox(6).pack());
+        for storage in [
+            ChunkStorage::Uniform { voxel: vox(5) },
+            ChunkStorage::Populated(Box::new(PopulatedChunk { material_id })),
+        ] {
+            let mut layer = Vec::new();
+            write_voxels(&mut layer, &storage);
+            let raw = serialize_chunk_record_raw(&ChunkRecord {
+                edits: ChunkEdits::Full(storage),
+                tags: ChunkTags::default(),
+                seam_finalized: false,
+            })
+                .unwrap();
+            assert_eq!(&raw[1..1 + layer.len()], layer.as_slice());
+        }
     }
 
     /// A blob whose version byte does not match BLOB_VERSION is rejected, never
