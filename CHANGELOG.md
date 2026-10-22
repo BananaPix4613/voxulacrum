@@ -18,11 +18,12 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8, T7, R7 and F8 are merged. The runtime
-spine and the engine object model are designed in `engine-design.md`, the CPU
-baseline M3's exit gate compares against is recorded, CI compares Tier-1
-results across Windows, Linux and macOS, generation no longer calls the
-platform's math library, and the API docs build without warnings.
+Milestone M3, in progress: R1, T4, B8, T7, R7, F8 and F9 are merged. The
+runtime spine and the engine object model are designed in `engine-design.md`,
+the CPU baseline M3's exit gate compares against is recorded, CI compares
+Tier-1 results across Windows, Linux and macOS, generation no longer calls the
+platform's math library, the API docs build without warnings, and package-load
+errors name each path once.
 
 ### Added
 
@@ -89,6 +90,13 @@ platform's math library, and the API docs build without warnings.
   isn't in scope, and three public docs in `nodegraph-eval`'s skeleton module
   linked the private `solve`. CI now builds the docs with `-D warnings`, so a
   broken or private doc link fails the build.
+- **Package-load errors name each path once** (F9, #88) — a package that fails
+  to load at startup printed its path twice, once from `run_with` and once from
+  the loader. Each error now starts with the manifest it concerns, such as
+  `error: …\packages\sandbox\package.ron: The system cannot find the file
+  specified.`, and names any other path once: a missing world as the manifest
+  writes it, a missing dependency by its directory. Manifest parse errors,
+  which named only the package directory, now name `package.ron`.
 
 ---
 
