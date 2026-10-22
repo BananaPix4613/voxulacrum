@@ -1,0 +1,81 @@
+# Tier-1 math rules for nodegraph-eval (engine-design.md §12, "Determinism";
+# roadmap R7, #95). Generation must give the same bits on every machine.
+#
+# Platform math libraries don't promise the same last bit for transcendental
+# functions, so those come from the `libm` crate, which is the same Rust code
+# everywhere. Fused multiply-add rounds once where a multiply and an add round
+# twice, so it is out too. `sqrt`, `abs`, `floor`, `ceil`, `round` and `trunc`
+# are exact everywhere and allowed.
+#
+# Clippy ignores a path it cannot resolve, without a warning. Every entry was
+# checked to resolve on the pinned toolchain (1.92.0); check again when it moves.
+disallowed-methods = [
+    { path = "f32::sin", reason = "Tier 1: use libm::sinf" },
+    { path = "f64::sin", reason = "Tier 1: use libm::sin" },
+    { path = "f32::cos", reason = "Tier 1: use libm::cosf" },
+    { path = "f64::cos", reason = "Tier 1: use libm::cos" },
+    { path = "f32::tan", reason = "Tier 1: use libm::tanf" },
+    { path = "f64::tan", reason = "Tier 1: use libm::tan" },
+    { path = "f32::sin_cos", reason = "Tier 1: use libm::sincosf" },
+    { path = "f64::sin_cos", reason = "Tier 1: use libm::sincos" },
+    { path = "f32::asin", reason = "Tier 1: use libm::asinf" },
+    { path = "f64::asin", reason = "Tier 1: use libm::asin" },
+    { path = "f32::acos", reason = "Tier 1: use libm::acosf" },
+    { path = "f64::acos", reason = "Tier 1: use libm::acos" },
+    { path = "f32::atan", reason = "Tier 1: use libm::atanf" },
+    { path = "f64::atan", reason = "Tier 1: use libm::atan" },
+    { path = "f32::atan2", reason = "Tier 1: use libm::atan2f" },
+    { path = "f64::atan2", reason = "Tier 1: use libm::atan2" },
+    { path = "f32::sinh", reason = "Tier 1: use libm::sinhf" },
+    { path = "f64::sinh", reason = "Tier 1: use libm::sinh" },
+    { path = "f32::cosh", reason = "Tier 1: use libm::coshf" },
+    { path = "f64::cosh", reason = "Tier 1: use libm::cosh" },
+    { path = "f32::tanh", reason = "Tier 1: use libm::tanhf" },
+    { path = "f64::tanh", reason = "Tier 1: use libm::tanh" },
+    { path = "f32::asinh", reason = "Tier 1: use libm::asinhf" },
+    { path = "f64::asinh", reason = "Tier 1: use libm::asinh" },
+    { path = "f32::acosh", reason = "Tier 1: use libm::acoshf" },
+    { path = "f64::acosh", reason = "Tier 1: use libm::acosh" },
+    { path = "f32::atanh", reason = "Tier 1: use libm::atanhf" },
+    { path = "f64::atanh", reason = "Tier 1: use libm::atanh" },
+    { path = "f32::exp", reason = "Tier 1: use libm::expf" },
+    { path = "f64::exp", reason = "Tier 1: use libm::exp" },
+    { path = "f32::exp2", reason = "Tier 1: use libm::exp2f" },
+    { path = "f64::exp2", reason = "Tier 1: use libm::exp2" },
+    { path = "f32::exp_m1", reason = "Tier 1: use libm::expm1f" },
+    { path = "f64::exp_m1", reason = "Tier 1: use libm::expm1" },
+    { path = "f32::ln", reason = "Tier 1: use libm::logf" },
+    { path = "f64::ln", reason = "Tier 1: use libm::log" },
+    { path = "f32::ln_1p", reason = "Tier 1: use libm::log1pf" },
+    { path = "f64::ln_1p", reason = "Tier 1: use libm::log1p" },
+    { path = "f32::log", reason = "Tier 1: divide two libm::logf calls" },
+    { path = "f64::log", reason = "Tier 1: divide two libm::log calls" },
+    { path = "f32::log2", reason = "Tier 1: use libm::log2f" },
+    { path = "f64::log2", reason = "Tier 1: use libm::log2" },
+    { path = "f32::log10", reason = "Tier 1: use libm::log10f" },
+    { path = "f64::log10", reason = "Tier 1: use libm::log10" },
+    { path = "f32::powf", reason = "Tier 1: use libm::powf" },
+    { path = "f64::powf", reason = "Tier 1: use libm::pow" },
+    { path = "f32::powi", reason = "Tier 1: multiply explicitly, or use libm::powf" },
+    { path = "f64::powi", reason = "Tier 1: multiply explicitly, or use libm::pow" },
+    { path = "f32::cbrt", reason = "Tier 1: use libm::cbrtf" },
+    { path = "f64::cbrt", reason = "Tier 1: use libm::cbrt" },
+    { path = "f32::hypot", reason = "Tier 1: use libm::hypotf" },
+    { path = "f64::hypot", reason = "Tier 1: use libm::hypot" },
+    { path = "f32::mul_add", reason = "Tier 1: no fused multiply-add; write a * b + c" },
+    { path = "f64::mul_add", reason = "Tier 1: no fused multiply-add; write a * b + c" },
+]
+
+# glam's SIMD-backed types. Its SSE2 and NEON backends sum a dot product in
+# different orders, so a normalize or slerp can differ in the last bit between
+# x86_64 and aarch64. Vec2, Vec3 and Mat3 are scalar and allowed.
+disallowed-types = [
+    { path = "glam::Quat", reason = "Tier 1: SIMD-backed; use crate::rotation::Rotation" },
+    { path = "glam::Vec3A", reason = "Tier 1: SIMD-backed; use glam::Vec3" },
+    { path = "glam::Vec4", reason = "Tier 1: SIMD-backed" },
+    { path = "glam::Mat2", reason = "Tier 1: SIMD-backed" },
+    { path = "glam::Mat3A", reason = "Tier 1: SIMD-backed; use glam::Mat3" },
+    { path = "glam::Mat4", reason = "Tier 1: SIMD-backed" },
+    { path = "glam::Affine2", reason = "Tier 1: SIMD-backed" },
+    { path = "glam::Affine3A", reason = "Tier 1: SIMD-backed" },
+]

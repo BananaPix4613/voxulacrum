@@ -9,6 +9,7 @@ mod error;
 mod eval;
 pub mod feature;
 pub mod river;
+mod rotation;
 pub mod skeleton;
 mod field;
 mod foliage;

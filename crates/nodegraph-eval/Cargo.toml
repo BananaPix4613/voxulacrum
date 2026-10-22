@@ -8,7 +8,10 @@ description = "Evaluator for nodegraph-ir: turns a graph into scalar/density fie
 [dependencies]
 nodegraph-ir = { path = "../nodegraph-ir" }
 voxel-core = { path = "../voxel-core" }
-glam = { workspace = true }
+# `libm`: glam's own transcendental math goes through the libm crate, so it
+# gives the same bits on every machine (Tier 1, engine-design.md §12).
+glam = { workspace = true, features = ["libm"] }
+libm.workspace = true
 fastnoise-lite.workspace = true
 image.workspace = true
 thiserror.workspace = true

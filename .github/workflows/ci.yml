@@ -39,6 +39,13 @@ jobs:
       - name: Facade dependency check
         run: cargo run -p boundary-check
 
+      # Tier-1 math (design §12, "Determinism"; R7): generation calls no
+      # platform math library, no fused multiply-add and no SIMD-backed glam
+      # type. The lists are in crates/nodegraph-eval/clippy.toml. Only those two
+      # lints are denied here; the crate's other clippy warnings are not.
+      - name: Tier-1 math
+        run: cargo clippy -p nodegraph-eval --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_types
+
       # Determinism coverage lives here: the slab-bearing generation test and the
       # scatter seed-derivation tests added in Phase 10 Substep 4, plus every
       # other workspace test.

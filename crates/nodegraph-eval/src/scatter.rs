@@ -125,8 +125,9 @@ pub fn poisson_placement(base: u64, radius: f32, k: u32) -> Vec<(f32, f32)> {
         for _ in 0..k {
             let ang = rng.next_f32() * std::f32::consts::TAU;
             let dist = radius * (1.0 + rng.next_f32());
-            let nx = px + ang.cos() * dist;
-            let nz = pz + ang.sin() * dist;
+            let (sin, cos) = libm::sincosf(ang);
+            let nx = px + cos * dist;
+            let nz = pz + sin * dist;
             if nx < lo || nx >= lo + span || nz < lo || nz >= lo + span { continue; }
             let gx = ((nx - lo) / cell) as isize;
             let gz = ((nz - lo) / cell) as isize;
