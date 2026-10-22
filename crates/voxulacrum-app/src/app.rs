@@ -969,21 +969,10 @@ pub fn run_with(options: RunOptions) {
     // Before anything reads content, including the headless checks below, so
     // `--verify-generation` checks whichever world this run loads.
     let root = options.package.unwrap_or_else(paths::default_package_root);
-    let package = match crate::package::Package::load(&root) {
-        Ok(package) if package.manifest.world.is_some() => package,
-        Ok(_) => {
-            eprintln!("error: {}: the package names no world to start", root.display());
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("error: {}: {e}", root.display());
-            std::process::exit(1);
-        }
-    };
-    let packages = match crate::package::Package::load_order(package, &paths::packages_dir()) {
+    let packages = match crate::package::Package::load_world(&root, &paths::packages_dir()) {
         Ok(packages) => packages,
         Err(e) => {
-            eprintln!("error: {}: {e}", root.display());
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     };
