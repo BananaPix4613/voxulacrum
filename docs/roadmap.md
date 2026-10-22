@@ -574,12 +574,12 @@ Keys are never reused. The D workstream's work items (D1–D11) are a separate s
 |---|-------|--------|
 | M1 Clean slate | F1–F7 | #1–#6, #60 |
 | M2 Engine/game boundary | B1–B4, B5 (steps B5a–B5d), B6 (steps B6a–B6c), B7, T2 | #7–#13, #66–#69, #74–#76, #85 |
-| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R7, B8, B9, F8–F10, T4, T7 | #14–#22, #80, #81, #87–#89, #91, #94, #95 |
+| M3 Runtime spine | R1, R2, R3 (steps R3a–R3c), R4–R7, B8, B9, F8–F10, F12, T4, T7, T9 | #14–#22, #80, #81, #87–#89, #91, #94, #95, #102, #103 |
 | M4 Format freeze | D1, D2 (steps D2a–D2c), D3–D11, B10 | #23–#36, #96 |
-| M5 Playable on the new data | V1–V8, S1, S2, E1, E2, T1, T3 | #37–#47, #82, #83, #90 |
+| M5 Playable on the new data | V1–V8, S1, S2, E1, E2, F11, T1, T3, T8 | #37–#47, #82, #83, #90, #100, #101 |
 | M6–M11 | One placeholder each; M8 also T5, T6 | #48–#53, #92, #93 |
 
-Within each row, issue numbers follow the order of the keys: F1 is #1, R3 is #16 with its steps at #17–#19, and D2 is #24 with its steps at #25–#27. Items added after a row was first written take the next free numbers: T7 is #94, R7 is #95 and B10 is #96.
+Within each row, issue numbers follow the order of the keys: F1 is #1, R3 is #16 with its steps at #17–#19, and D2 is #24 with its steps at #25–#27. Items added after a row was first written take the next free numbers: T7 is #94, R7 is #95, B10 is #96, T8 is #100, F11 is #101, F12 is #102 and T9 is #103.
 
 ---
 
@@ -698,7 +698,7 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [x] Integrated-GPU baseline recorded in `perf-baseline.md`
 
 ### M3 — Runtime spine
-**Contains:** R1–R7 (R3 in steps R3a–R3c), B8, B9, F8–F10, T4, T7. **Needs:** B1, B2.
+**Contains:** R1–R7 (R3 in steps R3a–R3c), B8, B9, F8–F10, F12, T4, T7, T9. **Needs:** B1, B2.
 **Non-goals:** serialization over a channel (M7), format changes, pipelined rendering, building scheduled, random and block ticks (R1 designs them; their first consumer builds them), removing camera assumptions from rendering (V8), registering registries from game code (B10, M4), a client build without server code (M7).
 - [ ] Server-core and the headless server build on a Linux runner with no windowing or GPU packages, and CI fails if `wgpu`, `naga`, `winit`, `raw-window-handle`, `egui` or `eframe` appears anywhere in their resolved dependencies (R3b, R3c)
 - [ ] One 30 Hz tick framework: the three ad-hoc clocks are gone, no simulation code reads frame time, and state at tick 3,000 is identical under three different frame-time sequences (R2, R3c)
@@ -723,7 +723,7 @@ Each milestone lists what it contains, what it needs, its non-goals and its exit
 - [ ] New generation hash anchor recorded. **The last save wipe.**
 
 ### M5 — Playable on the new data
-**Contains:** V1–V8, S1, S2, E1, E2, T1, T3. **Needs:** D1, D2; R4 for V6 and V8; B8 for V7.
+**Contains:** V1–V8, S1, S2, E1, E2, F11, T1, T3, T8. **Needs:** D1, D2; R4 for V6 and V8; B8 for V7.
 **Non-goals:** audio, particles, networking, entities above the player.
 - [ ] 30 fps at minimum settings on the integrated GPU
 - [ ] One testbed scene (terrain, a rotating grid, a character) runs under all three presentation presets and under a perspective camera, switchable at runtime
