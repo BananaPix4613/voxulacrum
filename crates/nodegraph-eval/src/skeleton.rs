@@ -14,7 +14,7 @@
 //! not reconciled, it is recomputed.
 //!
 //! **A node's parent always has a lower index**, because growth appends from a
-//! queue whose buds reference nodes that already exist. Both passes in [`solve`]
+//! queue whose buds reference nodes that already exist. Both passes in `solve`
 //! depend on it and neither needs a children list: the reverse pass pushes each
 //! node's contribution into its parent rather than pulling from its children,
 //! and the forward pass reads a parent that is already assigned. Substep 20c
@@ -87,9 +87,9 @@ pub struct Node {
     /// Parent node index, or [`NO_PARENT`] for the root. Always lower than this
     /// node's own index.
     pub parent: u32,
-    /// Centerline radius here, in voxels. Filled by [`solve`].
+    /// Centerline radius here, in voxels. Filled by `solve`.
     pub radius: f32,
-    /// Node count in this node's subtree, including itself. Filled by [`solve`].
+    /// Node count in this node's subtree, including itself. Filled by `solve`.
     pub weight: f32,
     /// Heavy-path chain this node belongs to.
     pub chain: u32,
