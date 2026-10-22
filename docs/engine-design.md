@@ -1330,6 +1330,124 @@ Each definition states the target. The line after it says where the code is toda
 - **Command.** A validated request to change state. It carries an origin and is applied only through the mutation door, at a tick boundary (roadmap P5). The door is where validation, the mode gate, persistence marking, event emission and, from M7, replication happen. Every system's writes take this shape, not only voxel edits (`target-architecture.md`, "Five API verbs"). A client sends commands as the `ClientCommand` kinds (Runtime spine).
   *Today:* `MutationCommand` with `Authoring`, `PlayTime` and `System` origins, applied at once rather than at a tick boundary.
 
+#### Asset types
+
+Every type content can name, grouped as in B8's starting catalog. Voxels, blocks, chunks, grids, regions and world instances are runtime structures rather than assets: content reaches them through the types below, so a packed grid is a clip and a world instance starts from a world definition.
+
+A type with both simulation and presentation fields loads as **two records under one name**: a **definition**, shared and covered by the join handshake's content hashes, and an **appearance**, client-only. One authored entry may hold both. Overriding always replaces a whole record, never single fields, so the two halves are what let a texture pack restyle a material without being able to change how it behaves. A side of "shared + client" below means that split.
+
+The override column uses these terms; the rules behind them are under "Override and layering rules" below.
+
+- **Replace:** a package that depends on the asset's package may replace the whole record by name.
+- **Replace; appearance open:** the definition as Replace; the appearance may also be replaced by a resource pack.
+- **Open:** presentation only, replaceable as Replace and also by resource packs.
+- **Merge:** each package's entries add to it, and a package that depends on its owner may replace it whole.
+- **Add only:** new entries only. An existing entry's meaning is part of a save or wire format, so replacing it would reinterpret data.
+- **Game only:** added or replaced by the game package alone.
+- **None:** never replaced.
+
+The milestone is when a type is built. For a type that exists, it is the item that next reshapes it. A row marked *interim* is replaced by the type it names and gets no new work.
+
+**World data**
+
+| Type | Owner | Registry | Side | Simulation fields | Presentation fields | Override | Milestone |
+|---|---|---|---|---|---|---|---|
+| Material | core | materials | shared + client | solid, opaque, hardness, permeability, supports flora, gameplay light emission, physics material, properties, tags | color, textures, palette ramp, surface function, filtering, variants, edge sharpness, surface sounds | Replace; appearance open | Exists; save mapping M4 (D3); split into definition and appearance M5 (V5) |
+| Material properties (block states) | core | none: declared on their material | shared | named values with semantic types | none | with their material | M4 (D2, D9) |
+| Visual variant | core | none: part of a material's appearance | client | none | per-face alternatives chosen by position hash | with the appearance | M5 (V7) |
+| Physics material | core | none: fields of a material definition or a collider | shared | friction, restitution, buoyancy | none | with its owner | M8 |
+| Chunk layer type | core mechanism; kit and games register | layers | declared per layer, shared by default | coverage, serializer, version | none | Add only | M4 (D4) |
+| Fixture type | core mechanism; game content | fixtures | shared + client | footprint, anchor, port table, orientation rules, block-entity schema | model, textures | Replace; appearance open | M4 (D11) |
+| Sub-voxel model type | core mechanism; game content | sub-voxel models | shared + client | collision shape, anchor rule, destruction policy | model, sway | Replace; appearance open | M4 (D11) |
+| Clip | core | clips | shared | voxels, mask, fixtures, block-entity data, ports, sockets, entities, protected-volume flag | thumbnail | Replace | M4 (D9) |
+| Registry tag | core | tags, one set per registry | shared | member names | none | Merge | M8, or earlier with its first consumer |
+| World definition | core | worlds | shared | seed, sea level, graphs, zones, biomes, default region parameters | none | Replace | Exists as `world.manifest.json`; named M4; several per package M10 |
+| Detail channel and species (`foliage.ron`), *interim* | core | foliage | shared + client | ids, density meaning | color | Replace; appearance open, once D3 lets a dependency ship it | Exists; a registered layer M4 (D4); replaced by sprites and billboard clumps M6 |
+| Scatter prop (`prefabs.ron`), *interim* | core | prefabs | shared + client | id, footprint | procedural shape, color, scale | None; it retires | Exists; replaced by sub-voxel models M4 (D11) and sprites M6 |
+
+**Visual.** Every visual type is client-side presentation, except a decal type, whose placements are world state.
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Palette | core | palettes | client | colors for the palette pass | Open | Exists, by path; named M5 (V2) |
+| Shader | core | shaders | client | WGSL source | Game only | Exists, by path; named M5 (V3) |
+| Texture | core | textures | client | image, resolution, frames, filtering hint, optional normal and emissive maps | Open | M5 (V7) |
+| Surface function | core mechanism; game content | surface functions | client | shader function filling albedo, normal, emission and material id | Replace | M5 (V5) |
+| Lighting model | core mechanism; built-ins in core | lighting models | client | shader function and its parameters | Game only | M5 (V5) |
+| Render pass | core mechanism; game content | render passes | client | shader, insertion point, inputs | Replace; a mod only at the post-process points | M5 (V6) |
+| Presentation preset | core; example presets in the kit | presentation presets | client | render resolution, snapping, filtering, anti-aliasing, palette pass, outlines, lighting model, post-process profile | Open | M5 (V2) |
+| Post-process profile | core | none: part of a presentation preset | client | post-pass parameters | with its preset | M5 (V2) |
+| Sprite, depth sprite, billboard clump | core | sprites | client | image, depth and normal maps, pivot | Open | M6 |
+| Particle effect | core | particle effects | client | emitter, spawn rules, budget class | Open | M6; game-facing M8 |
+| Decal type | core | decals | shared + client | definition: faces it may mark; appearance: texture | Replace; appearance open | M6 |
+| Sky and atmosphere profile | core | atmospheres | client | sky gradient, sun, clouds, fog | Open | M6 |
+| Model | core | models | client | mesh, material slots, skeleton (glTF) | Open | M8; sub-voxel models name one from M4 |
+
+**Generation.** Everything here is shared and Tier 1, because clients generate terrain themselves and verify it by hash.
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Graph (world, zone, biome, detail) | core | graphs | shared | nodes, parameters | Replace | Exists, by path; named M4 |
+| Graph library | core | libraries | shared | boundary, and a body or a kernel | Replace; the engine package's kernel-backed declarations: None | Exists |
+| Worldgen kernel | core mechanism; packages register | kernels | shared | native function, boundary, version | Replace; the engine's own: None | M4 (B10) |
+| Biome | core | biomes | shared + client | definition: graph, detail graph, parameters; appearance: tint, atmosphere | Replace; appearance open | Exists as manifest entries with numeric ids; named M4 |
+| Zone | core | zones | shared | graph | Replace | Exists as manifest entries with numeric ids; named M4 |
+| Blueprint, *interim* | core | blueprints | shared | anchor, cells, destruction policy, protected-volume flag | Replace | Exists; becomes a clip M4 (D9) |
+| Tree species | core | species | shared | skeleton generator parameters | Replace | Exists; the generator outputs clips M4 (D9) |
+| Macro tile layer | core | none yet | shared | continent, range and drainage parameters | Replace | Unscheduled (`macro-terrain-research.md`) |
+
+**Entities and behavior**
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Play policy (`play.ron`) | kit | none: one per package | shared | body, movement, reach, spawn rule, build tool | Replace | Exists; kit controller parameters M5 (E2) |
+| Entity type (entity templates) | core mechanism; game content | entity types | shared + client | definition: components, collider, replication, persistence and tier rules; appearance: model or sprite, animations, sounds | Replace; appearance open | M8 |
+| Component type | core mechanism; registered from code | components | declared per component | schema, saved or not, replication rule, version | Add only | M8 |
+| Animation clip and graph | core | animations | shared + client | definition: state machine, root motion, events, hitbox tracks; appearance: pose tracks | Replace; appearance open | M8; IK chains M9 |
+| Assembly definition | core mechanism; game content | assemblies | shared + client | definition: parts, joints, IK chains, locomotion controller; appearance: part visuals | Replace; appearance open | M9 |
+| AI agent profile | core | agent profiles | server | size, step, jump, drop, capabilities | Replace | M9 |
+| Behavior definition | kit | behaviors | server | a behavior tree, utility scorer or state machine in data | Replace | M9 |
+| Interaction kind | kit | interaction kinds | shared | targeting and placement rules | Replace | M8 |
+| Logic channel and network type | core mechanism; game content | channels, network types | shared | channel name; solver, solve mode, unload policy | Add only | M9 |
+| Reaction table | core schema; game content | a data table | shared | ignition, heat capacity, phase change per material | Replace | M10 |
+| Data table type | core mechanism; declared by the kit or game | one registry per declared type | declared per type | the record schema; records follow it | Add only for the type; Replace for its records | M8 |
+
+**Audio and UI.** Everything here is client-side presentation. Sounds play from replicated events, never from a second simulation (roadmap §6.14).
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Sound | core | sounds | client | audio data, streaming hint | Open | M6 |
+| Sound event | core | sound events | client | sounds, variation, bus, voice limit | Open | M6; game-facing M8 |
+| Music state and soundscape | core | music states, soundscapes | client | director states, tracks, ambience beds | Open | M8 |
+| UI layout | core mechanism; game content | UI layouts | client | layout, data bindings, named extension points | Replace | M8 |
+| UI theme | core | themes | client | styles | Open | M8 |
+| String table | core | strings | client | text per locale | Open; a resource pack may add a locale | M8 |
+| Font | core | fonts | client | font data | Open | M8 |
+| Icon and cursor | core | icons | client | images | Open | M8 |
+
+**Packaging and configuration**
+
+| Type | Owner | Registry | Side | Fields | Override | Milestone |
+|---|---|---|---|---|---|---|
+| Package manifest | core | none: one per package | read by both | id, namespace, kind, version, engine range, dependencies, modules | None | Exists (B6) |
+| Input action | core mechanism; games register | input actions | shared: action names travel in the `InputFrame` | name, value type, context | Add only | M5 (E1) |
+| Input bindings | core | none: one default set per package, then the player's own | client | default keys and buttons per action | Open; the player's rebinding wins | Exists, by path (`assets/input.ron`); M5 (E1) |
+| Parameter preset, *interim* | core | none: files under `params/` | client | the engine's tuning parameters | None; not package content | Exists; becomes presentation presets and settings M5 (V2) |
+| WebAssembly module | core | none: listed in its package's manifest | declared per module | code | None; replaced by its package's next version | M11 |
+| Capability | core | none: requested per module | per module | own data folder, listed network domains, clipboard | None | M11 |
+
+**Game content.** These belong to a game (roadmap §3, "The engine/game boundary"), so the engine has no type for them. Each is built from a generic engine type:
+
+| Content | Built from |
+|---|---|
+| Items | a data table whose record type the kit's inventory framework declares (roadmap §6.19), plus an entity type for an item lying in the world |
+| Recipes and crafting | a data table the game declares |
+| Loot tables | a data table using the kit's weighted selection |
+| Spawn tables | a data table the kit declares (roadmap §6.9), read by spawning |
+| Creature behaviors | behavior definitions and entity types |
+| Progression, quests and dialogue | data tables and string tables |
+| Combat rules and balance | game code and data tables |
+
 ### Per-region generation parameters (added v1.8)
 
 Generation is currently a pure function of `(seed, graphs, coords)`. That is sufficient for a world whose rules never change, and insufficient for one that can be reshaped after it has been generated and edited — a region-scale transformation in the Terraria-hardmode sense. The generalization:
