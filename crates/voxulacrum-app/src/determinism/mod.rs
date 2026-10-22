@@ -21,6 +21,10 @@
 //! a blueprint stamp through the mutation door. Each runs on a block of chunks
 //! it generates itself, and fails the run if it did not exercise what it is for.
 //!
+//! **The kernels** (`kernels`) are tree skeletons and Poisson-disk placement,
+//! hashed directly. A difference smaller than a voxel changes no chunk, and no
+//! shipped graph places by Poisson disk, so the generated base cannot see them.
+//!
 //! Like `--verify-generation`, this runs from the normal binary before the event
 //! loop exists, so it needs no window or GPU, and it generates on rayon's global
 //! pool outside the frame schedule. R3c moves it to the headless server binary.
@@ -44,6 +48,7 @@ use crate::world::world_generator::{world_manifest_path, GeneratedChunk, WorldGe
 /// different formats rather than comparing fields that mean different things.
 const FORMAT: u32 = 1;
 
+mod kernels;
 mod scenarios;
 
 /// Handle `--determinism-manifest <file>`.
@@ -245,6 +250,7 @@ fn write_manifest(path: &Path) -> i32 {
     for (name, outcome) in [
         ("fluid", scenarios::fluid(&generator, &materials)),
         ("edits", scenarios::edits(&generator, &materials)),
+        ("kernels", kernels::records()),
     ] {
         match outcome {
             Ok(records) => sections.push(Section { name, records }),
