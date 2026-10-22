@@ -183,6 +183,20 @@ pub struct CanopyLobe {
     pub index: u32,
 }
 
+/// How many features of each payload wrote at least one cell into a chunk.
+///
+/// A feature that reached the chunk's band but wrote nothing, because every
+/// cell it had in the window was clipped or under a protected volume, is not
+/// counted. The counts describe what the chunk's voxels contain, not which
+/// features were derived for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StampCounts {
+    /// Blueprint occurrences: structures.
+    pub blueprints: u32,
+    /// Tree occurrences.
+    pub trees: u32,
+}
+
 /// What one chunk's feature stamping produced.
 pub struct StampResult {
     /// Terrain with every in-window feature cell written.
@@ -197,6 +211,8 @@ pub struct StampResult {
     /// Canopy lobes this chunk owns, by the same rule: the chunk containing the
     /// lobe's center, drawn whole rather than clipped.
     pub lobes: Vec<CanopyLobe>,
+    /// Features of each payload that wrote into this chunk.
+    pub counts: StampCounts,
 }
 
 /// One derived occurrence.
@@ -358,8 +374,9 @@ pub fn stamp_features(
     let mut out = terrain.clone();
     let mut segments = Vec::new();
     let mut lobes = Vec::new();
+    let mut counts = StampCounts::default();
     if features.is_empty() {
-        return StampResult { terrain: out, segments, lobes };
+        return StampResult { terrain: out, segments, lobes, counts };
     }
     out.make_dense();
     let base = IVec3::new(ctx.chunk.x * N, ctx.chunk.y * N, ctx.chunk.z * N);
@@ -370,6 +387,7 @@ pub fn stamp_features(
         match &source.payload {
             FeaturePayload::Blueprint(bp) => {
                 let anchor = IVec3::from_array(bp.anchor);
+                let mut wrote = false;
                 for &(at, voxel) in &bp.cells {
                     let rel = IVec3::from_array(
                         feature.yaw.apply((IVec3::from_array(at) - anchor).to_array()),
@@ -383,9 +401,13 @@ pub fn stamp_features(
                         continue;
                     }
                     out.set(local.x as usize, local.y as usize, local.z as usize, voxel);
+                    wrote = true;
                     if bp.protected_volume {
                         protected.insert(key);
                     }
+                }
+                if wrote {
+                    counts.blueprints += 1;
                 }
             }
             FeaturePayload::Tree(t) => {
@@ -411,6 +433,7 @@ pub fn stamp_features(
                 // `surface_offset: 0` where a blueprint wants 1.
                 let root = feature.anchor.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
                 let wood = Voxel::cube(t.wood);
+                let mut wrote = false;
                 skeleton.voxelize(root, |cell| {
                     let local = cell - base;
                     if out_of_window(local) {
@@ -421,7 +444,11 @@ pub fn stamp_features(
                         return;
                     }
                     out.set(local.x as usize, local.y as usize, local.z as usize, wood);
+                    wrote = true;
                 });
+                if wrote {
+                    counts.trees += 1;
+                }
 
                 // Wood is drawn as two kinds of instance, and the split is what
                 // makes the joints seamless.
@@ -484,7 +511,7 @@ pub fn stamp_features(
     }
 
     out.try_collapse();
-    StampResult { terrain: out, segments, lobes }
+    StampResult { terrain: out, segments, lobes, counts }
 }
 
 #[cfg(test)]
@@ -646,6 +673,28 @@ mod tests {
     }
 
     #[test]
+    fn stamp_counts_only_features_that_wrote_a_cell() {
+        // The counts describe the chunk's voxels, so a feature that reached the
+        // band but wrote nothing must not count, whether it was clipped away or
+        // landed on a protected volume.
+        let ctx = EvalContext::new(1, IVec3::ZERO);
+        let sources = [source(pillar("vault", 2, true)), source(pillar("rubble", 3, false))];
+        let features = vec![
+            // Writes both its cells, and protects them.
+            Feature { anchor: IVec3::new(6, 6, 6), yaw: Yaw::Deg0, priority: 1, source: 0 },
+            // Lands only on the vault's protected cells, so writes nothing.
+            Feature { anchor: IVec3::new(6, 6, 6), yaw: Yaw::Deg0, priority: 2, source: 1 },
+            // Past the far border, so clipped entirely.
+            Feature { anchor: IVec3::new(32, 4, 4), yaw: Yaw::Deg0, priority: 3, source: 1 },
+            // Straddles the top border: its lower cell is inside the window.
+            Feature { anchor: IVec3::new(2, 31, 2), yaw: Yaw::Deg0, priority: 4, source: 1 },
+        ];
+        let base: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
+        let counts = stamp_features(&base, ctx, &sources, &features).counts;
+        assert_eq!(counts, StampCounts { blueprints: 2, trees: 0 });
+    }
+
+    #[test]
     fn a_canopy_belongs_to_the_chunk_holding_its_anchor() {
         // The ownership rule: every chunk in the band derives the same feature,
         // and exactly one emits its canopy. Two would double the tree; none
@@ -709,12 +758,15 @@ mod tests {
         let features = derive_features(ctx, &sources, flat_probe);
         assert!(!features.is_empty(), "vacuous: no tree was derived");
         let base: ChunkBuffer<Voxel, 32> = ChunkBuffer::uniform(Voxel::EMPTY);
-        let out = stamp_features(&base, ctx, &sources, &features).terrain;
+        let stamped = stamp_features(&base, ctx, &sources, &features);
+        let out = stamped.terrain;
         let wood = (0..32)
             .flat_map(|y| (0..32).flat_map(move |z| (0..32).map(move |x| (x, y, z))))
             .filter(|&(x, y, z)| out.get(x, y, z).material == MaterialId(9))
             .count();
         assert!(wood > 0, "a tree source stamped no wood");
+        assert!(stamped.counts.trees > 0, "trees wrote wood but were not counted");
+        assert_eq!(stamped.counts.blueprints, 0, "a tree is not a blueprint");
     }
 
     #[test]
