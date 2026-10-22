@@ -48,10 +48,11 @@
 
 use std::collections::VecDeque;
 
-use glam::{IVec3, Quat, Vec3};
+use glam::{IVec3, Vec3};
 use nodegraph_ir::TreeSpecies;
 
 use crate::context::mix64;
+use crate::rotation::Rotation;
 use crate::scatter::SplitMix64;
 
 /// Pipe-model exponent. 2.0 is strict da Vinci; real trees measure 2.0 to 2.5.
@@ -254,7 +255,7 @@ fn node_budget(age: f32) -> usize {
 /// An axis waiting to extend by one internode.
 struct Bud {
     parent: u32,
-    frame: Quat,
+    frame: Rotation,
     length: f32,
     order: u8,
     step: u8,
@@ -290,7 +291,7 @@ fn grow(seed: u64, sp: &TreeSpecies, budget: usize) -> Vec<Node> {
     let mut queue: VecDeque<Bud> = VecDeque::new();
     queue.push_back(Bud {
         parent: 0,
-        frame: Quat::from_rotation_y(root_yaw),
+        frame: Rotation::about(Vec3::Y, root_yaw),
         length: sp.internode * length_scale,
         order: 0,
         step: 0,
@@ -336,8 +337,8 @@ fn grow(seed: u64, sp: &TreeSpecies, budget: usize) -> Vec<Node> {
                 queue.push_back(Bud {
                     parent: index,
                     frame: frame
-                        * Quat::from_rotation_y(azimuth)
-                        * Quat::from_rotation_x(sp.branch_angle * angle_scale),
+                        * Rotation::about(Vec3::Y, azimuth)
+                        * Rotation::about(Vec3::X, sp.branch_angle * angle_scale),
                     length: bud.length * sp.child_scale,
                     order: bud.order + 1,
                     step: 0,
@@ -406,23 +407,29 @@ fn smooth(nodes: &mut [Node], amount: f32) {
 /// Bend a frame toward world up (or away), then add a random wobble. The
 /// frame's local `+Y` is the growth direction, so an identity frame grows
 /// straight up.
-fn bend(frame: Quat, gravitropism: f32, wobble: f32, rng: &mut SplitMix64) -> Quat {
+fn bend(frame: Rotation, gravitropism: f32, wobble: f32, rng: &mut SplitMix64) -> Rotation {
     let mut out = frame;
     let g = gravitropism.clamp(-1.0, 1.0);
     if g != 0.0 {
         let fwd = (out * Vec3::Y).normalize_or_zero();
         let target = if g >= 0.0 { Vec3::Y } else { Vec3::NEG_Y };
-        // `from_rotation_arc` has no defined plane for antiparallel inputs, and
-        // a branch pointing exactly away from the target has no preferred bend.
-        // Leave it and let the wobble break the tie on a later step.
+        // Antiparallel inputs have no defined plane to turn in, and a branch
+        // pointing exactly away from the target has no preferred bend. Leave it
+        // and let the wobble break the tie on a later step.
         if fwd != Vec3::ZERO && fwd.dot(target) > -0.999 {
-            out = Quat::IDENTITY.slerp(Quat::from_rotation_arc(fwd, target), g.abs()) * out;
+            // Turn through a fraction `|g|` of the arc to the target, about the
+            // axis square to both. A branch already on target has no axis.
+            let axis = fwd.cross(target).normalize_or_zero();
+            if axis != Vec3::ZERO {
+                let arc = libm::acosf(fwd.dot(target).clamp(-1.0, 1.0));
+                out = Rotation::about(axis, arc * g.abs()) * out;
+            }
         }
     }
     if wobble > 0.0 {
         let a = (rng.next_f32() - 0.5) * 2.0 * wobble;
         let b = (rng.next_f32() - 0.5) * 2.0 * wobble;
-        out *= Quat::from_rotation_x(a) * Quat::from_rotation_z(b);
+        out = out * (Rotation::about(Vec3::X, a) * Rotation::about(Vec3::Z, b));
     }
     out.normalize()
 }
@@ -583,7 +590,7 @@ fn solve(nodes: &mut [Node], trunk_radius: f32, species_tip: f32) -> (u32, f32, 
     // the tens of thousands a real tree carries - it makes every tip a club.
     let ratio = trunk_radius / tip_radius.max(1e-4);
     let exp = if tips > 1 && ratio > 1.001 {
-        ((tips as f32).ln() / ratio.ln()).clamp(0.5, 6.0)
+        (libm::logf(tips as f32) / libm::logf(ratio)).clamp(0.5, 6.0)
     } else {
         PIPE_EXP
     };
@@ -594,7 +601,7 @@ fn solve(nodes: &mut [Node], trunk_radius: f32, species_tip: f32) -> (u32, f32, 
     // all of them have already pushed into it and its radius is final.
     for i in (0..n).rev() {
         nodes[i].radius = if acc[i].area > 0.0 {
-            acc[i].area.powf(1.0 / exp)
+            libm::powf(acc[i].area, 1.0 / exp)
         } else {
             tip_radius
         };
@@ -603,7 +610,7 @@ fn solve(nodes: &mut [Node], trunk_radius: f32, species_tip: f32) -> (u32, f32, 
             continue;
         }
         let p = parent as usize;
-        acc[p].area += nodes[i].radius.powf(exp);
+        acc[p].area += libm::powf(nodes[i].radius, exp);
         nodes[p].weight += nodes[i].weight;
         if nodes[i].weight > acc[p].heaviest {
             acc[p].heaviest = nodes[i].weight;
@@ -681,7 +688,7 @@ fn derive_lobes(
         // Volume tracks supplying area, so radius tracks it to the 1/3 power.
         // Written against PIPE_EXT rather than a literal 2/3 so the two cannot
         // drift apart when the exponent is tuned per species.
-        let mut radius = sp.lobe_scale * supply.powf(pipe_exp / 3.0);
+        let mut radius = sp.lobe_scale * libm::powf(supply, pipe_exp / 3.0);
         radius *= 1.0 + (rng.next_f32() - 0.5) * 2.0 * sp.lobe_size_jitter;
         if radius < sp.lobe_min_radius {
             continue;
@@ -716,10 +723,11 @@ fn derive_lobes(
             }
         }
         let Some((i, k)) = hit else { break };
-        let (a3, b3) = (out[i].radius.powi(3), out[k].radius.powi(3));
+        let (a, b) = (out[i].radius, out[k].radius);
+        let (a3, b3) = (a * a * a, b * b * b);
         let toward = out[k].center;
         out[i].center = out[i].center.lerp(toward, b3 / (a3 + b3));
-        out[i].radius = (a3 + b3).cbrt();
+        out[i].radius = libm::cbrtf(a3 + b3);
         out.remove(k);
     }
 
@@ -817,7 +825,7 @@ mod tests {
         let mut area = vec![0.0f32; s.nodes.len()];
         for n in &s.nodes {
             if n.parent != NO_PARENT {
-                area[n.parent as usize] += n.radius.powf(s.pipe_exp);
+                area[n.parent as usize] += libm::powf(n.radius, s.pipe_exp);
             }
         }
         let mut interior = 0;
@@ -827,7 +835,7 @@ mod tests {
                 continue;
             }
             interior += 1;
-            let expected = area[i].powf(1.0 / s.pipe_exp);
+            let expected = libm::powf(area[i], 1.0 / s.pipe_exp);
             assert!((n.radius - expected).abs() < 1e-4, "node {i}: {} vs {expected}", n.radius);
         }
         assert!(interior > 0, "vacuous: the skeleton has no interior nodes");
