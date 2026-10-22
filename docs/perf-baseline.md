@@ -13,6 +13,37 @@ baselines recorded and compared").
 Getting this wrong invalidates the numbers, and it did once during 0.3.0 — see
 "Measurement hazards" below.
 
+### With the scripted benchmark (from M3)
+
+Baselines and comparisons from M3 on are taken this way. A scenario in `bench/`
+fixes the camera path, the input and the measured window, so a reading repeats.
+
+1. **Conditions.** AC power, Windows Best performance mode, other heavy
+   applications closed. Leave the machine alone while runs go: a run ignores the
+   keyboard and mouse, but closing its window fails it.
+2. **Build once, then start the built binary**, so no rebuild comes right before
+   a run. The M3 baseline's one outlying S2 run followed a rebuild.
+
+   ```
+   cargo build --release -p voxulacrum-app --bin voxulacrum-app
+   .\target\release\voxulacrum-app.exe --bench s1-rest-launch --runs 5
+   ```
+
+   `--bench` takes a file name in `bench/` without `.ron`, or a path to a `.ron`
+   file. Append `--gpu low-power` for the integrated GPU.
+3. **Five runs per scenario**, 30 s apart by default (`--cooldown <seconds>`).
+   Each runs in its own process, from a freshly generated world.
+4. **Compare medians, not runs.** The console table and
+   `target\bench\<name>-runs.json` give each figure per run, its median and its
+   spread. M3's gate compares the median of five runs with the baseline.
+5. **Copy `target\bench` aside before the next set.** Every set rewrites
+   `<name>.json` and `<name>-runs.json` there.
+
+### From the Performance panel
+
+For exploratory readings only: a panel reading is one second of one session,
+not a baseline (hazard 5).
+
 1. **Release build only.** `cargo run -p voxulacrum-app --bin voxulacrum-app --release`.
    The dev profile runs roughly 7× slower (0.3.0 measured 22 ms/frame against
    ~3 ms), so a debug reading is not a slow version of the truth, it is a
