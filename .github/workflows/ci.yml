@@ -44,7 +44,14 @@ jobs:
       # type. The lists are in crates/nodegraph-eval/clippy.toml. Only those two
       # lints are denied here; the crate's other clippy warnings are not.
       - name: Tier-1 math
-        run: cargo clippy -p nodegraph-eval --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_types
+      # Docs (F8, #87): any rustdoc warning, such as a broken intra-doc link or
+      # a public doc linking a private item, fails the build. RUSTDOCFLAGS is set
+      # on this step only: cargo test passes it to doctests as well, and their
+      # warnings are not what this gate is for.
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
 
       # Determinism coverage lives here: the slab-bearing generation test and the
       # scatter seed-derivation tests added in Phase 10 Substep 4, plus every
