@@ -1270,7 +1270,7 @@ Content loads as **packages**: a directory with a `package.ron` manifest at its 
 - **Every registry entry is `namespace:name`.** A bare name in content resolves in the namespace of the content holding it; a qualified name reaches into another loaded package. This is the in-memory half of the identity rule above; the save-embedded mapping is the other half.
 - **The engine package.** A built-in package, `voxulacrum`, declares one standard library per native kernel, beside the kernel's own code, so the boundary cannot drift from the computation and content never repeats the declaration. Its id and namespace are reserved.
 - **Dependencies** load from `packages/<id>/` before the packages that need them, in dependency order and then by id, so the same list loads the same way everywhere. Missing, cyclic, wrong-version and namespace-sharing dependencies are refused.
-- **Tables whose ids saves store stay with the world's own package.** Materials, prefabs and foliage are authored with numeric ids that voxels, scatter instances and paint edits persist, so two packages cannot merge them until the save carries its mapping; a dependency that ships one is refused. Libraries, blueprints and species, whose ids nothing persists, merge across packages.
+- **Tables whose ids saves store stay with the world's own package.** Materials, prefabs and foliage are authored with numeric ids that voxels, scatter instances and paint edits persist, so two packages cannot merge them until the save carries its mapping; a dependency that ships one is refused. Libraries, blueprints and species merge across packages. Chunk tags do persist library ids, numbered after the libraries loaded before them, so adding a dependency renumbers them; they also persist the manifest's numeric zone and biome ids. Tags only drive invalidation, which is why nothing has broken, but D3's mapping must cover them (corrected v1.14).
 - **Play policy is package data.** A package's `play.ron` holds the player's body, movement and reach, the spawn rule and the build tool. The controller, targeting and tools are engine mechanisms; a package without `play.ron` has no Play mode.
 - **Games build on the facade crate alone,** in their own repositories, and CI checks it (`boundary-check`, including `--manifest-path` for a workspace outside the engine).
 
@@ -1447,6 +1447,78 @@ The milestone is when a type is built. For a type that exists, it is the item th
 | Creature behaviors | behavior definitions and entity types |
 | Progression, quests and dialogue | data tables and string tables |
 | Combat rules and balance | game code and data tables |
+
+#### Extension points
+
+Every registry is an extension point, and so are the code hooks that have no registry of their own. Each is filled through one or more **deliveries**:
+
+- **Data:** content files in a package. Available now for the types that exist.
+- **Native:** a Rust crate built on the facade, which is how a game's own code arrives. Systems and event subscriptions from M3 (B9); registration into registries from M4 (B10).
+- **WebAssembly:** a module in a package, against a game's mod API (roadmap §6.9). From M11, and never for anything that must be compiled into the engine.
+
+A data-only package can fill only what data can describe; a type whose entries carry code (a layer's serializer, a kernel, a system) needs native code or a module. The **tier** is the determinism tier the type's results must meet (Runtime spine, "Determinism tiers"); "none" is presentation, which only has to look right.
+
+| Registry or hook | Delivery | Side | Tier | From |
+|---|---|---|---|---|
+| Materials | data, native, WebAssembly | shared + client | 1 (definition); none (appearance) | exists |
+| Tags | data, native | shared | that of the registry tagged | M8 |
+| Chunk layers | native, WebAssembly | declared per layer | 1 for layers generation or the door writes; declared otherwise | M4 (D4, B10) |
+| Fixtures, sub-voxel models | data; native for fixture behavior | shared + client | 1 | M4 (D11) |
+| Clips | data; native for capture | shared | 1 | M4 (D9) |
+| World definitions, graphs, biomes, zones | data | shared | 1 | exists |
+| Graph libraries | data | shared | 1 | exists |
+| Worldgen kernels | native, WebAssembly | shared | 1 | M4 (B10) |
+| Blueprints, species, foliage, prefabs (interim) | data | shared | 1 | exists |
+| Palettes, textures, sprites, particle effects, atmospheres, models, presentation presets | data | client | none | M5 to M8 |
+| Shaders, surface functions, lighting models | data (WGSL, validated with naga) | client | none | M5 (V3, V5) |
+| Render passes | data (WGSL), native | client | none | M5 (V6) |
+| Decals | data | shared + client | 1 (placement); none (appearance) | M6 |
+| Camera modules | native | client | none | M5 (V8) |
+| Entity types, animations, assemblies | data, native | shared + client | 2 (definition); none (appearance) | M8, M9 |
+| Components | native, WebAssembly | declared per component | 2 | M8 |
+| Systems | native from M3, WebAssembly | declared per system | 2; a system changes world state only through commands | M3 (B9) |
+| Event types | native, WebAssembly | declared per type | 2 | M8 |
+| Command kinds | native, WebAssembly | server-validated | 2; the door's voxel handlers stay 1 | M8 |
+| Interaction kinds | data, native | shared | 2 | M8 |
+| Agent profiles, behaviors | data; native for custom behavior nodes | server | 2 | M9 |
+| Logic channels, network types | data for channels; native for solvers | shared | 1 | M9 |
+| Data table types and their records | native or WebAssembly declare a type; data fills it | declared per type | declared per type | M8 |
+| Input actions | data, native | shared | 2 | M5 (E1) |
+| Input bindings | data | client | none | exists |
+| Console commands and variables | native | declared per command | none | M5 (T1) |
+| Sounds, sound events, music, soundscapes | data | client | none | M6, M8 |
+| UI layouts, themes, strings, fonts, icons | data; native for UI layouts | client | none | M8 |
+| Platform services | native | client | none | M11 |
+
+**The worldgen kernel registry.** A kernel is native computation behind a library boundary ("Standard libraries", §4). A registered kernel must be a pure function of its inputs and the seed: no state between calls, no wall clock, no thread identity. It follows the Tier 1 rules under "Determinism" above (`libm` for transcendental functions, no fused multiply-add, no parallel float reductions), and it carries a version. The version feeds the content hash a client checks at join, so changing what a kernel computes without bumping it is a defect the handshake cannot catch. The engine's own kernels are the engine package's and cannot be replaced. WebAssembly kernels (M11) additionally run with NaN canonicalization on and relaxed SIMD off, the two places WebAssembly floating point is allowed to differ between machines.
+
+#### Override and layering rules
+
+- **Assets are referenced by namespaced name, never by file path.** A path appears only inside a package, where its fixed layout maps files to the names they define. A reference in content, in a save or on the wire is always a name (the numeric id is its interned form within a session).
+- **Load order** is the existing one: dependencies before the packages that need them, then by id ("Packages and content namespaces" above). Resource packs load after every other package, in the order the player chooses.
+- **A package adds names only in its own namespace.** Writing a bare name defines it there.
+- **A package may replace a name from a package it depends on**, directly or through other dependencies, by writing its qualified name. The replacement takes the whole record ("Asset types" above). Because a replacing package always loads after the package it replaces, the later one in load order wins. What the dependency requirement adds is that two packages replacing the same name, where neither depends on the other, is a load error naming both packages and the name, rather than a winner picked by id order. A game that wants both resolves it by depending on both and replacing the name itself.
+- **Kinds limit what a package may replace** ("Package kinds" below). A library replaces nothing; a resource pack replaces only appearances and Open types.
+- **Tags merge.** Each package's entries add to a tag in load order. A package that depends on the tag's owner may instead replace the tag whole, which it states explicitly.
+- **Add-only and None types are never replaced**, by any package.
+- **Replacing keeps identity.** A replaced record keeps its name, so its saved id still maps to it (D3). Removing the package that replaced it restores the original. Removing the package that defined it leaves placeholders that keep the name (roadmap P18, D7).
+- **Simulation must match the server; presentation need not.** For every shared registry, the server's join handshake carries a content hash of the resolved records, after every replacement. Appearances and client-only types are outside it, so a client's resource pack never fails a join and never changes what the world does.
+- **Until D3 lands**, materials, prefabs and foliage stay with the world's own package ("Packages and content namespaces" above), so nothing replaces them yet.
+
+#### Package kinds
+
+| Kind | Starts a world | Loads as | Adds names | Replaces | Side |
+|---|---|---|---|---|---|
+| `Game` | yes, the one it names | the root package, or a dependency of the mods for it | yes | names from its dependencies | any |
+| `Mod` | no | a package the player enables, or a dependency | yes | names from its dependencies | any |
+| `Library` | no | a dependency only | yes | nothing | any |
+| `ResourcePack` | no | a client-side layer the player orders | appearances and Open types | appearances and Open types from any loaded package | client only |
+
+**Why `Library`.** Shared content and code (a block set, a kernel collection, a UI kit) need a kind that others depend on without it changing them. Because a library cannot replace anything, taking a newer library can add names to a world but never alter one, and a library never shows up in a player's mod list as something to switch on.
+
+**Why `ResourcePack` is a kind rather than a flag.** Every rule that applies to it differs from the others: its load order comes from the player rather than from dependencies, it is client-only, it may replace only presentation, it is outside the handshake's content hash, and it can be swapped while a world runs, reloading client registries only. A flag on `Mod` would need each of those as an exception. A resource pack names no dependencies; a replacement naming something no loaded package defines is reported and skipped, so an out-of-date pack degrades rather than refusing to load.
+
+Only a `Game` may name a world. The finer per-module sides and client requirements of `target-architecture.md` ("Packages, fault isolation and API stability") arrive with code modules in M11, inside these kinds.
 
 ### Per-region generation parameters (added v1.8)
 
