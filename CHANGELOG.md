@@ -18,10 +18,11 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8 and T7 are merged. The runtime spine and
-the engine object model are designed in `engine-design.md`, the CPU baseline
-M3's exit gate compares against is recorded, and CI compares Tier-1 results
-across Windows, Linux and macOS.
+Milestone M3, in progress: R1, T4, B8, T7 and R7 are merged. The runtime spine
+and the engine object model are designed in `engine-design.md`, the CPU baseline
+M3's exit gate compares against is recorded, CI compares Tier-1 results across
+Windows, Linux and macOS, and generation no longer calls the platform's math
+library.
 
 ### Added
 
@@ -65,6 +66,21 @@ across Windows, Linux and macOS.
 - **The toolchain is pinned** (T4, #91). `rust-toolchain.toml` names Rust
   1.92.0, and CI and release builds install it instead of the latest stable, so
   a baseline reading never moves with a compiler update.
+- **Generation math is the same on every machine** (R7, #95) — tree skeletons
+  and Poisson-disk placement take their transcendental functions from the
+  `libm` crate instead of the platform's math library, and skeletons rotate
+  with a scalar quaternion instead of glam's SIMD-backed `Quat`, whose SSE2 and
+  NEON backends sum a dot product in different orders. A new CI step denies
+  platform math, fused multiply-add and glam's SIMD types in `nodegraph-eval`
+  (`crates/nodegraph-eval/clippy.toml`). The determinism manifest gains a
+  `kernels` section that hashes skeletons and Poisson-disk point sets directly,
+  because a difference smaller than a voxel changes no chunk hash. glam's `libm`
+  feature is now on, which applies to every crate in a build that uses glam,
+  games included. **The generation hash anchor is unchanged** at
+  `0xed02babdf0f40420`, against the issue's expectation that it would move:
+  skeleton nodes now differ in their last bits, far below a voxel, and no layer
+  of the 512 sampled chunks changed, 131 of them tree-bearing. Saves need
+  nothing.
 
 ---
 
