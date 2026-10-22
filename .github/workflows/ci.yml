@@ -13,12 +13,11 @@ env:
 
 jobs:
   check:
-    # windows-latest rather than ubuntu: winit needs X11/Wayland development
-    # headers to build on Linux, and this is a Windows-primary project, so
-    # matching the development platform avoids a system-dependency detour for a
-    # job whose purpose is determinism rather than portability. Revisit when the
-    # server-core split (0.6.0) produces a renderer-free crate that builds
-    # anywhere.
+    # windows-latest: this is a Windows-primary project, and the tests and
+    # checks here do not depend on the platform. Linux and macOS are built and
+    # compared by the determinism job below (T7). Linux builds there still need
+    # the windowing and GPU packages, until the headless server (R3c) gives the
+    # job a binary without them.
     runs-on: windows-latest
 
     steps:
@@ -55,3 +54,113 @@ jobs:
 
       - name: Verify generation determinism
         run: cargo run -p voxulacrum-app --bin voxulacrum-app -- --verify-generation 512
+
+  # Cross-platform determinism (roadmap §4.5, T7; design §12 "Determinism
+  # tiers"). Each runner writes a manifest of its Tier-1 hashes: 512 generated
+  # chunks layer by layer, a fluid pour and a run of edits. The compare job
+  # below diffs them. Writing a manifest also fails when its sample holds no
+  # chunk of a kind it must cover, or a scenario did not exercise what it is for.
+  determinism:
+    name: Determinism (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    # macOS (aarch64) reports but never fails the build: it is not a supported
+    # host yet, and SIMD math may differ there in ways x86_64 runners share.
+    continue-on-error: ${{ matrix.informative }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            informative: false
+          - os: ubuntu-latest
+            label: linux-x64
+            informative: false
+          - os: macos-14
+            label: macos-arm64
+            informative: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: determinism-${{ matrix.label }}
+
+      # The manifest is written by the app binary, so Linux needs what
+      # release.yml installs for it. R3c moves the harness to the headless
+      # server, which needs none of this.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols \
+            libvulkan-dev
+
+      - name: Write the determinism manifest
+        run: cargo run -p voxulacrum-app --bin voxulacrum-app -- --determinism-manifest determinism-${{ matrix.label }}.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: determinism-${{ matrix.label }}
+          path: determinism-${{ matrix.label }}.json
+          if-no-files-found: error
+
+  determinism-compare:
+    name: Determinism compare
+    needs: determinism
+    # Runs even when a runner failed, so the manifests that were written are
+    # still compared. A runner's own failure already fails the build.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: determinism-compare
+
+      - name: Build determinism-diff
+        run: cargo build -p determinism-diff
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: determinism-*
+          path: manifests
+          merge-multiple: true
+
+      # Reports without failing until R7 (#95) moves generation's
+      # transcendental math to libm: tree skeletons call the platform's powf,
+      # ln, sin and cos, so tree-bearing chunks are expected to differ until
+      # then. R7 removes this continue-on-error, which makes the gate real.
+      - name: Windows against Linux
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo '### Windows against Linux' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          cargo run -q -p determinism-diff -- manifests/determinism-windows-x64.json manifests/determinism-linux-x64.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $status
+
+      - name: Windows against macOS (informative)
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo '### Windows against macOS (informative)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          cargo run -q -p determinism-diff -- manifests/determinism-windows-x64.json manifests/determinism-macos-arm64.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $status
