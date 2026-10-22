@@ -122,6 +122,8 @@ A full-height surface that mixes two materials at a half-cube boundary is repres
 - **The registry is consumed by everything that needs to interpret materials**: the worldgen evaluator, the mesher (for `material_id` baking), the renderer (for palette lookup), the audio system (for surface sounds), and mod loaders (which can register additional materials).
 - **The initial registry content** ships as engine data and may be extended by mods. Material identity is not hardcoded in any system; everything goes through the registry.
 
+The first bullet is superseded: identity is a namespaced name, and saves carry a name-to-id mapping (§12, "Registry identity and save-embedded mapping"). The material's full shape, with its properties, its split into a definition and an appearance, and the rules for replacing it, is under "Engine object model" in §12 (added v1.14).
+
 ---
 
 ## 3. Chunk Data Model
@@ -548,6 +550,8 @@ The **half-step-only behavior at value ≥ 1** produces the current stable "soft
 ## 6. Foliage System
 
 Foliage is **instanced geometry rendered in tandem with the voxel world**, not voxel data. It exists in three tiers.
+
+**Interim shape** (added v1.14, following roadmap §8 v2.1). This section describes the foliage stack as built, and that stack is interim: it gets no new work. Voxel trees and structures become clips, non-cube props become fixtures and sub-voxel models, detail paint and scatter become registered layers, and grass and canopies become sprites, depth sprites and billboard clumps (§12, "Engine object model", which lists the migration under its interim shapes).
 
 ### Tier 1 — Detail scatter (grass, ferns, small flowers)
 
@@ -1519,6 +1523,59 @@ A data-only package can fill only what data can describe; a type whose entries c
 **Why `ResourcePack` is a kind rather than a flag.** Every rule that applies to it differs from the others: its load order comes from the player rather than from dependencies, it is client-only, it may replace only presentation, it is outside the handshake's content hash, and it can be swapped while a world runs, reloading client registries only. A flag on `Mod` would need each of those as an exception. A resource pack names no dependencies; a replacement naming something no loaded package defines is reported and skipped, so an out-of-date pack degrades rather than refusing to load.
 
 Only a `Game` may name a world. The finer per-module sides and client requirements of `target-architecture.md` ("Packages, fault isolation and API stability") arrive with code modules in M11, inside these kinds.
+
+#### Shader reach
+
+How far a package can change rendering, as a ladder from least to most invasive. Each rung is a different promise, so each has its own users and its own stability.
+
+| Rung | Games | Mods | Resource packs | Stability |
+|---|---|---|---|---|
+| 1. Presets and parameters (V2) | yes | yes | yes | stable from M8 |
+| 2a. Surface functions (V5) | yes | yes | no | a versioned function signature, stable from M8 |
+| 2b. Lighting functions (V5) | yes | no | no | as 2a |
+| 3. Passes at named insertion points (V6) | at every point | before post and after post only | no | point names stable from M8; the inputs each point offers are versioned |
+| 4. Replacing a default shader by name | yes | no | no | internal: no promise, and expected to break on engine updates |
+| 5. Replacing a whole render stage | not offered | no | no | none |
+
+**Why the line falls here.** Rungs 1 to 3 are what P19 needs: strict pixel art, textured 3D and hybrids are presets, surface functions and lighting models over one pipeline, and a surface function fills albedo, normal, emission and material id while the engine keeps doing lighting, shadows, edges and the palette pass around it. That keeps the pipeline free to change underneath, which is why those rungs can carry a promise. Mods stop short of lighting and of passes inside the scene: their WGSL is validated with naga, and confining it to surface functions and post-process passes keeps a mod from breaking an invariant other systems depend on, such as the visibility classification, which a shader may consume but never be (§1). Resource packs change data only, never code. Rung 4 exposes engine shader source that changes with every release, so a game may use it at its own risk and nothing else may. Rung 5 is not a surface at all: a game that needs a stage replaced is showing a missing hook, and the answer is the hook (roadmap P12), not a fork of the renderer behind the facade.
+
+#### Camera boundary
+
+The core makes no camera assumption (roadmap P20). It takes a **camera description** per view and nothing else, which is the minimal description the Runtime spine's render world already records:
+
+- **View** and **projection**, with the view-projection.
+- **Frustum**, for culling.
+- **Area of interest**: a center, a horizontal radius and a vertical range, which the client sends as its observer area (`SetInterest`).
+
+Core systems read only these. Streaming takes the area of interest through observers ("Residency" above); culling and shadows take the frustum; picking takes the view-projection; level of detail and audio take positions from the description, never from a projection type. One view is active through M5; render-to-texture (minimaps, portraits, item icons) adds views, each with its own description.
+
+**Camera modules** are kit code, registered natively on the client ("Extension points" above). A module turns input and game state into a description, and keeps a block of its own that only it reads. Everything that makes a camera a particular kind of camera lives there:
+
+- framing and projection choice (isometric, dimetric, orthographic, perspective);
+- texel snapping and the sub-pixel offset it hands the upscale pass;
+- rotation steps and their easing;
+- cutaway and underground visibility policy, meaning which world-state classification to apply and when, since the classification itself is world state (§1);
+- follow behavior, such as the floor-anchored follow of roadmap §6.11;
+- the audio listener position;
+- deriving its area of interest, such as the isometric camera's altitude-aware view test ("Chunk streaming" above).
+
+The isometric camera is the kit's default module, and P8's rule of no head-on resting views is its rule, not the engine's. Observers are not cameras: a headless server takes its observers from its command line or script. The testbed's perspective camera (V8) is what keeps the boundary honest.
+
+#### Interim shapes
+
+| Today | Target above | Migrates in |
+|---|---|---|
+| One material record mixes presentation fields (`color`, `render_delegated`) with simulation fields; `hardness`, `permeable`, `supports_flora` and `sharpness` are loaded but no system reads them | A definition and an appearance under one name | V5 (M5) |
+| Materials, prefabs and foliage are numbered by hand and come only from the world's own package | Any package, identity by name, with replacement | D3 (M4) |
+| Chunk tags persist numeric zone, biome and library ids with no mapping | Covered by the save's mapping | D3 (M4) |
+| `world.manifest.json` names graphs by path, and zones and biomes by number | World definitions, graphs, zones and biomes named | M4; no item owns it yet |
+| Shaders, palettes, input bindings and parameter presets are engine files read by path under the asset root, in no package | Named assets in the engine package, added to and replaced as the catalog says | V3, V2 and E1 (M5) |
+| `PackageKind` has `Game` and `Mod`, nothing branches on it, any kind may name a world, and no package can replace another's asset | Four kinds and the override rules above | Before V7 (M5), whose gate is the first client-only override |
+| Library kernels are the closed `LibraryKernel` enum | The kernel registry | B10 (M4) |
+| The foliage stack: procedural `PrefabShape` props, skeleton trees drawn as capsule impostors, canopy cores, the tier-1 detail-paint schema and `render_delegated` | Clips (D9) for voxel trees and structures, fixtures and sub-voxel models (D11) for props, registered layers (D4) for detail and scatter, sprites, depth sprites and billboard clumps for grass and canopies | M4, M6 |
+| One isometric camera in the app; streaming evaluates its view itself, and render code assumes an orthographic projection | Camera modules in the kit over the camera description | R4 and R6 (M3), V8 (M5) |
+
+The foliage stack gets no new work in the meantime (roadmap §8, v2.1). The skeleton generator stays, as a generator that outputs clips.
 
 ### Per-region generation parameters (added v1.8)
 
