@@ -61,6 +61,15 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # Code derives tick counts from TICK_RATE_HZ and never assumes 30
+      # (engine-design.md §12, "Time"), so the tests run again at 20 Hz. The
+      # variable changes a constant, so this rebuilds the app crate and what
+      # depends on it.
+      - name: Test at 20 Hz
+        env:
+          VOXULACRUM_TICK_RATE_HZ: "20"
+        run: cargo test --workspace
+
       # Content validation: manifest resolution, graph kinds, reference targets,
       # and assignment coverage. Errors fail; warnings report. `--strict` is
       # deliberately not used yet - `biome_test` is registered and unassigned,
