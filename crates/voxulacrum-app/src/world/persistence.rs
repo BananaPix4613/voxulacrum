@@ -838,14 +838,13 @@ pub fn build_chunk_record(chunk: &LoadedChunk) -> Option<ChunkRecord> {
 pub struct WorldPersistence {
     db: Option<WorldDatabase>,
     pub db_path: Option<PathBuf>,
-    autosave_timer: f32,
     pub autosave_enabled: bool,
 }
 
 impl WorldPersistence {
     /// No persistence (fallback).
     pub fn disabled() -> Self {
-        Self { db: None, db_path: None, autosave_timer: 0.0, autosave_enabled: false }
+        Self { db: None, db_path: None, autosave_enabled: false }
     }
 
     /// Open or create a world database.
@@ -898,7 +897,6 @@ impl WorldPersistence {
         Ok(Self {
             db: Some(db),
             db_path: Some(db_path),
-            autosave_timer: 0.0,
             autosave_enabled: true,
         })
     }
@@ -943,18 +941,10 @@ impl WorldPersistence {
         Ok(count)
     }
 
-    /// Tick auto-save timer. Saves once `interval_secs` of frame time have
-    /// elapsed (`AutosaveConfig::interval_secs`).
-    pub fn tick_autosave(
-        &mut self,
-        dt: f32,
-        interval_secs: f32,
-        world: &mut super::World,
-    ) -> bool {
+    /// Save every dirty chunk, if autosave is on, and return whether anything
+    /// was saved. The autosave tick phase decides when (`AutosaveConfig`).
+    pub fn autosave(&self, world: &mut super::World) -> bool {
         if !self.autosave_enabled || !self.is_active() { return false; }
-        self.autosave_timer += dt;
-        if self.autosave_timer < interval_secs { return false; }
-        self.autosave_timer = 0.0;
         match self.save_dirty_chunks(world) {
             Ok(0) => false,
             Ok(_) => true,
@@ -1499,7 +1489,7 @@ mod tests {
         }
     }
 
-    /// A world holding one chunk, for driving `tick_autosave`.
+    /// A world holding one chunk, for driving `autosave`.
     fn world_holding(chunk: LoadedChunk) -> crate::world::World {
         use crate::world::mutation::{EngineMode, MutationLog};
 
@@ -1571,10 +1561,9 @@ mod tests {
             .map(|i| (IVec3::new(i as i32, 0, 0), trainable_record(i)))
             .collect();
         db.save_chunks_batch(&seed).expect("seed rows");
-        let mut persistence = WorldPersistence {
+        let persistence = WorldPersistence {
             db: Some(db),
             db_path: Some(dir.db_path()),
-            autosave_timer: 0.0,
             autosave_enabled: true,
         };
 
@@ -1590,9 +1579,8 @@ mod tests {
         chunk.data.edit_state = EditState::Delta(trainable_overrides(DICT_SAMPLE_TARGET - 1));
         chunk.persist_dirty = true;
         let mut world = world_holding(chunk);
-        let interval = crate::world::config::AutosaveConfig::default().interval_secs;
         assert!(
-            persistence.tick_autosave(interval, interval, &mut world),
+            persistence.autosave(&mut world),
             "first autosave saves the chunk",
         );
 
@@ -1603,7 +1591,7 @@ mod tests {
             chunk.persist_dirty = true;
         }
         assert!(
-            persistence.tick_autosave(interval, interval, &mut world),
+            persistence.autosave(&mut world),
             "second autosave saves the edit",
         );
 
@@ -1684,7 +1672,6 @@ mod tests {
         let persistence = WorldPersistence {
             db: Some(db),
             db_path: Some(dir.db_path()),
-            autosave_timer: 0.0,
             autosave_enabled: true,
         };
         let mut chunk = LoadedChunk::new_air(pos);

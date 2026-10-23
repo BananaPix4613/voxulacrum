@@ -1,7 +1,7 @@
-//! ECS glue for the player sim: components, the fixed clock, the `WorldView` impl,
-//! and the systems that wrap the pure `player_step`. No renderer type touches the
-//! player entity (the Phase-10 boundary); systems read the camera only to build the
-//! input frame and the spawn position.
+//! ECS glue for the player sim: components, the `WorldView` impl, and the systems
+//! that wrap the pure `player_step`, which runs as a tick phase. No renderer type
+//! touches the player entity (the Phase-10 boundary); systems read the camera only
+//! to build the input frame and the spawn position.
 
 use bevy_ecs::prelude::*;
 use glam::{IVec3, Vec2, Vec3};
@@ -10,7 +10,7 @@ use voxel_core::ShapeId;
 use crate::ecs::resources::VoxelWorld;
 use crate::input::{GameAction, InputState};
 use crate::player::sim::{player_step, InputFrame, PlayerState, WorldView};
-use crate::simulation::manager::{FrameState, SimulationManager};
+use crate::simulation::manager::SimulationManager;
 use crate::world::chunk::CHUNK_SIZE;
 use crate::world::mutation::EngineMode;
 
@@ -27,43 +27,6 @@ pub struct Player {
 #[derive(Component, Default)]
 pub struct PlayerInputBuffer {
     pub pending: InputFrame,
-}
-
-/// Fixed-timestep accumulator for the player sim (30 Hz), same pattern as
-/// `FluidClock`. `alpha` is the fractional progress toward the next tick, for
-/// Substep 6's camera interpolation.
-#[derive(Resource)]
-pub struct PlayerClock {
-    accumulator: f32,
-    tick_dt: f32,
-    max_ticks_per_frame: u32,
-}
-
-impl PlayerClock {
-    /// 30 Hz, at most 5 catch-up ticks per frame.
-    pub fn new() -> Self {
-        Self { accumulator: 0.0, tick_dt: crate::player::sim::TICK_DT, max_ticks_per_frame: 5 }
-    }
-
-    /// Accumulate a frame's `dt` and return how many fixed ticks to run.
-    pub fn ticks_for(&mut self, dt: f32) -> u32 {
-        self.accumulator += dt.min(0.25);
-        let mut n = 0;
-        while self.accumulator >= self.tick_dt && n < self.max_ticks_per_frame {
-            self.accumulator -= self.tick_dt;
-            n += 1;
-        }
-        if self.accumulator > self.tick_dt {
-            self.accumulator = 0.0; // drop backlog beyond the cap
-        }
-        n
-    }
-
-    /// Fractional progress into the current tick (0..=1), for render interpolation.
-    #[allow(dead_code)] // consumed by camera interpolation (Substep 6)
-    pub fn alpha(&self) -> f32 {
-        (self.accumulator / self.tick_dt).clamp(0.0, 1.0)
-    }
 }
 
 /// Read-only world access for the pure sim: a voxel's solid vertical interval,
@@ -150,12 +113,10 @@ pub fn player_input_gather_system(
     buffer.pending = InputFrame { move_world, jump: false };
 }
 
-/// Drive the player sim at the fixed tick rate, wrapping the pure `player_step`.
-/// Advances `prev`/`curr` per tick (interpolation source for Substep 6).
-pub fn player_sim_system(
-    frame: Res<FrameState>,
+/// Tick phase `Players`: step the player once with its pending input, keeping
+/// the previous state as the source the frame interpolates from.
+pub fn player_tick_system(
     world: Res<VoxelWorld>,
-    mut clock: ResMut<PlayerClock>,
     mut q: Query<(&mut Player, &PlayerInputBuffer)>,
     play: Option<Res<crate::play::PlaySettings>>,
 ) {
@@ -163,13 +124,10 @@ pub fn player_sim_system(
         return; // no play settings, so no player was ever spawned
     };
     let Some((mut player, buffer)) = q.iter_mut().next() else {
-        return; // no player: don't accumulate, so spawn doesn't burst catch-up ticks
+        return;
     };
-    let ticks = clock.ticks_for(frame.dt);
-    for _ in 0..ticks {
-        player.prev = player.curr;
-        player.curr = player_step(&player.curr, &buffer.pending, &world.0, &play.player);
-    }
+    player.prev = player.curr;
+    player.curr = player_step(&player.curr, &buffer.pending, &world.0, &play.player);
 }
 
 /// Find a grounded spawn: the top surface of the highest solid voxel in the

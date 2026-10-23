@@ -36,6 +36,15 @@ pub struct UiState {
     /// Per-`FrameStage` CPU mean/max last second, in ms.
     pub stage_mean_ms: [f32; crate::diagnostics::STAGE_COUNT],
     pub stage_max_ms: [f32; crate::diagnostics::STAGE_COUNT],
+    /// Tick inspector (roadmap §4.4): the tick the simulation is on, the last
+    /// second's tick counts and per-phase cost, and the session's dropped ticks.
+    pub tick: u64,
+    pub ticks_per_sec: u32,
+    pub ticks_max_per_frame: u32,
+    pub dropped_per_sec: u32,
+    pub dropped_total: u64,
+    pub tick_phase_mean_ms: [f32; crate::world::tick::TickPhase::COUNT],
+    pub tick_phase_max_ms: [f32; crate::world::tick::TickPhase::COUNT],
     /// Generation-frontier sample (roadmap §7.3), mirrored from `FrameTimings`.
     /// Session-scoped, not per-second - see the note in `diagnostics.rs`.
     pub frontier_cpu_max_ms: f32,
@@ -121,6 +130,13 @@ impl UiState {
             present_mean_ms: 0.0,
             stage_mean_ms: [0.0; crate::diagnostics::STAGE_COUNT],
             stage_max_ms: [0.0; crate::diagnostics::STAGE_COUNT],
+            tick: 0,
+            ticks_per_sec: 0,
+            ticks_max_per_frame: 0,
+            dropped_per_sec: 0,
+            dropped_total: 0,
+            tick_phase_mean_ms: [0.0; crate::world::tick::TickPhase::COUNT],
+            tick_phase_max_ms: [0.0; crate::world::tick::TickPhase::COUNT],
             frontier_cpu_max_ms: 0.0,
             frontier_cpu_mean_ms: 0.0,
             frontier_frames: 0,
@@ -1011,8 +1027,28 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
             ));
         }
         ui.separator();
-        // Session-scoped, unlike everything above it, and labeled so nobody
-        // reads it as a one-second figure.
+        ui.label(format!(
+            "Tick {}   {} ticks last second at {} Hz, most in one frame {}",
+            state.tick,
+            state.ticks_per_sec,
+            crate::world::tick::TICK_RATE_HZ,
+            state.ticks_max_per_frame,
+        ));
+        ui.label(format!(
+            "  dropped {} last second, {} this session",
+            state.dropped_per_sec, state.dropped_total,
+        ));
+        ui.label("Tick phase CPU mean / max per tick (ms)");
+        for phase in crate::world::tick::TickPhase::ALL {
+            let i = phase.index();
+            ui.label(format!(
+                "  {:<10}{:>6.2} /{:>6.2}",
+                phase.name(), state.tick_phase_mean_ms[i], state.tick_phase_max_ms[i],
+            ));
+        }
+        ui.separator();
+        // Session-scoped, unlike the one-second figures above it, and labeled
+        // so nobody reads it as one.
         ui.horizontal(|ui| {
             ui.label("Generation frontier (session)");
             if ui.button("Reset").clicked() {
@@ -1042,7 +1078,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
             // decompose row 0.
             ui.label("  span        mean     max    (all frontier frames)");
             for (i, n) in crate::diagnostics::SUB_NAMES.iter().enumerate() {
-                // Rows 4-7 decompose row 0; 8-11 are separate stages' systems.
+                // Rows 4-7 decompose row 0; 8-10 are separate stages' systems.
                 let indent = if (4..8).contains(&i) { "    " } else { "  " };
                 ui.label(format!(
                     "{}{:<10}{:>6.2}{:>8.2}",

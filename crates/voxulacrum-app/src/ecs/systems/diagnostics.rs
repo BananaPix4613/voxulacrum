@@ -11,10 +11,13 @@ use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
 use crate::world::streaming::ChunkStreamingManager;
+use crate::world::tick::{CurrentTick, TickTimings};
 
 pub fn frame_counter_system(
     mut counter: ResMut<FrameCounter>,
     timings: Res<FrameTimings>,
+    tick: Res<CurrentTick>,
+    tick_timings: Res<TickTimings>,
     mut ui: ResMut<UiState>
 ) {
     counter.tick();
@@ -28,6 +31,13 @@ pub fn frame_counter_system(
     ui.present_mean_ms = timings.present_mean_ms;
     ui.stage_mean_ms = timings.stage_mean_ms;
     ui.stage_max_ms = timings.stage_max_ms;
+    ui.tick = tick.0.0;
+    ui.ticks_per_sec = timings.ticks_per_sec;
+    ui.ticks_max_per_frame = timings.ticks_max_per_frame;
+    ui.dropped_per_sec = timings.dropped_per_sec;
+    ui.dropped_total = timings.dropped_total;
+    ui.tick_phase_mean_ms = tick_timings.mean_ms;
+    ui.tick_phase_max_ms = tick_timings.max_ms;
     // Session-scoped, so unlike the rows above these change continuously rather
     // than on the second boundary. Mirrored here anyway because the panel draws
     // only from `UiState`; being one frame stale is immaterial for a maximum.

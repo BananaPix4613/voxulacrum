@@ -19,6 +19,7 @@ pub mod room;
 pub mod events;
 pub mod blueprint;
 pub mod config;
+pub mod tick;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

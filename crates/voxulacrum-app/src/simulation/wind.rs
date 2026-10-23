@@ -4,20 +4,19 @@ use crate::params::WindParams;
 
 pub struct WindState {
     pub wind_vector: Vec2,
-    elapsed: f32,
 }
 
 impl WindState {
     pub fn new() -> Self {
         Self {
             wind_vector: Vec2::new(1.0, 0.5),
-            elapsed: 0.0,
         }
     }
 
-    pub fn update(&mut self, dt: f32, params: &WindParams) {
-        self.elapsed += dt;
-        let t = self.elapsed;
+    /// Set the wind for `seconds` of simulation time. A function of time
+    /// alone, so nothing accumulates.
+    pub fn update(&mut self, seconds: f32, params: &WindParams) {
+        let t = seconds;
 
         let base_angle = t * params.direction_frequency;
         let base_magnitude = params.base_magnitude

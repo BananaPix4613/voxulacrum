@@ -1,6 +1,7 @@
 use bevy_ecs::schedule::{Schedule, SystemSet, IntoScheduleConfigs};
 use crate::ecs::systems;
 use crate::input;
+use crate::world::tick::{TickPhase, TickSchedule};
 
 /// Frame execution stages, run in order each frame.
 ///
@@ -9,7 +10,8 @@ use crate::input;
 pub enum FrameStage {
     /// Frame counter, shader hot-reload, window resize, input forwarding.
     Input,
-    /// Camera, time-of-day, wind, frustum, param change detection.
+    /// Simulation ticks, then camera, time-of-day, wind, frustum, param change
+    /// detection.
     Simulation,
     /// Poll meshing workers, upload completed meshes.
     Meshing,
@@ -66,6 +68,7 @@ pub fn build_frame_schedule() -> Schedule {
 
     // Input
     schedule.add_systems((
+        systems::tick::presentation_clock_system.in_set(FrameStage::Input),
         input::process_input_system.in_set(FrameStage::Input),
         input::toggle_ui_system.in_set(FrameStage::Input),
         systems::diagnostics::frame_counter_system.in_set(FrameStage::Input),
@@ -76,7 +79,7 @@ pub fn build_frame_schedule() -> Schedule {
     schedule.add_systems((
         systems::simulation::simulation_tick_system
             .in_set(FrameStage::Simulation)
-            .after(crate::player::systems::player_sim_system)
+            .after(systems::tick::run_ticks_system)
             .after(systems::visibility::room_detection_system),
         systems::climate::climate_tick_system
             .in_set(FrameStage::Simulation)
@@ -94,27 +97,30 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::picking_system), // needs the current pick
         systems::hot_reload::palette_load_system.in_set(FrameStage::Simulation),
-        systems::fluids::fluid_tick_system
+        systems::fluids::fluid_pour_system
             .in_set(FrameStage::Simulation)
-            .after(systems::simulation::simulation_tick_system) // needs FrameState
             .after(crate::interaction::picking_system), // needs the current pick
+        systems::fluids::water_rebuild_system
+            .in_set(FrameStage::Simulation)
+            .after(systems::tick::run_ticks_system)
+            .after(systems::fluids::fluid_pour_system),
         crate::interaction::picking_system
             .in_set(FrameStage::Simulation)
             .after(systems::simulation::simulation_tick_system),
     ));
-    // Player sim (Substep 4)
+    // Simulation ticks, with the player systems that feed and read them
     schedule.add_systems((
         crate::player::systems::player_mode_toggle_system.in_set(FrameStage::Input),
         crate::player::systems::player_input_gather_system.in_set(FrameStage::Simulation),
-        crate::player::systems::player_sim_system
+        systems::tick::run_ticks_system
             .in_set(FrameStage::Simulation)
             .after(crate::player::systems::player_input_gather_system),
         systems::visibility::room_detection_system
             .in_set(FrameStage::Simulation)
-            .after(crate::player::systems::player_sim_system),
+            .after(systems::tick::run_ticks_system),
         crate::interaction::player_targeting_system
             .in_set(FrameStage::Simulation)
-            .after(crate::player::systems::player_sim_system),
+            .after(systems::tick::run_ticks_system),
         crate::interaction::player_tool_system
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::player_targeting_system),
@@ -154,10 +160,36 @@ pub fn build_frame_schedule() -> Schedule {
         systems::render::render_present_system.in_set(FrameStage::Render),
     );
     // PostFrame
-    schedule.add_systems((
+    schedule.add_systems(
         systems::regen::world_regen_system.in_set(FrameStage::PostFrame),
-        systems::persistence::persistence_autosave_system.in_set(FrameStage::PostFrame),
-    ));
+    );
 
+    schedule
+}
+
+/// Build the schedule one simulation tick runs (`world::tick::run_tick`),
+/// phase by phase. Tick systems read world state, the tick and queued input
+/// only: no frame time and no render or UI resource, so the headless server
+/// (R3c) can run this same schedule.
+pub fn build_tick_schedule() -> Schedule {
+    let mut schedule = Schedule::new(TickSchedule);
+    schedule.configure_sets(
+        (TickPhase::Players, TickPhase::SubRates, TickPhase::Autosave).chain()
+    );
+    schedule.add_systems((
+        crate::player::systems::player_tick_system.in_set(TickPhase::Players),
+        systems::fluids::fluid_tick_system.in_set(TickPhase::SubRates),
+        systems::persistence::persistence_autosave_system.in_set(TickPhase::Autosave),
+    ));
+    schedule.add_systems((
+        systems::tick::tick_timings_begin.before(TickPhase::Players),
+        systems::tick::tick_timings_end_players
+            .after(TickPhase::Players)
+            .before(TickPhase::SubRates),
+        systems::tick::tick_timings_end_sub_rates
+            .after(TickPhase::SubRates)
+            .before(TickPhase::Autosave),
+        systems::tick::tick_timings_end_autosave.after(TickPhase::Autosave),
+    ));
     schedule
 }

@@ -10,10 +10,7 @@
 use glam::{IVec3, Vec2, Vec3};
 
 use crate::play::PlayerTuning;
-
-/// Fixed sim tick duration. `PlayerClock` ticks at this rate; `player_step`
-/// integrates against it, so the sim is framerate-independent and deterministic.
-pub const TICK_DT: f32 = 1.0 / 30.0;
+use crate::world::tick::TICK_DT;
 
 const EPS: f32 = 1e-4;
 

@@ -380,7 +380,6 @@ impl ChunkStreamingManager {
         meshing: &mut MeshingCoordinator,
         jobs: &mut JobSystem,
         camera_view: &CameraView,
-        _dt: f32,
         on_unload: &mut dyn FnMut(&crate::world::chunk::LoadedChunk),
     ) -> StreamingTickResult {
         let min_y = world.min_chunk_y;

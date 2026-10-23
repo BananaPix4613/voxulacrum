@@ -11,7 +11,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::{
     bench, core_budget, diagnostics, graph_reload, interaction, jobs, libraries, materials,
-    paths, player, prefabs, rendering, simulation, ui, validate, verify, world, determinism,
+    paths, prefabs, rendering, simulation, ui, validate, verify, world, determinism,
 };
 use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::render_context::RenderContext;
@@ -44,7 +44,8 @@ use crate::materials::MaterialRegistryRes;
 
 use crate::ecs::resources::*;
 use crate::ecs::events::*;
-use crate::ecs::schedule::build_frame_schedule;
+use crate::ecs::clocks::{PresentationClock, TickDriver};
+use crate::ecs::schedule::{build_frame_schedule, build_tick_schedule};
 use crate::input::{InputMap, InputState, PointerButton, PointerState, RawInputBuffer, RawInputEvent};
 use crate::world::room::RoomState;
 
@@ -530,9 +531,11 @@ fn init_ecs(
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
-    ecs.insert_resource(FluidClock::new());
-    ecs.insert_resource(ClimateClock::new());
-    ecs.insert_resource(player::systems::PlayerClock::new());
+    ecs.insert_resource(FluidChanges::default());
+    ecs.insert_resource(PresentationClock::new());
+    ecs.insert_resource(TickDriver::default());
+    ecs.insert_resource(world::tick::CurrentTick::default());
+    ecs.insert_resource(world::tick::TickTimings::new());
     if let Some(play) = play {
         ecs.insert_resource(play);
     }
@@ -636,6 +639,7 @@ fn init_ecs(
     // Build the schedule
     // -----------------------------------------------------------------------
 
+    ecs.add_schedule(build_tick_schedule());
     let mut schedule = build_frame_schedule();
     if let Some(setup) = bench_setup {
         ecs.insert_resource(bench::BenchRun::new(setup));
