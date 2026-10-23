@@ -87,8 +87,16 @@ impl Default for FluidLimits {
 /// How often dirty chunks are saved while they stay resident.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AutosaveConfig {
-    /// Seconds of frame time between autosaves. R2 counts it in ticks.
+    /// Simulated seconds between autosaves. The autosave phase counts them in
+    /// ticks ([`Self::interval_ticks`]).
     pub interval_secs: f32,
+}
+
+impl AutosaveConfig {
+    /// Ticks between autosaves.
+    pub fn interval_ticks(&self) -> u64 {
+        crate::world::tick::secs_to_ticks(self.interval_secs)
+    }
 }
 
 impl Default for AutosaveConfig {

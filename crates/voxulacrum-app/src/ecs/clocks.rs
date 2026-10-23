@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use bevy_ecs::prelude::Resource;
 
-use crate::world::tick::TICK_RATE_HZ;
+use crate::world::tick::{SimTick, TICK_RATE_HZ};
 
 /// Longest frame the driver counts, in seconds. Time past it is lost rather
 /// than run, so one long stall (a debugger pause, a window drag) can't queue a
@@ -65,6 +65,12 @@ impl TickDriver {
     pub fn alpha(&self) -> f32 {
         self.owed as f32
     }
+    
+    /// The simulation time this frame draws, in seconds: `ticks_run` whole
+    /// ticks plus the fraction owed toward the next.
+    pub fn sim_seconds(&self, ticks_run: SimTick) -> f64 {
+        (ticks_run.0 as f64 + self.owed) / f64::from(TICK_RATE_HZ)
+    }
 }
 
 #[cfg(test)]
@@ -95,5 +101,15 @@ mod tests {
         let mut driver = TickDriver::default();
         let ran: u32 = (0..1000).map(|_| driver.advance(0.007)).sum();
         assert_eq!(ran, (7.0 * f64::from(TICK_RATE_HZ)).floor() as u32);
+    }
+
+    #[test]
+    fn simulation_time_counts_ticks_run_and_the_fraction_owed() {
+        let mut driver = TickDriver::default();
+        let one_second = SimTick(u64::from(TICK_RATE_HZ));
+        assert_eq!(driver.sim_seconds(one_second), 1.0);
+        driver.advance(TICK_DT * 0.5);
+        let t = driver.sim_seconds(one_second);
+        assert!((t - (1.0 + 0.5 / f64::from(TICK_RATE_HZ))).abs() < 1e-6, "{t}");
     }
 }

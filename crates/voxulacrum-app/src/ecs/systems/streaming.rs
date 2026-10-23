@@ -15,7 +15,7 @@ use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
-use crate::simulation::manager::{FrameState, SimulationManager};
+use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
 use crate::world::mutation::{MutationCommand, WorldMutation};
@@ -28,7 +28,6 @@ pub fn streaming_tick_system(
     mut meshing: ResMut<MeshingCoordinator>,
     mut jobs: ResMut<JobSystem>,
     sim: Res<SimulationManager>,
-    frame: Res<FrameState>,
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
     mut capsules: ResMut<CapsulePass>,
@@ -64,7 +63,6 @@ pub fn streaming_tick_system(
         &mut meshing,
         &mut jobs,
         &camera_view,
-        frame.dt,
         &mut |chunk: &crate::world::chunk::LoadedChunk| {
             if chunk.persist_dirty {
                 if let Err(e) = persistence.save_chunk_on_unload(chunk) {

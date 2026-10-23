@@ -1042,7 +1042,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
             // decompose row 0.
             ui.label("  span        mean     max    (all frontier frames)");
             for (i, n) in crate::diagnostics::SUB_NAMES.iter().enumerate() {
-                // Rows 4-7 decompose row 0; 8-11 are separate stages' systems.
+                // Rows 4-7 decompose row 0; 8-10 are separate stages' systems.
                 let indent = if (4..8).contains(&i) { "    " } else { "  " };
                 ui.label(format!(
                     "{}{:<10}{:>6.2}{:>8.2}",

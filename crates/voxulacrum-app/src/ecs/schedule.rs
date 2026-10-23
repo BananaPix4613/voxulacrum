@@ -160,10 +160,9 @@ pub fn build_frame_schedule() -> Schedule {
         systems::render::render_present_system.in_set(FrameStage::Render),
     );
     // PostFrame
-    schedule.add_systems((
+    schedule.add_systems(
         systems::regen::world_regen_system.in_set(FrameStage::PostFrame),
-        systems::persistence::persistence_autosave_system.in_set(FrameStage::PostFrame),
-    ));
+    );
 
     schedule
 }
@@ -174,10 +173,13 @@ pub fn build_frame_schedule() -> Schedule {
 /// (R3c) can run this same schedule.
 pub fn build_tick_schedule() -> Schedule {
     let mut schedule = Schedule::new(TickSchedule);
-    schedule.configure_sets((TickPhase::Players, TickPhase::SubRates).chain());
+    schedule.configure_sets(
+        (TickPhase::Players, TickPhase::SubRates, TickPhase::Autosave).chain()
+    );
     schedule.add_systems((
         crate::player::systems::player_tick_system.in_set(TickPhase::Players),
         systems::fluids::fluid_tick_system.in_set(TickPhase::SubRates),
+        systems::persistence::persistence_autosave_system.in_set(TickPhase::Autosave),
     ));
     schedule
 }

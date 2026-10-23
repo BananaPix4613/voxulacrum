@@ -31,6 +31,11 @@ pub const fn ticks_per_step(rate_hz: u32) -> u64 {
     (TICK_RATE_HZ / rate_hz) as u64
 }
 
+/// The whole number of ticks nearest `secs` seconds, and at least one.
+pub fn secs_to_ticks(secs: f32) -> u64 {
+    (secs * TICK_RATE_HZ as f32).round().max(1.0) as u64
+}
+
 /// Parse the build's tick-rate override. A malformed value fails the build
 /// rather than falling back, so a typo can't quietly run the tests at 30.
 const fn parse_rate(rate: &str) -> u32 {
@@ -85,6 +90,8 @@ pub enum TickPhase {
     /// Run the systems that step at a sub-rate of the tick, on the ticks that
     /// rate falls on.
     SubRates,
+    /// Save dirty chunks once per autosave interval.
+    Autosave,
 }
 
 /// Run one tick: every phase of [`TickSchedule`], then advance [`CurrentTick`].
@@ -120,6 +127,12 @@ mod tests {
             .filter(|&t| SimTick(t).is_multiple_of(every))
             .count();
         assert_eq!(steps, 10, "ten steps in one second of ticks");
+    }
+
+    #[test]
+    fn seconds_convert_to_whole_ticks() {
+        assert_eq!(secs_to_ticks(30.0), 30 * u64::from(TICK_RATE_HZ));
+        assert_eq!(secs_to_ticks(0.0), 1, "an interval is never zero ticks");
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::rendering::render_targets::RenderTargets;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::mutation::EngineMode;
+use crate::world::tick::CurrentTick;
 
 /// Vertical offset from the player's feet to the camera look-at point, framing
 /// the player's middle (AABB is 1.8 tall).
@@ -22,6 +23,7 @@ pub fn simulation_tick_system(
     world: Res<VoxelWorld>,
     clock: Res<PresentationClock>,
     driver: Res<TickDriver>,
+    tick: Res<CurrentTick>,
     players: Query<&crate::player::systems::Player>,
     mut commands: Commands,
 ) {
@@ -36,6 +38,7 @@ pub fn simulation_tick_system(
     };
     let follow = player_pos.map(|p| p + CAMERA_FOLLOW_OFFSET);
 
+    sim.advance_world_time(driver.sim_seconds(tick.0), &ui.params);
     let frame = sim.tick(&ui.params, &render_targets, &input, follow, clock.dt, clock.elapsed);
 
     commands.insert_resource(frame);

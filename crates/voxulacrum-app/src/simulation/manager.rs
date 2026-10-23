@@ -48,6 +48,9 @@ pub struct SimulationManager {
     pub wind: WindState,
     pub cloud_shadow: CloudShadowState,
     pub frustum: Frustum,
+    /// The simulation time `advance_world_time` last moved world time to, in
+    /// seconds.
+    sim_seconds: f64,
 }
 
 impl SimulationManager {
@@ -59,11 +62,26 @@ impl SimulationManager {
             wind: WindState::new(),
             cloud_shadow,
             frustum: Frustum::from_view_projection(vp),
+            sim_seconds: 0.0,
         }
     }
 
-    /// Advance all simulation systems by one frame. `dt` and `elapsed` are the
-    /// frame's presentation time (`PresentationClock`).
+    /// Move time of day and wind to `sim_seconds` of simulation time: the ticks
+    /// run so far plus the frame's interpolation fraction. Both follow the
+    /// tick, so they stop when the simulation stops and slow when it drops
+    /// ticks. They live here, on the client, until world time crosses the
+    /// boundary in `ServerUpdate` (R5).
+    pub fn advance_world_time(&mut self, sim_seconds: f64, params: &EngineParams) {
+        let dt = (sim_seconds - self.sim_seconds) as f32;
+        self.sim_seconds = sim_seconds;
+        self.time_of_day.update(dt, &params.time_control);
+        self.wind.update(sim_seconds as f32, &params.wind);
+    }
+
+    /// Advance the camera and frustum by one frame and build its `FrameState`.
+    /// Time of day and wind come from [`Self::advance_world_time`], called
+    /// first. `dt` and `elapsed` are the frame's presentation time
+    /// (`PresentationClock`).
     pub fn tick(
         &mut self,
         params: &EngineParams,
@@ -85,11 +103,6 @@ impl SimulationManager {
                 subpixel_offset: [0.0; 2],
             }
         };
-
-        // Time, wind (clouds are ticked by climate_tick_system - Substep 3c -
-        // which needs World/RenderContext access this method doesn't have)
-        self.time_of_day.update(dt, &params.time_control);
-        self.wind.update(dt, &params.wind);
 
         // Frustum
         if !params.debug.freeze_culling {

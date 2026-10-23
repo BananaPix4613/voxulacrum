@@ -40,14 +40,15 @@ pub const FRAME_BUDGET_MS: f32 = 16.6;
 pub const FRONTIER_BUDGET_MS: f32 = 33.0;
 
 /// Four at `FrameStage::Meshing` granularity, four splitting `SUB_STREAM`, and
-/// four naming the `sim` and `post` systems whose recorded triggers fired when
-/// the reference world's ocean and caves landed.
-pub const SUB_COUNT: usize = 12;
+/// three naming the `sim` systems whose recorded triggers fired when the
+/// reference world's ocean and caves landed. Autosave, the fourth, runs inside
+/// the tick, where the tick inspector times it.
+pub const SUB_COUNT: usize = 11;
 
 /// Display labels, in index order.
 pub const SUB_NAMES: [&str; SUB_COUNT] = [
     "stream", "seam", "upload", "pump", "drain", "submit", "scan", "unload",
-    "fluid", "climate", "params", "save",
+    "fluid", "climate", "params",
 ];
 
 /// `streaming_tick_system` - result drain, chunk insertion, per-chunk pass rebuilds.
@@ -74,8 +75,8 @@ pub const SUB_SCAN: usize = 6;
 /// The unload scan, save-on-unload, and eviction through the door.
 pub const SUB_UNLOAD: usize = 7;
 
-// `FrameStage::Simulation` and `PostFrame` candidates. Each is an item carried
-// out of 0.3.0 with a stated trigger; the reference world met the conditions.
+// `FrameStage::Simulation` candidates. Each is an item carried out of 0.3.0
+// with a stated trigger; the reference world met the conditions.
 /// `fluid_pour_system` and `water_rebuild_system` - the editor's pour and the
 /// water meshes the ticks changed. The fluid step itself runs inside the tick.
 pub const SUB_FLUID: usize = 8;
@@ -83,8 +84,6 @@ pub const SUB_FLUID: usize = 8;
 pub const SUB_CLIMATE: usize = 9;
 /// `param_change_detection_system` - deep-clones `EngineParams` every frame.
 pub const SUB_PARAMS: usize = 10;
-/// `persistence_autosave_system` - writes fluid as a full-field snapshot (design §9).
-pub const SUB_SAVE: usize = 11;
 
 /// Per-`FrameStage` timing, accumulated per frame and published each second.
 #[derive(Resource)]
