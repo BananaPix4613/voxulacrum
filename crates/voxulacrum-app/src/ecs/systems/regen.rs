@@ -34,15 +34,20 @@ pub fn world_regen_system(
             regen.queue_slot(*slot);
         }
     }
+    let regenerate_requested = std::mem::take(&mut ui.regenerate_requested);
     regen.tick(
         &mut world.0,
         &mut meshing,
         &mut detail_paint,
         &mut scatter,
         &mut water_pass,
-        &mut ui,
+        regenerate_requested,
         &ctx,
         &persistence,
         &mut streaming,
     );
+    // Read after the tick, so a regeneration started or swapped in this frame
+    // shows this frame.
+    ui.regenerating = regen.manager.is_regenerating();
+    ui.regen_progress = regen.manager.progress();
 }

@@ -18,16 +18,16 @@ pub mod mutation;
 pub mod room;
 pub mod events;
 pub mod blueprint;
+pub mod config;
 
 use std::collections::HashMap;
-use wgpu::util::DeviceExt;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
-use chunk::{ChunkMesh, ChunkNeighbors, LoadedChunk, CHUNK_SIZE, CHUNK_VOLUME};
+use chunk::{ChunkNeighbors, LoadedChunk, CHUNK_SIZE, CHUNK_VOLUME};
 use layers::{DetailTexel, PrefabId, ScatterFlags, ScatterInstance, StableInstanceId};
 use world_generator::WorldGenerator;
 use mutation::{
@@ -61,7 +61,6 @@ pub struct World {
     event_outbox: Vec<events::WorldEvent>,
 }
 
-use crate::params::TerrainGenParams;
 use voxel_core::{ChunkCoord, LocalPos, MaterialId, MaterialRegistry, Voxel};
 use crate::world::mutation::MutationOrigin;
 
@@ -173,52 +172,6 @@ impl World {
             if !self.chunks.contains_key(&ChunkCoord::from(n)) { return false; }
         }
         true
-    }
-
-    /// Upload a completed mesh result to the GPU for a specific chunk.
-    pub fn upload_mesh_result(
-        &mut self,
-        chunk_key: IVec3,
-        vertices: &[crate::rendering::pipelines::FaceVertex],
-        indices: &[u32],
-        device: &wgpu::Device,
-        mesh_seq: u64,
-    ) {
-        let chunk = match self.chunks.get_mut(&ChunkCoord::from(chunk_key)) {
-            Some(c) => c,
-            None => return, // Chunk was unloaded while mesh was in flight
-        };
-
-        if vertices.is_empty() || indices.is_empty() {
-            chunk.mesh = None;
-            // Only clear mesh_dirty if the chunk wasn't re-dirtied during meshing
-            if chunk.mesh_seq == mesh_seq {
-                chunk.mesh_dirty = false;
-            }
-            return;
-        }
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk_vertex_buffer"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk_index_buffer"),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        chunk.mesh = Some(ChunkMesh {
-            vertex_buffer,
-            index_buffer,
-            index_count: indices.len() as u32,
-            gpu_bytes: (size_of_val(vertices) + size_of_val(indices)) as u64,
-        });
-        if chunk.mesh_seq == mesh_seq {
-            chunk.mesh_dirty = false;
-        }
     }
 
     pub fn build_neighbors(&self, pos: IVec3) -> ChunkNeighbors<'_> {
@@ -897,11 +850,7 @@ impl World {
     ///
     /// `previous` carries the session peaks forward, since a peak is meaningless
     /// if each sample starts from zero.
-    pub fn sample_residency(
-        &self,
-        previous: crate::diagnostics::ResidencyStats,
-    ) -> crate::diagnostics::ResidencyStats {
-        use crate::diagnostics::ResidencyStats;
+    pub fn sample_residency(&self, previous: ResidencyStats) -> ResidencyStats {
         use layers::{DetailTexel, FluidCell, ScatterInstance};
         use std::mem::size_of;
 
@@ -1077,6 +1026,47 @@ pub struct DeterminismReport {
     pub ran: bool,
 }
 
+/// Resident memory by chunk layer, plus GPU buffers (roadmap §4.4
+/// memory/residency panel).
+/// 
+/// The `peak_*` fields serve §7.3's "session growth flat after warm-up": a
+/// resident total that keeps climbing while you revisit the same area is a leak,
+/// and nothing reported it before this existed.
+/// 
+/// `gpu_mesh_bytes` and `peak_gpu_bytes` read the GPU state `LoadedChunk` still
+/// holds; R4 moves that state, and these two fields, to the render world.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResidencyStats {
+    pub chunks: usize,
+    /// Chunks whose voxel storage collapsed to a single value.
+    pub uniform_chunks: usize,
+    pub voxel_bytes: u64,
+    pub detail_bytes: u64,
+    pub scatter_bytes: u64,
+    pub fluid_bytes: u64,
+    pub override_bytes: u64,
+    /// Chunks whose saved record failed to load. They stay playable but are not
+    /// saved, so an edit made in one is lost when it unloads.
+    pub blocked_chunks: usize,
+    /// Vertex + index buffers of resident chunk meshes.
+    pub gpu_mesh_bytes: u64,
+    /// Highest CPU-side total seen this session.
+    pub peak_cpu_bytes: u64,
+    /// Highest GPU mesh total seen this session.
+    pub peak_gpu_bytes: u64,
+}
+
+impl ResidencyStats {
+    /// CPU-side total across every layer.
+    pub fn cpu_bytes(&self) -> u64 {
+        self.voxel_bytes
+            + self.detail_bytes
+            + self.scatter_bytes
+            + self.fluid_bytes
+            + self.override_bytes
+    }
+}
+
 /// Manages background terrain regeneration.
 /// 
 /// `start_regeneration` submits one fan-out task to the shared generation pool;
@@ -1095,7 +1085,6 @@ pub struct WorldManager {
     regen_rx: Mutex<Option<mpsc::Receiver<HashMap<ChunkCoord, LoadedChunk>>>>,
     regen_progress: Arc<AtomicU32>,
     regen_total: u32,
-    regen_params: Option<TerrainGenParams>,
     /// Generator the in-flight regen is using; adopted by `World` + streaming
     /// on completion so all three share one `Arc`.
     regen_generator: Option<Arc<WorldGenerator>>,
@@ -1113,7 +1102,6 @@ impl WorldManager {
             regen_rx: Mutex::new(None),
             regen_progress: Arc::new(AtomicU32::new(0)),
             regen_total: 0,
-            regen_params: None,
             regen_generator: None,
             regen_min_y: 0,
             regen_max_y: 4,
@@ -1137,7 +1125,6 @@ impl WorldManager {
     /// built generator the new world will adopt on completion.
     pub fn start_regeneration(
         &mut self,
-        params: &TerrainGenParams,
         generator: Arc<WorldGenerator>,
         positions: Vec<IVec3>,
     ) {
@@ -1149,7 +1136,6 @@ impl WorldManager {
         let total = positions.len() as u32;
         self.regen_total = total;
         self.regen_progress.store(0, Ordering::Relaxed);
-        self.regen_params = Some(params.clone());
         self.regen_generator = Some(generator.clone());
         
         let progress = self.regen_progress.clone();
@@ -1169,7 +1155,7 @@ impl WorldManager {
 
     pub fn poll_regeneration(
         &mut self,
-    ) -> Option<(HashMap<ChunkCoord, LoadedChunk>, TerrainGenParams, Arc<WorldGenerator>)> {
+    ) -> Option<(HashMap<ChunkCoord, LoadedChunk>, Arc<WorldGenerator>)> {
         use std::sync::mpsc::TryRecvError;
 
         // What the channel told us. Computed inside a scope that holds a mutable
@@ -1201,14 +1187,12 @@ impl WorldManager {
 
         match outcome {
             Outcome::Got(chunks) => {
-                let params = self.regen_params.take().unwrap();
                 let generator = self.regen_generator.take().unwrap();
                 log::info!("Background regeneration complete ({} chunks)", chunks.len());
-                Some((chunks, params, generator))
+                Some((chunks, generator))
             }
             Outcome::Done => {
                 log::error!("Background regeneration task ended without a result");
-                self.regen_params = None;
                 self.regen_generator = None;
                 None
             }

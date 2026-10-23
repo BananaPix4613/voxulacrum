@@ -176,7 +176,7 @@ impl MeshingPipeline {
     ) {
         // Main-thread budget: each submission extracts a 34^3 snapshot, which is a
         // real per-frame cost independent of how many jobs may run concurrently.
-        // Operator-tunable via `StreamingParams::max_mesh_per_frame`.
+        // Operator-tunable via `MeshingParams::max_mesh_per_frame`.
         let mut submitted = 0;
         let mut i = 0;
 

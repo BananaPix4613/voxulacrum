@@ -290,6 +290,10 @@ pub struct MeshingParams {
     pub edge_strength: f32,
     pub ortho_ao_enabled: bool,
     pub ortho_ao_strength: f32,
+    /// Chunk snapshots extracted for meshing per frame. This is a *main-thread*
+    /// budget - each submission copies a 34^3 voxel snapshot - and is separate
+    /// from how many mesh jobs may run concurrently, which the scheduler owns.
+    pub max_mesh_per_frame: u32,
 }
 
 impl Default for MeshingParams {
@@ -298,6 +302,7 @@ impl Default for MeshingParams {
             edge_strength: 0.15,
             ortho_ao_enabled: true,
             ortho_ao_strength: 0.3,
+            max_mesh_per_frame: 32,
         }
     }
 }
@@ -378,61 +383,6 @@ impl Default for CameraParams {
 }
 
 // ============================================================================
-// Terrain generation parameters
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct TerrainGenParams {
-    pub base_height: f32,
-    pub cliff_threshold: f32,
-    pub hill_amplitude: f32,
-    pub hill_frequency: f32,
-    pub ridge_amplitude: f32,
-    pub ridge_frequency: f32,
-    pub detail_amplitude: f32,
-    pub detail_frequency: f32,
-    // Cave system
-    pub cave_enabled: bool,
-    pub cave_spaghetti_freq: f32,      // Frequency for main tunnel noise (default: 0.02)
-    pub cave_spaghetti_thickness: f32, // Threshold width - higher = wider tunnels (default: 0.12)
-    pub cave_noodle_freq: f32,         // Frequency for thin passages (default: 0.04)
-    pub cave_noodle_thickness: f32,    // Threshold for thin passages (default: 0.06)
-    pub cave_cheese_freq: f32,         // Frequency for large chambers (default: 0.008)
-    pub cave_cheese_threshold: f32,    // Threshold - how much noise must exceed to carve (default: 0.6)
-    pub cave_warp_amp: f32,            // Domain warp amplitude for organic shapes (default: 30.0)
-    pub cave_surface_margin: f32,      // Depth below surface before caves begin (default: 4.0)
-    pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
-    pub water_level: f32,
-}
-
-impl Default for TerrainGenParams {
-    fn default() -> Self {
-        Self {
-            base_height: 32.0,
-            cliff_threshold: 2.0,
-            hill_amplitude: 20.0,
-            hill_frequency: 0.0025,
-            ridge_amplitude: 8.0,
-            ridge_frequency: 0.01,
-            detail_amplitude: 2.0,
-            detail_frequency: 0.05,
-            cave_enabled: true,
-            cave_spaghetti_freq: 0.01,
-            cave_spaghetti_thickness: 0.25,
-            cave_noodle_freq: 0.015,
-            cave_noodle_thickness: 0.2,
-            cave_cheese_freq: 0.008,
-            cave_cheese_threshold: 0.6,
-            cave_warp_amp: 15.0,
-            cave_surface_margin: 2.0,
-            cave_y_squash: 0.5,
-            water_level: 30.0,
-        }
-    }
-}
-
-// ============================================================================
 // Debug parameters
 // ============================================================================
 
@@ -507,63 +457,6 @@ impl Default for CrossSectionParams {
 }
 
 // ============================================================================
-// Streaming Params
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct StreamingParams {
-    /// Proportional load margin: fraction of visible extent added as buffer.
-    /// E.g., 0.15 = 15% buffer on each side beyond the visible view rect.
-    /// A minimum of 2 chunks is always enforced regardless of zoom.
-    pub load_margin: f32,
-    /// Proportional unload margin: fraction of visible extent beyond which
-    /// chunks are unloaded. Should be larger than load_margin to prevent
-    /// load/unload thrashing (hysteresis).
-    pub unload_margin: f32,
-    /// Completed generation results inserted into the world per frame.
-    pub max_gen_per_frame: u32,
-    /// Chunk snapshots extracted for meshing per frame. This is a *main-thread*
-    /// budget - each submission copies a 34^3 voxel snapshot - and is separate
-    /// from how many mesh jobs may run concurrently, which the scheduler owns.
-    pub max_mesh_per_frame: u32,
-    /// Main-thread time budget for the unload phase, in milliseconds.
-    ///
-    /// Eviction runs `save_chunk_on_unload` (zstd + SQLite) for every
-    /// persist-dirty chunk leaving the view, and `FinalizeSeam` writes demotions
-    /// into nearly every chunk's override bucket - so nearly every eviction is a
-    /// write. Unbounded, that phase measured **103 ms on a single frame** during
-    /// a pan at maximum supported zoom (`perf-baseline.md` §0.4.0).
-    ///
-    /// A *time* budget rather than a chunk count, because per-chunk cost scales
-    /// with override-bucket size - exactly what differed between regions in that
-    /// measurement - so a count calibrated against one region is wrong in the
-    /// next. The default is §7.3's "no recurring hitch > 4 ms" line.
-    ///
-    /// Chunks not evicted this frame are reconsidered next frame; nothing is
-    /// lost, they stay resident slightly longer. The trade is residency: if
-    /// evictions cannot keep pace with a sustained pan, the resident set grows.
-    #[serde(default = "default_unload_budget_ms")]
-    pub unload_budget_ms: f32,
-}
-
-/// Serde default so presets written before this field load unchanged.
-fn default_unload_budget_ms() -> f32 {
-    4.0
-}
-
-impl Default for StreamingParams {
-    fn default() -> Self {
-        Self {
-            load_margin: 0.40,
-            unload_margin: 0.55,
-            max_gen_per_frame: 64,
-            max_mesh_per_frame: 32,
-            unload_budget_ms: default_unload_budget_ms(),
-        }
-    }
-}
-
-// ============================================================================
 // Mesh Cache Params
 // ============================================================================
 
@@ -601,13 +494,11 @@ pub struct EngineParams {
     pub palette: PaletteParams,
     pub time_control: TimeControlParams,
     pub camera: CameraParams,
-    pub terrain_gen: TerrainGenParams,
     pub debug: DebugParams,
     pub meshing: MeshingParams,
     pub render_pipeline: RenderPipelineParams,
     pub outline: OutlineParams,
     pub cross_section: CrossSectionParams,
-    pub streaming: StreamingParams,
     pub mesh_cache: MeshCacheParams,
 }
 
@@ -622,13 +513,11 @@ impl Default for EngineParams {
             palette: PaletteParams::default(),
             time_control: TimeControlParams::default(),
             camera: CameraParams::default(),
-            terrain_gen: TerrainGenParams::default(),
             debug: DebugParams::default(),
             meshing: MeshingParams::default(),
             render_pipeline: RenderPipelineParams::default(),
             outline: OutlineParams::default(),
             cross_section: CrossSectionParams::default(),
-            streaming: StreamingParams::default(),
             mesh_cache: MeshCacheParams::default(),
         }
     }
@@ -683,7 +572,6 @@ pub enum ParamChangeKind {
     /// producer, left `EngineParams`. Kept for the remesh-on-edit work.
     #[allow(dead_code)]
     MeshInvalidating,
-    RegenerationRequired,
 }
 
 pub struct ParamChangeDetector {
@@ -698,9 +586,6 @@ impl ParamChangeDetector {
     }
     
     pub fn detect(&self, current: &EngineParams) -> ParamChangeKind {
-        if current.terrain_gen != self.previous.terrain_gen {
-            return ParamChangeKind::RegenerationRequired;
-        }
         if (current.render_pipeline.world_pixel_density
             - self.previous.render_pipeline.world_pixel_density).abs() > f32::EPSILON {
             return ParamChangeKind::UniformOnly;
@@ -731,6 +616,16 @@ mod tests {
                   "hardness": 0.0, "permeable": true, "supports_flora": false }
             ] }
         }"#;
+        let params: EngineParams = serde_json::from_str(json).expect("an old preset loads");
+        assert_eq!(params, EngineParams::default());
+    }
+    
+    /// Presets written while `EngineParams` carried terrain-generation sliders
+    /// have a `terrain_gen` block. Those sliders reached no generation code, so
+    /// the block went; such a preset must still load, with the block ignored.
+    #[test]
+    fn a_preset_with_a_terrain_gen_block_still_loads_and_the_block_is_ignored() {
+        let json = r#"{ "terrain_gen": { "base_height": 40.0, "cave_enabled": false } }"#;
         let params: EngineParams = serde_json::from_str(json).expect("an old preset loads");
         assert_eq!(params, EngineParams::default());
     }

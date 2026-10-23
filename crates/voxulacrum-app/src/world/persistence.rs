@@ -834,8 +834,6 @@ pub fn build_chunk_record(chunk: &LoadedChunk) -> Option<ChunkRecord> {
 
 // -- WorldPersistence (Bevy Resource) ----------------------------------------
 
-const AUTOSAVE_INTERVAL_SECS: f32 = 30.0;
-
 #[derive(Resource)]
 pub struct WorldPersistence {
     db: Option<WorldDatabase>,
@@ -876,17 +874,16 @@ impl WorldPersistence {
         }
 
         // One-shot save wipe when the on-disk voxel encoding is stale (pre-release;
-        // saves are intentionally not migrated). Mirrors the regen cache-clear path.
+        // saves are intentionally not migrated). The mesh cache needs nothing
+        // here: it is keyed by the content of each chunk snapshot, so a cached
+        // mesh is only ever reused for exactly the voxels it was built from.
         let stored_voxel_fmt = db.get_meta_u64("voxel_format_version")?.unwrap_or(0);
         if stored_voxel_fmt < VOXEL_FORMAT_VERSION {
             let cleared = db.clear_all_chunks()?;
-            let cache_dir = crate::paths::asset_root().join("cache").join("meshes");
-            let _ = crate::meshing::cache::clear_world_cache(&cache_dir);
             log::warn!(
                 "Voxel format changed (saved v{stored_voxel_fmt} < v{VOXEL_FORMAT_VERSION}); \
-                 wiped {cleared} saved chunks and the mesh cache. Pre-release: saves are not migrated."
+                 wiped {cleared} saved chunks. Pre-release: saves are not migrated."
             );
-            db.set_meta_u64("voxel_format_version", VOXEL_FORMAT_VERSION)?;
         }
 
         // No `format_version` meta key is written: the per-chunk blob already
@@ -946,11 +943,17 @@ impl WorldPersistence {
         Ok(count)
     }
 
-    /// Tick auto-save timer. Saves when interval elapses.
-    pub fn tick_autosave(&mut self, dt: f32, world: &mut super::World) -> bool {
+    /// Tick auto-save timer. Saves once `interval_secs` of frame time have
+    /// elapsed (`AutosaveConfig::interval_secs`).
+    pub fn tick_autosave(
+        &mut self,
+        dt: f32,
+        interval_secs: f32,
+        world: &mut super::World,
+    ) -> bool {
         if !self.autosave_enabled || !self.is_active() { return false; }
         self.autosave_timer += dt;
-        if self.autosave_timer < AUTOSAVE_INTERVAL_SECS { return false; }
+        if self.autosave_timer < interval_secs { return false; }
         self.autosave_timer = 0.0;
         match self.save_dirty_chunks(world) {
             Ok(0) => false,
@@ -1587,8 +1590,9 @@ mod tests {
         chunk.data.edit_state = EditState::Delta(trainable_overrides(DICT_SAMPLE_TARGET - 1));
         chunk.persist_dirty = true;
         let mut world = world_holding(chunk);
+        let interval = crate::world::config::AutosaveConfig::default().interval_secs;
         assert!(
-            persistence.tick_autosave(AUTOSAVE_INTERVAL_SECS, &mut world),
+            persistence.tick_autosave(interval, interval, &mut world),
             "first autosave saves the chunk",
         );
 
@@ -1599,7 +1603,7 @@ mod tests {
             chunk.persist_dirty = true;
         }
         assert!(
-            persistence.tick_autosave(AUTOSAVE_INTERVAL_SECS, &mut world),
+            persistence.tick_autosave(interval, interval, &mut world),
             "second autosave saves the edit",
         );
 

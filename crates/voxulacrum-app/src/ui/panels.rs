@@ -89,7 +89,7 @@ pub struct UiState {
     /// Streaming load + the §7.3 fill-time metric.
     pub streaming: crate::world::streaming::StreamingStats,
     /// Resident memory by layer (roadmap §4.4 memory/residency panel).
-    pub residency: crate::diagnostics::ResidencyStats,
+    pub residency: crate::world::ResidencyStats,
     /// Frames until the next residency sample. Sampling walks every resident
     /// chunk, so it runs on a throttle rather than per frame.
     pub residency_countdown: u32,
@@ -239,7 +239,6 @@ pub fn draw_engine_panel(
                 ui.separator();
                 draw_terrain_gen(
                     ui,
-                    &mut state.params.terrain_gen,
                     state.regenerating,
                     state.regen_progress,
                     &mut state.regenerate_requested,
@@ -806,40 +805,11 @@ fn draw_meshing_params(ui: &mut egui::Ui, _p: &mut MeshingParams, remeshing: boo
 
 fn draw_terrain_gen(
     ui: &mut egui::Ui,
-    p: &mut TerrainGenParams,
     regenerating: bool,
     regen_progress: (u32, u32),
     regenerate_requested: &mut bool,
 ) {
-    ui.collapsing("Terrain Generation", |ui| {
-        // Disable param sliders while regenerating (scoped via add_enabled_ui)
-        ui.add_enabled_ui(!regenerating, |ui| {
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Base height:"); ui.add(egui::Slider::new(&mut p.base_height, 0.0..=64.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cliff threshold:"); ui.add(egui::Slider::new(&mut p.cliff_threshold, 0.5..=5.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Hill amplitude:"); ui.add(egui::Slider::new(&mut p.hill_amplitude, 0.0..=50.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Hill frequency:"); ui.add(egui::Slider::new(&mut p.hill_frequency, 0.0001..=0.05).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge amplitude:"); ui.add(egui::Slider::new(&mut p.ridge_amplitude, 0.0..=30.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Ridge frequency:"); ui.add(egui::Slider::new(&mut p.ridge_frequency, 0.001..=0.1).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Detail amplitude:"); ui.add(egui::Slider::new(&mut p.detail_amplitude, 0.0..=10.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Detail frequency:"); ui.add(egui::Slider::new(&mut p.detail_frequency, 0.001..=0.2).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.separator();
-            ui.label("Cave System");
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Caves enabled:"); ui.add(egui::Checkbox::without_text(&mut p.cave_enabled)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Spaghetti freq:"); ui.add(egui::Slider::new(&mut p.cave_spaghetti_freq, 0.005..=0.1).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Spaghetti thickness:"); ui.add(egui::Slider::new(&mut p.cave_spaghetti_thickness, 0.01..=0.3).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Noodle freq:"); ui.add(egui::Slider::new(&mut p.cave_noodle_freq, 0.001..=0.2).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Noodle thickness:"); ui.add(egui::Slider::new(&mut p.cave_noodle_thickness, 0.01..=0.5).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cheese freq:"); ui.add(egui::Slider::new(&mut p.cave_cheese_freq, 0.002..=0.03).logarithmic(true).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Cheese threshold:"); ui.add(egui::Slider::new(&mut p.cave_cheese_threshold, 0.1..=0.9).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Warp amplitude:"); ui.add(egui::Slider::new(&mut p.cave_warp_amp, 0.0..=80.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Surface margin:"); ui.add(egui::Slider::new(&mut p.cave_surface_margin, 0.1..=10.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Y squash:"); ui.add(egui::Slider::new(&mut p.cave_y_squash, 0.1..=2.0).clamping(egui::SliderClamping::Never)); });
-            ui.horizontal(|ui| { dot_red(ui); ui.label("Water level (gen):"); ui.add(egui::Slider::new(&mut p.water_level, 0.0..=64.0).clamping(egui::SliderClamping::Never)); });
-        });
-
-        // Button/progress area (always enabled, outside the add_enabled_ui scope)
-        ui.add_space(4.0);
-
+    ui.collapsing("World Regeneration", |ui| {
         if regenerating {
             let (done, total) = regen_progress;
             let fraction = if total > 0 { done as f32 / total as f32 } else { 0.0 };
@@ -849,10 +819,7 @@ fn draw_terrain_gen(
                     .animate(true),
             );
         } else {
-            ui.colored_label(
-                egui::Color32::from_rgb(220, 60, 60),
-                "Changes require world regeneration.",
-            );
+            ui.label("Regenerates the loaded chunks from the world's graphs. Saved edits are cleared.");
             if ui.button("Regenerate World").clicked() {
                 *regenerate_requested = true;
             }

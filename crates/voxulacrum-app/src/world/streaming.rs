@@ -12,7 +12,7 @@ use glam::{IVec3, Vec3};
 
 use crate::jobs::{JobKind, JobSystem, Priority};
 use crate::meshing::coordinator::MeshingCoordinator;
-use crate::params::StreamingParams;
+use crate::world::config::StreamingConfig;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
 use crate::world::persistence::WorldDatabase;
 use crate::world::world_generator::WorldGenerator;
@@ -266,7 +266,7 @@ pub struct StreamingStats {
 
 #[derive(Resource)]
 pub struct ChunkStreamingManager {
-    pub params: StreamingParams,
+    pub params: StreamingConfig,
     last_camera_chunk: Option<IVec3>,
     /// Shared chunk-generation pool (also used by the startup fill and regen).
     generator: Arc<WorldGenerator>,
@@ -292,7 +292,7 @@ pub struct ChunkStreamingManager {
 
 impl ChunkStreamingManager {
     pub fn new(
-        params: &StreamingParams,
+        params: &StreamingConfig,
         generator: Arc<WorldGenerator>,
         db_path: Option<PathBuf>,
         dict_bytes: Option<Arc<Vec<u8>>>,
@@ -533,7 +533,7 @@ impl ChunkStreamingManager {
             .map(|c| IVec3::from(*c))
             .collect();
 
-        // Bounded by time (see `StreamingParams::unload_budget_ms`). `mark` is
+        // Bounded by time (see `StreamingConfig::unload_budget_ms`). `mark` is
         // the start of this phase - `close_phase(2, ...)` reset it immediately
         // above - so it doubles as the budget clock without a second `Instant`,
         // and the budget correctly covers the resident scan as well as the

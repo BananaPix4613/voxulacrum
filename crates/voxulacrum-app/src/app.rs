@@ -35,6 +35,7 @@ use crate::meshing::coordinator::MeshingCoordinator;
 use crate::meshing::MeshingPipeline;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::world::persistence::WorldPersistence;
+use crate::world::config::ServerConfig;
 use crate::camera::IsometricCamera;
 use crate::cloud_shadow::CloudShadowState;
 use crate::params::EngineParams;
@@ -568,13 +569,17 @@ fn init_ecs(
     let db_path = persistence.db_path.clone();
     let dict_bytes = persistence.dictionary_bytes().map(|b| Arc::new(b));
     ecs.insert_resource(persistence);
+    // Defaults until the headless server (R3c) supplies its own; nothing loads
+    // the world's settings from a file yet.
+    let server_config = ServerConfig::default();
     let streaming_manager = world::streaming::ChunkStreamingManager::new(
-        &ui_state.params.streaming,
+        &server_config.streaming,
         generator.clone(),
         db_path,
         dict_bytes, 
     );
     ecs.insert_resource(streaming_manager);
+    ecs.insert_resource(server_config);
     ecs.insert_resource(jobs::JobSystem::new(gen_pool.clone()));
     ecs.insert_resource(ui_state);
     ecs.insert_resource(ui::field_probe::FieldProbe::new(gen_pool.clone()));

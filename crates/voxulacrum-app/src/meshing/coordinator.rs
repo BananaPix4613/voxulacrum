@@ -1,8 +1,12 @@
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
+use voxel_core::ChunkCoord;
+use wgpu::util::DeviceExt;
 use crate::meshing::MeshingPipeline;
+use crate::rendering::pipelines::FaceVertex;
 use crate::rendering::render_context::RenderContext;
 use crate::ui::panels::UiState;
+use crate::world::chunk::ChunkMesh;
 use crate::world::World;
 
 #[derive(Resource)]
@@ -41,7 +45,8 @@ impl MeshingCoordinator {
         let mut meshed_positions = Vec::with_capacity(completed.len());
         for result in completed {
             let pos = result.chunk_key;
-            world.upload_mesh_result(
+            upload_mesh_result(
+                world,
                 pos,
                 &result.vertices,
                 &result.indices,
@@ -75,5 +80,55 @@ impl MeshingCoordinator {
         }
         
         meshed_positions
+    }
+}
+
+/// Upload a completed mesh result to the GPU for a specific chunk.
+///
+/// Here rather than on `World`, so the world code names no render type. It
+/// still writes the GPU state `LoadedChunk` holds; R4 moves that state into the
+/// render world.
+fn upload_mesh_result(
+    world: &mut World,
+    chunk_key: IVec3,
+    vertices: &[FaceVertex],
+    indices: &[u32],
+    device: &wgpu::Device,
+    mesh_seq: u64,
+) {
+    let chunk = match world.chunks.get_mut(&ChunkCoord::from(chunk_key)) {
+        Some(c) => c,
+        None => return, // Chunk was unloaded while mesh was in flight
+    };
+
+    if vertices.is_empty() || indices.is_empty() {
+        chunk.mesh = None;
+        // Only clear mesh_dirty if the chunk wasn't re-dirtied during meshing
+        if chunk.mesh_seq == mesh_seq {
+            chunk.mesh_dirty = false;
+        }
+        return;
+    }
+
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("chunk_vertex_buffer"),
+        contents: bytemuck::cast_slice(vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("chunk_index_buffer"),
+        contents: bytemuck::cast_slice(indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+
+    chunk.mesh = Some(ChunkMesh {
+        vertex_buffer,
+        index_buffer,
+        index_count: indices.len() as u32,
+        gpu_bytes: (size_of_val(vertices) + size_of_val(indices)) as u64,
+    });
+    if chunk.mesh_seq == mesh_seq {
+        chunk.mesh_dirty = false;
     }
 }
