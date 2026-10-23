@@ -89,7 +89,7 @@ pub struct UiState {
     /// Streaming load + the §7.3 fill-time metric.
     pub streaming: crate::world::streaming::StreamingStats,
     /// Resident memory by layer (roadmap §4.4 memory/residency panel).
-    pub residency: crate::diagnostics::ResidencyStats,
+    pub residency: crate::world::ResidencyStats,
     /// Frames until the next residency sample. Sampling walks every resident
     /// chunk, so it runs on a throttle rather than per frame.
     pub residency_countdown: u32,

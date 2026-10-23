@@ -427,47 +427,6 @@ impl Drop for SubTimer<'_> {
     }
 }
 
-// ============================================================================
-// Residency (roadmap §4.4 memory/residency panel)
-// ============================================================================
-
-/// Resident memory by chunk layer, plus GPU buffers.
-///
-/// The `peak_*` fields server §7.3's "session growth flat after warm-up": a
-/// resident total that keeps climbing while you revisit the same area is a leak,
-/// and nothing reported it before this existed.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ResidencyStats {
-    pub chunks: usize,
-    /// Chunks whose voxel storage collapsed to a single value.
-    pub uniform_chunks: usize,
-    pub voxel_bytes: u64,
-    pub detail_bytes: u64,
-    pub scatter_bytes: u64,
-    pub fluid_bytes: u64,
-    pub override_bytes: u64,
-    /// Chunks whose saved record failed to load. They stay playable but are not
-    /// saved, so an edit made in one is lost when it unloads.
-    pub blocked_chunks: usize,
-    /// Vertex + index buffers of resident chunk meshes.
-    pub gpu_mesh_bytes: u64,
-    /// Highest CPU-side total seen this session.
-    pub peak_cpu_bytes: u64,
-    /// Highest GPU mesh total seen this session.
-    pub peak_gpu_bytes: u64,
-}
-
-impl ResidencyStats {
-    /// CPU-side total across every layer.
-    pub fn cpu_bytes(&self) -> u64 {
-        self.voxel_bytes
-            + self.detail_bytes
-            + self.scatter_bytes
-            + self.fluid_bytes
-            + self.override_bytes
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
