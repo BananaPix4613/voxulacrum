@@ -66,7 +66,7 @@ pub fn meshing_tick_system(
         (cam.z / CHUNK_WORLD_SIZE).floor() as i32,
     );
     // Read before `ui` is mutably borrowed by the call below.
-    let max_snapshots = ui.params.streaming.max_mesh_per_frame as usize;
+    let max_snapshots = ui.params.meshing.max_mesh_per_frame as usize;
     let meshed = meshing.tick(
         &mut world.0,
         &mut jobs,

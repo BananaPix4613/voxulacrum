@@ -290,6 +290,10 @@ pub struct MeshingParams {
     pub edge_strength: f32,
     pub ortho_ao_enabled: bool,
     pub ortho_ao_strength: f32,
+    /// Chunk snapshots extracted for meshing per frame. This is a *main-thread*
+    /// budget - each submission copies a 34^3 voxel snapshot - and is separate
+    /// from how many mesh jobs may run concurrently, which the scheduler owns.
+    pub max_mesh_per_frame: u32,
 }
 
 impl Default for MeshingParams {
@@ -298,6 +302,7 @@ impl Default for MeshingParams {
             edge_strength: 0.15,
             ortho_ao_enabled: true,
             ortho_ao_strength: 0.3,
+            max_mesh_per_frame: 32,
         }
     }
 }
@@ -507,63 +512,6 @@ impl Default for CrossSectionParams {
 }
 
 // ============================================================================
-// Streaming Params
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct StreamingParams {
-    /// Proportional load margin: fraction of visible extent added as buffer.
-    /// E.g., 0.15 = 15% buffer on each side beyond the visible view rect.
-    /// A minimum of 2 chunks is always enforced regardless of zoom.
-    pub load_margin: f32,
-    /// Proportional unload margin: fraction of visible extent beyond which
-    /// chunks are unloaded. Should be larger than load_margin to prevent
-    /// load/unload thrashing (hysteresis).
-    pub unload_margin: f32,
-    /// Completed generation results inserted into the world per frame.
-    pub max_gen_per_frame: u32,
-    /// Chunk snapshots extracted for meshing per frame. This is a *main-thread*
-    /// budget - each submission copies a 34^3 voxel snapshot - and is separate
-    /// from how many mesh jobs may run concurrently, which the scheduler owns.
-    pub max_mesh_per_frame: u32,
-    /// Main-thread time budget for the unload phase, in milliseconds.
-    ///
-    /// Eviction runs `save_chunk_on_unload` (zstd + SQLite) for every
-    /// persist-dirty chunk leaving the view, and `FinalizeSeam` writes demotions
-    /// into nearly every chunk's override bucket - so nearly every eviction is a
-    /// write. Unbounded, that phase measured **103 ms on a single frame** during
-    /// a pan at maximum supported zoom (`perf-baseline.md` §0.4.0).
-    ///
-    /// A *time* budget rather than a chunk count, because per-chunk cost scales
-    /// with override-bucket size - exactly what differed between regions in that
-    /// measurement - so a count calibrated against one region is wrong in the
-    /// next. The default is §7.3's "no recurring hitch > 4 ms" line.
-    ///
-    /// Chunks not evicted this frame are reconsidered next frame; nothing is
-    /// lost, they stay resident slightly longer. The trade is residency: if
-    /// evictions cannot keep pace with a sustained pan, the resident set grows.
-    #[serde(default = "default_unload_budget_ms")]
-    pub unload_budget_ms: f32,
-}
-
-/// Serde default so presets written before this field load unchanged.
-fn default_unload_budget_ms() -> f32 {
-    4.0
-}
-
-impl Default for StreamingParams {
-    fn default() -> Self {
-        Self {
-            load_margin: 0.40,
-            unload_margin: 0.55,
-            max_gen_per_frame: 64,
-            max_mesh_per_frame: 32,
-            unload_budget_ms: default_unload_budget_ms(),
-        }
-    }
-}
-
-// ============================================================================
 // Mesh Cache Params
 // ============================================================================
 
@@ -607,7 +555,6 @@ pub struct EngineParams {
     pub render_pipeline: RenderPipelineParams,
     pub outline: OutlineParams,
     pub cross_section: CrossSectionParams,
-    pub streaming: StreamingParams,
     pub mesh_cache: MeshCacheParams,
 }
 
@@ -628,7 +575,6 @@ impl Default for EngineParams {
             render_pipeline: RenderPipelineParams::default(),
             outline: OutlineParams::default(),
             cross_section: CrossSectionParams::default(),
-            streaming: StreamingParams::default(),
             mesh_cache: MeshCacheParams::default(),
         }
     }

@@ -9,6 +9,7 @@ use crate::interaction::PickState;
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::water_pass::WaterPass;
 use crate::simulation::manager::FrameState;
+use crate::world::config::ServerConfig;
 use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 
 pub fn fluid_tick_system(
@@ -17,6 +18,7 @@ pub fn fluid_tick_system(
     input: Res<InputState>,
     pick: Res<PickState>,
     mut world: ResMut<VoxelWorld>,
+    config: Res<ServerConfig>,
     mut water_pass: ResMut<WaterPass>,
     ctx: Res<RenderContext>,
     mut timings: ResMut<FrameTimings>,
@@ -39,16 +41,17 @@ pub fn fluid_tick_system(
         }
     }
 
+    let limits = &config.fluids;
     let active_total: usize =
         world.0.chunks.values().map(|c| c.data.fluids.active.len()).sum();
-    if active_total > 100_000 {
+    if active_total > limits.warn_active_cells {
         log::warn!("fluid: {active_total} active cells - possible mass-conservation runaway");
     }
     let mut ticks = clock.ticks_for(frame.dt);
     // Throttle: during a very large disturbance, run fewer ticks per frame so a
     // big flow slows down instead of stalling the framerate. Each tick is still a
     // full, deterministic global two-phase; we just do fewer per frame.
-    if active_total > 20_000 {
+    if active_total > limits.throttle_active_cells {
         ticks = ticks.min(1);
     }
     for _ in 0..ticks {

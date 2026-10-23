@@ -18,6 +18,7 @@ pub mod mutation;
 pub mod room;
 pub mod events;
 pub mod blueprint;
+pub mod config;
 
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;

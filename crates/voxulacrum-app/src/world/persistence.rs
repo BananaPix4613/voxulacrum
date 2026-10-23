@@ -834,8 +834,6 @@ pub fn build_chunk_record(chunk: &LoadedChunk) -> Option<ChunkRecord> {
 
 // -- WorldPersistence (Bevy Resource) ----------------------------------------
 
-const AUTOSAVE_INTERVAL_SECS: f32 = 30.0;
-
 #[derive(Resource)]
 pub struct WorldPersistence {
     db: Option<WorldDatabase>,
@@ -946,11 +944,17 @@ impl WorldPersistence {
         Ok(count)
     }
 
-    /// Tick auto-save timer. Saves when interval elapses.
-    pub fn tick_autosave(&mut self, dt: f32, world: &mut super::World) -> bool {
+    /// Tick auto-save timer. Saves once `interval_secs` of frame time have
+    /// elapsed (`AutosaveConfig::interval_secs`).
+    pub fn tick_autosave(
+        &mut self,
+        dt: f32,
+        interval_secs: f32,
+        world: &mut super::World,
+    ) -> bool {
         if !self.autosave_enabled || !self.is_active() { return false; }
         self.autosave_timer += dt;
-        if self.autosave_timer < AUTOSAVE_INTERVAL_SECS { return false; }
+        if self.autosave_timer < interval_secs { return false; }
         self.autosave_timer = 0.0;
         match self.save_dirty_chunks(world) {
             Ok(0) => false,
@@ -1587,8 +1591,9 @@ mod tests {
         chunk.data.edit_state = EditState::Delta(trainable_overrides(DICT_SAMPLE_TARGET - 1));
         chunk.persist_dirty = true;
         let mut world = world_holding(chunk);
+        let interval = crate::world::config::AutosaveConfig::default().interval_secs;
         assert!(
-            persistence.tick_autosave(AUTOSAVE_INTERVAL_SECS, &mut world),
+            persistence.tick_autosave(interval, interval, &mut world),
             "first autosave saves the chunk",
         );
 
@@ -1599,7 +1604,7 @@ mod tests {
             chunk.persist_dirty = true;
         }
         assert!(
-            persistence.tick_autosave(AUTOSAVE_INTERVAL_SECS, &mut world),
+            persistence.tick_autosave(interval, interval, &mut world),
             "second autosave saves the edit",
         );
 
