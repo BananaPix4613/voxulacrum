@@ -531,7 +531,7 @@ fn init_ecs(
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
-    ecs.insert_resource(FluidClock::new());
+    ecs.insert_resource(FluidChanges::default());
     ecs.insert_resource(ClimateClock::new());
     ecs.insert_resource(PresentationClock::new());
     ecs.insert_resource(TickDriver::default());

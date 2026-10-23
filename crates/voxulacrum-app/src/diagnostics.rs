@@ -76,7 +76,8 @@ pub const SUB_UNLOAD: usize = 7;
 
 // `FrameStage::Simulation` and `PostFrame` candidates. Each is an item carried
 // out of 0.3.0 with a stated trigger; the reference world met the conditions.
-/// `fluid_tick_system` - sums `active.len()` across every resident chunk.
+/// `fluid_pour_system` and `water_rebuild_system` - the editor's pour and the
+/// water meshes the ticks changed. The fluid step itself runs inside the tick.
 pub const SUB_FLUID: usize = 8;
 /// `climate_tick_system` - cleared at ≤2.2 ms in Phase 10, before an ocean existed.
 pub const SUB_CLIMATE: usize = 9;

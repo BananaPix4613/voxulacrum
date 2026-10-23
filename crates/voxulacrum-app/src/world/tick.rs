@@ -19,6 +19,18 @@ pub const TICK_RATE_HZ: u32 = match option_env!("VOXULACRUM_TICK_RATE_HZ") {
 /// The simulated time one tick covers, in seconds.
 pub const TICK_DT: f32 = 1.0 / TICK_RATE_HZ as f32;
 
+/// Ticks between steps of a system that runs at `rate_hz`, a sub-rate of the
+/// tick. The rate must divide [`TICK_RATE_HZ`], so every step falls on a tick
+/// and the sub-rate never drifts. Declared as a const, a rate that doesn't
+/// divide it fails the build.
+pub const fn ticks_per_step(rate_hz: u32) -> u64 {
+    assert!(
+        rate_hz > 0 && TICK_RATE_HZ % rate_hz == 0,
+        " a sub-rate must divide TICK_RATE_HZ",
+    );
+    (TICK_RATE_HZ / rate_hz) as u64
+}
+
 /// Parse the build's tick-rate override. A malformed value fails the build
 /// rather than falling back, so a typo can't quietly run the tests at 30.
 const fn parse_rate(rate: &str) -> u32 {
@@ -43,6 +55,13 @@ const fn parse_rate(rate: &str) -> u32 {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SimTick(pub u64);
 
+impl SimTick {
+    /// Whether a system stepping every `ticks` ticks runs on this tick.
+    pub fn is_multiple_of(self, ticks: u64) -> bool {
+        self.0.is_multiple_of(ticks)
+    }
+}
+
 /// The tick the simulation is on: inside a tick's phases, the tick running;
 /// between ticks, the next one to run, which is also the count already run.
 ///
@@ -63,6 +82,9 @@ pub struct TickSchedule;
 pub enum TickPhase {
     /// Step each player with its input for this tick.
     Players,
+    /// Run the systems that step at a sub-rate of the tick, on the ticks that
+    /// rate falls on.
+    SubRates,
 }
 
 /// Run one tick: every phase of [`TickSchedule`], then advance [`CurrentTick`].
@@ -87,6 +109,17 @@ mod tests {
     fn the_rate_override_parses_whole_hertz() {
         assert_eq!(parse_rate("20"), 20);
         assert_eq!(parse_rate("30"), 30);
+    }
+
+    #[test]
+    fn a_sub_rate_steps_on_evenly_spaced_ticks() {
+        assert_eq!(ticks_per_step(TICK_RATE_HZ), 1);
+        let every = ticks_per_step(10);
+        assert_eq!(every * 10, u64::from(TICK_RATE_HZ));
+        let steps = (0..u64::from(TICK_RATE_HZ))
+            .filter(|&t| SimTick(t).is_multiple_of(every))
+            .count();
+        assert_eq!(steps, 10, "ten steps in one second of ticks");
     }
 
     #[test]

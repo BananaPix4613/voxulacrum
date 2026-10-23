@@ -10,7 +10,7 @@ use crate::world::tick::{TickPhase, TickSchedule};
 pub enum FrameStage {
     /// Frame counter, shader hot-reload, window resize, input forwarding.
     Input,
-    /// Simulation ticks, then amera, time-of-day, wind, frustum, param change
+    /// Simulation ticks, then camera, time-of-day, wind, frustum, param change
     /// detection.
     Simulation,
     /// Poll meshing workers, upload completed meshes.
@@ -97,10 +97,13 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::picking_system), // needs the current pick
         systems::hot_reload::palette_load_system.in_set(FrameStage::Simulation),
-        systems::fluids::fluid_tick_system
+        systems::fluids::fluid_pour_system
             .in_set(FrameStage::Simulation)
-            .after(systems::simulation::simulation_tick_system) // needs FrameState
             .after(crate::interaction::picking_system), // needs the current pick
+        systems::fluids::water_rebuild_system
+            .in_set(FrameStage::Simulation)
+            .after(systems::tick::run_ticks_system)
+            .after(systems::fluids::fluid_pour_system),
         crate::interaction::picking_system
             .in_set(FrameStage::Simulation)
             .after(systems::simulation::simulation_tick_system),
@@ -171,8 +174,10 @@ pub fn build_frame_schedule() -> Schedule {
 /// (R3c) can run this same schedule.
 pub fn build_tick_schedule() -> Schedule {
     let mut schedule = Schedule::new(TickSchedule);
-    schedule.add_systems(
+    schedule.configure_sets((TickPhase::Players, TickPhase::SubRates).chain());
+    schedule.add_systems((
         crate::player::systems::player_tick_system.in_set(TickPhase::Players),
-    );
+        systems::fluids::fluid_tick_system.in_set(TickPhase::SubRates),
+    ));
     schedule
 }

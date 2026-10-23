@@ -69,9 +69,9 @@ pub struct FluidLimits {
     /// Above this many active cells the fluid tick logs a warning: a likely
     /// mass-conservation runaway.
     pub warn_active_cells: usize,
-    /// Above this many active cells at most one fluid step runs per frame, so a
-    /// large flow slows down instead of stalling the frame rate. R2 replaces
-    /// this frame-based throttle with one decided from world state.
+    /// Above this many active cells fluids step at half their rate, so a large
+    /// flow slows down instead of stalling the frame rate. The fluid tick
+    /// decides from the count at that tick, so the result is deterministic.
     pub throttle_active_cells: usize,
 }
 
