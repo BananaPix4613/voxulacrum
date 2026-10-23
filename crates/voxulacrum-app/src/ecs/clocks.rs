@@ -33,7 +33,7 @@ impl PresentationClock {
     pub fn new() -> Self {
         Self { last_frame: Instant::now(), dt: 0.0, elapsed: 0.0 }
     }
-    
+
     /// Measure this frame.
     pub fn advance(&mut self) {
         let now = Instant::now();
@@ -49,23 +49,36 @@ impl PresentationClock {
 pub struct TickDriver {
     /// Time owed to the simulation, in ticks. Below 1 between frames.
     owed: f64,
+    /// Ticks the last frame owed but didn't run.
+    dropped: u32,
 }
 
 impl TickDriver {
     /// Add a frame's time and return how many ticks to run now.
     pub fn advance(&mut self, frame_dt: f32) -> u32 {
-        self.owed += f64::from(frame_dt.min(MAX_FRAME_DT)) * f64::from(TICK_RATE_HZ);
-        let due = self.owed.floor();
-        self.owed -= due;
-        (due as u32).min(MAX_TICKS_PER_FRAME)
+        let counted = frame_dt.min(MAX_FRAME_DT);
+        let lost = (f64::from(frame_dt - counted) * f64::from(TICK_RATE_HZ)).floor() as u32;
+        self.owed += f64::from(counted) * f64::from(TICK_RATE_HZ);
+        let due = self.owed.floor() as u32;
+        self.owed -= f64::from(due);
+        let run = due.min(MAX_TICKS_PER_FRAME);
+        self.dropped = lost + (due - run);
+        run
     }
-    
+
     /// Progress from the last tick toward the next (0..1), for interpolating
     /// what the frame draws.
     pub fn alpha(&self) -> f32 {
         self.owed as f32
     }
-    
+
+    /// Ticks the last [`Self::advance`] owed but dropped, past the cap or past
+    /// the longest frame it counts. Each is simulated time lost: the simulation
+    /// is running slower than real time.
+    pub fn last_dropped(&self) -> u32 {
+        self.dropped
+    }
+
     /// The simulation time this frame draws, in seconds: `ticks_run` whole
     /// ticks plus the fraction owed toward the next.
     pub fn sim_seconds(&self, ticks_run: SimTick) -> f64 {
@@ -93,6 +106,12 @@ mod tests {
         let owed = (MAX_FRAME_DT * TICK_RATE_HZ as f32).floor() as u32;
         assert_eq!(driver.advance(10.0), owed.min(MAX_TICKS_PER_FRAME));
         assert!(driver.alpha() < 1.0, "the backlog past the cap is dropped, not carried");
+        let lost = (9.75 * f64::from(TICK_RATE_HZ)).floor() as u32;
+        assert_eq!(
+            driver.last_dropped(),
+            lost + owed - owed.min(MAX_TICKS_PER_FRAME),
+            "both the time past the longest frame and the backlog past the cap count as dropped",
+        );
     }
 
     #[test]

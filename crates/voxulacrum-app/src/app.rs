@@ -535,6 +535,7 @@ fn init_ecs(
     ecs.insert_resource(PresentationClock::new());
     ecs.insert_resource(TickDriver::default());
     ecs.insert_resource(world::tick::CurrentTick::default());
+    ecs.insert_resource(world::tick::TickTimings::new());
     if let Some(play) = play {
         ecs.insert_resource(play);
     }

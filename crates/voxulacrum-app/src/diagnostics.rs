@@ -121,6 +121,9 @@ pub struct FrameTimings {
     acc_outside_max: f32,
     acc_inter_max: f32,
     acc_over_budget: u32,
+    acc_ticks: u32,
+    acc_ticks_max: u32,
+    acc_dropped: u32,
 
     // --- published once per second; the panel and the log read these ---
     pub fps: f32,
@@ -143,6 +146,15 @@ pub struct FrameTimings {
     pub inter_max_ms: f32,
     /// Frames whose CPU work exceeded [`FRAME_BUDGET_MS`] in the last second.
     pub over_budget: u32,
+    /// Simulation ticks run in the last second.
+    pub ticks_per_sec: u32,
+    /// Most ticks a single frame ran in the last second.
+    pub ticks_max_per_frame: u32,
+    /// Ticks dropped in the last second: simulated time lost because the frames
+    /// couldn't keep up.
+    pub dropped_per_sec: u32,
+    /// Ticks dropped this session. Session-scoped, so `publish` leaves it.
+    pub dropped_total: u64,
 
     // --- generation frontier (roadmap §7.3) - SESSION-scoped ---
     //
@@ -205,6 +217,9 @@ impl FrameTimings {
             acc_outside_max: 0.0,
             acc_inter_max: 0.0,
             acc_over_budget: 0,
+            acc_ticks: 0,
+            acc_ticks_max: 0,
+            acc_dropped: 0,
             fps: 0.0,
             stage_mean_ms: [0.0; STAGE_COUNT],
             stage_max_ms: [0.0; STAGE_COUNT],
@@ -216,6 +231,10 @@ impl FrameTimings {
             outside_max_ms: 0.0,
             inter_max_ms: 0.0,
             over_budget: 0,
+            ticks_per_sec: 0,
+            ticks_max_per_frame: 0,
+            dropped_per_sec: 0,
+            dropped_total: 0,
             frontier_cpu_max_ms: 0.0,
             frontier_worst_stages: [0.0; STAGE_COUNT],
             frontier_worst_sub: [0.0; SUB_COUNT],
@@ -266,6 +285,15 @@ impl FrameTimings {
         if let Some(slot) = self.sub.get_mut(index) {
             *slot += ms;
         }
+    }
+
+    /// Record the simulation ticks this frame ran and dropped, for the tick
+    /// inspector (roadmap §4.4).
+    pub fn add_ticks(&mut self, ran: u32, dropped: u32) {
+        self.acc_ticks += ran;
+        self.acc_ticks_max = self.acc_ticks_max.max(ran);
+        self.acc_dropped += dropped;
+        self.dropped_total += u64::from(dropped);
     }
 
     /// Open a sub-span timer. Hold the guard for the region to measure.
@@ -392,6 +420,9 @@ impl FrameTimings {
         self.outside_max_ms = self.acc_outside_max;
         self.inter_max_ms = self.acc_inter_max;
         self.over_budget = self.acc_over_budget;
+        self.ticks_per_sec = self.acc_ticks;
+        self.ticks_max_per_frame = self.acc_ticks_max;
+        self.dropped_per_sec = self.acc_dropped;
         self.acc_start = now;
         self.acc_frames = 0;
         self.acc_stage_sum = [0.0; STAGE_COUNT];
@@ -404,6 +435,9 @@ impl FrameTimings {
         self.acc_outside_max = 0.0;
         self.acc_inter_max = 0.0;
         self.acc_over_budget = 0;
+        self.acc_ticks = 0;
+        self.acc_ticks_max = 0;
+        self.acc_dropped = 0;
     }
 }
 
@@ -499,6 +533,18 @@ mod tests {
         let (cpu, stages) = t.last_frame();
         assert!(cpu >= 2.0, "{cpu}");
         assert_eq!(cpu, stages.iter().sum::<f32>(), "no present, so CPU work is every stage");
+    }
+
+    #[test]
+    fn tick_counts_publish_with_the_second_and_drops_also_add_up_for_the_session() {
+        let mut t = FrameTimings::new();
+        t.add_ticks(2, 0);
+        t.add_ticks(1, 3);
+        t.publish(Instant::now());
+        assert_eq!((t.ticks_per_sec, t.ticks_max_per_frame, t.dropped_per_sec), (3, 2, 3));
+        t.publish(Instant::now());
+        assert_eq!((t.ticks_per_sec, t.ticks_max_per_frame, t.dropped_per_sec), (0, 0, 0));
+        assert_eq!(t.dropped_total, 3, "the session total survives the one-second window");
     }
 
     #[test]

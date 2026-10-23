@@ -5,6 +5,8 @@
 //! or in ticks derived from [`TICK_RATE_HZ`], never as a bare tick count, so
 //! the tests can run at another rate to keep that true.
 
+use std::time::Instant;
+
 use bevy_ecs::prelude::Resource;
 use bevy_ecs::schedule::{ScheduleLabel, SystemSet};
 
@@ -26,7 +28,7 @@ pub const TICK_DT: f32 = 1.0 / TICK_RATE_HZ as f32;
 pub const fn ticks_per_step(rate_hz: u32) -> u64 {
     assert!(
         rate_hz > 0 && TICK_RATE_HZ % rate_hz == 0,
-        " a sub-rate must divide TICK_RATE_HZ",
+        "a sub-rate must divide TICK_RATE_HZ",
     );
     (TICK_RATE_HZ / rate_hz) as u64
 }
@@ -83,7 +85,7 @@ pub struct TickSchedule;
 /// A tick's phases, in the order they run (design §12, "Time"). Phases the
 /// engine doesn't run yet (commands, scheduled and block ticks, residency,
 /// publishing) join in that order when they are built.
-#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TickPhase {
     /// Step each player with its input for this tick.
     Players,
@@ -92,6 +94,97 @@ pub enum TickPhase {
     SubRates,
     /// Save dirty chunks once per autosave interval.
     Autosave,
+}
+
+impl TickPhase {
+    /// How many phases a tick runs.
+    pub const COUNT: usize = 3;
+
+    /// Every phase, in the order a tick runs them.
+    pub const ALL: [TickPhase; Self::COUNT] = [Self::Players, Self::SubRates, Self::Autosave];
+
+    /// This phase's position in [`Self::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The phase's name on the tick inspector.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Players => "players",
+            Self::SubRates => "sub-rates",
+            Self::Autosave => "autosave",
+        }
+    }
+}
+
+/// What each tick phase costs, for the tick inspector (roadmap §4.4).
+/// Measurement only: the timing systems around the phases read the clock, and
+/// nothing in the simulation reads this.
+#[derive(Resource)]
+pub struct TickTimings {
+    /// Start of the phase being measured.
+    mark: Instant,
+    acc_start: Instant,
+    acc_ticks: u32,
+    acc_sum_ms: [f32; TickPhase::COUNT],
+    acc_max_ms: [f32; TickPhase::COUNT],
+    /// Each phase's mean milliseconds per tick over the last published second.
+    pub mean_ms: [f32; TickPhase::COUNT],
+    /// Each phase's longest single run in that second, in milliseconds.
+    pub max_ms: [f32; TickPhase::COUNT],
+}
+
+impl TickTimings {
+    pub fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            mark: now,
+            acc_start: now,
+            acc_ticks: 0,
+            acc_sum_ms: [0.0; TickPhase::COUNT],
+            acc_max_ms: [0.0; TickPhase::COUNT],
+            mean_ms: [0.0; TickPhase::COUNT],
+            max_ms: [0.0; TickPhase::COUNT],
+        }
+    }
+
+    /// Open a tick, before its first phase.
+    pub fn begin(&mut self) {
+        self.mark = Instant::now();
+    }
+
+    /// Close `phase` and open the next.
+    pub fn end_phase(&mut self, phase: TickPhase) {
+        let now = Instant::now();
+        let ms = (now - self.mark).as_secs_f32() * 1000.0;
+        self.mark = now;
+        let i = phase.index();
+        self.acc_sum_ms[i] += ms;
+        self.acc_max_ms[i] = self.acc_max_ms[i].max(ms);
+    }
+
+    /// Close the tick, publishing once a second has passed since the last
+    /// publish.
+    pub fn end_tick(&mut self) {
+        self.acc_ticks += 1;
+        let now = Instant::now();
+        if (now - self.acc_start).as_secs_f32() >= 1.0 {
+            self.publish(now);
+        }
+    }
+
+    fn publish(&mut self, now: Instant) {
+        let n = self.acc_ticks.max(1) as f32;
+        for i in 0..TickPhase::COUNT {
+            self.mean_ms[i] = self.acc_sum_ms[i] / n;
+            self.max_ms[i] = self.acc_max_ms[i];
+        }
+        self.acc_start = now;
+        self.acc_ticks = 0;
+        self.acc_sum_ms = [0.0; TickPhase::COUNT];
+        self.acc_max_ms = [0.0; TickPhase::COUNT];
+    }
 }
 
 /// Run one tick: every phase of [`TickSchedule`], then advance [`CurrentTick`].
@@ -143,5 +236,22 @@ mod tests {
         run_tick(&mut ecs);
         run_tick(&mut ecs);
         assert_eq!(ecs.resource::<CurrentTick>().0, SimTick(2));
+    }
+
+    #[test]
+    fn a_phases_time_lands_in_its_own_slot() {
+        let mut t = TickTimings::new();
+        t.begin();
+        t.end_phase(TickPhase::Players);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        t.end_phase(TickPhase::SubRates);
+        t.end_phase(TickPhase::Autosave);
+        t.end_tick();
+        t.publish(Instant::now());
+        let sub_rates = t.max_ms[TickPhase::SubRates.index()];
+        assert!(sub_rates >= 2.0, "{sub_rates}");
+        assert!(t.max_ms[TickPhase::Players.index()] < sub_rates);
+        assert!(t.max_ms[TickPhase::Autosave.index()] < sub_rates);
+        assert_eq!(t.mean_ms, t.max_ms, "one tick, so each phase's mean is its only run");
     }
 }

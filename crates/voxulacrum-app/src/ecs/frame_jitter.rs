@@ -20,7 +20,7 @@ use crate::world::config::ServerConfig;
 use crate::world::mutation::{MutationCommand, WorldMutation};
 use crate::world::persistence::{self, WorldPersistence};
 use crate::world::storage::ChunkStorage;
-use crate::world::tick::{run_tick, secs_to_ticks, CurrentTick, SimTick};
+use crate::world::tick::{run_tick, secs_to_ticks, CurrentTick, SimTick, TickTimings};
 use crate::world::{split_world_voxel, world_generator};
 
 /// The tick every run stops at.
@@ -106,6 +106,7 @@ fn tick_world() -> (World, Entity) {
     ecs.insert_resource(FluidChanges::default());
     ecs.insert_resource(WorldPersistence::disabled());
     ecs.insert_resource(CurrentTick::default());
+    ecs.insert_resource(TickTimings::new());
     ecs.insert_resource(PlaySettings {
         player: TUNING,
         spawn: SpawnRule::SurfaceUnderCamera,

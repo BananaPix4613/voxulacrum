@@ -181,5 +181,15 @@ pub fn build_tick_schedule() -> Schedule {
         systems::fluids::fluid_tick_system.in_set(TickPhase::SubRates),
         systems::persistence::persistence_autosave_system.in_set(TickPhase::Autosave),
     ));
+    schedule.add_systems((
+        systems::tick::tick_timings_begin.before(TickPhase::Players),
+        systems::tick::tick_timings_end_players
+            .after(TickPhase::Players)
+            .before(TickPhase::SubRates),
+        systems::tick::tick_timings_end_sub_rates
+            .after(TickPhase::SubRates)
+            .before(TickPhase::Autosave),
+        systems::tick::tick_timings_end_autosave.after(TickPhase::Autosave),
+    ));
     schedule
 }
