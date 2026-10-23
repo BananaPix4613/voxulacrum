@@ -18,12 +18,13 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8, T7, R7, F8 and F9 are merged. The
+Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9 and R3a are merged. The
 runtime spine and the engine object model are designed in `engine-design.md`,
 the CPU baseline M3's exit gate compares against is recorded, CI compares
 Tier-1 results across Windows, Linux and macOS, generation no longer calls the
-platform's math library, the API docs build without warnings, and package-load
-errors name each path once.
+platform's math library, the API docs build without warnings, package-load
+errors name each path once, and the world code no longer reads the editor's
+settings.
 
 ### Added
 
@@ -82,6 +83,19 @@ errors name each path once.
   skeleton nodes now differ in their last bits, far below a voxel, and no layer
   of the 512 sampled chunks changed, 131 of them tree-bearing. Saves need
   nothing.
+- **The world code is decoupled from the editor and the renderer** (R3a, #17)
+  — the first step toward the server-core crate. Chunk streaming budgets, the
+  fluid limits and the autosave interval are now a `ServerConfig` the world
+  code owns, with the same defaults, so a saved parameter preset's `streaming`
+  block is ignored and its meshing budget, `max_mesh_per_frame`, is read from
+  `meshing`. The panel's Terrain Generation sliders are gone: no generation code
+  had read them since graphs took over, and a preset's `terrain_gen` block is
+  ignored. Its Regenerate World button remains, under World Regeneration, and
+  now says that regenerating clears saved edits. Regeneration no longer reads
+  the editor's state, persistence no longer calls into the mesh cache (a call
+  that deleted nothing), and no module under `world/` imports a client module
+  apart from the streaming and regeneration couplings R4 and R6 remove. The
+  generation hash is unchanged at `0xed02babdf0f40420`; saves need nothing.
 
 ### Fixed
 
