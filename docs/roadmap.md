@@ -1,7 +1,7 @@
 # Voxulacrum Engine Roadmap — 0.4.0 through 1.0
 
 **Status:** Authoritative planning reference, v2.2
-**Companions:** `engine-design.md` (v1.15 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
+**Companions:** `engine-design.md` (v1.18 — foundational data model and architecture), `target-architecture.md` and `migration-plan.md` (October 2026 design review; the source of the v2.0 decisions), `networking-architecture-proposal.md` (PROPOSAL until the networking work completes), `underground-visibility-design.md`, phase audits, `architecture-drift-review.md`, `engine-architecture-reference.md` (external review — disposition recorded in §21).
 **Tracker:** every work item is a GitHub issue, grouped by [milestone](https://github.com/BananaPix4613/voxulacrum/milestones) and tracked on the *Voxulacrum engine* project board (§9.3).
 **Purpose:** Make the technical goals visible, fix the working discipline, and sequence every core capability the engine needs before it is a *ready product* — an engine another person (or future you) can build a title on without engine surgery.
 
@@ -170,11 +170,11 @@ Tooling is a first-class deliverable (P11), tracked as its own cross-cutting wor
 | **`FrameTimings`**, job inspector, streaming readout, cache hit/miss, memory/residency panel, determinism checker, mutation log | 0.3.0 | Shipped |
 | **GPU selection** (`--gpu low-power`) and the adapter named on the Performance panel | 0.5.0 | Shipped |
 | **Scripted benchmark** (`--bench <scenario>`, `--runs <n>`): a fixed camera path and input, every frame recorded, medians and spread across runs | M3 (T4) | Shipped |
+| **Tick scheduler inspector** — tick number, ticks per frame, dropped ticks and cost per tick phase; scheduled/random/block tick load per region once those ticks exist | M3 (R2) | Shipped, except the per-region load, which comes with those ticks |
 | **GPU time** on the Performance panel (timestamp queries) | M5 (T3) | |
 | **In-engine console** — registered commands and variables | M5 (T1) | |
 | **Debug protocol** — the editor attaches to a running game or modded build | M8 | |
 | **Profiling capture export** + frame graph | M5 | |
-| **Tick scheduler inspector** — tick number, ticks per frame, dropped ticks and cost per tick phase; scheduled/random/block tick load per region once those ticks exist | M3 (R2) | |
 | **Per-grid and per-system cost attribution** ("what is using physics time") | M9 | |
 | **Network panel** — bandwidth, delta queue depth, prediction corrections, interpolation health | M7 | |
 | **Entity inspector** — live components; realized/abstract tier state | M8 | |
@@ -372,8 +372,8 @@ Runs at **voxel resolution using face coverage masks**, never at a finer subdivi
 **State:** nothing. Realized and abstract tiers plus the transition contract — **M8**; statistical tier — **M10**.
 
 ### 6.24 Tick & scheduling framework
-**The substrate every survival simulation needs, and currently absent.** One tick framework replacing the three ad-hoc clocks (`PlayerClock`, `FluidClock`, `ClimateClock`): fixed simulation tick with render interpolation, scheduled block updates, random ticks over resident regions with a defined distribution, sub-rate clocks derived from the primary tick rather than free-running, and a coarse region tick for distant simulation. All of it replicated-clock-aware so server and client agree on tick identity (P14).
-**State:** three independent clocks, no block/random/scheduled tick concept. The tick framework at 30 Hz, with derived sub-rates and the tick inspector — **M3** (R1, R2). Scheduled, random and block ticks are designed in M3 and built with their first consumer.
+**The substrate every survival simulation needs.** One tick framework replacing the three ad-hoc clocks (`PlayerClock`, `FluidClock`, `ClimateClock`): fixed simulation tick with render interpolation, scheduled block updates, random ticks over resident regions with a defined distribution, sub-rate clocks derived from the primary tick rather than free-running, and a coarse region tick for distant simulation. All of it replicated-clock-aware so server and client agree on tick identity (P14).
+**State:** one 30 Hz tick with derived sub-rates, render interpolation and the tick inspector; player, fluids and autosave run as tick phases (R2). No block, random or scheduled ticks yet: designed in M3 (R1) and built with their first consumer. Time of day and wind follow the tick from the client until R5 makes world time server state.
 
 ### 6.25 Lighting as a queryable field
 **Two lights, named separately** — the external review's reframe, and correct for authoritative multiplayer: `GameplayLight` and `RenderLight`. The server must answer "can a creature spawn here," "does this crop grow," "is snow melting," "is the player in darkness" — questions no GPU shadow map can answer. Conflating them is how a server ends up disagreeing with what players see (R9).

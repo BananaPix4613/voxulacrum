@@ -31,11 +31,9 @@ fn regional_weather_data_at(world: &crate::world::World, world_pos: glam::Vec2) 
 }
 
 /// Advance the simulated cloud layers, rasterize them into the shared cloud
-/// texture, and refresh the offsets/coverages `simulation_tick_system` reads
-/// into this frame's `FrameState`. Runs before `simulation_tick_system` and
-/// reads last frame's camera position - a one-frame lag, imperceptible for a
-/// slowly-panning macro-scale field (the same trade-off already accepted for
-/// the shadow frustum's smoothed camera).
+/// texture, and refresh the offsets and coverages `write_uniforms_system`
+/// sends to the shaders. Runs after `simulation_tick_system`, so it reads this
+/// frame's camera position and wind.
 pub fn climate_tick_system(
     mut sim: ResMut<SimulationManager>,
     ui: Res<UiState>,

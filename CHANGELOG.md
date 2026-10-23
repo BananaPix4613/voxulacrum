@@ -18,13 +18,14 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9 and R3a are merged. The
-runtime spine and the engine object model are designed in `engine-design.md`,
-the CPU baseline M3's exit gate compares against is recorded, CI compares
-Tier-1 results across Windows, Linux and macOS, generation no longer calls the
-platform's math library, the API docs build without warnings, package-load
-errors name each path once, and the world code no longer reads the editor's
-settings.
+Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9, R3a and R2 are merged.
+The runtime spine and the engine object model are designed in
+`engine-design.md`, the CPU baseline M3's exit gate compares against is
+recorded, CI compares Tier-1 results across Windows, Linux and macOS,
+generation no longer calls the platform's math library, the API docs build
+without warnings, package-load errors name each path once, the world code no
+longer reads the editor's settings, and one 30 Hz tick drives all simulation
+time.
 
 ### Added
 
@@ -62,6 +63,10 @@ settings.
   Linux fails the build; macOS reports. A run also fails if its sample holds no
   chunk with fluid, trees, structures, two biomes or caves, or if a scenario
   did not exercise what it is for. The first run was identical on all three.
+- **Tick inspector** (R2, #15) on the Performance panel: the tick number, ticks
+  run in the last second and the most in one frame, ticks dropped in the last
+  second and this session, and each tick phase's mean and longest cost per
+  tick.
 
 ### Changed
 
@@ -96,6 +101,22 @@ settings.
   that deleted nothing), and no module under `world/` imports a client module
   apart from the streaming and regeneration couplings R4 and R6 remove. The
   generation hash is unchanged at `0xed02babdf0f40420`; saves need nothing.
+- **One tick drives all simulation time** (R2, #15) — the player step, fluids
+  and autosave run as phases of a 30 Hz tick instead of on three separate
+  clocks and frame time, so the state at a given tick no longer depends on the
+  frame rate. Each frame runs the ticks its time owes, at most five; time past
+  that, or past a 0.25 s frame, is dropped and shown on the tick inspector,
+  and the simulation runs slower rather than catching up. The player now steps
+  on the current frame's time, not the previous frame's. Fluids step on every
+  third tick (10 Hz, as before); above `throttle_active_cells` they step at
+  half rate, decided from the active-cell count at that tick rather than by
+  limiting fluid steps per frame. Autosave runs every 30 simulated seconds, so
+  dropped ticks delay it. Time of day and wind follow simulation time, and the
+  cloud animation runs on a presentation clock. A pour reaches the water up to
+  one fluid tick (100 ms) later than before. `TICK_RATE_HZ` is the one rate
+  constant; building with `VOXULACRUM_TICK_RATE_HZ` set overrides it, which CI
+  uses to run the tests again at 20 Hz. The generation hash is unchanged at
+  `0xed02babdf0f40420`; saves need nothing.
 
 ### Fixed
 

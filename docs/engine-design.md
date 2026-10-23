@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.17
+**Status:** Baseline reference, v1.18
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -27,6 +27,7 @@
 - v1.15 — Recorded the **cross-platform determinism job** (roadmap M3, T7) in §12 Determinism: what its manifest hashes, the content and scenario checks that keep a comparison from passing vacuously, and which platforms gate. The rule that hashes use the persistence encoding now says the generated fluid, scatter and detail layers have encodings for hashing alone. Runtime spine's interim shapes gain the harness living in the app binary, which keeps the Linux runner installing windowing and GPU packages until R3c moves it to the headless server; the issue had named R3b for that.
 - v1.16 — Settled **Tier-1 math in generation** (roadmap M3, R7) in §12 Determinism. glam's `libm` feature turned out not to be enough: its `Quat`, `Vec4` and other SIMD-backed types sum dot products in a different order on SSE2 than on NEON, so the rule now bans those types in Tier-1 code as well, and tree skeletons rotate with a scalar quaternion of their own. The rules are enforced by clippy lists in `crates/nodegraph-eval/clippy.toml`, which a CI step denies. The determinism manifest gains a `kernels` section. Runtime spine's interim shapes retire R7's row and gain one for the lists covering only `nodegraph-eval` until server-core exists (R3b).
 - v1.17 — Recorded the **in-place decoupling of the world code** (roadmap M3, R3a) in Runtime spine's interim shapes. The world code now reads no editor setting: its streaming budgets, fluid limits and autosave interval are a `ServerConfig` it owns, and the terrain-generation parameters the editor carried are gone, since generation read none of them. Four rows are added, each with the item that retires it: regeneration's render rebuild (R4), streaming's mesher and view-test coupling (R6), `ServerConfig` built from defaults (R3c), and the two client modules that live under `world/` (R3b).
+- v1.18 — Built the **tick framework** (roadmap M3, R2) and recorded what it settled in §12 Runtime spine. `TICK_RATE_HZ` is defined once and can be overridden at build time, which is how CI runs the tests again at 20 Hz; a frame-jitter test holds the state at tick 3,000 to one hash under three frame-time sequences. The fluid throttle is decided from world state, dropped ticks include time past the 0.25 s frame clamp, and the tick inspector publishes once per second like the rest of the Performance panel. Runtime architecture's interim schedule now runs the tick schedule from `Simulation`. Runtime spine's interim shapes retire R2's row and gain five: world time on the client until R5, commands applied between ticks until R5, fluid changes drained per frame until R4, residency outside the tick until R6, and a tick counter that restarts each session. The driver's pause and time scale are recorded as not built.
 
 ---
 
@@ -984,7 +985,7 @@ FrameStage::PostFrame — client housekeeping
 
 These orderings are the engine's scheduling contract: a new system declares its side, and the tick phase or frame stage it runs in. The stage names may change as M3 builds them; the order is the contract. Resources (the chunk store, graph registry, material registry, render context, etc.) live as ECS resources accessed through system parameters, each in the world of the side that owns it.
 
-**Interim shape:** until the render world and the client/server boundary land (roadmap M3, R4 and R5), one schedule runs both sides on the main thread: `Input → Simulation → Meshing → UniformWrite → Render → PostFrame`. The player step, fluids, climate, time of day, picking and the editor tools run in `Simulation`; streaming, seam finalization and meshing run in `Meshing`.
+**Interim shape:** until the render world and the client/server boundary land (roadmap M3, R4 and R5), one schedule runs both sides on the main thread: `Input → Simulation → Meshing → UniformWrite → Render → PostFrame`. In `Simulation`, an exclusive system runs the tick schedule as many times as the frame's time owes (R2); the player step, fluids and autosave are its phases. Climate, time of day, picking and the editor tools run in `Simulation` once per frame; streaming, seam finalization and meshing run in `Meshing`.
 
 The choice of `bevy_ecs` is an implementation detail of the runtime — it does not affect the data model, the graph hierarchy, or any other system described in this document. Any compatible ECS could substitute. The choice is documented here because every cross-cutting system (hot reload, streaming, persistence) integrates through a schedule and must know its ordering.
 
@@ -1015,9 +1016,9 @@ Shared and server code share one crate until M7, because no server-only code exi
 
 #### Time
 
-One tick-rate constant, `TICK_RATE_HZ = 30`, and a tick counter, `SimTick(u64)`, that identifies every tick and later timestamps network messages, replays and scheduled updates. Code writes durations in seconds, or in ticks derived from that constant, and never in a bare 30; the tests also run at 20 Hz to keep that true.
+One tick-rate constant, `TICK_RATE_HZ = 30`, and a tick counter, `SimTick(u64)`, that identifies every tick and later timestamps network messages, replays and scheduled updates. Code writes durations in seconds, or in ticks derived from that constant, and never in a bare 30; the tests also run at 20 Hz to keep that true. The build-time variable `VOXULACRUM_TICK_RATE_HZ` overrides the constant, and CI runs the workspace tests a second time with it set to 20 (added v1.18). A frame-jitter test (`ecs/frame_jitter.rs`) runs the tick schedule to tick 3,000 under three frame-time sequences, constant 16.7 ms, constant 7 ms and seeded jitter from 5 to 60 ms, and requires the same hash of player and fluid state from each.
 
-**Sub-rates are keyed by tick number, never free-running.** Fluids step on every third tick (10 Hz). Physics will run two substeps per tick (60 Hz) once it exists (M8). Block updates and growth run at 10 Hz or lower. A sub-rate system that would exceed its budget defers a whole step, and decides that from world state, never from frame timing. The fluid throttle that drops ticks when a frame runs long is the failure this rules out.
+**Sub-rates are keyed by tick number, never free-running.** Fluids step on every third tick (10 Hz). Physics will run two substeps per tick (60 Hz) once it exists (M8). Block updates and growth run at 10 Hz or lower. A sub-rate system that would exceed its budget defers a whole step, and decides that from world state, never from frame timing. The fluid throttle that drops ticks when a frame runs long is the failure this rules out. Fluids instead step on every other fluid tick while more than `ServerConfig`'s `throttle_active_cells` are active, counted at that tick (added v1.18).
 
 **A tick runs its phases in a fixed order:**
 
@@ -1034,7 +1035,7 @@ Logic networks join in the order `target-architecture.md` gives them (M9): topol
 
 **Server state changes only inside a tick.** Between ticks it is read-only, so every tick boundary is a consistent snapshot: it is what the client reads, and what a joining client receives in M7.
 
-**Driving ticks.** The integrated client adds `min(frame_dt, 0.25) × scale` to an accumulator each frame and runs ticks while the accumulator holds a whole tick, at most five per frame. A remainder past the cap is dropped and counted: dropped ticks mean the simulation is running slow, and the tick inspector shows them. The headless server instead sleeps until each tick's deadline and logs overruns.
+**Driving ticks.** The integrated client adds `min(frame_dt, 0.25) × scale` to an accumulator each frame and runs ticks while the accumulator holds a whole tick, at most five per frame. A remainder past the cap is dropped and counted: dropped ticks mean the simulation is running slow, and the tick inspector shows them. Whole ticks of frame time past the 0.25 s clamp count as dropped too. The headless server instead sleeps until each tick's deadline and logs overruns. The driver has no `scale` or pause yet, since nothing uses them; the first consumer, an editor pause or a time-scale setting, adds both.
 
 **Render interpolation.** Extract interpolates between the last two ticks by `alpha = accumulator / tick_dt`, for transforms (the player already works this way) and for world time.
 
@@ -1042,7 +1043,7 @@ Logic networks join in the order `target-architecture.md` gives them (M9): topol
 
 **Randomness** comes from stateless streams, `hash(world_seed, system, tick, key)`. There is no shared generator, so the order in which systems run cannot change a draw.
 
-The **tick inspector** on the Performance panel shows the tick number, ticks run this frame, dropped ticks and the cost of each phase (`roadmap.md` §4.4).
+The **tick inspector** on the Performance panel shows the tick number, ticks run this frame, dropped ticks and the cost of each phase (`roadmap.md` §4.4). Like the panel's other figures it publishes once per second, since a per-frame count read at 60 fps is unreadable: ticks run in the last second and the most in one frame, ticks dropped in the last second and this session, and each phase's mean and longest run per tick. Phase cost is measured server-side (`TickTimings`), by timing systems between the phases, so the headless server reads the same figures (added v1.18).
 
 #### Scheduled, random and block ticks
 
@@ -1123,7 +1124,11 @@ On the client, a camera module computes its area of interest and sends it with `
 
 | Today | Target above | Migrates in |
 |---|---|---|
-| `PlayerClock` (30 Hz), `FluidClock` (10 Hz) and `ClimateClock` (wall clock); time of day, wind and autosave on frame time | One tick, derived sub-rates, a presentation clock | R2 |
+| Time of day and wind are client state in `SimulationManager`, advanced each frame to the simulation time the frame draws (ticks run plus `alpha`), and the editor's time controls set them directly | World time is server state, advanced in tick phase 5 and sent as `ServerUpdate.world_time`; the time controls become `Admin` commands | R5 |
+| Edits, pours and the editor's tools reach the door from the frame, between ticks, as soon as they are issued | Commands queue and apply in tick phase 1 | R5 |
+| Water changes collect in `FluidChanges`, which a frame system drains once per frame to rebuild water meshes | The `changed` feed | R4 |
+| Residency (`streaming_tick_system`) runs once per frame, outside the tick | Tick phase 6 | R6 |
+| `CurrentTick` is not saved, so every session starts at tick 0 | Saved with the world, so due ticks survive a reload | The first scheduled tick (D4's registrable layers) |
 | One `FrameStage` schedule runs simulation and rendering on the main thread | Server tick phases; a client frame with extract; a separate render world | R4, R5 |
 | `LoadedChunk` holds GPU buffers and mesh state; the door returns render rebuild lists | Per-chunk render entries; the `changed` feed | R4 |
 | Residency follows one isometric camera, and streaming drives meshing | Observers; the client chunk view | R6 |
@@ -1270,6 +1275,8 @@ The voxel light field exists regardless of how the renderer works, because an au
 One tick framework, per the scheduling principle in §1. It supersedes the current ad-hoc per-system clocks (`PlayerClock`, `FluidClock`, `ClimateClock`) and provides what simulation systems need beyond a fixed step: scheduled block updates, random ticks over resident regions with a defined distribution, sub-rate clocks derived from the primary tick rather than free-running, and a coarse region tick for distant simulation. It is replicated-clock-aware from the start so server and client agree on tick identity.
 
 **Settled in v1.13** as part of the runtime spine (see "Time" and "Scheduled, random and block ticks" under Runtime spine above): one 30 Hz tick with a `SimTick` counter, sub-rates keyed by tick number, a fixed phase order, separate simulation and presentation time, and stateless seeded randomness. Scheduled, random, block and region ticks are designed there and built with their first consumer.
+
+**Built in M3** (R2, added v1.18): the three clocks are gone. `world/tick.rs` holds the rate, the counter, the tick schedule and its phases; the client's `TickDriver` and `PresentationClock` live in `ecs/clocks.rs`.
 
 ### Registry identity and save-embedded mapping (added v1.8)
 
