@@ -1,4 +1,3 @@
-use std::time::Instant;
 use glam::Mat4;
 use bevy_ecs::prelude::Resource;
 
@@ -49,8 +48,6 @@ pub struct SimulationManager {
     pub wind: WindState,
     pub cloud_shadow: CloudShadowState,
     pub frustum: Frustum,
-    pub elapsed: f32,
-    last_frame: Instant,
 }
 
 impl SimulationManager {
@@ -62,24 +59,20 @@ impl SimulationManager {
             wind: WindState::new(),
             cloud_shadow,
             frustum: Frustum::from_view_projection(vp),
-            elapsed: 0.0,
-            last_frame: Instant::now(),
         }
     }
 
-    /// Advance all simulation systems by one frame.
+    /// Advance all simulation systems by one frame. `dt` and `elapsed` are the
+    /// frame's presentation time (`PresentationClock`).
     pub fn tick(
         &mut self,
         params: &EngineParams,
         rt: &RenderTargets,
         input: &InputState,
         follow: Option<glam::Vec3>,
+        dt: f32,
+        elapsed: f32,
     ) -> FrameState {
-        let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32();
-        self.last_frame = now;
-        self.elapsed += dt;
-
         // Camera
         self.camera.apply_params(&params.camera);
         self.camera.update(dt, input, &params.camera, follow);
@@ -157,7 +150,7 @@ impl SimulationManager {
 
         FrameState {
             dt,
-            elapsed: self.elapsed,
+            elapsed,
             view_proj: snapped.view_proj,
             subpixel_offset: snapped.subpixel_offset,
             light_space: self.time_of_day.light_space_matrix(self.camera.smooth_target, shadow_radius),

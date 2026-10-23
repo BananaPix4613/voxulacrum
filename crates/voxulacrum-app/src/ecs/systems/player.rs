@@ -14,7 +14,7 @@ use crate::world::mutation::EngineMode;
 pub fn player_render_prep_system(
     ctx: Res<RenderContext>,
     world: Res<VoxelWorld>,
-    clock: Res<crate::player::systems::PlayerClock>,
+    driver: Res<crate::ecs::clocks::TickDriver>,
     sim: Res<SimulationManager>,
     render_targets: Res<RenderTargets>,
     players: Query<&crate::player::systems::Player>,
@@ -28,7 +28,7 @@ pub fn player_render_prep_system(
     }
     let p = player.unwrap();
     let play = play.unwrap();
-    let feet = p.prev.position.lerp(p.curr.position, clock.alpha());
+    let feet = p.prev.position.lerp(p.curr.position, driver.alpha());
 
     // Snap the RENDERED position to the world texel lattice (sim untouched).
     // The lattice anchor is the world origin - snap_camera pins integer world

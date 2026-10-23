@@ -2,6 +2,7 @@
 //! publishes this frame's `FrameState`.
 
 use bevy_ecs::prelude::*;
+use crate::ecs::clocks::{PresentationClock, TickDriver};
 use crate::ecs::resources::VoxelWorld;
 use crate::input::InputState;
 use crate::rendering::render_targets::RenderTargets;
@@ -19,7 +20,8 @@ pub fn simulation_tick_system(
     render_targets: Res<RenderTargets>,
     input: Res<InputState>,
     world: Res<VoxelWorld>,
-    clock: Res<crate::player::systems::PlayerClock>,
+    clock: Res<PresentationClock>,
+    driver: Res<TickDriver>,
     players: Query<&crate::player::systems::Player>,
     mut commands: Commands,
 ) {
@@ -28,13 +30,13 @@ pub fn simulation_tick_system(
         players
             .iter()
             .next()
-            .map(|p| p.prev.position.lerp(p.curr.position, clock.alpha()))
+            .map(|p| p.prev.position.lerp(p.curr.position, driver.alpha()))
     } else {
         None
     };
     let follow = player_pos.map(|p| p + CAMERA_FOLLOW_OFFSET);
 
-    let frame = sim.tick(&ui.params, &render_targets, &input, follow);
+    let frame = sim.tick(&ui.params, &render_targets, &input, follow, clock.dt, clock.elapsed);
 
     commands.insert_resource(frame);
 }

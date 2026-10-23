@@ -17,3 +17,4 @@ pub mod uniforms;
 pub mod render;
 pub mod regen;
 pub mod persistence;
+pub mod tick;
