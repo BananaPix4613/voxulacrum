@@ -62,7 +62,6 @@ pub struct World {
     event_outbox: Vec<events::WorldEvent>,
 }
 
-use crate::params::TerrainGenParams;
 use voxel_core::{ChunkCoord, LocalPos, MaterialId, MaterialRegistry, Voxel};
 use crate::world::mutation::MutationOrigin;
 
@@ -1096,7 +1095,6 @@ pub struct WorldManager {
     regen_rx: Mutex<Option<mpsc::Receiver<HashMap<ChunkCoord, LoadedChunk>>>>,
     regen_progress: Arc<AtomicU32>,
     regen_total: u32,
-    regen_params: Option<TerrainGenParams>,
     /// Generator the in-flight regen is using; adopted by `World` + streaming
     /// on completion so all three share one `Arc`.
     regen_generator: Option<Arc<WorldGenerator>>,
@@ -1114,7 +1112,6 @@ impl WorldManager {
             regen_rx: Mutex::new(None),
             regen_progress: Arc::new(AtomicU32::new(0)),
             regen_total: 0,
-            regen_params: None,
             regen_generator: None,
             regen_min_y: 0,
             regen_max_y: 4,
@@ -1138,7 +1135,6 @@ impl WorldManager {
     /// built generator the new world will adopt on completion.
     pub fn start_regeneration(
         &mut self,
-        params: &TerrainGenParams,
         generator: Arc<WorldGenerator>,
         positions: Vec<IVec3>,
     ) {
@@ -1150,7 +1146,6 @@ impl WorldManager {
         let total = positions.len() as u32;
         self.regen_total = total;
         self.regen_progress.store(0, Ordering::Relaxed);
-        self.regen_params = Some(params.clone());
         self.regen_generator = Some(generator.clone());
         
         let progress = self.regen_progress.clone();
@@ -1170,7 +1165,7 @@ impl WorldManager {
 
     pub fn poll_regeneration(
         &mut self,
-    ) -> Option<(HashMap<ChunkCoord, LoadedChunk>, TerrainGenParams, Arc<WorldGenerator>)> {
+    ) -> Option<(HashMap<ChunkCoord, LoadedChunk>, Arc<WorldGenerator>)> {
         use std::sync::mpsc::TryRecvError;
 
         // What the channel told us. Computed inside a scope that holds a mutable
@@ -1202,14 +1197,12 @@ impl WorldManager {
 
         match outcome {
             Outcome::Got(chunks) => {
-                let params = self.regen_params.take().unwrap();
                 let generator = self.regen_generator.take().unwrap();
                 log::info!("Background regeneration complete ({} chunks)", chunks.len());
-                Some((chunks, params, generator))
+                Some((chunks, generator))
             }
             Outcome::Done => {
                 log::error!("Background regeneration task ended without a result");
-                self.regen_params = None;
                 self.regen_generator = None;
                 None
             }

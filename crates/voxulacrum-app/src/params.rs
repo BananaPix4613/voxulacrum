@@ -383,61 +383,6 @@ impl Default for CameraParams {
 }
 
 // ============================================================================
-// Terrain generation parameters
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct TerrainGenParams {
-    pub base_height: f32,
-    pub cliff_threshold: f32,
-    pub hill_amplitude: f32,
-    pub hill_frequency: f32,
-    pub ridge_amplitude: f32,
-    pub ridge_frequency: f32,
-    pub detail_amplitude: f32,
-    pub detail_frequency: f32,
-    // Cave system
-    pub cave_enabled: bool,
-    pub cave_spaghetti_freq: f32,      // Frequency for main tunnel noise (default: 0.02)
-    pub cave_spaghetti_thickness: f32, // Threshold width - higher = wider tunnels (default: 0.12)
-    pub cave_noodle_freq: f32,         // Frequency for thin passages (default: 0.04)
-    pub cave_noodle_thickness: f32,    // Threshold for thin passages (default: 0.06)
-    pub cave_cheese_freq: f32,         // Frequency for large chambers (default: 0.008)
-    pub cave_cheese_threshold: f32,    // Threshold - how much noise must exceed to carve (default: 0.6)
-    pub cave_warp_amp: f32,            // Domain warp amplitude for organic shapes (default: 30.0)
-    pub cave_surface_margin: f32,      // Depth below surface before caves begin (default: 4.0)
-    pub cave_y_squash: f32,            // Y-axis frequency multiplier - <1.0 = horizontal bias (default: 0.5)
-    pub water_level: f32,
-}
-
-impl Default for TerrainGenParams {
-    fn default() -> Self {
-        Self {
-            base_height: 32.0,
-            cliff_threshold: 2.0,
-            hill_amplitude: 20.0,
-            hill_frequency: 0.0025,
-            ridge_amplitude: 8.0,
-            ridge_frequency: 0.01,
-            detail_amplitude: 2.0,
-            detail_frequency: 0.05,
-            cave_enabled: true,
-            cave_spaghetti_freq: 0.01,
-            cave_spaghetti_thickness: 0.25,
-            cave_noodle_freq: 0.015,
-            cave_noodle_thickness: 0.2,
-            cave_cheese_freq: 0.008,
-            cave_cheese_threshold: 0.6,
-            cave_warp_amp: 15.0,
-            cave_surface_margin: 2.0,
-            cave_y_squash: 0.5,
-            water_level: 30.0,
-        }
-    }
-}
-
-// ============================================================================
 // Debug parameters
 // ============================================================================
 
@@ -549,7 +494,6 @@ pub struct EngineParams {
     pub palette: PaletteParams,
     pub time_control: TimeControlParams,
     pub camera: CameraParams,
-    pub terrain_gen: TerrainGenParams,
     pub debug: DebugParams,
     pub meshing: MeshingParams,
     pub render_pipeline: RenderPipelineParams,
@@ -569,7 +513,6 @@ impl Default for EngineParams {
             palette: PaletteParams::default(),
             time_control: TimeControlParams::default(),
             camera: CameraParams::default(),
-            terrain_gen: TerrainGenParams::default(),
             debug: DebugParams::default(),
             meshing: MeshingParams::default(),
             render_pipeline: RenderPipelineParams::default(),
@@ -629,7 +572,6 @@ pub enum ParamChangeKind {
     /// producer, left `EngineParams`. Kept for the remesh-on-edit work.
     #[allow(dead_code)]
     MeshInvalidating,
-    RegenerationRequired,
 }
 
 pub struct ParamChangeDetector {
@@ -644,9 +586,6 @@ impl ParamChangeDetector {
     }
     
     pub fn detect(&self, current: &EngineParams) -> ParamChangeKind {
-        if current.terrain_gen != self.previous.terrain_gen {
-            return ParamChangeKind::RegenerationRequired;
-        }
         if (current.render_pipeline.world_pixel_density
             - self.previous.render_pipeline.world_pixel_density).abs() > f32::EPSILON {
             return ParamChangeKind::UniformOnly;
@@ -677,6 +616,16 @@ mod tests {
                   "hardness": 0.0, "permeable": true, "supports_flora": false }
             ] }
         }"#;
+        let params: EngineParams = serde_json::from_str(json).expect("an old preset loads");
+        assert_eq!(params, EngineParams::default());
+    }
+    
+    /// Presets written while `EngineParams` carried terrain-generation sliders
+    /// have a `terrain_gen` block. Those sliders reached no generation code, so
+    /// the block went; such a preset must still load, with the block ignored.
+    #[test]
+    fn a_preset_with_a_terrain_gen_block_still_loads_and_the_block_is_ignored() {
+        let json = r#"{ "terrain_gen": { "base_height": 40.0, "cave_enabled": false } }"#;
         let params: EngineParams = serde_json::from_str(json).expect("an old preset loads");
         assert_eq!(params, EngineParams::default());
     }

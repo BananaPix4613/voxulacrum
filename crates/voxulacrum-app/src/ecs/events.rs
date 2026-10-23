@@ -1,6 +1,6 @@
 use bevy_ecs::prelude::Event;
 
-/// Request a full terrain regeneration from current `TerrainGenParams`.
+/// Request a full terrain regeneration.
 #[derive(Event)]
 pub struct RegenerateWorld;
 

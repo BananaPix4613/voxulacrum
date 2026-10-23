@@ -8,7 +8,6 @@ use crate::rendering::render_context::RenderContext;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
-use crate::ui::panels::UiState;
 use crate::world::{World, WorldManager};
 use crate::world::persistence::WorldPersistence;
 use crate::world::streaming::ChunkStreamingManager;
@@ -48,6 +47,8 @@ impl WorldRegenCoordinator {
     }
     
     /// Poll for regen completion and handle regen requests.
+    /// `regenerate_requested` is an explicit "Regenerate World" request; the
+    /// caller reads progress back from `manager`.
     pub fn tick(
         &mut self,
         world: &mut World,
@@ -55,20 +56,16 @@ impl WorldRegenCoordinator {
         detail_paint: &mut DetailPaintPass,
         scatter: &mut ScatterPass,
         water_pass: &mut WaterPass,
-        ui_state: &mut UiState,
+        regenerate_requested: bool,
         ctx: &RenderContext,
         persistence: &WorldPersistence,
         streaming: &mut ChunkStreamingManager,
     ) {
-        // Feed regeneration status to UI
-        ui_state.regenerating = self.manager.is_regenerating();
-        ui_state.regen_progress = self.manager.progress();
-
         // Regen is authoritative Authoring-mode work (§9). If the user is in Play
         // mode, leave the completed result pending until they return to Authoring
         // rather than swapping (and mode-rejecting) mid-Play.
         if world.mode == EngineMode::Authoring {
-            if let Some((new_chunks, regen_params, regen_generator)) = self.manager.poll_regeneration() {
+            if let Some((new_chunks, regen_generator)) = self.manager.poll_regeneration() {
                 // Swap the completed regeneration into the world through the mutation
                 // API: merge regenerated chunks (retaining untouched ones; a full regen
                 // overwrites all), adopt the shared generator, and mark every chunk
@@ -122,31 +119,16 @@ impl WorldRegenCoordinator {
                     persistence.dictionary_bytes().map(|b| std::sync::Arc::new(b)),
                 );
                 log::info!("Streaming workers rebuilt for new generator");
-
-                ui_state.regenerating = false;
-
-                // If terrain params changed during regen, restart
-                if regen_params != ui_state.params.terrain_gen {
-                    log::info!("Terrain params changed during regeneration, restarting");
-                    match crate::world::world_generator::load_default() {
-                        Ok(gen) => {
-                            let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
-                            self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
-                        }
-                        Err(e) => log::error!("Regen restart: failed to load generator: {e}"),
-                    }
-                }
             }
         }
         
         // Handle explicit "Regenerate World" button press
-        if ui_state.regenerate_requested {
-            ui_state.regenerate_requested = false;
+        if regenerate_requested {
             if !self.manager.is_regenerating() {
                 match crate::world::world_generator::load_default() {
                     Ok(gen) => {
                         let positions: Vec<IVec3> = world.chunks.keys().map(|c| IVec3::from(*c)).collect();
-                        self.manager.start_regeneration(&ui_state.params.terrain_gen, gen, positions);
+                        self.manager.start_regeneration(gen, positions);
                     }
                     Err(e) => log::error!("Regenerate: failed to load generator: {e}"),
                 }
@@ -177,7 +159,6 @@ impl WorldRegenCoordinator {
                         slots,
                     );
                     self.manager.start_regeneration(
-                        &ui_state.params.terrain_gen,
                         std::sync::Arc::new(gen),
                         positions,
                     );
