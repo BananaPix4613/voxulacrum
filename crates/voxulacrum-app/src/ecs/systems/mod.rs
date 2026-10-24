@@ -7,6 +7,7 @@ pub mod hot_reload;
 pub mod simulation;
 pub mod meshing;
 pub mod fluids;
+pub mod chunk_changes;
 pub mod climate;
 pub mod player;
 pub mod visibility;

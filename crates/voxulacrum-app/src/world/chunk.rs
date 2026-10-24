@@ -3,6 +3,7 @@ use glam::IVec3;
 use smallvec::SmallVec;
 use std::time::Instant;
 
+use super::changes::ChunkVersion;
 use super::layers::{DecalLayer, DetailLayers, FluidLayer, LightData, ScatterStore};
 use super::overrides::EditState;
 use super::tags::{BiomeId, ChunkTags, ZoneId};
@@ -114,6 +115,10 @@ pub struct LoadedChunk {
     /// Canopy lobes rooted in this chunk, in world space. Beside `segments` and
     /// for the same reason: render-side derived output, not chunk state.
     pub lobes: Vec<nodegraph_eval::feature::CanopyLobe>,
+    /// The version the door last stamped this chunk with (`world::changes`).
+    /// The default until the chunk's first change.
+    #[allow(dead_code)] // read once the feed drives meshing (R4)
+    pub version: ChunkVersion,
 }
 
 impl LoadedChunk {
@@ -130,6 +135,7 @@ impl LoadedChunk {
             smoothing_distances: None,
             segments: Vec::new(),
             lobes: Vec::new(),
+            version: ChunkVersion::default(),
         }
     }
 

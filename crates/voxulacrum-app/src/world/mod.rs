@@ -20,6 +20,7 @@ pub mod events;
 pub mod blueprint;
 pub mod config;
 pub mod tick;
+pub mod changes;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,7 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
 use chunk::{ChunkNeighbors, LoadedChunk, CHUNK_SIZE, CHUNK_VOLUME};
+use changes::{ChunkChange, ChunkFaces, ChunkLayers, ChunkVersion};
 use layers::{DetailTexel, PrefabId, ScatterFlags, ScatterInstance, StableInstanceId};
 use world_generator::WorldGenerator;
 use mutation::{
@@ -60,6 +62,11 @@ pub struct World {
     /// `world_event_pump_system`; if it ever grows, that is a scheduling bug
     /// rather than a capacity problem.
     event_outbox: Vec<events::WorldEvent>,
+    /// The last version stamped on a chunk; the default until the first change.
+    last_version: ChunkVersion,
+    /// Changes published since the client last drained them: the changed-chunk
+    /// feed (`changes`). Drained once per frame by `chunk_change_system`.
+    change_feed: Vec<ChunkChange>,
 }
 
 use voxel_core::{ChunkCoord, LocalPos, MaterialId, MaterialRegistry, Voxel};
@@ -157,6 +164,8 @@ impl World {
             mode: EngineMode::Authoring,
             mutation_log: MutationLog::default(),
             event_outbox: Vec::new(),
+            last_version: ChunkVersion::default(),
+            change_feed: Vec::new(),
         }
     }
 
@@ -290,6 +299,7 @@ impl World {
                 self.handle_stamp_blueprint(origin, blueprint, yaw)
             }
         };
+        self.publish_changes(&outcome, origin);
         self.mutation_log
             .record(intent_index, intent_name, origin, mode, &outcome);
         if let Some(event) = event {
@@ -301,6 +311,28 @@ impl World {
     /// Take this frame's emitted events, for the pump to publish.
     pub fn drain_events(&mut self) -> std::vec::Drain<'_, events::WorldEvent> {
         self.event_outbox.drain(..)
+    }
+
+    /// Take the changes published since the last drain, oldest first.
+    pub fn drain_changes(&mut self) -> std::vec::Drain<'_, ChunkChange> {
+        self.change_feed.drain(..)
+    }
+
+    /// Stamp each chunk a command changed with a fresh version, and append it to
+    /// the change feed. A chunk that is not resident publishes nothing.
+    fn publish_changes(&mut self, outcome: &MutationOutcome, origin: MutationOrigin) {
+        for &(pos, layers, faces) in &outcome.changed {
+            let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(pos)) else { continue };
+            self.last_version = ChunkVersion(self.last_version.0 + 1);
+            chunk.version = self.last_version;
+            self.change_feed.push(ChunkChange {
+                chunk: chunk.data.coord,
+                version: self.last_version,
+                layers,
+                faces,
+                origin,
+            });
+        }
     }
 
     /// Run one fluid step (design §7): plan every chunk with active cells from
@@ -373,10 +405,15 @@ impl World {
             // An edit changes what a cell can hold, and the fluid layer is not
             // told. Bring any cell the edit left over its new capacity back down
             // to it, judged on the voxel each cell ended the batch with.
+            let mut clamped = false;
             for &(pos, _) in &edits {
                 if let Some(cell) = chunk.data.fluids.cells.get_mut(&pos) {
                     let held = chunk.data.voxels.voxel(pos.to_index());
-                    cell.mass = cell.mass.min(fluid_gen::fluid_capacity(held));
+                    let capacity = fluid_gen::fluid_capacity(held);
+                    if cell.mass > capacity {
+                        cell.mass = capacity;
+                        clamped = true;
+                    }
                 }
             }
 
@@ -391,6 +428,12 @@ impl World {
             chunk.persist_dirty = true;
             chunk.mark_mesh_dirty_from_edit();
             outcome.mesh_invalidated.push(chunk_pos);
+            let layers = if clamped {
+                ChunkLayers::VOXELS | ChunkLayers::FLUID
+            } else {
+                ChunkLayers::VOXELS
+            };
+            outcome.touch(chunk_pos, layers, border_faces(&edits));
         }
 
         // Border neighbors whose mesh must re-cull, unioned across the batch (each
@@ -423,6 +466,7 @@ impl World {
             if remove_scatter_at(chunk, anchor) {
                 chunk.persist_dirty = true;
                 outcome.scatter_rebuild.push(chunk_pos);
+                outcome.touch(chunk_pos, ChunkLayers::SCATTER, ChunkFaces::NONE);
             }
         }
         outcome
@@ -443,6 +487,7 @@ impl World {
             if place_scatter_at(chunk, anchor, world_voxel, prefab) {
                 chunk.persist_dirty = true;
                 outcome.scatter_rebuild.push(chunk_pos);
+                outcome.touch(chunk_pos, ChunkLayers::SCATTER, ChunkFaces::NONE);
             }
         }
         outcome
@@ -488,6 +533,7 @@ impl World {
             if !outcome.water_rebuild.contains(&chunk_pos) {
                 outcome.water_rebuild.push(chunk_pos);
             }
+            outcome.touch(chunk_pos, ChunkLayers::FLUID, ChunkFaces::NONE);
         }
         outcome
     }
@@ -538,6 +584,7 @@ impl World {
                 c.data.edit_state.bucket_mut();
             }
             outcome.water_rebuild.push(pos);
+            outcome.touch(pos, ChunkLayers::FLUID, ChunkFaces::NONE);
         }
         
         outcome
@@ -551,6 +598,7 @@ impl World {
         let mut outcome = MutationOutcome::default();
         let pos: IVec3 = chunk.data.coord.into();
         self.insert_chunk(chunk);
+        outcome.touch(pos, ChunkLayers::ALL, ChunkFaces::ALL);
         for offset in [
             IVec3::new(1, 0, 0),
             IVec3::new(-1, 0, 0),
@@ -617,6 +665,8 @@ impl World {
                 chunk.data.voxels = Arc::new(storage);
                 chunk.mark_mesh_dirty();
                 outcome.mesh_invalidated.push(chunk_pos);
+                // Set when a demotion lets the sea in, which also drowns foliage.
+                let mut wet = false;
 
                 // A seam demotion only ever turns a Cube (fluid capacity 0, so
                 // ocean_fill correctly placed no water) into a SlabBottom
@@ -664,6 +714,7 @@ impl World {
                                 lp.z as usize,
                                 lp.y,
                             );
+                            wet = true;
                         }
                     }
                 }
@@ -679,6 +730,17 @@ impl World {
                     .edit_state
                     .record_voxels(applied.iter().copied());
                 chunk.persist_dirty = true;
+                // Seam demotions lie along the chunk's faces, so every neighbor
+                // re-culls against them, as the mesh marking below does.
+                let layers = if wet {
+                    ChunkLayers::VOXELS
+                        | ChunkLayers::FLUID
+                        | ChunkLayers::DETAIL
+                        | ChunkLayers::SCATTER
+                } else {
+                    ChunkLayers::VOXELS
+                };
+                outcome.touch(chunk_pos, layers, ChunkFaces::ALL);
             }
             chunk.seam_finalized = true;
         }
@@ -716,12 +778,17 @@ impl World {
         chunks: HashMap<ChunkCoord, LoadedChunk>,
         generator: Arc<WorldGenerator>,
     ) -> MutationOutcome {
+        let mut outcome = MutationOutcome::default();
+        // Each swapped chunk is new data. Map keys are unique, so no merge.
+        for &coord in chunks.keys() {
+            outcome.changed.push((coord.into(), ChunkLayers::ALL, ChunkFaces::ALL));
+        }
         self.chunks.extend(chunks);
         self.generator = generator;
         for chunk in self.chunks.values_mut() {
             chunk.mesh_dirty = true;
         }
-        MutationOutcome::default()
+        outcome
     }
     
     /// Handler for [`WorldMutation::StampBlueprint`]. Decomposes the blueprint
@@ -1268,6 +1335,17 @@ fn fluid_edge_mirrors(
     }
 }
 
+/// The faces of a chunk whose boundary cells `edits` touch.
+fn border_faces(edits: &[(LocalPos, Voxel)]) -> ChunkFaces {
+    let mut faces = ChunkFaces::NONE;
+    for &(pos, _) in edits {
+        for offset in chunk::border_dirty_neighbors(pos.to_index() as u16) {
+            faces |= ChunkFaces::toward(offset);
+        }
+    }
+    faces
+}
+
 /// Drop Tier-1 paint and Tier-2/3 scatter anchored to the surface voxel
 /// `(x, sy, z)`, for a column the seam pass has just put underwater. This is the
 /// same submersion cull `StorageBoundary::materialize_foliage` runs at
@@ -1402,6 +1480,8 @@ mod mutation_tests {
             mode,
             mutation_log: MutationLog::default(),
             event_outbox: Vec::new(),
+            last_version: Default::default(),
+            change_feed: Vec::new(),
         }
     }
 
@@ -1754,6 +1834,111 @@ mod mutation_tests {
                 .execute(MutationCommand::system(WorldMutation::InsertLoadedChunk { chunk }))
                 .expect("system command accepted regardless of mode");
         }
+    }
+
+    // ---- The changed-chunk feed (R4) -----------------------------------------
+
+    #[test]
+    fn an_edit_publishes_its_chunk_layers_faces_and_a_fresh_version() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        // Cell (0, 0, 0) lies on the -x, -y and -z faces.
+        world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                chunk: IVec3::ZERO,
+                index: 0,
+                voxel: Voxel::cube(MaterialId(1)),
+            }))
+            .expect("authoring edit accepted");
+        let first: Vec<ChunkChange> = world.drain_changes().collect();
+        let version = world.get_chunk(IVec3::ZERO).unwrap().version;
+        assert_eq!(
+            first,
+            [ChunkChange {
+                chunk: ChunkCoord::from(IVec3::ZERO),
+                version,
+                layers: ChunkLayers::VOXELS,
+                faces: ChunkFaces::toward(IVec3::NEG_X)
+                    | ChunkFaces::toward(IVec3::NEG_Y)
+                    | ChunkFaces::toward(IVec3::NEG_Z),
+                origin: MutationOrigin::Authoring,
+            }],
+        );
+        assert!(version > ChunkVersion::default(), "a change stamps a real version");
+
+        world
+            .execute(MutationCommand::authoring(WorldMutation::EditVoxel {
+                chunk: IVec3::ZERO,
+                index: 0,
+                voxel: Voxel::cube(MaterialId(2)),
+            }))
+            .expect("authoring edit accepted");
+        let second: Vec<ChunkChange> = world.drain_changes().collect();
+        assert_eq!(second.len(), 1);
+        assert!(second[0].version > version, "every change moves the version on");
+        assert_eq!(world.get_chunk(IVec3::ZERO).unwrap().version, second[0].version);
+    }
+
+    #[test]
+    fn a_pour_publishes_fluid_only() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        world
+            .execute(MutationCommand::authoring(WorldMutation::PourFluidColumn {
+                anchor: IVec3::new(5, 5, 5),
+            }))
+            .expect("authoring pour accepted");
+        let changes: Vec<ChunkChange> = world.drain_changes().collect();
+        assert_eq!(changes.len(), 1, "the column stays inside one chunk");
+        assert_eq!(changes[0].layers, ChunkLayers::FLUID);
+        assert_eq!(changes[0].faces, ChunkFaces::NONE);
+    }
+
+    #[test]
+    fn an_inserted_chunk_publishes_every_layer_and_face() {
+        let mut world = world_with_air_chunk(EngineMode::Play);
+        world
+            .execute(MutationCommand::system(WorldMutation::InsertLoadedChunk {
+                chunk: LoadedChunk::new_air(IVec3::new(1, 0, 0)),
+            }))
+            .expect("system insert accepted");
+        let changes: Vec<ChunkChange> = world.drain_changes().collect();
+        assert_eq!(changes.len(), 1, "only the inserted chunk's data changed");
+        assert_eq!(changes[0].chunk, ChunkCoord::from(IVec3::new(1, 0, 0)));
+        assert_eq!(changes[0].layers, ChunkLayers::ALL);
+        assert_eq!(changes[0].faces, ChunkFaces::ALL);
+        assert_eq!(changes[0].origin, MutationOrigin::System);
+    }
+
+    #[test]
+    fn a_rejected_command_publishes_nothing() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let result = world.execute(MutationCommand::play(WorldMutation::EditVoxel {
+            chunk: IVec3::ZERO,
+            index: 0,
+            voxel: Voxel::cube(MaterialId(1)),
+        }));
+        assert!(result.is_err(), "a Play edit is refused in Authoring");
+        assert_eq!(world.drain_changes().count(), 0);
+    }
+
+    #[test]
+    fn a_regeneration_swap_publishes_the_swapped_chunks_only() {
+        let mut world = world_with_air_chunk(EngineMode::Authoring);
+        let generator = world.generator.clone();
+        let mut chunks = HashMap::new();
+        chunks.insert(
+            ChunkCoord::from(IVec3::new(2, 0, 0)),
+            LoadedChunk::new_air(IVec3::new(2, 0, 0)),
+        );
+        world
+            .execute(MutationCommand::authoring(WorldMutation::SwapRegeneratedChunks {
+                chunks,
+                generator,
+            }))
+            .expect("authoring swap accepted");
+        let changes: Vec<ChunkChange> = world.drain_changes().collect();
+        assert_eq!(changes.len(), 1, "the retained chunk's data did not change");
+        assert_eq!(changes[0].chunk, ChunkCoord::from(IVec3::new(2, 0, 0)));
+        assert_eq!(changes[0].layers, ChunkLayers::ALL);
     }
 
     // ---- A chunk promoted to a Full save keeps saving Full (F1, #1) ----------

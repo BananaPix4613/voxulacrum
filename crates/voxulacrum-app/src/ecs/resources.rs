@@ -200,12 +200,3 @@ impl Deref for VoxelWorld {
 impl DerefMut for VoxelWorld {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
-
-/// Chunks whose fluid changed since the frame last rebuilt their water meshes.
-/// The fluid tick phase and the editor's pour add to it; `water_rebuild_system`
-/// drains it once per frame, however many ticks ran. R4's changed-chunk feed
-/// replaces it.
-#[derive(Resource, Default)]
-pub struct FluidChanges {
-    pub chunks: std::collections::HashSet<glam::IVec3>,
-}

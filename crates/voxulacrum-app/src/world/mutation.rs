@@ -20,6 +20,7 @@ use voxel_core::{ChunkCoord, LocalPos, ResolvedBlueprint, Voxel, Yaw};
 
 use super::fluid_sim::ChunkPlan;
 use super::layers::PrefabId;
+use super::changes::{ChunkFaces, ChunkLayers};
 use super::chunk::LoadedChunk;
 use super::world_generator::WorldGenerator;
 
@@ -113,6 +114,10 @@ pub struct MutationOutcome {
     pub water_rebuild: SmallVec<[IVec3; 4]>,
     /// Chunks newly mesh-invalidated (the caller submits them to the mesher).
     pub mesh_invalidated: SmallVec<[IVec3; 4]>,
+    /// Chunks whose data changed, with the layers and boundary faces changed,
+    /// one entry per chunk. `World::execute` stamps each with a version and
+    /// publishes it to the change feed, which replaces the three lists above (R4).
+    pub changed: SmallVec<[(IVec3, ChunkLayers, ChunkFaces); 4]>,
 }
 
 impl MutationOutcome {
@@ -122,6 +127,21 @@ impl MutationOutcome {
         self.scatter_rebuild.extend(other.scatter_rebuild);
         self.water_rebuild.extend(other.water_rebuild);
         self.mesh_invalidated.extend(other.mesh_invalidated);
+        for (chunk, layers, faces) in other.changed {
+            self.touch(chunk, layers, faces);
+        }
+    }
+    
+    /// Record that the command changed `layers` and `faces` of `chunk`, merged
+    /// into an earlier record of the same chunk.
+    pub fn touch(&mut self, chunk: IVec3, layers: ChunkLayers, faces: ChunkFaces) {
+        match self.changed.iter_mut().find(|(c, _, _)| *c == chunk) {
+            Some((_, l, f)) => {
+                *l |= layers;
+                *f |= faces;
+            }
+            None => self.changed.push((chunk, layers, faces)),
+        }
     }
 }
 

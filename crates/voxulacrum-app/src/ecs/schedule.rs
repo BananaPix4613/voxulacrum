@@ -100,7 +100,7 @@ pub fn build_frame_schedule() -> Schedule {
         systems::fluids::fluid_pour_system
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::picking_system), // needs the current pick
-        systems::fluids::water_rebuild_system
+        systems::chunk_changes::chunk_change_system
             .in_set(FrameStage::Simulation)
             .after(systems::tick::run_ticks_system)
             .after(systems::fluids::fluid_pour_system),
