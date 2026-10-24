@@ -79,6 +79,8 @@ pub struct UiState {
     pub total_triangles: u64,
     pub chunks_visible: u32,
     pub chunks_total: u32,
+    /// Draws the render graph issued last frame; egui's are not counted.
+    pub draws: u32,
     /// Wood capsules across resident chunks, awaiting the impostor pass.
     pub branch_segments: u64,
     /// Canopy lobes across resident chunks, awaiting the depth-core pass.
@@ -159,6 +161,7 @@ impl UiState {
             total_triangles: 0,
             chunks_visible: 0,
             chunks_total: 0,
+            draws: 0,
             branch_segments: 0,
             canopy_lobes: 0,
             shader_log: Vec::new(),
@@ -1106,6 +1109,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
         }
         ui.separator();
         ui.label(format!("Triangles: {}", format_number(state.total_triangles)));
+        ui.label(format!("Draws: {}", format_number(u64::from(state.draws))));
         ui.label(format!("Chunks: {}/{}", state.chunks_visible, state.chunks_total));
         if state.chunks_total > 0 {
             let cull_pct = (1.0 - state.chunks_visible as f64 / state.chunks_total as f64) * 100.0;

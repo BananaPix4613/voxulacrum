@@ -1,6 +1,6 @@
 use bevy_ecs::prelude::Resource;
 use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::uniforms::OutlineUniforms;
 
 #[derive(Resource)]
@@ -272,8 +272,8 @@ impl RenderPassNode for OutlinePass {
         }
     }
 
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32 {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("outline_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: resources.get(ResourceId::PROCESSED),
@@ -287,8 +287,10 @@ impl RenderPassNode for OutlinePass {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let mut pass = CountingPass::new(pass);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
+        pass.draws()
     }
 }

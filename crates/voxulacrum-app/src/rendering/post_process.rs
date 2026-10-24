@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::Resource;
 
 use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::pipelines;
 use crate::rendering::uniforms::{self, PostProcessUniforms};
 
@@ -118,8 +118,8 @@ impl RenderPassNode for PostProcessPass {
         }
     }
 
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32 {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("post_process_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: resources.get(ResourceId::SCENE),
@@ -133,8 +133,10 @@ impl RenderPassNode for PostProcessPass {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let mut pass = CountingPass::new(pass);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
+        pass.draws()
     }
 }

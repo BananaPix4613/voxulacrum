@@ -1,5 +1,5 @@
 use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::world::chunk::LoadedChunk;
 
 /// Transient per-frame node - borrows from AppState.
@@ -21,8 +21,8 @@ impl<'a> RenderPassNode for ShadowPassNode<'a> {
         }
     }
 
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, _resources: &ResourceMap) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, _resources: &ResourceMap) -> u32 {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("shadow_pass"),
             color_attachments: &[],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -36,6 +36,7 @@ impl<'a> RenderPassNode for ShadowPassNode<'a> {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let mut pass = CountingPass::new(pass);
         pass.set_pipeline(self.pipeline);
         pass.set_bind_group(0, self.bind_group, &[]);
         for &chunk in self.chunks {
@@ -58,5 +59,6 @@ impl<'a> RenderPassNode for ShadowPassNode<'a> {
                 pass.draw(0..6, 0..caps.instance_count);
             }
         }
+        pass.draws()
     }
 }

@@ -213,6 +213,7 @@ impl Recording {
             chunks_visible: ui.chunks_visible,
             chunks_meshed: ui.chunks_total,
             triangles: ui.total_triangles,
+            draws: ui.draws,
             cpu_memory_mb: ui.residency.cpu_bytes() as f32 / BYTES_PER_MB,
             gpu_memory_mb: ui.residency.gpu_mesh_bytes as f32 / BYTES_PER_MB,
         }

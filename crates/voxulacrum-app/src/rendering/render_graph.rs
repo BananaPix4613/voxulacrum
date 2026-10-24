@@ -65,7 +65,52 @@ impl<'a> ResourceMap<'a> {
 /// Trait for render passes that participate in the graph.
 pub trait RenderPassNode {
     fn declaration(&self) -> PassDecl;
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap);
+    /// Record the pass, returning how many draws it issued.
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32;
+}
+
+/// A render pass that counts the draws recorded into it, for the Performance
+/// panel's draw count. It derefs to the wrapped `wgpu::RenderPass`, so a node
+/// records through it unchanged; only `draw` and `draw_indexed` are counted. A
+/// node that draws any other way (indirect, multi-draw) is not counted.
+pub struct CountingPass<'e> {
+    pass: wgpu::RenderPass<'e>,
+    draws: u32,
+}
+
+impl<'e> CountingPass<'e> {
+    pub fn new(pass: wgpu::RenderPass<'e>) -> Self {
+        Self { pass, draws: 0 }
+    }
+
+    pub fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
+        self.pass.draw(vertices, instances);
+        self.draws += 1;
+    }
+
+    pub fn draw_indexed(
+        &mut self,
+        indices: std::ops::Range<u32>,
+        base_vertex: i32,
+        instances: std::ops::Range<u32>,
+    ) {
+        self.pass.draw_indexed(indices, base_vertex, instances);
+        self.draws += 1;
+    }
+
+    /// Draws recorded so far.
+    pub fn draws(&self) -> u32 {
+        self.draws
+    }
+}
+
+impl<'e> std::ops::Deref for CountingPass<'e> {
+    type Target = wgpu::RenderPass<'e>;
+    fn deref(&self) -> &Self::Target { &self.pass }
+}
+
+impl std::ops::DerefMut for CountingPass<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.pass }
 }
 
 /// Collects passes and executes them in order.
@@ -105,10 +150,12 @@ impl<'a> RenderGraph<'a> {
         Ok(())
     }
     
-    /// Execute all passes in order.
-    pub fn execute(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) {
+    /// Execute all passes in order, returning the draws they issued.
+    pub fn execute(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32 {
+        let mut draws = 0;
         for pass in &self.passes {
-            pass.record(encoder, resources);
+            draws += pass.record(encoder, resources);
         }
+        draws
     }
 }

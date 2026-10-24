@@ -1,5 +1,5 @@
 use crate::rendering::frustum::Frustum;
-use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::water_pass::WaterPass;
 
 /// Dedicated water pass (design §7 rendering). Runs after the opaque scene: copies
@@ -26,9 +26,9 @@ impl<'a> RenderPassNode for WaterScenePassNode<'a> {
         }
     }
     
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) {
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32 {
         if self.hide_water || self.water_pass.chunk_meshes.is_empty() {
-            return;
+            return 0;
         }
         
         // Snapshot the opaque scene for the shader to sample.
@@ -48,7 +48,7 @@ impl<'a> RenderPassNode for WaterScenePassNode<'a> {
             self.tex_size,
         );
         
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("water_pass"),
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
@@ -67,6 +67,7 @@ impl<'a> RenderPassNode for WaterScenePassNode<'a> {
             occlusion_query_set: None,
         });
         
+        let mut pass = CountingPass::new(pass);
         pass.set_pipeline(self.pipeline);
         pass.set_bind_group(0, self.global_bind_group, &[]);
         pass.set_bind_group(1, &self.water_pass.bind_group, &[]);
@@ -77,5 +78,6 @@ impl<'a> RenderPassNode for WaterScenePassNode<'a> {
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
+        pass.draws()
     }
 }

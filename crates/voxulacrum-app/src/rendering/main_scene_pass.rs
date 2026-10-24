@@ -1,7 +1,7 @@
 use crate::rendering::cap_pass::CapPass;
 use crate::rendering::debug_lines::DebugLinePass;
 use crate::rendering::frustum::Frustum;
-use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::scatter_pass::ScatterPass;
@@ -55,8 +55,8 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         }
     }
 
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32 {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("main_pass"),
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
@@ -95,6 +95,8 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        
+        let mut pass = CountingPass::new(pass);
 
         // Terrain
         pass.set_pipeline(self.terrain_pipeline);
@@ -288,5 +290,6 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.draw(0..self.debug_line_pass.overlay_count, 0..1);
         }
+        pass.draws()
     }
 }

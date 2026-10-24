@@ -182,7 +182,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         label: Some("render_encoder"),
     });
 
-    {
+    let draws = {
         let ui = ecs.resource::<UiState>();
         let world = ecs.resource::<VoxelWorld>();
         let sim = ecs.resource::<SimulationManager>();
@@ -347,8 +347,9 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         resources.insert(ResourceId::SHADOW_DEPTH, &shadow_depth_view.0);
         resources.insert(ResourceId::SURFACE, &surface_view);
 
-        graph.execute(&mut encoder, &resources);
-    }
+        graph.execute(&mut encoder, &resources)
+    };
+    ecs.resource_mut::<UiState>().draws = draws;
 
     // --- Egui draw ---
     let window_arc = ecs.resource::<WindowHandle>().0.clone();

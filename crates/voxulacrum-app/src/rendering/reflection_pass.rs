@@ -2,7 +2,7 @@ use wgpu::CommandEncoder;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
 use crate::rendering::frustum::Frustum;
 use crate::rendering::player_pass::PlayerPass;
-use crate::rendering::render_graph::{PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::world::chunk::LoadedChunk;
@@ -40,11 +40,11 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
         PassDecl { name: "reflection", reads: &[ResourceId::SHADOW_DEPTH], writes: &[] }
     }
 
-    fn record(&self, encoder: &mut CommandEncoder, _resources: &ResourceMap) {
+    fn record(&self, encoder: &mut CommandEncoder, _resources: &ResourceMap) -> u32 {
         if !self.enabled {
-            return;
+            return 0;
         }
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("reflection_pass"),
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
@@ -67,6 +67,8 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
             occlusion_query_set: None,
         });
 
+        let mut pass = CountingPass::new(pass);
+        
         // Terrain (mirror-culled variant).
         pass.set_pipeline(self.terrain_pipeline);
         pass.set_bind_group(0, self.reflection_bind_group, &[]);
@@ -142,5 +144,6 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
             pass.set_index_buffer(self.player_pass.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.player_pass.body_index_count, 0, 0..1);
         }
+        pass.draws()
     }
 }
