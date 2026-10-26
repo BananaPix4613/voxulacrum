@@ -144,12 +144,6 @@ impl WaterPass {
         self.chunk_surface.remove(&pos);
         self.recompute_avg();
     }
-
-    /// Clear all water meshes (used during regen).
-    pub fn clear_all(&mut self) {
-        self.chunk_meshes.clear();
-        self.chunk_surface.clear();
-    }
 }
 
 // Surface welding/flow tuning (voxel units).

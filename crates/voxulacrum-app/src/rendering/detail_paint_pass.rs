@@ -139,11 +139,6 @@ impl DetailPaintPass {
             foliage: foliage.clone(),
         }
     }
-    
-    /// The foliage registry this pass was built with (used to rebuild on regen).
-    pub fn foliage(&self) -> &Arc<FoliageRegistry> {
-        &self.foliage
-    }
 
     /// Build (or refresh) per-chunk paint buffers for a single chunk.
     pub fn add_chunk(&mut self, pos: IVec3, world: &World, device: &wgpu::Device) {

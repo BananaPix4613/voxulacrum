@@ -103,11 +103,6 @@ impl ScatterPass {
     pub fn remove_chunk(&mut self, pos: IVec3) {
         self.chunk_scatter.remove(&pos);
     }
-
-    /// The prefab registry this pass was built with (used to rebuild on regen).
-    pub fn prefabs(&self) -> &Arc<PrefabRegistry> {
-        &self.prefabs
-    }
 }
 
 /// Build per-prefab instance buffers for one chunk. `None` if it has no scatter.

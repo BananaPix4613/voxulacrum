@@ -506,24 +506,3 @@ fn parse_chunk_pos_from_filename(name: &str) -> Option<IVec3> {
         parts[2].parse().ok()?,
     ))
 }
-
-// ============================================================================
-// World generation cache
-// ============================================================================
-
-pub fn clear_world_cache(cache_dir: &Path) -> io::Result<u64> {
-    let parent = cache_dir.parent().unwrap_or(cache_dir);
-    let mut count = 0u64;
-    if parent.exists() {
-        for entry in std::fs::read_dir(parent)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("world_") && name_str.ends_with(".bin") {
-                let _ = std::fs::remove_file(entry.path());
-                count += 1;
-            }
-        }
-    }
-    Ok(count)
-}
