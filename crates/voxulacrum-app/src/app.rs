@@ -31,7 +31,7 @@ use crate::rendering::palette_pass::PalettePass;
 use crate::rendering::cap_pass::CapPass;
 use crate::shader_reload::ShaderWatcher;
 use crate::simulation::manager::SimulationManager;
-use crate::meshing::coordinator::MeshingCoordinator;
+use crate::meshing::coordinator::{ChunkMeshes, MeshingCoordinator};
 use crate::meshing::MeshingPipeline;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::world::persistence::WorldPersistence;
@@ -509,8 +509,8 @@ fn init_ecs(
     ui_state.gpu = gpu_label;
 
     // Meshing
-    let mut meshing_pipeline = MeshingPipeline::new(&ui_state.params.mesh_cache);
-    meshing_pipeline.submit_all_dirty(&world);
+    // The startup chunks reach it through the change feed, like any other load.
+    let meshing_pipeline = MeshingPipeline::new(&ui_state.params.mesh_cache);
     let meshing = MeshingCoordinator::new(meshing_pipeline);
 
     // -----------------------------------------------------------------------
@@ -566,6 +566,7 @@ fn init_ecs(
     ecs.insert_resource(shader_watcher);
     ecs.insert_resource(graph_watcher);
     ecs.insert_resource(meshing);
+    ecs.insert_resource(ChunkMeshes::default());
     ecs.insert_resource(WorldRegenCoordinator::new(gen_pool.clone()));
     // `persistence` was opened earlier, before world generation (see above).
     let db_path = persistence.db_path.clone();

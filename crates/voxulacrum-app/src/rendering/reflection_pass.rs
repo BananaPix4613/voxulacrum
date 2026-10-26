@@ -5,7 +5,7 @@ use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::capsule_pass::CapsulePass;
-use crate::world::chunk::LoadedChunk;
+use crate::meshing::coordinator::ChunkMesh;
 
 /// Planar water reflection pass. Re-renders terrain + foliage + scatter + player
 /// into the half-res reflection targets with the mirrored view-projection
@@ -20,7 +20,7 @@ pub struct ReflectionPassNode<'a> {
     pub sky_color: wgpu::Color,
     pub terrain_pipeline: &'a wgpu::RenderPipeline, // cull-None mirror variant
     pub reflection_bind_group: &'a wgpu::BindGroup,
-    pub chunks: &'a [&'a LoadedChunk],
+    pub chunks: &'a [&'a ChunkMesh],
     pub frustum: &'a Frustum,
     pub detail_paint_pass: &'a DetailPaintPass,
     pub detail_paint_pipeline: &'a wgpu::RenderPipeline,
@@ -72,12 +72,10 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
         // Terrain (mirror-culled variant).
         pass.set_pipeline(self.terrain_pipeline);
         pass.set_bind_group(0, self.reflection_bind_group, &[]);
-        for &chunk in self.chunks {
-            if let Some(mesh) = &chunk.mesh {
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-            }
+        for &mesh in self.chunks {
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
         }
 
         // Tier-1 detail paint.

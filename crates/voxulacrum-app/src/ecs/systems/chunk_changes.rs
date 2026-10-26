@@ -7,29 +7,56 @@ use glam::IVec3;
 use super::meshing::rebuild_water_with_neighbors;
 use crate::diagnostics::{FrameTimings, SUB_FLUID};
 use crate::ecs::resources::VoxelWorld;
+use crate::meshing::coordinator::MeshingCoordinator;
 use crate::rendering::render_context::RenderContext;
+use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
-use crate::world::changes::ChunkLayers;
+use crate::world::changes::{ChunkChange, ChunkLayers};
+use crate::world::mutation::MutationOrigin;
 
-/// Drain the change feed, however many ticks ran since the last frame, and
-/// rebuild the water meshes of chunks whose fluid alone changed. A change that
-/// also touched voxels is left to meshing, which rebuilds a chunk's water when
-/// its new mesh lands, so water and terrain appear on the same frame.
+/// Drain the change feed, however many ticks ran since the last frame. Runs
+/// after streaming and seam finalization and before meshing, so a chunk changed
+/// this frame starts meshing this frame.
 ///
-/// Meshing and the foliage buffers still follow the door's rebuild lists; the
-/// feed takes them over next (R4).
+/// A voxel change re-meshes the chunk and the resident neighbor across each
+/// face it changed; an actor's edit is debounced and meshed ahead of streaming.
+/// Meshing rebuilds a chunk's foliage and water when its new mesh lands, so a
+/// change that touched voxels needs nothing else here. A change that left the
+/// voxels alone rebuilds what it touched directly: water (with the neighbors its
+/// surface welds to) and scatter.
 pub fn chunk_change_system(
     mut world: ResMut<VoxelWorld>,
+    mut meshing: ResMut<MeshingCoordinator>,
     mut water_pass: ResMut<WaterPass>,
+    mut scatter: ResMut<ScatterPass>,
     ctx: Res<RenderContext>,
     mut timings: ResMut<FrameTimings>,
 ) {
+    let changes: Vec<ChunkChange> = world.0.drain_changes().collect();
+    let mut water: Vec<IVec3> = Vec::new();
+    for change in changes {
+        let pos = IVec3::from(change.chunk);
+        // Evicted since the change was published.
+        if world.0.get_chunk(pos).is_none() {
+            continue;
+        }
+        if change.layers.contains(ChunkLayers::VOXELS) {
+            let edit = change.origin != MutationOrigin::System;
+            meshing.pipeline.invalidate(pos, edit);
+            for offset in change.faces.neighbor_offsets() {
+                if world.0.get_chunk(pos + offset).is_some() {
+                    meshing.pipeline.invalidate(pos + offset, edit);
+                }
+            }
+            continue;
+        }
+        if change.layers.contains(ChunkLayers::FLUID) {
+            water.push(pos);
+        }
+        if change.layers.contains(ChunkLayers::SCATTER) {
+            scatter.add_chunk(pos, &world.0, &ctx.device);
+        }
+    }
     let _timer = timings.sub_timer(SUB_FLUID);
-    let fluid_only: Vec<IVec3> = world
-        .0
-        .drain_changes()
-        .filter(|c| c.layers.contains(ChunkLayers::FLUID) && !c.layers.contains(ChunkLayers::VOXELS))
-        .map(|c| IVec3::from(c.chunk))
-        .collect();
-    rebuild_water_with_neighbors(&mut water_pass, &world.0, &ctx.device, fluid_only);
+    rebuild_water_with_neighbors(&mut water_pass, &world.0, &ctx.device, water);
 }

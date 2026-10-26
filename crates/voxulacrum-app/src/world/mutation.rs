@@ -3,9 +3,10 @@
 //! (dev-authoring vs play-time) and its intent ([`WorldMutation`]);
 //! [`World::execute`](super::World::execute) validates the origin against the
 //! engine's current [`EngineMode`], then dispatches the intent to its handler.
-//! Each handler owns its own persistence marking, mesh-dirty flagging,
-//! override-bucket creation, and invalidation, so call sites don't sprinkle those
-//! across the codebase. No world mutation bypasses this seam.
+//! Each handler owns its own persistence marking, override-bucket creation and
+//! invalidation, and reports the chunks it changed to the change feed, so call
+//! sites don't sprinkle those across the codebase. No world mutation bypasses
+//! this seam.
 //!
 //! Phase 8 ships only [`EngineMode::Authoring`]; `Play` lands in Phase 9. The
 //! mode-rejection contract is real and unit-tested against synthesized
@@ -102,21 +103,14 @@ impl std::fmt::Display for MutationError {
 }
 impl std::error::Error for MutationError {}
 
-/// Side-effects a successful mutation asks the caller to finish. World-state
-/// changes (storage, overrides, persist/mesh dirty flags) are applied inside the
-/// handler; this reports the GPU-buffer rebuilds that live *outside* `World` so
-/// the calling system can service them (scatter/water passes, mesher).
+/// What a successful mutation changed. The handler applies every world-state
+/// change itself; this names the chunks whose data it changed, which
+/// `World::execute` publishes to the change feed. It names data, never render
+/// work: what to rebuild is the client's decision.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct MutationOutcome {
-    /// Chunks whose scatter instance buffer must be rebuilt.
-    pub scatter_rebuild: SmallVec<[IVec3; 4]>,
-    /// Chunks whose water mesh must be rebuilt.
-    pub water_rebuild: SmallVec<[IVec3; 4]>,
-    /// Chunks newly mesh-invalidated (the caller submits them to the mesher).
-    pub mesh_invalidated: SmallVec<[IVec3; 4]>,
     /// Chunks whose data changed, with the layers and boundary faces changed,
-    /// one entry per chunk. `World::execute` stamps each with a version and
-    /// publishes it to the change feed, which replaces the three lists above (R4).
+    /// one entry per chunk. `World::execute` stamps each with a version.
     pub changed: SmallVec<[(IVec3, ChunkLayers, ChunkFaces); 4]>,
 }
 
@@ -124,9 +118,6 @@ impl MutationOutcome {
     /// Fold another outcome into this one (used when a command touches several
     /// chunks or delegates to sub-handlers).
     pub fn extend(&mut self, other: MutationOutcome) {
-        self.scatter_rebuild.extend(other.scatter_rebuild);
-        self.water_rebuild.extend(other.water_rebuild);
-        self.mesh_invalidated.extend(other.mesh_invalidated);
         for (chunk, layers, faces) in other.changed {
             self.touch(chunk, layers, faces);
         }
@@ -151,8 +142,8 @@ impl MutationOutcome {
 /// `EditVoxelBatch`.
 pub enum WorldMutation {
     /// Set a single voxel at flat `index` within the chunk at `chunk` (chunk-space
-    /// coordinate). Records the change in the override bucket and marks the chunk
-    /// and its border neighbors mesh-dirty.
+    /// coordinate). Records the change in the override bucket and reports the
+    /// chunk's voxels changed, with the faces the cell lies on.
     EditVoxel { chunk: IVec3, index: u16, voxel: Voxel },
     /// Apply a batch of voxel edits to one chunk with a single storage clone
     /// (drift-review 3.1: the single-edit path clones once per voxel). The primary
@@ -189,8 +180,8 @@ pub enum WorldMutation {
     /// part of committing rather than a separate call the caller had to
     /// remember, which is what let drift 1.2 hide for two phases.
     CommitFluidPlans { plans: Vec<(ChunkCoord, ChunkPlan)> },
-    /// Insert a freshly generated/loaded chunk into the resident set and mark its
-    /// six face neighbors mesh-dirty so their boundary faces re-cull against it.
+    /// Insert a freshly generated/loaded chunk into the resident set and report
+    /// every layer and face changed, so its six face neighbors re-cull against it.
     /// Issued by streaming when a generation task completes.
     InsertLoadedChunk { chunk: LoadedChunk },
     /// Drop a chunk from the resident set (streaming eviction). The caller
@@ -211,8 +202,8 @@ pub enum WorldMutation {
     /// uses: compute outside, write inside.
     FinalizeSeam { chunk: IVec3, demotions: Vec<(usize, Voxel)> },
     /// Swap a completed background regeneration into the world: merge the
-    /// regenerated chunks over the resident set, adopt the new generator, and mark
-    /// every resident chunk mesh-dirty. Authoring-mode authoritative regen (§9) -
+    /// regenerated chunks over the resident set, adopt the new generator, and
+    /// report every swapped chunk changed. Authoring-mode authoritative regen (§9) -
     /// the regenerated chunks carry no overrides, so player-shaped state is
     /// intentionally replaced (not a bug; the design's mode model).
     SwapRegeneratedChunks {
@@ -336,9 +327,8 @@ pub struct MutationRecord {
     pub origin: MutationOrigin,
     /// The engine mode at the time - the other half of the coexistence gate.
     pub mode: EngineMode,
-    pub mesh_invalidated: u16,
-    pub scatter_rebuild: u16,
-    pub water_rebuild: u16,
+    /// Chunks whose data the command changed.
+    pub changed: u16,
 }
 
 /// The mutation and event log (roadmap §4.4).
@@ -386,9 +376,7 @@ impl MutationLog {
             intent,
             origin,
             mode,
-            mesh_invalidated: outcome.mesh_invalidated.len().min(u16::MAX as usize) as u16,
-            scatter_rebuild: outcome.scatter_rebuild.len().min(u16::MAX as usize) as u16,
-            water_rebuild: outcome.water_rebuild.len().min(u16::MAX as usize) as u16,
+            changed: outcome.changed.len().min(u16::MAX as usize) as u16,
         });
         self.recent_next = (self.recent_next + 1) % RECENT_LEN;
     }

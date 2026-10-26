@@ -7,6 +7,7 @@ use crate::app::FrameCounter;
 use crate::diagnostics::FrameTimings;
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
+use crate::meshing::coordinator::ChunkMeshes;
 use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
@@ -106,6 +107,7 @@ pub fn frame_timings_frame_end(
 
 pub fn compute_stats_system(
     world: Res<VoxelWorld>,
+    meshes: Res<ChunkMeshes>,
     sim: Res<SimulationManager>,
     frame: Res<FrameState>,
     jobs: Res<JobSystem>,
@@ -120,12 +122,12 @@ pub fn compute_stats_system(
     for chunk in world.0.chunks.values() {
         branch_segments += chunk.segments.len() as u64;
         canopy_lobes += chunk.lobes.len() as u64;
-        if chunk.mesh.is_some() {
-            chunks_total += 1;
-            if sim.frustum.is_chunk_visible(chunk.data.coord.into()) {
-                chunks_visible += 1;
-                total_tris += chunk.mesh.as_ref().unwrap().index_count as u64 / 3;
-            }
+    }
+    for (&pos, mesh) in &meshes.meshes {
+        chunks_total += 1;
+        if sim.frustum.is_chunk_visible(pos) {
+            chunks_visible += 1;
+            total_tris += mesh.index_count as u64 / 3;
         }
     }
     ui.total_triangles = total_tris;
@@ -153,7 +155,11 @@ pub fn compute_stats_system(
     // it runs about once a second rather than joining the per-frame full-set
     // scans that audit §4.9 identifies as the secondary cost at high zoom.
     if ui.residency_countdown == 0 {
-        ui.residency = world.0.sample_residency(ui.residency);
+        let mut residency = world.0.sample_residency(ui.residency);
+        // GPU memory is the client's, so it joins the world's figures here.
+        residency.gpu_mesh_bytes = meshes.gpu_bytes();
+        residency.peak_gpu_bytes = residency.peak_gpu_bytes.max(residency.gpu_mesh_bytes);
+        ui.residency = residency;
         ui.residency_countdown = 60;
     } else {
         ui.residency_countdown -= 1;

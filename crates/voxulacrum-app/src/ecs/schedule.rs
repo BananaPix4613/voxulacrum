@@ -100,10 +100,6 @@ pub fn build_frame_schedule() -> Schedule {
         systems::fluids::fluid_pour_system
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::picking_system), // needs the current pick
-        systems::chunk_changes::chunk_change_system
-            .in_set(FrameStage::Simulation)
-            .after(systems::tick::run_ticks_system)
-            .after(systems::fluids::fluid_pour_system),
         crate::interaction::picking_system
             .in_set(FrameStage::Simulation)
             .after(systems::simulation::simulation_tick_system),
@@ -140,6 +136,10 @@ pub fn build_frame_schedule() -> Schedule {
         systems::jobs::job_pump_system
             .in_set(FrameStage::Meshing)
             .after(systems::streaming::streaming_tick_system),
+        systems::chunk_changes::chunk_change_system
+            .in_set(FrameStage::Meshing)
+            .after(systems::streaming::seam_smoothing_system)
+            .before(systems::meshing::meshing_tick_system),
         systems::meshing::meshing_tick_system.in_set(FrameStage::Meshing),
     ));
     // Field probe (debug): poll/dispatch graph-node inspection eval.

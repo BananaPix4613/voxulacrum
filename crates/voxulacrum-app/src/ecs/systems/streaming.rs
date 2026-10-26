@@ -8,7 +8,7 @@ use crate::diagnostics::{
 };
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
-use crate::meshing::coordinator::MeshingCoordinator;
+use crate::meshing::coordinator::{ChunkMeshes, MeshingCoordinator};
 use crate::rendering::canopy_pass::CanopyPass;
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
@@ -26,6 +26,7 @@ pub fn streaming_tick_system(
     mut streaming: ResMut<ChunkStreamingManager>,
     mut world: ResMut<VoxelWorld>,
     mut meshing: ResMut<MeshingCoordinator>,
+    mut meshes: ResMut<ChunkMeshes>,
     mut jobs: ResMut<JobSystem>,
     sim: Res<SimulationManager>,
     mut detail_paint: ResMut<DetailPaintPass>,
@@ -72,8 +73,10 @@ pub fn streaming_tick_system(
         },
     );
 
-    // Remove detail paint and water for unloaded chunks
+    // Drop the unloaded chunks' meshes and per-chunk buffers. R6 moves this to
+    // the client's chunk view.
     for pos in &tick_result.unloaded {
+        meshes.remove(*pos);
         detail_paint.remove_chunk(*pos);
         scatter.remove_chunk(*pos);
         capsules.remove_chunk(*pos);

@@ -1175,13 +1175,11 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
                         any_recent = true;
                     }
                     ui.label(format!(
-                        "  {:<18}{:<6}{:<10}mesh {}  scatter {}  water {}",
+                        "  {:<18}{:<6}{:<10}chunks {}",
                         r.intent,
                         r.origin.label(),
                         format!("{:?}", r.mode).to_lowercase(),
-                        r.mesh_invalidated,
-                        r.scatter_rebuild,
-                        r.water_rebuild,
+                        r.changed,
                     ));
                 }
             });

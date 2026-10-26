@@ -185,9 +185,9 @@ pub fn blueprint_authoring_system(
                             // One above the clicked surface voxel, matching the
                             // rule `place_blueprints` uses on the generation side.
                             let origin = anchor + IVec3::Y;
-                            // The outcome is discarded on purpose: a stamp fills
-                            // only `mesh_invalidated`, and `meshing_tick_system`
-                            // acts on the chunk's `mesh_dirty` flag every frame.
+                            // The outcome is discarded on purpose: the stamp's
+                            // changed chunks reach meshing through the change
+                            // feed (`chunk_change_system`).
                             let yaw = state.yaw;
                             match world.0.execute(MutationCommand::authoring(
                                 WorldMutation::StampBlueprint { origin, blueprint, yaw },
@@ -437,7 +437,7 @@ pub fn skeleton_debug_system(
     // Occupancy is derived either way: it feeds the readout, and its outline is
     // the one overlay that complements a solid render rather than restating it.
     let root_voxels = origin.as_vec3() + Vec3::new(0.5, 1.0, 0.5);
-    let mut wood: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
+    let mut wood: std::collections::HashSet<IVec3> = std::collections::HashSet::new();
     skeleton.voxelize(root_voxels, |c| {
         wood.insert(c);
     });

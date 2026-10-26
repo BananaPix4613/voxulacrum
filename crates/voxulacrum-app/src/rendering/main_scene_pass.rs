@@ -8,7 +8,7 @@ use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::canopy_pass::CanopyPass;
 use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
-use crate::world::chunk::LoadedChunk;
+use crate::meshing::coordinator::ChunkMesh;
 
 /// Configuration for cross-section cap rendering within the main scene pass.
 pub struct CapConfig {
@@ -25,7 +25,7 @@ pub struct MainScenePassNode<'a> {
     pub sky_color: wgpu::Color,
     pub terrain_pipeline: &'a wgpu::RenderPipeline,
     pub uniform_bind_group: &'a wgpu::BindGroup,
-    pub chunks: &'a [&'a LoadedChunk],
+    pub chunks: &'a [&'a ChunkMesh],
     pub frustum: &'a Frustum,
     // Sub-passes
     pub cap_pass: &'a CapPass,
@@ -101,15 +101,13 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
         // Terrain
         pass.set_pipeline(self.terrain_pipeline);
         pass.set_bind_group(0, self.uniform_bind_group, &[]);
-        for &chunk in self.chunks {
-            if let Some(mesh) = &chunk.mesh {
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(
-                    mesh.index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-            }
+        for &mesh in self.chunks {
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(
+                mesh.index_buffer.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
         }
 
         // Cross-section cap mesh

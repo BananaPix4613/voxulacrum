@@ -68,8 +68,8 @@ impl WorldRegenCoordinator {
             if let Some((new_chunks, regen_generator)) = self.manager.poll_regeneration() {
                 // Swap the completed regeneration into the world through the mutation
                 // API: merge regenerated chunks (retaining untouched ones; a full regen
-                // overwrites all), adopt the shared generator, and mark every chunk
-                // mesh-dirty. Authoring-mode authoritative regen (§9).
+                // overwrites all), adopt the shared generator, and publish the swapped
+                // chunks to the change feed. Authoring-mode authoritative regen (§9).
                 world
                     .execute(MutationCommand::authoring(WorldMutation::SwapRegeneratedChunks {
                         chunks: new_chunks,
@@ -77,9 +77,9 @@ impl WorldRegenCoordinator {
                     }))
                     .expect("authoring regen swap in authoring mode");
 
-                // Reset the meshing pipeline, then resubmit every (now-dirty) chunk.
+                // Reset the meshing pipeline. The swapped chunks reach it again
+                // through the change feed.
                 meshing.pipeline.reset_for_new_world();
-                meshing.pipeline.submit_all_dirty(world);
 
                 let foliage = detail_paint.foliage().clone();
                 *detail_paint = DetailPaintPass::new(ctx, world, &foliage);

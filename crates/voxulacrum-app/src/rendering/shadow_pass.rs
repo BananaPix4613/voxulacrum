@@ -1,13 +1,13 @@
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::world::chunk::LoadedChunk;
+use crate::meshing::coordinator::ChunkMesh;
 
 /// Transient per-frame node - borrows from AppState.
 pub struct ShadowPassNode<'a> {
     pub pipeline: &'a wgpu::RenderPipeline,
     pub bind_group: &'a wgpu::BindGroup,
     pub shadow_depth_view: &'a wgpu::TextureView,
-    pub chunks: &'a [&'a LoadedChunk],
+    pub chunks: &'a [&'a ChunkMesh],
     pub capsule_pass: &'a CapsulePass,
     pub capsule_shadow_pipeline: &'a wgpu::RenderPipeline,
 }
@@ -39,12 +39,10 @@ impl<'a> RenderPassNode for ShadowPassNode<'a> {
         let mut pass = CountingPass::new(pass);
         pass.set_pipeline(self.pipeline);
         pass.set_bind_group(0, self.bind_group, &[]);
-        for &chunk in self.chunks {
-            if let Some(mesh) = &chunk.mesh {
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-            }
+        for &mesh in self.chunks {
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
         }
 
         // Wood casts too. Not view-frustum culled: the shadow frustum is the

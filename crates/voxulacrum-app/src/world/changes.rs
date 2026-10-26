@@ -79,6 +79,15 @@ impl ChunkFaces {
             .position(|&o| o == offset)
             .map_or(Self::NONE, |i| Self(1 << i))
     }
+
+    /// Offsets to the neighbors across the faces in this set.
+    pub fn neighbor_offsets(self) -> impl Iterator<Item = IVec3> {
+        Self::OFFSETS
+            .into_iter()
+            .enumerate()
+            .filter(move |&(i, _)| self.0 & (1 << i) != 0)
+            .map(|(_, offset)| offset)
+    }
 }
 
 impl BitOr for ChunkFaces {
@@ -95,14 +104,12 @@ impl BitOrAssign for ChunkFaces {
 pub struct ChunkChange {
     pub chunk: ChunkCoord,
     /// The version the change left the chunk at.
-    #[allow(dead_code)] // read once the feed drives meshing (R4)
+    #[allow(dead_code)] // read once render entries are tagged with it (R4)
     pub version: ChunkVersion,
     pub layers: ChunkLayers,
     /// Faces whose boundary cells changed; `NONE` unless `layers` has `VOXELS`.
-    #[allow(dead_code)] // read once the feed drives meshing (R4)
     pub faces: ChunkFaces,
     /// The origin of the command that made the change: an actor's edit
     /// (`Authoring` or `PlayTime`) or engine infrastructure (`System`).
-    #[allow(dead_code)] // read once the feed drives meshing (R4)
     pub origin: MutationOrigin,
 }

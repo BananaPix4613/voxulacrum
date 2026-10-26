@@ -5,7 +5,7 @@ use glam::IVec3;
 use crate::diagnostics::{FrameTimings, SUB_UPLOAD};
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
-use crate::meshing::coordinator::MeshingCoordinator;
+use crate::meshing::coordinator::{ChunkMeshes, MeshingCoordinator};
 use crate::rendering::canopy_pass::CanopyPass;
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
@@ -45,7 +45,8 @@ pub(super) fn rebuild_water_with_neighbors(
 
 pub fn meshing_tick_system(
     mut meshing: ResMut<MeshingCoordinator>,
-    mut world: ResMut<VoxelWorld>,
+    mut meshes: ResMut<ChunkMeshes>,
+    world: Res<VoxelWorld>,
     mut jobs: ResMut<JobSystem>,
     sim: Res<SimulationManager>,
     ctx: Res<RenderContext>,
@@ -58,7 +59,7 @@ pub fn meshing_tick_system(
     mut timings: ResMut<FrameTimings>,
 ) {
     let _timer = timings.sub_timer(SUB_UPLOAD);
-    // Phase 1: tick meshing with &mut world - collects meshed positions.
+    // Phase 1: tick meshing, uploading finished meshes - collects meshed positions.
     let cam = sim.camera.smooth_target;
     let camera_chunk = IVec3::new(
         (cam.x / CHUNK_WORLD_SIZE).floor() as i32,
@@ -68,7 +69,8 @@ pub fn meshing_tick_system(
     // Read before `ui` is mutably borrowed by the call below.
     let max_snapshots = ui.params.meshing.max_mesh_per_frame as usize;
     let meshed = meshing.tick(
-        &mut world.0,
+        &world.0,
+        &mut meshes,
         &mut jobs,
         &ctx,
         &mut ui,
@@ -77,7 +79,7 @@ pub fn meshing_tick_system(
     );
 
     // Phase 2: for each newly meshed chunk, build per-chunk foliage
-    // and water GPU buffers. world.0 is now borrowed immutably.
+    // and water GPU buffers.
     if !meshed.is_empty() {
         for pos in &meshed {
             detail_paint.add_chunk(*pos, &world.0, &ctx.device);

@@ -33,7 +33,7 @@ use crate::rendering::water_pass::WaterPass;
 use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui;
 use crate::ui::panels::UiState;
-use crate::world::chunk::LoadedChunk;
+use crate::meshing::coordinator::{ChunkMesh, ChunkMeshes};
 
 // ==========================================================================
 // Render stage — exclusive system (takes &mut World)
@@ -184,7 +184,6 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
     let draws = {
         let ui = ecs.resource::<UiState>();
-        let world = ecs.resource::<VoxelWorld>();
         let sim = ecs.resource::<SimulationManager>();
         let pipeline_registry = ecs.resource::<PipelineRegistry>();
         let shadow_bind_group = ecs.resource::<ShadowBindGroup>();
@@ -215,13 +214,16 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let frame = ecs.resource::<FrameState>();
         let shadow_frustum = Frustum::from_view_projection(frame.light_space);
 
-        // Pre-filter chunks: one list for the camera frustum (main scene),
-        // one for the shadow frustum (shadow pass).
-        let visible_chunks: Vec<&LoadedChunk> = world.0.chunks.values()
-            .filter(|c| c.mesh.is_some() && sim.frustum.is_chunk_visible(c.data.coord.into()))
+        // Pre-filter meshes: one list for the camera frustum (main scene), one
+        // for the shadow frustum (shadow pass).
+        let meshes = ecs.resource::<ChunkMeshes>();
+        let visible_chunks: Vec<&ChunkMesh> = meshes.meshes.iter()
+            .filter(|(pos, _)| sim.frustum.is_chunk_visible(**pos))
+            .map(|(_, mesh)| mesh)
             .collect();
-        let shadow_chunks: Vec<&LoadedChunk> = world.0.chunks.values()
-            .filter(|c| c.mesh.is_some() && shadow_frustum.is_chunk_visible(c.data.coord.into()))
+        let shadow_chunks: Vec<&ChunkMesh> = meshes.meshes.iter()
+            .filter(|(pos, _)| shadow_frustum.is_chunk_visible(**pos))
+            .map(|(_, mesh)| mesh)
             .collect();
 
         let shadow_node = ShadowPassNode {

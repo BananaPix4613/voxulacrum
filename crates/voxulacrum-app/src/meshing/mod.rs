@@ -39,6 +39,21 @@ enum ChunkMeshState {
     InProgress,
 }
 
+/// What a chunk's mesh needs, as the client tracks it. Moved here from
+/// `LoadedChunk`, which holds no mesh state (R4); the change feed drives it
+/// through [`MeshingPipeline::invalidate`].
+#[derive(Clone, Copy, Default)]
+struct MeshRequest {
+    /// Bumped on every invalidation. A result built from an older sequence
+    /// leaves the chunk dirty: a neighbor loaded or an edit landed while it was
+    /// meshing, so its borders may be wrong.
+    seq: u64,
+    /// When an edit last invalidated the chunk. An edited chunk waits out a
+    /// short debounce and meshes ahead of streaming; `None` for one only
+    /// generation and streaming have touched.
+    edited_at: Option<Instant>,
+}
+
 #[derive(Clone, Default)]
 pub struct MeshingStats {
     pub in_progress: usize,
@@ -86,6 +101,10 @@ pub struct MeshingPipeline {
     cache_config: Arc<CacheConfig>,
 
     chunk_states: HashMap<IVec3, ChunkMeshState>,
+    /// Every chunk the pipeline has been asked to mesh, until it unloads.
+    requests: HashMap<IVec3, MeshRequest>,
+    /// Chunks whose current mesh is out of date.
+    dirty: HashSet<IVec3>,
 
     pub stats: MeshingStats,
     batch_start: Option<Instant>,
@@ -136,6 +155,8 @@ impl MeshingPipeline {
             result_rx: Mutex::new(res_rx),
             cache_config,
             chunk_states: HashMap::new(),
+            requests: HashMap::new(),
+            dirty: HashSet::new(),
             stats: MeshingStats { worker_count, ..Default::default() },
             batch_start: None,
             pending_submissions: Vec::new(),
@@ -146,16 +167,27 @@ impl MeshingPipeline {
         }
     }
 
-    /// Queue all dirty chunks for meshing. Actual snapshot creation happens
-    /// incrementally in drain_pending_submissions() to avoid blocking the main thread.
-    pub fn submit_all_dirty(&mut self, world: &crate::world::World) {
+    /// Mark the chunk at `pos` as needing a new mesh. `edit` is true when an
+    /// actor's edit caused it, which debounces the chunk and meshes it ahead of
+    /// streaming.
+    pub fn invalidate(&mut self, pos: IVec3, edit: bool) {
+        let request = self.requests.entry(pos).or_default();
+        request.seq = request.seq.wrapping_add(1);
+        if edit {
+            request.edited_at = Some(Instant::now());
+        }
+        self.dirty.insert(pos);
+    }
+    
+    /// Queue every dirty chunk that is past its edit debounce and not already
+    /// meshing. Snapshots are taken incrementally in `drain_pending_submissions`
+    /// to avoid blocking the main thread.
+    pub fn submit_dirty(&mut self) {
         const DEBOUNCE_MS: u128 = 50;
-        for (coord, chunk) in &world.chunks {
-            if !chunk.mesh_dirty { continue; }
-            if let Some(t) = chunk.mesh_debounce {
+        for &pos in &self.dirty {
+            if let Some(t) = self.requests.get(&pos).and_then(|r| r.edited_at) {
                 if t.elapsed().as_millis() < DEBOUNCE_MS { continue; }
             }
-            let pos: IVec3 = (*coord).into();
             let state = self.chunk_states.get(&pos).copied().unwrap_or(ChunkMeshState::Idle);
             if state != ChunkMeshState::Idle { continue; }
             if self.pending_set.insert(pos) {
@@ -164,6 +196,14 @@ impl MeshingPipeline {
         }
         if !self.pending_submissions.is_empty() && self.batch_start.is_none() {
             self.batch_start = Some(Instant::now());
+        }
+    }
+    
+    /// Record that a mesh built at `seq` landed. The chunk is clean unless it
+    /// was invalidated again while meshing.
+    pub fn mark_meshed(&mut self, pos: IVec3, seq: u64) {
+        if self.requests.get(&pos).is_some_and(|r| r.seq == seq) {
+            self.dirty.remove(&pos);
         }
     }
 
@@ -214,8 +254,11 @@ impl MeshingPipeline {
             let chunk = match world.get_chunk(pos) {
                 Some(c) => c,
                 None => {
+                    // Unloaded: nothing left to mesh, and nothing to track.
                     self.pending_submissions.swap_remove(i);
                     self.pending_set.remove(&pos);
+                    self.dirty.remove(&pos);
+                    self.requests.remove(&pos);
                     continue;
                 }
             };
@@ -236,7 +279,8 @@ impl MeshingPipeline {
                 world.max_chunk_y,
                 world.materials.render_delegated_mask(),
             );
-            let mesh_seq = chunk.mesh_seq;
+            let request = self.requests.get(&pos).copied().unwrap_or_default();
+            let mesh_seq = request.seq;
 
             // Submit to the scheduler; the job returns over the result channel,
             // which `poll` drains. An edit-dirtied chunk (the only thing that sets
@@ -245,7 +289,7 @@ impl MeshingPipeline {
             let dx = pos.x - camera_chunk.x;
             let dz = pos.z - camera_chunk.z;
             let distance = (dx * dx + dz * dz).max(0) as u32;
-            let priority = if chunk.mesh_debounce.is_some() {
+            let priority = if request.edited_at.is_some() {
                 Priority::interactive(distance)
             } else {
                 Priority::streaming(distance)
@@ -318,6 +362,8 @@ impl MeshingPipeline {
 
     pub fn remove_chunk_state(&mut self, pos: IVec3) {
         self.chunk_states.remove(&pos);
+        self.dirty.remove(&pos);
+        self.requests.remove(&pos);
         if self.pending_set.remove(&pos) {
             self.pending_submissions.retain(|p| *p != pos);
         }
