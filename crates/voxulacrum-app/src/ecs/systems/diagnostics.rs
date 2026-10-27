@@ -125,7 +125,7 @@ pub fn compute_stats_system(
     }
     for (&pos, mesh) in &meshes.meshes {
         chunks_total += 1;
-        if sim.frustum.is_chunk_visible(pos) {
+        if frame.camera.frustum.is_chunk_visible(pos) {
             chunks_visible += 1;
             total_tris += mesh.index_count as u64 / 3;
         }

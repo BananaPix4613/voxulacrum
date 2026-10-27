@@ -8,7 +8,6 @@ use crate::rendering::outline_pass::OutlinePass;
 use crate::rendering::palette_pass::PalettePass;
 use crate::rendering::post_process::PostProcessPass;
 use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::water_pass::WaterPass;
@@ -29,7 +28,6 @@ pub fn write_uniforms_system(
     palette_pass: Res<PalettePass>,
     upscale: Res<UpscalePass>,
     water_pass: Res<WaterPass>,
-    render_targets: Res<RenderTargets>,
     loaded_palette: Res<LoadedPalette>,
 ) {
     let reflect_plane = water_pass.avg_surface_y;
@@ -47,7 +45,6 @@ pub fn write_uniforms_system(
         &palette_pass,
         &upscale,
         &water_pass,
-        &render_targets,
         &loaded_palette.0,
         surface.surface_config.width,
         surface.surface_config.height,

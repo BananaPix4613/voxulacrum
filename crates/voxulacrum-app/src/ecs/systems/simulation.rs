@@ -3,9 +3,8 @@
 
 use bevy_ecs::prelude::*;
 use crate::ecs::clocks::{PresentationClock, TickDriver};
-use crate::ecs::resources::VoxelWorld;
+use crate::ecs::resources::{VoxelWorld, WindowHandle};
 use crate::input::InputState;
-use crate::rendering::render_targets::RenderTargets;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::mutation::EngineMode;
@@ -18,7 +17,7 @@ const CAMERA_FOLLOW_OFFSET: glam::Vec3 = glam::Vec3::new(0.0, 1.0, 0.0);
 pub fn simulation_tick_system(
     mut sim: ResMut<SimulationManager>,
     ui: Res<UiState>,
-    render_targets: Res<RenderTargets>,
+    window: Res<WindowHandle>,
     input: Res<InputState>,
     world: Res<VoxelWorld>,
     clock: Res<PresentationClock>,
@@ -39,7 +38,9 @@ pub fn simulation_tick_system(
     let follow = player_pos.map(|p| p + CAMERA_FOLLOW_OFFSET);
 
     sim.advance_world_time(driver.sim_seconds(tick.0), &ui.params);
-    let frame = sim.tick(&ui.params, &render_targets, &input, follow, clock.dt, clock.elapsed);
+    let size = window.inner_size();
+    let surface = (size.width.max(1), size.height.max(1));
+    let frame = sim.tick(&ui.params, surface, &input, follow, clock.dt, clock.elapsed);
 
     commands.insert_resource(frame);
 }

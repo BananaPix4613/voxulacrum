@@ -6,7 +6,7 @@
 //! anchor is highlighted by reusing the debug-line pipeline.
 
 use bevy_ecs::prelude::*;
-use glam::{IVec3, Mat4, Vec3};
+use glam::{IVec3, Vec3};
 use voxel_core::Voxel;
 
 use crate::ecs::resources::VoxelWorld;
@@ -15,7 +15,8 @@ use crate::player::systems::Player;
 use crate::rendering::debug_lines::DebugLinePass;
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::surface_state::SurfaceState;
-use crate::simulation::manager::SimulationManager;
+use crate::rendering::camera_desc::CameraDesc;
+use crate::simulation::manager::FrameState;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 use crate::world::World;
@@ -34,7 +35,7 @@ const MAX_PICK_STEPS: i32 = 4096;
 pub fn picking_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
-    sim: Res<SimulationManager>,
+    frame: Res<FrameState>,
     surface: Res<SurfaceState>,
     world: Res<VoxelWorld>,
     ctx: Res<RenderContext>,
@@ -53,7 +54,7 @@ pub fn picking_system(
     pick.anchor = if buffer.egui_wants_pointer {
         None
     } else {
-        compute_pick(&pointer, &sim, &surface, &world.0)
+        compute_pick(&pointer, &frame.camera, &surface, &world.0)
     };
     debug_lines.set_highlight(&ctx, pick.anchor, HIGHLIGHT_ACTIVE);
 }
@@ -63,7 +64,7 @@ pub fn picking_system(
 /// Authoring's pick and Play mode's reach targeting.
 fn cursor_ray(
     pointer: &PointerState,
-    sim: &SimulationManager,
+    camera: &CameraDesc,
     surface: &SurfaceState,
 ) -> Option<(Vec3, Vec3)> {
     let (cx, cy) = pointer.cursor?;
@@ -76,9 +77,8 @@ fn cursor_ray(
     // Window pixels -> NDC (y flipped).
     let ndc_x = cx / w * 2.0 - 1.0;
     let ndc_y = 1.0 - cy / h * 2.0;
-
-    let vp = Mat4::from_cols_array_2d(&sim.camera.view_projection());
-    let inv = vp.inverse();
+    
+    let inv = camera.view_proj.inverse();
     let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
     let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
     let dir = (far - near).normalize_or_zero();
@@ -92,11 +92,11 @@ fn cursor_ray(
 /// unbounded dev-tool pick).
 fn compute_pick(
     pointer: &PointerState,
-    sim: &SimulationManager,
+    camera: &CameraDesc,
     surface: &SurfaceState,
     world: &World,
 ) -> Option<IVec3> {
-    let (near, dir) = cursor_ray(pointer, sim, surface)?;
+    let (near, dir) = cursor_ray(pointer, camera, surface)?;
     raycast_voxel(world, near, dir)
 }
 
@@ -215,7 +215,7 @@ pub struct PlayerToolState {
 pub fn player_targeting_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
-    sim: Res<SimulationManager>,
+    frame: Res<FrameState>,
     surface: Res<SurfaceState>,
     world: Res<VoxelWorld>,
     ctx: Res<RenderContext>,
@@ -232,7 +232,7 @@ pub fn player_targeting_system(
     } else if let (Some(player), Some(play)) = (player, play.as_deref()) {
         let tuning = &play.player;
         let eye = (player.curr.position + Vec3::new(0.0, tuning.eye_height, 0.0)) / VOXEL_SCALE;
-        cursor_ray(&pointer, &sim, &surface)
+        cursor_ray(&pointer, &frame.camera, &surface)
             .and_then(|(origin, dir)| raycast_voxel_faced(&world.0, origin, dir, f32::INFINITY))
             .map(|(hit, prev)| (hit, prev, hit.as_vec3().distance(eye) <= tuning.reach))
     } else {

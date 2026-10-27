@@ -985,7 +985,7 @@ FrameStage::PostFrame — client housekeeping
 
 These orderings are the engine's scheduling contract: a new system declares its side, and the tick phase or frame stage it runs in. The stage names may change as M3 builds them; the order is the contract. Resources (the chunk store, graph registry, material registry, render context, etc.) live as ECS resources accessed through system parameters, each in the world of the side that owns it.
 
-**Interim shape:** until the render world and the client/server boundary land (roadmap M3, R4 and R5), one schedule runs both sides on the main thread: `Input → Simulation → Meshing → UniformWrite → Render → PostFrame`. In `Simulation`, an exclusive system runs the tick schedule as many times as the frame's time owes (R2); the player step, fluids and autosave are its phases. Climate, time of day, picking and the editor tools run in `Simulation` once per frame; streaming, seam finalization and meshing run in `Meshing`.
+**Interim shape:** until the render world and the client/server boundary land (roadmap M3, R4 and R5), one schedule runs both sides on the main thread: `Input → Simulation → Meshing → UniformWrite → Render → PostFrame`. In `Simulation`, an exclusive system runs the tick schedule as many times as the frame's time owes (R2); the player step, fluids and autosave are its phases. Climate, time of day, picking and the editor tools run in `Simulation` once per frame; streaming, seam finalization, the client's application of the change feed (`chunk_change_system`) and meshing run in `Meshing`, in that order.
 
 The choice of `bevy_ecs` is an implementation detail of the runtime — it does not affect the data model, the graph hierarchy, or any other system described in this document. Any compatible ECS could substitute. The choice is documented here because every cross-cutting system (hot reload, streaming, persistence) integrates through a schedule and must know its ordering.
 
@@ -1077,7 +1077,7 @@ No kind carries `System` origin. System writes (fluid commits, chunk insertion, 
 **Server to client:** one `ServerUpdate { tick, events, changed, acks, players, world_time }` per tick, in a tick-stamped outbox that the client drains by cursor. A frame that ran three ticks reads three updates; a frame that ran none reads none. bevy's double-buffered `Events` stay an intra-schedule tool on each side: they age per schedule run, so across the boundary they would lose the first tick's events whenever a frame ran several ticks.
 
 - `events`: the world events this tick published (`roadmap.md` §6.7).
-- `changed`: `(chunk, version, layers)` for every chunk whose data changed this tick. It replaces the rebuild lists the door returns today (`MutationOutcome`), which name render work rather than data.
+- `changed`: `(chunk, version, layers, faces, origin)` for every chunk whose data changed this tick: the layers that changed, the faces whose boundary cells changed, and the origin of the command that changed them. It names data, never render work. Which neighbors re-mesh and whether an edit is debounced are the client's decisions, and `faces` and `origin` are what it decides them from (revised in R4, which replaced the door's render-shaped rebuild lists with this feed).
 - `acks`: each command accepted, or rejected with a reason.
 - `players`: each player's state at this tick.
 
@@ -1095,6 +1095,8 @@ Rendering reads only a **render world**: a separate `bevy_ecs` world owned by th
 
 - **Per-frame data:** the camera description, lighting and time of day, wind, clip bounds, the visibility mask, player render state, debug lines and HUD data.
 - **Per-chunk entries**, keyed by chunk coordinate: the terrain mesh, water mesh, scatter instances, detail paint, and tree capsules and canopy lobes. Each records the chunk version it was built from. They are derived data (roadmap P17): any of them can be rebuilt from a snapshot at any time, including after a GPU device loss.
+
+**Chunk versions** come from one counter the world owns. Every change the door applies stamps the chunk with the next value, so a version is never reused, even by a chunk that unloads and loads again. Versions are runtime state and are not saved. The startup set is published to the feed as loads, so the client builds it the way it builds a streamed chunk (R4).
 
 **Extract** runs once per frame, after the client drains its updates. It copies the per-frame data and applies `changed` to the per-chunk entries, marking stale ones for rebuild. It never scans every loaded chunk.
 
@@ -1126,14 +1128,13 @@ On the client, a camera module computes its area of interest and sends it with `
 |---|---|---|
 | Time of day and wind are client state in `SimulationManager`, advanced each frame to the simulation time the frame draws (ticks run plus `alpha`), and the editor's time controls set them directly | World time is server state, advanced in tick phase 5 and sent as `ServerUpdate.world_time`; the time controls become `Admin` commands | R5 |
 | Edits, pours and the editor's tools reach the door from the frame, between ticks, as soon as they are issued | Commands queue and apply in tick phase 1 | R5 |
-| Water changes collect in `FluidChanges`, which a frame system drains once per frame to rebuild water meshes | The `changed` feed | R4 |
+| Changes collect in a feed on `World` that `chunk_change_system` drains once per frame, however many ticks ran | `ServerUpdate.changed`, one per tick, drained by cursor | R5 |
 | Residency (`streaming_tick_system`) runs once per frame, outside the tick | Tick phase 6 | R6 |
 | `CurrentTick` is not saved, so every session starts at tick 0 | Saved with the world, so due ticks survive a reload | The first scheduled tick (D4's registrable layers) |
 | One `FrameStage` schedule runs simulation and rendering on the main thread | Server tick phases; a client frame with extract; a separate render world | R4, R5 |
-| `LoadedChunk` holds GPU buffers and mesh state; the door returns render rebuild lists | Per-chunk render entries; the `changed` feed | R4 |
+| Terrain meshes are a client resource (`ChunkMeshes`), what needs re-meshing is tracked by `MeshingPipeline`, and the other per-chunk buffers live in the render passes, which render code reads directly | Per-chunk render entries in the render world, each tagged with its chunk version | R4 |
 | Residency follows one isometric camera, and streaming drives meshing | Observers; the client chunk view | R6 |
 | The whole engine is one app crate. The world code under `world/` reads no editor setting and imports no client module, apart from the two couplings in the rows below this one (R3a) | The crates above | R3 |
-| Regeneration (`world/regen.rs`) swaps the new chunks in through the door and, in the same step, resets the mesh pipeline and rebuilds the scatter, detail-paint and water passes and the streaming manager | A server swap through the door; the client rebuilds from the `changed` feed | R4 |
 | Streaming (`world/streaming.rs`) submits to the mesher, checks it before evicting, and evaluates the isometric view test itself; `ServerConfig`'s load and unload margins size that test | Residency from observers; the margins belong to the camera's area of interest | R6 |
 | `ServerConfig` (`world/config.rs`: streaming budgets, fluid limits, autosave interval) is built from defaults in the app, and nothing loads it from a file | The headless server fills it from its command line | R3c |
 | The cloud automaton (`world/climate.rs`) and the visibility flood (`world/room.rs`) are client modules that live under `world/` | They stay in the app crate when the world code moves | R3b |

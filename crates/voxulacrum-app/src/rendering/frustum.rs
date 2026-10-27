@@ -30,6 +30,7 @@ impl Plane {
 }
 
 /// Six-plane frustum extracted from a view-projection matrix.
+#[derive(Clone, Copy)]
 pub struct Frustum {
     planes: [Plane; 6],
 }

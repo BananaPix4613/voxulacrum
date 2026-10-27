@@ -1,12 +1,13 @@
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::Resource;
 
+use crate::app::{compute_render_dimensions, RenderDims};
 use crate::camera::{IsometricCamera, SnappedCamera};
 use crate::input::InputState;
 use crate::cloud_shadow::CloudShadowState;
 use crate::params::EngineParams;
+use crate::rendering::camera_desc::{AreaOfInterest, CameraDesc, IsoCameraBlock};
 use crate::rendering::frustum::Frustum;
-use crate::rendering::render_targets::RenderTargets;
 use crate::simulation::time_of_day::TimeOfDay;
 use crate::simulation::wind::WindState;
 use crate::world::chunk::VOXEL_SCALE;
@@ -16,8 +17,12 @@ use crate::world::chunk::VOXEL_SCALE;
 pub struct FrameState {
     pub dt: f32,
     pub elapsed: f32,
-    pub view_proj: [[f32; 4]; 4],
-    pub subpixel_offset: [f32; 2],
+    /// This frame's camera description.
+    pub camera: CameraDesc,
+    /// The pixel lattice this frame is drawn on, sized from the window and the
+    /// camera's zoom. Beside the camera rather than in its block, because the
+    /// render targets are sized from it; V8 decides who owns it.
+    pub dims: RenderDims,
     pub light_space: Mat4,
     pub sun_direction: [f32; 3],
     pub sun_color: [f32; 3],
@@ -29,16 +34,14 @@ pub struct FrameState {
     pub mask_origin: [f32; 3],
     pub mask_enabled: u32,
     pub volume_radius: f32,
-    pub view_dir: [f32; 3],
-    pub view_right: [f32; 3],
-    pub view_up: [f32; 3],
     pub debug_mode: u32,
     #[allow(dead_code)] // sky tint uniform; retained for shader wiring
     pub sky_color: [f32; 3],
     pub warm_tint_color: [f32; 3],
     pub warm_tint_strength: f32,
-    pub cos_r: f32,
-    pub sin_r: f32,
+    /// Which way the cross-section cap faces on each axis (+1 or -1), from the
+    /// camera's settled rotation.
+    pub clip_dirs: [f32; 3],
 }
 
 #[derive(Resource)]
@@ -47,7 +50,9 @@ pub struct SimulationManager {
     pub time_of_day: TimeOfDay,
     pub wind: WindState,
     pub cloud_shadow: CloudShadowState,
-    pub frustum: Frustum,
+    /// What the camera culls against, held still while culling is frozen.
+    /// Read through `FrameState::camera`.
+    frustum: Frustum,
     /// The simulation time `advance_world_time` last moved world time to, in
     /// seconds.
     sim_seconds: f64,
@@ -80,14 +85,15 @@ impl SimulationManager {
 
     /// Advance the camera and frustum by one frame and build its `FrameState`.
     /// Time of day and wind come from [`Self::advance_world_time`], called
-    /// first. `dt` and `elapsed` are the frame's presentation time
+    /// first. `surface` is the window's drawable size in pixels, at least 1 on
+    /// each axis. `dt` and `elapsed` are the frame's presentation time
     /// (`PresentationClock`).
     pub fn tick(
         &mut self,
         params: &EngineParams,
-        rt: &RenderTargets,
+        surface: (u32, u32),
         input: &InputState,
-        follow: Option<glam::Vec3>,
+        follow: Option<Vec3>,
         dt: f32,
         elapsed: f32,
     ) -> FrameState {
@@ -95,8 +101,16 @@ impl SimulationManager {
         self.camera.apply_params(&params.camera);
         self.camera.update(dt, input, &params.camera, follow);
 
+        // The lattice this frame is drawn on, from the zoom just updated.
+        let dims = compute_render_dimensions(
+            surface.0,
+            surface.1,
+            self.camera.zoom,
+            params.render_pipeline.world_pixel_density,
+        );
+        
         let snapped = if params.render_pipeline.camera_snap_enabled {
-            self.camera.snap_camera(rt.alloc_w, rt.alloc_h, rt.k, rt.s)
+            self.camera.snap_camera(dims.alloc_w, dims.alloc_h, dims.k, dims.s)
         } else {
             SnappedCamera {
                 view_proj: self.camera.view_projection(),
@@ -120,6 +134,11 @@ impl SimulationManager {
         let (clip_min, clip_max, clip_enabled) = compute_clip_bounds(
             &self.camera, params, cos_r, sin_r,
         );
+        let clip_dirs = [
+            if cos_r >= 0.0 { 1.0 } else { -1.0 },
+            1.0,
+            if sin_r >= 0.0 { 1.0 } else { -1.0 },
+        ];
 
         // Camera view direction (into the scene). Uses the smoothed `rotation` so it
         // matches the rendered view exactly during a rotation lerp — it's a plain
@@ -161,11 +180,38 @@ impl SimulationManager {
         // while panning.
         let shadow_radius = (self.camera.visible_radius() * 1.25 + 15.0).max(40.0);
 
+        let view = self.camera.view_matrix();
+        let projection = self.camera.projection_matrix();
+        // The cube `visible_radius` describes. Streaming still runs its own view
+        // test; R6 derives this area from it.
+        let center = self.camera.smooth_target;
+        let reach = self.camera.visible_radius();
+        let camera = CameraDesc {
+            view,
+            projection,
+            view_proj: projection * view,
+            frustum: self.frustum,
+            right: Vec3::from(view_right),
+            up: Vec3::from(view_up),
+            forward: Vec3::from(view_dir),
+            area_of_interest: AreaOfInterest {
+                center,
+                horizontal_radius: reach,
+                vertical_range: (center.y - reach, center.y + reach),
+            },
+            iso: IsoCameraBlock {
+                snapped_view_proj: Mat4::from_cols_array_2d(&snapped.view_proj),
+                snap_offset: snapped.subpixel_offset,
+                rotation: self.camera.rotation,
+                pitch: view_pitch,
+            },
+        };
+        
         FrameState {
             dt,
             elapsed,
-            view_proj: snapped.view_proj,
-            subpixel_offset: snapped.subpixel_offset,
+            camera,
+            dims,
             light_space: self.time_of_day.light_space_matrix(self.camera.smooth_target, shadow_radius),
             sun_direction: self.time_of_day.sun_direction().into(),
             sun_color: self.time_of_day.sun_color(&params.lighting).into(),
@@ -177,15 +223,11 @@ impl SimulationManager {
             mask_origin: [0.0; 3],
             mask_enabled: 0,
             volume_radius: 0.0,
-            view_dir,
-            view_right,
-            view_up,
             debug_mode,
             sky_color: params.render_pipeline.sky_color,
             warm_tint_color: warm_tint_color.into(),
             warm_tint_strength,
-            cos_r,
-            sin_r,
+            clip_dirs,
         }
     }
 }

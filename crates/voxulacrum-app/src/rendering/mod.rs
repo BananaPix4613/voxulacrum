@@ -1,3 +1,4 @@
+pub mod camera_desc;
 pub mod debug_lines;
 pub mod frustum;
 pub mod surface_state;

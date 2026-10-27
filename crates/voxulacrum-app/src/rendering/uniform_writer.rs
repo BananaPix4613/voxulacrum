@@ -5,7 +5,6 @@ use crate::rendering::outline_pass::OutlinePass;
 use crate::rendering::palette_pass::PalettePass;
 use crate::rendering::post_process::PostProcessPass;
 use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::uniforms::{
     GlobalUniforms, OutlineUniforms, PostProcessUniforms, ShadowUniforms, UpscaleUniforms,
     WaterUniforms,
@@ -28,7 +27,6 @@ pub fn write_all_uniforms(
     palette_pass: &PalettePass,
     upscale: &UpscalePass,
     water_pass: &WaterPass,
-    render_targets: &RenderTargets,
     loaded_palette: &Option<Palette>,
     surface_width: u32,
     surface_height: u32,
@@ -64,7 +62,7 @@ pub fn write_all_uniforms(
 
     // Global uniforms
     let uniforms = GlobalUniforms {
-        view_proj: frame.view_proj,
+        view_proj: frame.camera.iso.snapped_view_proj.to_cols_array_2d(),
         light_space_matrix: frame.light_space.to_cols_array_2d(),
         sun_direction: frame.sun_direction,
         _pad0: 0.0,
@@ -106,14 +104,14 @@ pub fn write_all_uniforms(
         _pad4: 0.0,
         mask_origin: frame.mask_origin,
         mask_enabled: frame.mask_enabled,
-        view_dir: frame.view_dir,
+        view_dir: frame.camera.forward.to_array(),
         _pad5: 0.0,
-        render_size: [render_targets.view_w, render_targets.view_h],
+        render_size: [frame.dims.view_w, frame.dims.view_h],
         volume_radius: frame.volume_radius,
         _pad6: 0.0,
-        view_right: frame.view_right,
+        view_right: frame.camera.right.to_array(),
         _pad7: 0.0,
-        view_up: frame.view_up,
+        view_up: frame.camera.up.to_array(),
         _pad8: 0.0,
     };
     ctx.queue.write_buffer(global_buf, 0, bytemuck::cast_slice(&[uniforms]));
@@ -128,7 +126,7 @@ pub fn write_all_uniforms(
         0.0, 0.0, 1.0, 0.0,
         0.0, 2.0 * reflect_plane, 0.0, 1.0,
     ]);
-    let mirrored_vp = glam::Mat4::from_cols_array_2d(&frame.view_proj) * reflect;
+    let mirrored_vp = frame.camera.iso.snapped_view_proj * reflect;
     let mut reflection_uniforms = uniforms;
     reflection_uniforms.view_proj = mirrored_vp.to_cols_array_2d();
 
@@ -147,10 +145,10 @@ pub fn write_all_uniforms(
     // A direction reflects by negating Y - the plane's offset moves points, not
     // directions - and the hit point stays un-mirrored, so lighting and the
     // below-water clip keep working exactly as they do for terrain.
-    reflection_uniforms.view_dir = [frame.view_dir[0], -frame.view_dir[1], frame.view_dir[2]];
-    reflection_uniforms.view_right =
-        [frame.view_right[0], -frame.view_right[1], frame.view_right[2]];
-    reflection_uniforms.view_up = [frame.view_up[0], -frame.view_up[1], frame.view_up[2]];
+    let mirror = |v: glam::Vec3| [v.x, -v.y, v.z];
+    reflection_uniforms.view_dir = mirror(frame.camera.forward);
+    reflection_uniforms.view_right = mirror(frame.camera.right);
+    reflection_uniforms.view_up = mirror(frame.camera.up);
 
     // Clip geometry below the reflection plane. Without this, everything under the
     // water (banks, caves, terrain) mirrors UP over the water and occludes the real
@@ -166,7 +164,7 @@ pub fn write_all_uniforms(
     let pp = &params.post_process;
     let cs = &params.cross_section;
 
-    let vp_mat = glam::Mat4::from_cols_array_2d(&frame.view_proj);
+    let vp_mat = frame.camera.iso.snapped_view_proj;
     let inv_vp = vp_mat.inverse().to_cols_array_2d();
     water_pass.update_uniforms(
         &ctx.queue,
@@ -202,7 +200,7 @@ pub fn write_all_uniforms(
         clip_min: frame.clip_min,
         _pad1: 0.0,
         inv_view_proj: inv_vp,
-        render_resolution: [render_targets.view_w, render_targets.view_h],
+        render_resolution: [frame.dims.view_w, frame.dims.view_h],
         _pad2: [0.0; 2],
     };
     post_process.update_uniforms(&ctx.queue, pp_uniforms);
@@ -213,8 +211,8 @@ pub fn write_all_uniforms(
         &ctx.queue,
         OutlineUniforms {
             texel_size: [
-                1.0 / render_targets.alloc_w as f32,
-                1.0 / render_targets.alloc_h as f32,
+                1.0 / frame.dims.alloc_w as f32,
+                1.0 / frame.dims.alloc_h as f32,
             ],
             depth_threshold: op.depth_threshold,
             depth_strength: op.depth_strength,
@@ -240,11 +238,14 @@ pub fn write_all_uniforms(
     palette_pass.update_uniforms(&ctx.queue, palette_uniforms);
 
     // Upscale uniforms
+    // The lattice sizes come from the same dims the camera snapped to, so the
+    // stretch and the snap agree on the frame zoom changes. The Render stage
+    // resizes the targets to these dims before drawing.
     let upscale_uniforms = UpscaleUniforms {
-        subpixel_offset: frame.subpixel_offset,
-        render_resolution: [render_targets.view_w, render_targets.view_h],
+        subpixel_offset: frame.camera.iso.snap_offset,
+        render_resolution: [frame.dims.view_w, frame.dims.view_h],
         window_resolution: [surface_width as f32, surface_height as f32],
-        tex_resolution: [render_targets.alloc_w as f32, render_targets.alloc_h as f32],
+        tex_resolution: [frame.dims.alloc_w as f32, frame.dims.alloc_h as f32],
     };
     upscale.update_uniforms(&ctx.queue, upscale_uniforms);
 }

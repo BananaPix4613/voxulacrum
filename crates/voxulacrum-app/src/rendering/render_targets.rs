@@ -63,12 +63,10 @@ pub struct RenderTargets {
     pub reflection_w: u32,
     #[allow(dead_code)]
     pub reflection_h: u32,
+    /// The allocation the textures were created at. This frame's lattice is
+    /// `FrameState::dims`.
     pub alloc_w: u32,
     pub alloc_h: u32,
-    pub view_w: f32,
-    pub view_h: f32,
-    pub k: u32,
-    pub s: f32,
 }
 
 impl RenderTargets {
@@ -170,10 +168,6 @@ impl RenderTargets {
             reflection_h: refl_h,
             alloc_w: tex_width,
             alloc_h: tex_height,
-            view_w: dims.view_w,
-            view_h: dims.view_h,
-            k: dims.k,
-            s: dims.s,
         }
     }
 
@@ -204,14 +198,5 @@ impl RenderTargets {
 
     pub fn needs_recreate(&self, dims: &crate::app::RenderDims) -> bool {
         self.alloc_w != dims.alloc_w || self.alloc_h != dims.alloc_h
-    }
-
-    /// Zoom changes `view`/`k`/`s` continuously without reallocating; keep the
-    /// fields current every frame so uniforms and the camera snap read them.
-    pub fn update_view(&mut self, dims: &crate::app::RenderDims) {
-        self.view_w = dims.view_w;
-        self.view_h = dims.view_h;
-        self.k = dims.k;
-        self.s = dims.s;
     }
 }

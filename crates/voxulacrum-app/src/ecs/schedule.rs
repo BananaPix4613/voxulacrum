@@ -116,7 +116,7 @@ pub fn build_frame_schedule() -> Schedule {
             .after(systems::tick::run_ticks_system),
         crate::interaction::player_targeting_system
             .in_set(FrameStage::Simulation)
-            .after(systems::tick::run_ticks_system),
+            .after(systems::simulation::simulation_tick_system),
         crate::interaction::player_tool_system
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::player_targeting_system),

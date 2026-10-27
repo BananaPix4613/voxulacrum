@@ -4,8 +4,7 @@ use bevy_ecs::prelude::*;
 use crate::ecs::resources::VoxelWorld;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_targets::RenderTargets;
-use crate::simulation::manager::SimulationManager;
+use crate::simulation::manager::FrameState;
 use crate::world::mutation::EngineMode;
 
 /// Rebuild the player avatar mesh each frame at the interpolated render position
@@ -15,8 +14,7 @@ pub fn player_render_prep_system(
     ctx: Res<RenderContext>,
     world: Res<VoxelWorld>,
     driver: Res<crate::ecs::clocks::TickDriver>,
-    sim: Res<SimulationManager>,
-    render_targets: Res<RenderTargets>,
+    frame: Res<FrameState>,
     players: Query<&crate::player::systems::Player>,
     play: Option<Res<crate::play::PlaySettings>>,
     mut player_pass: ResMut<PlayerPass>,
@@ -36,8 +34,8 @@ pub fn player_render_prep_system(
     // view-space offset RELATIVE to the origin's puts it at the same sub-texel
     // phase every frame, still or moving. (Quantizing absolute view coords is
     // a no-op under a player-pinned camera and scrambles with the camera frac.)
-    let view = sim.camera.view_matrix();
-    let k = render_targets.k as f32;
+    let view = frame.camera.view;
+    let k = frame.dims.k as f32;
     let o = view.transform_point3(glam::Vec3::ZERO);
     let mut v = view.transform_point3(feet);
     v.x = o.x + ((v.x - o.x) * k).round() / k;

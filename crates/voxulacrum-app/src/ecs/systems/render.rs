@@ -1,7 +1,6 @@
 //! The render stage: render target upkeep, the render graph, egui, and present.
 
 use glam::IVec3;
-use crate::app::compute_render_dimensions;
 use crate::diagnostics::FrameTimings;
 use crate::ecs::resources::{
     GlobalUniformBindGroup, ReflectionUniformBindGroup, ShadowBindGroup, ShadowDepthView,
@@ -30,7 +29,7 @@ use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
 use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::water_pass::WaterPass;
-use crate::simulation::manager::{FrameState, SimulationManager};
+use crate::simulation::manager::FrameState;
 use crate::ui;
 use crate::ui::panels::UiState;
 use crate::meshing::coordinator::{ChunkMesh, ChunkMeshes};
@@ -53,17 +52,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     let ctx = ecs.resource::<RenderContext>().clone();
 
     // --- Render target resize check ---
-    let dims = {
-        let surface = ecs.resource::<SurfaceState>();
-        let sim = ecs.resource::<SimulationManager>();
-        let ui = ecs.resource::<UiState>();
-        compute_render_dimensions(
-            surface.surface_config.width,
-            surface.surface_config.height,
-            sim.camera.zoom,
-            ui.params.render_pipeline.world_pixel_density,
-        )
-    };
+    // The lattice this frame is drawn on was sized with the camera.
+    let dims = ecs.resource::<FrameState>().dims;
 
     if ecs.resource::<RenderTargets>().needs_recreate(&dims) {
         let new_rt = RenderTargets::new(&ctx, &dims);
@@ -99,8 +89,6 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
         *ecs.resource_mut::<RenderTargets>() = new_rt;
     }
-    // Zoom moves view/k/s continuously without reallocating - keep fields fresh.
-    ecs.resource_mut::<RenderTargets>().update_view(&dims);
 
     // --- Acquire swapchain ---
     // Timed separately from the rest of the Render stage: under Fifo this call
@@ -141,30 +129,24 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             .map(|c| IVec3::from(*c))
             .collect();
         ecs.resource_scope::<DebugLinePass, _>(|ecs, mut debug| {
-            let sim = ecs.resource::<SimulationManager>();
-            debug.update(&ctx, &chunk_positions, &sim.frustum);
+            let frame = ecs.resource::<FrameState>();
+            debug.update(&ctx, &chunk_positions, &frame.camera.frustum);
         });
     }
 
     // --- Cap mesh update ---
-    let (cap_enabled, cos_r, sin_r, clip_max, clip_min) = {
+    let (cap_enabled, clip_dirs, clip_max, clip_min) = {
         let frame = ecs.resource::<FrameState>();
         let cs_enabled = ecs.resource::<UiState>().params.cross_section.enabled;
         (
             cs_enabled && frame.clip_enabled == 1,
-            frame.cos_r,
-            frame.sin_r,
+            frame.clip_dirs,
             frame.clip_max,
             frame.clip_min,
         )
     };
 
     if cap_enabled {
-        let clip_dirs: [f32; 3] = [
-            if cos_r >= 0.0 { 1.0 } else { -1.0 },
-            1.0,
-            if sin_r >= 0.0 { 1.0 } else { -1.0 },
-        ];
         let clip_pos = [
             if clip_dirs[0] > 0.0 { clip_max[0] } else { clip_min[0] },
             clip_max[1],
@@ -184,7 +166,6 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
     let draws = {
         let ui = ecs.resource::<UiState>();
-        let sim = ecs.resource::<SimulationManager>();
         let pipeline_registry = ecs.resource::<PipelineRegistry>();
         let shadow_bind_group = ecs.resource::<ShadowBindGroup>();
         let shadow_depth_view = ecs.resource::<ShadowDepthView>();
@@ -218,7 +199,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         // for the shadow frustum (shadow pass).
         let meshes = ecs.resource::<ChunkMeshes>();
         let visible_chunks: Vec<&ChunkMesh> = meshes.meshes.iter()
-            .filter(|(pos, _)| sim.frustum.is_chunk_visible(**pos))
+            .filter(|(pos, _)| frame.camera.frustum.is_chunk_visible(**pos))
             .map(|(_, mesh)| mesh)
             .collect();
         let shadow_chunks: Vec<&ChunkMesh> = meshes.meshes.iter()
@@ -254,15 +235,11 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             terrain_pipeline,
             uniform_bind_group: &uniform_bind_group.0,
             chunks: &visible_chunks,
-            frustum: &sim.frustum,
+            frustum: &frame.camera.frustum,
             cap_pass: &cap_pass,
             cap_config: CapConfig {
                 enabled: cap_enabled,
-                clip_dirs: [
-                    if cos_r >= 0.0 { 1.0 } else { -1.0 },
-                    1.0,
-                    if sin_r >= 0.0 { 1.0 } else { -1.0 },
-                ],
+                clip_dirs,
                 clip_pos: [0.0; 3],
             },
             detail_paint_pass: &detail_paint_pass,
@@ -290,7 +267,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             terrain_pipeline: &pipeline_registry.terrain_reflection_pipeline,
             reflection_bind_group: &reflection_bind_group.0,
             chunks: &visible_chunks,
-            frustum: &sim.frustum,
+            frustum: &frame.camera.frustum,
             detail_paint_pass: &detail_paint_pass,
             detail_paint_pipeline: &pipeline_registry.detail_paint_pipeline,
             scatter_pass: &scatter_pass,
@@ -306,7 +283,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             pipeline: &pipeline_registry.water_pipeline,
             global_bind_group: &uniform_bind_group.0,
             water_pass: &water_pass,
-            frustum: &sim.frustum,
+            frustum: &frame.camera.frustum,
             hide_water: ui.params.debug.hide_water,
             scene_tex: &render_targets.scene,
             scene_copy_tex: &render_targets.scene_copy,

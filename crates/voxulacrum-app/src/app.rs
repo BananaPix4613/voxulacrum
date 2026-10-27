@@ -89,6 +89,7 @@ impl FrameCounter {
 /// (integer texels per voxel - the image is always painted at this density);
 /// `s` is how big one texel appears on screen (continuous, non-integer fine).
 /// Zoom only ever changes `s` (and, in octaves, `k`) - never the lattice phase.
+#[derive(Clone, Copy)]
 pub struct RenderDims {
     /// Texels per voxel — integer, stepped in octaves.
     pub k: u32,
@@ -604,8 +605,8 @@ fn init_ecs(
     ecs.insert_resource(simulation::manager::FrameState {
         dt: 0.0,
         elapsed: 0.0,
-        view_proj: [[0.0; 4]; 4],
-        subpixel_offset: [0.0; 2],
+        camera: crate::rendering::camera_desc::CameraDesc::default(),
+        dims,
         light_space: glam::Mat4::IDENTITY,
         sun_direction: [0.0, 1.0, 0.0],
         sun_color: [1.0; 3],
@@ -617,15 +618,11 @@ fn init_ecs(
         mask_origin: [0.0; 3],
         mask_enabled: 0,
         volume_radius: 0.0,
-        view_dir: [0.0, -1.0, 0.0],
-        view_right: [1.0, 0.0, 0.0],
-        view_up: [0.0, 1.0, 0.0],
         debug_mode: 0,
         sky_color: [0.5, 0.7, 1.0],
         warm_tint_color: [1.0; 3],
         warm_tint_strength: 0.0,
-        cos_r: 1.0,
-        sin_r: 0.0,
+        clip_dirs: [1.0, 1.0, 1.0],
     });
 
     // Initialize event queues
