@@ -4,26 +4,23 @@
 //! density map - blades are *not* stored per-blade. Per chunk we upload a
 //! storage buffer of `{ density, surface_y }` per column (32x32 = 1024) plus a
 //! chunk-origin uniform; the vertex shader indexes the buffer by
-//! `instance_index` and places one blade per dense column.
+//! `instance_index` and places one blade per dense column. The per-column
+//! records are built on the CPU (`meshing::foliage`).
 //!
 //! Phase 5 4a-2i is the scaffold: a single flat-green blade per dense column,
 //! proving the pipeline + per-chunk buffer + lifecycle + cutover. 4a-2ii adds
 //! density-driven blade count, wind, tint, and per-blade variation.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use bevy_ecs::prelude::Resource;
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
-use crate::foliage::FoliageRegistry;
 use crate::rendering::pipelines::GrassVertex;
 use crate::rendering::render_context::RenderContext;
-use crate::world::chunk::{LoadedChunk, CHUNK_SIZE, VOXEL_SCALE};
-use crate::world::World;
-use voxel_core::ShapeId;
+use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 
 /// Columns per chunk footprint; also the per-chunk instance count (one blade
 /// candidate per column - empty columns are culled in the shader).
@@ -37,18 +34,16 @@ pub const MAX_BLADES_PER_COLUMN: u32 = 8;
 /// Per-chunk instance count: one instance per (column, blade) slot.
 pub const INSTANCES_PER_CHUNK: u32 = COLUMN_COUNT * MAX_BLADES_PER_COLUMN;
 
-const CHUNK_AREA: usize = CHUNK_SIZE * CHUNK_SIZE;
-
 /// GPU per-column record: density (0 = no blade) + local surface height.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct ColumnTexel {
+pub struct ColumnTexel {
     /// Packed paint texel: density (bits 0-7) | species (8-15) | tint (16-23).
     /// `density == 0` marks an empty column (no blades).
-    packed: u32,
+    pub packed: u32,
     /// Top-face height of the surface voxel, in voxel units (slab-aware:
     /// a bottom slab's top is `y + 0.5`; a full cube or top slab is `y + 1.0`).
-    surface_top: f32,
+    pub surface_top: f32,
 }
 
 /// GPU per-chunk uniform: world-space chunk origin, voxel scale, and the slot
@@ -61,6 +56,16 @@ struct ChunkUniform {
     voxel_scale: f32,
     layer_slot: u32,
     _pad: [u32; 3],
+}
+
+/// One chunk's paint, built on the CPU (`meshing::foliage`).
+pub struct DetailPaintData {
+    /// One record per column, `COLUMN_COUNT` of them, indexed `x + z * CHUNK_SIZE`.
+    pub columns: Vec<ColumnTexel>,
+    /// World-space chunk origin.
+    pub origin: [f32; 3],
+    /// The chunk's detail layer's slot in the species color table.
+    pub layer_slot: u32,
 }
 
 /// Per-chunk GPU detail-paint data.
@@ -79,13 +84,12 @@ pub struct DetailPaintPass {
     pub chunk_paint: HashMap<IVec3, ChunkDetailPaint>,
     /// Group 2: the species color table, built once from the registry.
     pub species_bind_group: wgpu::BindGroup,
-    /// The registry the table and layer slots came from (reused on regen).
-    foliage: Arc<FoliageRegistry>,
 }
 
 impl DetailPaintPass {
-    /// Full rebuild - scans all loaded chunks. Used for initial load and regen.
-    pub fn new(ctx: &RenderContext, world: &World, foliage: &Arc<FoliageRegistry>) -> Self {
+    /// The blade mesh and the species color table (`FoliageRegistry::species_color_table`).
+    /// Chunks are added as they mesh.
+    pub fn new(ctx: &RenderContext, species_colors: &[[f32; 4]]) -> Self {
         let (vertices, indices) = create_blade_mesh();
 
         let blade_vertex_buffer = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -103,7 +107,7 @@ impl DetailPaintPass {
 
         let species_colors = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("detail_paint_species_colors"),
-            contents: bytemuck::cast_slice(&foliage.species_color_table()),
+            contents: bytemuck::cast_slice(species_colors),
             usage: wgpu::BufferUsages::STORAGE,
         });
         let species_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -114,42 +118,23 @@ impl DetailPaintPass {
                 resource: species_colors.as_entire_binding(),
             }],
         });
-        
-        let mut chunk_paint = HashMap::new();
-        for (&coord, _) in &world.chunks {
-            let pos = IVec3::from(coord);
-            if let Some(chunk) = world.get_chunk(pos) {
-                if let Some((columns, uniform)) = build_chunk_columns(chunk, foliage) {
-                    chunk_paint.insert(
-                        pos,
-                        make_chunk_paint(&ctx.device, &chunk_bind_group_layout, &columns, uniform),
-                    );
-                }
-            }
-        }
-        log::info!("Detail paint: built {} painted chunks", chunk_paint.len());
 
         Self {
             blade_vertex_buffer,
             blade_index_buffer,
             blade_index_count: indices.len() as u32,
             chunk_bind_group_layout,
-            chunk_paint,
+            chunk_paint: HashMap::new(),
             species_bind_group,
-            foliage: foliage.clone(),
         }
     }
 
-    /// Build (or refresh) per-chunk paint buffers for a single chunk.
-    pub fn add_chunk(&mut self, pos: IVec3, world: &World, device: &wgpu::Device) {
-        let chunk = match world.get_chunk(pos) {
-            Some(c) => c,
-            None => return,
-        };
-        match build_chunk_columns(chunk, &self.foliage) {
-            Some((columns, uniform)) => {
-                let entry =
-                    make_chunk_paint(device, &self.chunk_bind_group_layout, &columns, uniform);
+    /// Replace `pos`'s paint buffers with `data`, or drop them when the chunk
+    /// has no paint (`None`).
+    pub fn set(&mut self, pos: IVec3, data: Option<&DetailPaintData>, device: &wgpu::Device) {
+        match data {
+            Some(data) => {
+                let entry = make_chunk_paint(device, &self.chunk_bind_group_layout, data);
                 self.chunk_paint.insert(pos, entry);
             }
             None => {
@@ -159,7 +144,7 @@ impl DetailPaintPass {
     }
 
     /// Drop a chunk's paint buffers on unload.
-    pub fn remove_chunk(&mut self, pos: IVec3) {
+    pub fn remove(&mut self, pos: IVec3) {
         self.chunk_paint.remove(&pos);
     }
 }
@@ -236,72 +221,20 @@ fn create_blade_mesh() -> (Vec<GrassVertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-/// Build the per-column density buffer (+ chunk uniform) from a chunk's first
-/// detail layer. Returns `None` if the chunk has no paint to draw.
-fn build_chunk_columns(
-    chunk: &LoadedChunk,
-    foliage: &FoliageRegistry,
-) -> Option<(Vec<ColumnTexel>, ChunkUniform)> {
-    let layer = chunk.data.detail_layers.layers.first()?;
-
-    let mut any = false;
-    let mut columns = Vec::with_capacity(CHUNK_AREA);
-    for idx in 0..CHUNK_AREA {
-        let lx = idx % CHUNK_SIZE;
-        let lz = idx / CHUNK_SIZE;
-        let texel = layer.map[idx];
-        if texel.density == 0 {
-            columns.push(ColumnTexel { packed: 0, surface_top: 0.0 });
-            continue;
-        }
-        // Topmost solid voxel in this column = the painted surface. Use the
-        // voxel's shape so blades sit on a slab's top face, not the cell top.
-        let mut surface_top = None;
-        for ly in (0..CHUNK_SIZE).rev() {
-            if chunk.is_solid(lx, ly, lz) {
-                let cell_top = match chunk.voxel(lx, ly, lz).shape {
-                    ShapeId::SlabBottom => ly as f32 + 0.5,
-                    _ => ly as f32 + 1.0,
-                };
-                surface_top = Some(cell_top);
-                break;
-            }
-        }
-        match surface_top {
-            Some(top) => {
-                let packed = texel.density as u32
-                    | ((texel.species as u32) << 8)
-                    | ((texel.tint as u32) << 16);
-                columns.push(ColumnTexel { packed, surface_top: top });
-                any = true;
-            }
-            None => columns.push(ColumnTexel { packed: 0, surface_top: 0.0 }),
-        }
-    }
-    if !any {
-        return None;
-    }
-
-    let c = chunk.data.coord;
-    let span = CHUNK_SIZE as f32 * VOXEL_SCALE;
-    let uniform = ChunkUniform {
-        origin: [c.x as f32 * span, c.y as f32 * span, c.z as f32 * span],
-        voxel_scale: VOXEL_SCALE,
-        layer_slot: foliage.layer_slot(layer.layer_id).unwrap_or(u32::MAX),
-        _pad: [0; 3],
-    };
-    Some((columns, uniform))
-}
-
 fn make_chunk_paint(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    columns: &[ColumnTexel],
-    uniform: ChunkUniform,
+    data: &DetailPaintData,
 ) -> ChunkDetailPaint {
+    let uniform = ChunkUniform {
+        origin: data.origin,
+        voxel_scale: VOXEL_SCALE,
+        layer_slot: data.layer_slot,
+        _pad: [0; 3],
+    };
     let column_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("detail_paint_columns"),
-        contents: bytemuck::cast_slice(columns),
+        contents: bytemuck::cast_slice(&data.columns),
         usage: wgpu::BufferUsages::STORAGE,
     });
     let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

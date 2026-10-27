@@ -1100,7 +1100,7 @@ Rendering reads only a **render world**: a separate `bevy_ecs` world owned by th
 
 **Extract** runs once per frame, after the client drains its updates. It copies the per-frame data and applies `changed` to the per-chunk entries, marking stale ones for rebuild. It never scans every loaded chunk.
 
-**The camera description** has four fields core code reads: view, projection (with view-projection), frustum, and area of interest. A camera module adds a block of its own for its presentation; the isometric module's holds the texel snap offset, rotation and pitch. Nothing outside that module reads the block (roadmap P20). This is the minimal description the engine object model's camera boundary adopts (roadmap B8). Render code still makes orthographic assumptions after M3; V8 (M5) removes them.
+**The camera description** has five fields core code reads: view, projection (with view-projection), frustum, the view basis (right, up and forward), and area of interest. The view-projection is the one mapped to the window, which picking inverts. The basis is there because shaders that reconstruct a ray (the capsule impostors and canopy lobes) need it, and taking it from the camera keeps the camera's own values rather than ones re-derived from a matrix (R4). A camera module adds a block of its own for its presentation; the isometric module's holds the texel-snapped view-projection the scene is drawn with, the snap offset, rotation and pitch. Nothing outside that module reads the block (roadmap P20). This is the minimal description the engine object model's camera boundary adopts (roadmap B8). Render code still makes orthographic assumptions after M3; V8 (M5) removes them.
 
 **Pipelining**, with the GPU drawing frame N while simulation prepares N+1, is not built in M3. A self-contained render world is what keeps it possible.
 
@@ -1132,6 +1132,7 @@ On the client, a camera module computes its area of interest and sends it with `
 | Residency (`streaming_tick_system`) runs once per frame, outside the tick | Tick phase 6 | R6 |
 | `CurrentTick` is not saved, so every session starts at tick 0 | Saved with the world, so due ticks survive a reload | The first scheduled tick (D4's registrable layers) |
 | One `FrameStage` schedule runs simulation and rendering on the main thread | Server tick phases; a client frame with extract; a separate render world | R4, R5 |
+| The camera description (`rendering/camera_desc.rs`) lives in `FrameState`, filled by `SimulationManager` from the one isometric camera. The uniform writer reads the isometric block's snapped view-projection and snap offset, and the frame's `RenderDims` sit beside the description rather than in a camera module | The isometric camera as a kit module; render code reads only the core fields | V8 (M5) |
 | Terrain meshes are a client resource (`ChunkMeshes`), what needs re-meshing is tracked by `MeshingPipeline`, and the other per-chunk buffers live in the render passes, which render code reads directly | Per-chunk render entries in the render world, each tagged with its chunk version | R4 |
 | Residency follows one isometric camera, and streaming drives meshing | Observers; the client chunk view | R6 |
 | The whole engine is one app crate. The world code under `world/` reads no editor setting and imports no client module, apart from the two couplings in the rows below this one (R3a) | The crates above | R3 |
@@ -1565,6 +1566,7 @@ The core makes no camera assumption (roadmap P20). It takes a **camera descripti
 
 - **View** and **projection**, with the view-projection.
 - **Frustum**, for culling.
+- **View basis**: right, up and forward, for anything that reconstructs a view ray.
 - **Area of interest**: a center, a horizontal radius and a vertical range, which the client sends as its observer area (`SetInterest`).
 
 Core systems read only these. Streaming takes the area of interest through observers ("Residency" above); culling and shadows take the frustum; picking takes the view-projection; level of detail and audio take positions from the description, never from a projection type. One view is active through M5; render-to-texture (minimaps, portraits, item icons) adds views, each with its own description.
@@ -1687,7 +1689,7 @@ These are toggleable in the engine's debug UI.
 - **BiomeGraph**: graph type defining terrain density, material, fluid output, and fade behavior for one biome.
 - **BiomeParams**: per-biome typed scalar-metadata sidecar. Addressable by name from the biome manifest entry and by `BiomeParam(name)` nodes inside a `BiomeGraph`. Home for `traversal_smoothing_distance` and future biome-scoped scalars.
 - **Block**: a 2×2×2 group of 0.5 m voxels on the 1 m lattice. A spatial unit, never a type.
-- **Camera description**: what the core takes from a camera, per view: view, projection with view-projection, frustum and area of interest.
+- **Camera description**: what the core takes from a camera, per view: view, projection with view-projection, frustum, view basis and area of interest.
 - **Camera module**: kit code that turns input and game state into a camera description, and owns everything particular to one kind of camera. The isometric camera is the default one.
 - **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation. Called chunk tags, to keep them apart from registry tags.
 - **Clip**: one format for any piece of voxel content outside a grid: structures, blueprints, copy and paste, packed vehicles, test fixtures.

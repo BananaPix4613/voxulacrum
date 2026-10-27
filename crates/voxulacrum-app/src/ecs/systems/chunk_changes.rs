@@ -8,6 +8,8 @@ use super::meshing::rebuild_water_with_neighbors;
 use crate::diagnostics::{FrameTimings, SUB_FLUID};
 use crate::ecs::resources::VoxelWorld;
 use crate::meshing::coordinator::MeshingCoordinator;
+use crate::meshing::foliage::build_scatter;
+use crate::prefabs::PrefabRegistryRes;
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::water_pass::WaterPass;
@@ -29,6 +31,7 @@ pub fn chunk_change_system(
     mut meshing: ResMut<MeshingCoordinator>,
     mut water_pass: ResMut<WaterPass>,
     mut scatter: ResMut<ScatterPass>,
+    prefabs: Res<PrefabRegistryRes>,
     ctx: Res<RenderContext>,
     mut timings: ResMut<FrameTimings>,
 ) {
@@ -37,9 +40,7 @@ pub fn chunk_change_system(
     for change in changes {
         let pos = IVec3::from(change.chunk);
         // Evicted since the change was published.
-        if world.0.get_chunk(pos).is_none() {
-            continue;
-        }
+        let Some(chunk) = world.0.get_chunk(pos) else { continue };
         if change.layers.contains(ChunkLayers::VOXELS) {
             let edit = change.origin != MutationOrigin::System;
             meshing.pipeline.invalidate(pos, edit);
@@ -54,7 +55,7 @@ pub fn chunk_change_system(
             water.push(pos);
         }
         if change.layers.contains(ChunkLayers::SCATTER) {
-            scatter.add_chunk(pos, &world.0, &ctx.device);
+            scatter.set(pos, build_scatter(chunk, &prefabs).as_deref(), &ctx.device);
         }
     }
     let _timer = timings.sub_timer(SUB_FLUID);

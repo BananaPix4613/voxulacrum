@@ -4,8 +4,12 @@ use bevy_ecs::prelude::*;
 use glam::IVec3;
 use crate::diagnostics::{FrameTimings, SUB_UPLOAD};
 use crate::ecs::resources::VoxelWorld;
+use crate::foliage::FoliageRegistryRes;
 use crate::jobs::JobSystem;
 use crate::meshing::coordinator::{ChunkMeshes, MeshingCoordinator};
+use crate::meshing::foliage::{build_capsules, build_detail_paint, build_lobes, build_scatter};
+use crate::meshing::water::build_water_surface;
+use crate::prefabs::PrefabRegistryRes;
 use crate::rendering::canopy_pass::CanopyPass;
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::detail_paint_pass::DetailPaintPass;
@@ -20,8 +24,8 @@ use crate::world::chunk::CHUNK_WORLD_SIZE;
 /// mesher welds surface heights across chunk seams (design §7 rendering), so a
 /// chunk whose fluid changed shifts its neighbors' boundary columns too. Only
 /// X/Z neighbors matter: the mesher samples horizontally within one chunk-Y band.
-/// Neighbors that aren't resident are a no-op (`add_chunk_water` early-outs), and
-/// the set dedups overlap so each chunk rebuilds at most once per call.
+/// Neighbors that aren't resident are skipped, and the set dedups overlap so
+/// each chunk rebuilds at most once per call.
 pub(super) fn rebuild_water_with_neighbors(
     water_pass: &mut WaterPass,
     world: &crate::world::World,
@@ -39,7 +43,11 @@ pub(super) fn rebuild_water_with_neighbors(
         }
     }
     for pos in set {
-        water_pass.add_chunk_water(pos, world, device);
+        // Not resident: nothing to build, and its unload already dropped its mesh.
+        if world.get_chunk(pos).is_none() {
+            continue;
+        }
+        water_pass.set(pos, build_water_surface(pos, world).as_ref(), device);
     }
 }
 
@@ -51,6 +59,8 @@ pub fn meshing_tick_system(
     sim: Res<SimulationManager>,
     ctx: Res<RenderContext>,
     mut ui: ResMut<UiState>,
+    foliage: Res<FoliageRegistryRes>,
+    prefabs: Res<PrefabRegistryRes>,
     mut detail_paint: ResMut<DetailPaintPass>,
     mut scatter: ResMut<ScatterPass>,
     mut capsules: ResMut<CapsulePass>,
@@ -78,14 +88,17 @@ pub fn meshing_tick_system(
         max_snapshots,
     );
 
-    // Phase 2: for each newly meshed chunk, build per-chunk foliage
-    // and water GPU buffers.
+    // Phase 2: for each newly meshed chunk, build its foliage and water on the
+    // CPU and upload them, so they appear on the same frame as its terrain.
+    // Startup chunks arrive here too, through the change feed.
     if !meshed.is_empty() {
         for pos in &meshed {
-            detail_paint.add_chunk(*pos, &world.0, &ctx.device);
-            scatter.add_chunk(*pos, &world.0, &ctx.device);
-            capsules.add_chunk(*pos, &world.0, &ctx.device);
-            canopy.add_chunk(*pos, &world.0, &ctx.device);
+            // `tick` only reports resident chunks.
+            let Some(chunk) = world.0.get_chunk(*pos) else { continue };
+            detail_paint.set(*pos, build_detail_paint(chunk, &foliage).as_ref(), &ctx.device);
+            scatter.set(*pos, build_scatter(chunk, &prefabs).as_deref(), &ctx.device);
+            capsules.set(*pos, build_capsules(chunk).as_deref(), &ctx.device);
+            canopy.set(*pos, build_lobes(chunk).as_deref(), &ctx.device);
         }
         // Water welds across seams, so also refresh newly-meshed chunks' neighbors
         // (detail/scatter are per-chunk and don't need this).

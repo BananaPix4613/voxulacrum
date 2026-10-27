@@ -443,12 +443,16 @@ fn init_ecs(
     log::info!("World generated in {:.2?}", gen_start.elapsed());
     world.print_debug_stats(&material_registry);
 
-    // Tier-1 detail paint + Tier-2/3 scatter + water
+    // Tier-1 detail paint + Tier-2/3 scatter + water. The passes start empty:
+    // each chunk's entries are built as its mesh lands, startup chunks included.
     let foliage_registry = crate::foliage::load_foliage_registry();
-    let detail_paint_pass = DetailPaintPass::new(&ctx, &world, &foliage_registry);
-    let scatter_pass = ScatterPass::new(&ctx, &world, &prefab_registry);
-    let capsule_pass = CapsulePass::new(&ctx, &world);
-    let canopy_pass = CanopyPass::new(&ctx, &world);
+    let detail_paint_pass = DetailPaintPass::new(&ctx, &foliage_registry.species_color_table());
+    let scatter_pass = ScatterPass::new(
+        &ctx,
+        &crate::meshing::foliage::prefab_meshes(&prefab_registry),
+    );
+    let capsule_pass = CapsulePass::default();
+    let canopy_pass = CanopyPass::default();
     let water_pass = WaterPass::new(
         &ctx.device,
         &pipeline_resources.water_bind_group_layout,
@@ -542,6 +546,7 @@ fn init_ecs(
     ecs.insert_resource(RoomState::default());
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
     ecs.insert_resource(prefabs::PrefabRegistryRes(prefab_registry));
+    ecs.insert_resource(crate::foliage::FoliageRegistryRes(foliage_registry));
     ecs.insert_resource(libraries::LibrariesRes(libraries));
 
     // Direct Resource types

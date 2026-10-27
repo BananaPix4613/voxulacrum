@@ -77,11 +77,11 @@ pub fn streaming_tick_system(
     // the client's chunk view.
     for pos in &tick_result.unloaded {
         meshes.remove(*pos);
-        detail_paint.remove_chunk(*pos);
-        scatter.remove_chunk(*pos);
-        capsules.remove_chunk(*pos);
-        canopy.remove_chunk(*pos);
-        water_pass.remove_chunk_water(*pos);
+        detail_paint.remove(*pos);
+        scatter.remove(*pos);
+        capsules.remove(*pos);
+        canopy.remove(*pos);
+        water_pass.remove(*pos);
     }
 
     // NOTE: We do NOT add foliage/water here for inserted chunks.
