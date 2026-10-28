@@ -125,7 +125,7 @@ impl Observers {
 }
 
 /// Phases `tick` reports timings for, in the order it runs them.
-pub const PHASE_COUNT: usize = 4;
+pub const PHASE_COUNT: usize = 3;
 
 /// Close one `tick` phase: record elapsed since `mark` into `out[i]`, then reset
 /// the mark. Plain `Instant`s rather than the diagnostics timer type, so this
@@ -141,10 +141,23 @@ pub struct StreamingTickResult {
     pub inserted: Vec<IVec3>,
     pub unloaded: Vec<IVec3>,
     /// Per-phase milliseconds, in `tick`'s execution order: drain-and-insert,
-    /// `submit_all_dirty`, candidate scan, unload-and-persist. Named by the
+    /// candidate scan, unload-and-persist. Named by the
     /// `diagnostics::SUB_DRAIN..=SUB_UNLOAD` constants; the order here is the
     /// contract between the two.
     pub phase_ms: [f32; PHASE_COUNT],
+}
+
+/// What residency and seam finalization cost in the ticks since the frame last
+/// took the figures, in milliseconds, for the Performance panel's streaming
+/// sub-spans. Measurement only: nothing in the simulation reads it.
+#[derive(Resource, Default)]
+pub struct ResidencyTimings {
+    /// The whole residency system.
+    pub stream_ms: f32,
+    /// `tick`'s phases, in `StreamingTickResult::phase_ms` order.
+    pub phase_ms: [f32; PHASE_COUNT],
+    /// Seam finalization.
+    pub seam_ms: f32,
 }
 
 /// What streaming is doing right now (roadmap §4.4 streaming visualizer).
@@ -157,7 +170,7 @@ pub struct StreamingTickResult {
 pub struct StreamingStats {
     /// Chunks resident in the world.
     pub resident: usize,
-    /// Chunks inside some observer's load area this frame.
+    /// Chunks inside some observer's load area as of the last tick.
     pub wanted: usize,
     /// Wanted but not resident. Zero means the view is fully populated.
     pub missing: usize,
@@ -188,7 +201,7 @@ pub struct ChunkStreamingManager {
     db_generation: u64,
     /// Positions submitted whose result has not been consumed yet. The scheduler
     /// counts *running* jobs; this tracks *outstanding* ones, which is what
-    /// dedups the per-frame candidate scan and bounds the result channel.
+    /// dedups the per-tick candidate scan and bounds the result channel.
     in_flight: HashSet<IVec3>,
     result_tx: mpsc::Sender<GenResult>,
     gen_result_rx: Mutex<mpsc::Receiver<GenResult>>,
@@ -303,14 +316,14 @@ impl ChunkStreamingManager {
         let mut phase_ms = [0.0f32; PHASE_COUNT];
         let mut mark = Instant::now();
 
-        // --- Poll completed chunk generations (capped per frame) ---
+        // --- Poll completed chunk generations (capped per tick) ---
         //
-        // Cap insertions to spread a burst of completions across frames;
+        // Cap insertions to spread a burst of completions across ticks;
         // undrained results stay in the channel and their positions stay in
         // `in_flight`, so they are neither re-queued nor lost. The mesher paces
         // its own snapshots (`max_mesh_per_frame`), so residency does not slow
         // down for its backlog: a server does not wait on one client's mesher.
-        let effective_cap = self.params.max_gen_per_frame as usize;
+        let effective_cap = self.params.max_inserts_per_tick as usize;
         {
             let rx = self.gen_result_rx.get_mut().unwrap();
             let mut inserted_count = 0usize;
@@ -338,7 +351,7 @@ impl ChunkStreamingManager {
 
                 // Stop draining channel when cap is hit. Remaining results stay in
                 // the channel and their chunks stay in `in_flight`, so they are
-                // not re-queued. Next frame picks up where we left off.
+                // not re-queued. The next tick picks up where we left off.
                 if inserted_count >= effective_cap {
                     break;
                 }
@@ -346,18 +359,13 @@ impl ChunkStreamingManager {
         }
         close_phase(0, &mut mark, &mut phase_ms);
 
-        // Inserted chunks reach the mesher through the change feed
-        // (`chunk_change_system`), so the submit phase has nothing left to time.
-        // The slot stays until R6 splits streaming from meshing.
-        close_phase(1, &mut mark, &mut phase_ms);
-
         // --- Spawn new generation tasks, nearest-first, up to the budget ---
         //
-        // The priority queue is rebuilt every frame on the main thread: it is a
+        // The priority queue is rebuilt every tick on the main thread: it is a
         // pure function of the observers' areas, currently-loaded chunks, and
         // the in-flight set, so there is no shared queue to keep in sync. We pop
         // the nearest candidates and spawn them onto the shared pool until the
-        // in-flight budget is full; the rest are reconsidered next frame.
+        // in-flight budget is full; the rest are reconsidered next tick.
 
         // The cap now comes from the scheduler, which is its single owner
         // (drift-review 2.2). Bounding by *outstanding* rather than *running*
@@ -425,7 +433,7 @@ impl ChunkStreamingManager {
                 );
             }
         }
-        close_phase(2, &mut mark, &mut phase_ms);
+        close_phase(1, &mut mark, &mut phase_ms);
 
         // --- Unload chunks no observer keeps and no active fluid holds ---
         // The resident set is the observers' areas plus every chunk with active
@@ -440,7 +448,7 @@ impl ChunkStreamingManager {
             .collect();
 
         // Bounded by time (see `StreamingConfig::unload_budget_ms`). `mark` is
-        // the start of this phase - `close_phase(2, ...)` reset it immediately
+        // the start of this phase - `close_phase(1, ...)` reset it immediately
         // above - so it doubles as the budget clock without a second `Instant`,
         // and the budget correctly covers the resident scan as well as the
         // per-chunk saves.
@@ -468,11 +476,11 @@ impl ChunkStreamingManager {
             result.unloaded.push(pos);
             evicted += 1;
         }
-        close_phase(3, &mut mark, &mut phase_ms);
+        close_phase(2, &mut mark, &mut phase_ms);
 
         // --- Fill-time metric (roadmap §7.3) ---
         // The clock restarts whenever an observer's area changes and stops the
-        // first frame every area's load footprint is fully populated, so
+        // first tick every area's load footprint is fully populated, so
         // `fill_ms` answers exactly the budget's question: how long after the
         // camera settles until the visible area is complete.
         if self.last_view.as_ref() != Some(observers) {

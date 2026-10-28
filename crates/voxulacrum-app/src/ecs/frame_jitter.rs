@@ -7,11 +7,12 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use glam::{IVec3, Vec2, Vec3};
-use voxel_core::{ChunkCoord, MaterialId, Voxel};
+use voxel_core::{AreaOfInterest, ChunkCoord, Footprint, MaterialId, Voxel};
 
 use crate::ecs::clocks::TickDriver;
 use crate::ecs::resources::VoxelWorld;
 use crate::ecs::schedule::build_tick_schedule;
+use crate::jobs::JobSystem;
 use crate::play::{PlaySettings, PlayerTuning, SpawnRule};
 use crate::player::sim::{InputFrame, PlayerState};
 use crate::player::systems::{Player, PlayerInputBuffer};
@@ -20,6 +21,7 @@ use crate::world::config::ServerConfig;
 use crate::world::mutation::{MutationCommand, WorldMutation};
 use crate::world::persistence::{self, WorldPersistence};
 use crate::world::storage::ChunkStorage;
+use crate::world::streaming::{ChunkStreamingManager, ObserverId, Observers, ResidencyTimings};
 use crate::world::tick::{run_tick, secs_to_ticks, CurrentTick, SimTick, TickTimings};
 use crate::world::{split_world_voxel, world_generator};
 
@@ -96,13 +98,41 @@ fn basin_world() -> crate::world::World {
     )
 }
 
+/// Exactly the basin's four chunk columns, as observer 0's area. Residency
+/// keeps them and asks for nothing else, so every run ticks the same chunks.
+fn basin_area() -> AreaOfInterest {
+    // At yaw 0 the rectangle's axes run toward -z and -x, so the columns at -1
+    // and 0 on each axis measure 1 and 0.
+    let columns = Footprint::Rect {
+        yaw: 0.0,
+        right: (0.0, 1.0),
+        up: (0.0, 1.0),
+        span: (0.0, 0.0),
+    };
+    AreaOfInterest { center: (0, 0), chunk_y: (0, 1), load: columns, retain: columns }
+}
+
 /// An ECS world holding only what the tick schedule reads. It has no window,
 /// renderer or UI resource, so the test also shows the schedule needs none,
 /// which the headless server (R3c) depends on.
 fn tick_world() -> (World, Entity) {
     let mut ecs = World::new();
-    ecs.insert_resource(VoxelWorld(basin_world()));
+    let world = basin_world();
+    let generator = world.generator.clone();
+    ecs.insert_resource(VoxelWorld(world));
     ecs.insert_resource(ServerConfig::default());
+    ecs.insert_resource(ChunkStreamingManager::new(
+        &ServerConfig::default().streaming,
+        generator,
+        None,
+        None,
+    ));
+    let mut observers = Observers::default();
+    observers.set(ObserverId::LOCAL, basin_area());
+    ecs.insert_resource(observers);
+    ecs.insert_resource(ResidencyTimings::default());
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().expect("pool");
+    ecs.insert_resource(JobSystem::new(Arc::new(pool)));
     ecs.insert_resource(WorldPersistence::disabled());
     ecs.insert_resource(CurrentTick::default());
     ecs.insert_resource(TickTimings::new());
@@ -208,6 +238,11 @@ fn finish(ecs: &World, player: Entity, frames: usize, walked: f32) -> Run {
     state.push(p.flags);
 
     let world = &ecs.resource::<VoxelWorld>().0;
+    assert_eq!(
+        world.chunks.len(),
+        4,
+        "residency keeps the basin's four chunks and loads nothing else",
+    );
     let mut coords: Vec<IVec3> = world.chunks.keys().map(|&c| IVec3::from(c)).collect();
     coords.sort_unstable_by_key(|c| (c.x, c.y, c.z));
     let mut water_chunks = 0;

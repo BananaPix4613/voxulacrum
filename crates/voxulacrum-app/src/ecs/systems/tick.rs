@@ -43,6 +43,10 @@ pub fn tick_timings_end_sub_rates(mut t: ResMut<TickTimings>) {
     t.end_phase(TickPhase::SubRates);
 }
 
+pub fn tick_timings_end_residency(mut t: ResMut<TickTimings>) {
+    t.end_phase(TickPhase::Residency);
+}
+
 pub fn tick_timings_end_autosave(mut t: ResMut<TickTimings>) {
     t.end_phase(TickPhase::Autosave);
     t.end_tick();

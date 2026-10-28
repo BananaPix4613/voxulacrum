@@ -568,7 +568,17 @@ fn init_ecs(
         dict_bytes, 
     );
     ecs.insert_resource(streaming_manager);
-    ecs.insert_resource(world::streaming::Observers::default());
+    // Observer 0 starts where the camera does, so the first tick keeps the
+    // startup set rather than evicting it before a frame has sent the area.
+    let mut observers = world::streaming::Observers::default();
+    observers.set(
+        world::streaming::ObserverId::LOCAL,
+        ecs.resource::<SimulationManager>()
+            .camera
+            .area_of_interest((min_y, max_y), &ui_state.params.camera),
+    );
+    ecs.insert_resource(observers);
+    ecs.insert_resource(world::streaming::ResidencyTimings::default());
     ecs.insert_resource(server_config);
     ecs.insert_resource(jobs::JobSystem::new(gen_pool.clone()));
     ecs.insert_resource(ui_state);

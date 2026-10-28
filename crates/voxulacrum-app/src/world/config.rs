@@ -17,14 +17,14 @@ pub struct ServerConfig {
     pub autosave: AutosaveConfig,
 }
 
-/// Chunk streaming's per-frame budgets. How far past a view chunks load and
+/// Chunk streaming's per-tick budgets. How far past a view chunks load and
 /// stay loaded belongs to the observer's area of interest, which its camera
 /// sizes (the isometric camera's margins are in `CameraParams`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamingConfig {
-    /// Completed generation results inserted into the world per frame.
-    pub max_gen_per_frame: u32,
-    /// Main-thread time budget for the unload phase, in milliseconds.
+    /// Completed generation results inserted into the world per tick.
+    pub max_inserts_per_tick: u32,
+    /// Main-thread time budget for the unload phase, in milliseconds per tick.
     ///
     /// Eviction runs `save_chunk_on_unload` (zstd + SQLite) for every
     /// persist-dirty chunk leaving the view, and `FinalizeSeam` writes demotions
@@ -37,7 +37,7 @@ pub struct StreamingConfig {
     /// measurement - so a count calibrated against one region is wrong in the
     /// next. The default is §7.3's "no recurring hitch > 4 ms" line.
     ///
-    /// Chunks not evicted this frame are reconsidered next frame; nothing is
+    /// Chunks not evicted this tick are reconsidered the next; nothing is
     /// lost, they stay resident slightly longer. The trade is residency: if
     /// evictions cannot keep pace with a sustained pan, the resident set grows.
     pub unload_budget_ms: f32,
@@ -46,7 +46,7 @@ pub struct StreamingConfig {
 impl Default for StreamingConfig {
     fn default() -> Self {
         Self {
-            max_gen_per_frame: 64,
+            max_inserts_per_tick: 64,
             unload_budget_ms: 4.0,
         }
     }

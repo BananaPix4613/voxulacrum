@@ -83,8 +83,8 @@ pub struct CurrentTick(pub SimTick);
 pub struct TickSchedule;
 
 /// A tick's phases, in the order they run (design §12, "Time"). Phases the
-/// engine doesn't run yet (commands, scheduled and block ticks, residency,
-/// publishing) join in that order when they are built.
+/// engine doesn't run yet (commands, scheduled and block ticks, publishing)
+/// join in that order when they are built.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TickPhase {
     /// Step each player with its input for this tick.
@@ -92,16 +92,20 @@ pub enum TickPhase {
     /// Run the systems that step at a sub-rate of the tick, on the ticks that
     /// rate falls on.
     SubRates,
+    /// Load what the observers' areas want, insert finished generation
+    /// results, evict what no area keeps, and finalize seams.
+    Residency,
     /// Save dirty chunks once per autosave interval.
     Autosave,
 }
 
 impl TickPhase {
     /// How many phases a tick runs.
-    pub const COUNT: usize = 3;
+    pub const COUNT: usize = 4;
 
     /// Every phase, in the order a tick runs them.
-    pub const ALL: [TickPhase; Self::COUNT] = [Self::Players, Self::SubRates, Self::Autosave];
+    pub const ALL: [TickPhase; Self::COUNT] =
+        [Self::Players, Self::SubRates, Self::Residency, Self::Autosave];
 
     /// This phase's position in [`Self::ALL`].
     pub fn index(self) -> usize {
@@ -113,6 +117,7 @@ impl TickPhase {
         match self {
             Self::Players => "players",
             Self::SubRates => "sub-rates",
+            Self::Residency => "residency",
             Self::Autosave => "autosave",
         }
     }
