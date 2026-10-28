@@ -179,8 +179,8 @@ impl VisibilityMask {
 pub struct VisibilityMaskTexels(pub Versioned<Vec<u8>>);
 
 /// What the main side asks of the renderer beyond per-frame data: a new surface
-/// size from the window, and the shader files that changed on disk. Applied in
-/// UniformWrite.
+/// size from the window, and the shader files that changed on disk. Handed to
+/// the render world at Extract and applied there before the frame draws.
 #[derive(Resource, Default)]
 pub struct RenderRequests {
     /// The window's latest size, when it changed since the last frame.

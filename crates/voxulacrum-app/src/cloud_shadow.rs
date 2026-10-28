@@ -7,6 +7,7 @@ use nodegraph_eval::WorldEvaluator;
 use std::collections::HashMap;
 use crate::world::climate::{self, ClimateGrid};
 use crate::params::{CloudParams, CLOUD_LAYER_COUNT};
+use crate::rendering::uniform_writer::CloudFrame;
 use crate::rendering::versioned::Versioned;
 
 /// Side length of the baked Layer B (detail) texture. Static, baked once at
@@ -262,6 +263,18 @@ impl CloudShadowState {
             env_extent_world: ENV_SIZE as f32 * climate::CELL_SIZE,
             detail_texels,
             envelope_texels: Versioned::default(),
+        }
+    }
+
+    /// This frame's uniform inputs, for the render world.
+    pub fn frame(&self) -> CloudFrame {
+        CloudFrame {
+            offsets: self.offsets,
+            coverages: self.coverages,
+            cloud_defaults: self.cloud_defaults,
+            env_typical: self.env_typical,
+            env_origin_world: self.env_origin_world,
+            env_extent_world: self.env_extent_world,
         }
     }
 

@@ -13,7 +13,7 @@ use crate::simulation::wind::WindState;
 use crate::world::chunk::VOXEL_SCALE;
 
 /// All computed per-frame data that rendering needs.
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 pub struct FrameState {
     pub dt: f32,
     pub elapsed: f32,

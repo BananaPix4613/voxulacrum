@@ -46,7 +46,7 @@ use crate::materials::MaterialRegistryRes;
 use crate::ecs::resources::*;
 use crate::ecs::events::*;
 use crate::ecs::clocks::{PresentationClock, TickDriver};
-use crate::ecs::schedule::{build_frame_schedule, build_tick_schedule};
+use crate::ecs::schedule::{build_frame_schedule, build_render_schedule, build_tick_schedule};
 use crate::input::{InputMap, InputState, PointerButton, PointerState, RawInputBuffer, RawInputEvent};
 use crate::world::room::RoomState;
 
@@ -528,19 +528,27 @@ fn init_ecs(
     // -----------------------------------------------------------------------
 
     // Newtype wrappers
+    // The render world owns every GPU resource. The main world holds it as a
+    // resource and hands it each frame's data at Extract.
+    let mut render = World::new();
+    render.insert_resource(WindowHandle(window.clone()));
     ecs.insert_resource(WindowHandle(window));
-    ecs.insert_resource(GlobalUniformBuffer(uniform_buffer));
-    ecs.insert_resource(GlobalUniformBindGroup(uniform_bind_group));
-    ecs.insert_resource(ShadowUniformBuffer(shadow_uniform_buffer));
-    ecs.insert_resource(ReflectionUniformBuffer(reflection_uniform_buffer));
-    ecs.insert_resource(ReflectionUniformBindGroup(reflection_bind_group));
-    ecs.insert_resource(ShadowBindGroup(shadow_bind_group));
-    ecs.insert_resource(ShadowDepthView(shadow_depth_view));
-    ecs.insert_resource(MaterialColorBuffer(material_color_buffer));
-    ecs.insert_resource(VisibilityMask::new(visibility_mask_texture));
+    render.insert_resource(GlobalUniformBuffer(uniform_buffer));
+    render.insert_resource(GlobalUniformBindGroup(uniform_bind_group));
+    render.insert_resource(ShadowUniformBuffer(shadow_uniform_buffer));
+    render.insert_resource(ReflectionUniformBuffer(reflection_uniform_buffer));
+    render.insert_resource(ReflectionUniformBindGroup(reflection_bind_group));
+    render.insert_resource(ShadowBindGroup(shadow_bind_group));
+    render.insert_resource(ShadowDepthView(shadow_depth_view));
+    render.insert_resource(MaterialColorBuffer(material_color_buffer));
+    render.insert_resource(VisibilityMask::new(visibility_mask_texture));
     ecs.insert_resource(VisibilityMaskTexels::default());
+    // Queues the main side fills and Extract hands across. The render world
+    // keeps its own copy of each to apply.
     ecs.insert_resource(RenderRequests::default());
+    render.insert_resource(RenderRequests::default());
     ecs.insert_resource(crate::meshing::uploads::ChunkUploads::default());
+    render.insert_resource(crate::meshing::uploads::ChunkUploads::default());
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
@@ -558,35 +566,35 @@ fn init_ecs(
     ecs.insert_resource(libraries::LibrariesRes(libraries));
 
     // Direct Resource types
-    ecs.insert_resource(ctx);
-    ecs.insert_resource(surface_state);
+    render.insert_resource(ctx);
+    render.insert_resource(surface_state);
     ecs.insert_resource(simulation);
-    ecs.insert_resource(cloud_textures);
-    ecs.insert_resource(pipeline_registry);
-    ecs.insert_resource(pipeline_resources);
-    ecs.insert_resource(render_targets);
-    ecs.insert_resource(debug_line_pass);
-    ecs.insert_resource(upscale_pass);
-    ecs.insert_resource(detail_paint_pass);
-    ecs.insert_resource(scatter_pass);
-    ecs.insert_resource(capsule_pass);
-    ecs.insert_resource(canopy_pass);
-    ecs.insert_resource(rendering::skeleton_preview_pass::SkeletonPreviewPass::default());
-    // Main-side render data; `render_upload_system` copies it into the passes.
+    render.insert_resource(cloud_textures);
+    render.insert_resource(pipeline_registry);
+    render.insert_resource(pipeline_resources);
+    render.insert_resource(render_targets);
+    render.insert_resource(debug_line_pass);
+    render.insert_resource(upscale_pass);
+    render.insert_resource(detail_paint_pass);
+    render.insert_resource(scatter_pass);
+    render.insert_resource(capsule_pass);
+    render.insert_resource(canopy_pass);
+    render.insert_resource(rendering::skeleton_preview_pass::SkeletonPreviewPass::default());
+    // Main-side render data; `extract_system` uploads it into the passes.
     ecs.insert_resource(crate::meshing::overlay::DebugLines::default());
     ecs.insert_resource(crate::meshing::overlay::SkeletonPreview::default());
     ecs.insert_resource(crate::meshing::player::PlayerMesh::default());
     ecs.insert_resource(crate::meshing::cap::CapMesh::default());
-    ecs.insert_resource(water_pass);
-    ecs.insert_resource(post_process);
-    ecs.insert_resource(outline_pass);
-    ecs.insert_resource(palette_pass);
-    ecs.insert_resource(cap_pass);
-    ecs.insert_resource(player_pass);
+    render.insert_resource(water_pass);
+    render.insert_resource(post_process);
+    render.insert_resource(outline_pass);
+    render.insert_resource(palette_pass);
+    render.insert_resource(cap_pass);
+    render.insert_resource(player_pass);
     ecs.insert_resource(shader_watcher);
     ecs.insert_resource(graph_watcher);
     ecs.insert_resource(meshing);
-    ecs.insert_resource(ChunkMeshes::default());
+    render.insert_resource(ChunkMeshes::default());
     ecs.insert_resource(WorldRegenCoordinator::new(gen_pool.clone()));
     // `persistence` was opened earlier, before world generation (see above).
     let db_path = persistence.db_path.clone();
@@ -619,11 +627,12 @@ fn init_ecs(
 
     // EguiUi - NonSend because egui_winit::State may be !Send
     ecs.insert_non_send_resource(egui_ui);
-    ecs.insert_resource(egui_painter);
+    render.insert_resource(egui_painter);
     ecs.insert_resource(rendering::egui_painter::EguiFrame::default());
+    render.insert_resource(rendering::egui_painter::EguiFrame::default());
 
     // Initialize a default FrameState so systems don't panic on first frame
-    ecs.insert_resource(simulation::manager::FrameState {
+    let frame_state = simulation::manager::FrameState {
         dt: 0.0,
         elapsed: 0.0,
         camera: crate::rendering::camera_desc::CameraDesc::default(),
@@ -644,7 +653,9 @@ fn init_ecs(
         warm_tint_color: [1.0; 3],
         warm_tint_strength: 0.0,
         clip_dirs: [1.0, 1.0, 1.0],
-    });
+    };
+    render.insert_resource(frame_state.clone());
+    ecs.insert_resource(frame_state);
 
     // Initialize event queues
     ecs.init_resource::<Events<RegenerateWorld>>();
@@ -656,6 +667,13 @@ fn init_ecs(
     // -----------------------------------------------------------------------
     // Build the schedule
     // -----------------------------------------------------------------------
+
+    render.insert_resource(crate::rendering::render_world::RenderFeedback::default());
+    ecs.insert_resource(crate::rendering::render_world::RenderStats::default());
+    ecs.insert_resource(crate::rendering::render_world::RenderWorld::new(
+        render,
+        build_render_schedule(),
+    ));
 
     ecs.add_schedule(build_tick_schedule());
     let mut schedule = build_frame_schedule();
@@ -779,8 +797,8 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(new_size) => {
                 // The camera is main-side and follows at once. The surface is the
-                // renderer's: it resizes from the request in UniformWrite, and the
-                // render targets follow the frame's dims in the Render stage.
+                // render world's: it resizes from the request Extract hands it, and
+                // the render targets follow the frame's dims when it draws.
                 ecs.resource_mut::<SimulationManager>()
                     .camera
                     .resize(new_size.width, new_size.height);

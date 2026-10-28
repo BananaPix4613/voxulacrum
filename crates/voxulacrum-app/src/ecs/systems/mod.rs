@@ -15,6 +15,7 @@ pub mod editor_tools;
 pub mod streaming;
 pub mod jobs;
 pub mod uniforms;
+pub mod extract;
 pub mod render;
 pub mod regen;
 pub mod persistence;

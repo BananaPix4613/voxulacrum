@@ -35,7 +35,7 @@ pub struct TerrainMesh {
 
 /// The terrain meshes of resident chunks, keyed by chunk coordinate. Client
 /// state: the world holds no mesh (R4). Filled and emptied from `ChunkUploads`
-/// by `chunk_upload_system`; the render world takes these over later in R4.
+/// by `chunk_upload_system`. A render-world resource.
 #[derive(Resource, Default)]
 pub struct ChunkMeshes {
     pub meshes: HashMap<IVec3, ChunkMesh>,

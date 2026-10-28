@@ -151,3 +151,15 @@ pub fn stepping_uniforms(params: &crate::params::PaletteParams) -> PaletteUnifor
     uniforms.l_gamma = params.l_gamma;
     uniforms
 }
+
+/// The palette pass's uniforms for this frame: the loaded palette's colors in
+/// palette mode (mode 0), and plain stepping otherwise or when none is loaded.
+pub fn frame_uniforms(
+    loaded: Option<&Palette>,
+    params: &crate::params::PaletteParams,
+) -> PaletteUniforms {
+    match loaded {
+        Some(palette) if params.mode == 0 => palette_to_uniforms(palette, params),
+        _ => stepping_uniforms(params),
+    }
+}

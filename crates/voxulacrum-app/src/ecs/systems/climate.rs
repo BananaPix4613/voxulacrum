@@ -30,7 +30,7 @@ fn regional_weather_data_at(world: &crate::world::World, world_pos: glam::Vec2) 
 }
 
 /// Advance the simulated cloud layers, pack them into the envelope texels
-/// `render_upload_system` uploads, and refresh the offsets and coverages
+/// `extract_system` uploads, and refresh the offsets and coverages
 /// `write_uniforms_system` sends to the shaders. Runs after
 /// `simulation_tick_system`, so it reads this frame's camera position and wind.
 pub fn climate_tick_system(

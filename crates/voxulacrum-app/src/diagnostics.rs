@@ -27,7 +27,7 @@ pub const STAGE_COUNT: usize = 6;
 
 /// Display labels for the six stages, in schedule order.
 pub const STAGE_NAMES: [&str; STAGE_COUNT] =
-    ["input", "sim", "mesh", "uniform", "render", "post"];
+    ["input", "sim", "mesh", "extract", "render", "post"];
 
 /// Per-frame CPU-work budget in milliseconds (roadmap §7.3: 16.6 ms sustained).
 pub const FRAME_BUDGET_MS: f32 = 16.6;

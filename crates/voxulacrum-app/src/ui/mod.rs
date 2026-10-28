@@ -212,9 +212,9 @@ impl EguiUi {
     }
 }
 
-/// Lay out this frame's UI into `EguiFrame`, which the Render stage paints.
-/// Runs last in UniformWrite, after the uniforms are written, so a panel edit
-/// takes effect on the next frame, as it did when layout ran in the Render stage.
+/// Lay out this frame's UI into `EguiFrame`, which the render world paints.
+/// Runs in Extract after the stats and before `extract_system`, which hands the
+/// frame across, so a panel edit reaches this frame's uniforms.
 pub fn egui_layout_system(
     mut egui: NonSendMut<EguiUi>,
     mut ui_state: ResMut<panels::UiState>,

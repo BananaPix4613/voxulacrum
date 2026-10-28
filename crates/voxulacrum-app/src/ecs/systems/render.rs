@@ -1,7 +1,8 @@
-//! The render stage: render target upkeep, the render graph, the egui paint,
-//! and present.
+//! The render world's draw: render target upkeep, the render graph, the egui
+//! paint and present, plus the stats the main side reads back. Runs in the
+//! render world's schedule; what it reports goes back through `RenderFeedback`.
 
-use crate::diagnostics::FrameTimings;
+use bevy_ecs::prelude::{Res, ResMut};
 use crate::ecs::resources::{
     GlobalUniformBindGroup, ReflectionUniformBindGroup, ShadowBindGroup, ShadowDepthView,
     WindowHandle,
@@ -23,6 +24,7 @@ use crate::rendering::reflection_pass::ReflectionPassNode;
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_graph::{RenderGraph, ResourceId, ResourceMap};
 use crate::rendering::render_targets::RenderTargets;
+use crate::rendering::render_world::{RenderFeedback, RenderParams};
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::shadow_pass::ShadowPassNode;
 use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
@@ -30,11 +32,29 @@ use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::water_pass::WaterPass;
 use crate::simulation::manager::FrameState;
-use crate::ui::panels::UiState;
 use crate::meshing::coordinator::{ChunkMesh, ChunkMeshes};
 
+/// Count what the renderer holds, for the main side's stats: meshed chunks,
+/// those inside the camera frustum and their triangles, and the mesh bytes on
+/// the GPU. The draw count comes from the render graph.
+pub fn render_stats_system(
+    meshes: Res<ChunkMeshes>,
+    frame: Res<FrameState>,
+    mut feedback: ResMut<RenderFeedback>,
+) {
+    let stats = &mut feedback.stats;
+    for (&pos, mesh) in &meshes.meshes {
+        stats.chunks_meshed += 1;
+        if frame.camera.frustum.is_chunk_visible(pos) {
+            stats.chunks_visible += 1;
+            stats.triangles += mesh.index_count as u64 / 3;
+        }
+    }
+    stats.gpu_mesh_bytes = meshes.gpu_bytes();
+}
+
 // ==========================================================================
-// Render stage — exclusive system (takes &mut World)
+// The draw - exclusive system (takes the render world)
 // ==========================================================================
 
 pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
@@ -95,7 +115,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     let acquire_start = std::time::Instant::now();
     let surface_result = ecs.resource::<SurfaceState>().surface.get_current_texture();
     let acquire_ms = acquire_start.elapsed().as_secs_f32() * 1000.0;
-    ecs.resource_mut::<FrameTimings>().add_present(acquire_ms);
+    ecs.resource_mut::<RenderFeedback>().present_ms += acquire_ms;
     let surface_frame = match surface_result {
         Ok(f) => f,
         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -122,7 +142,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     // decides whether to draw it.
     let (cap_enabled, clip_dirs) = {
         let frame = ecs.resource::<FrameState>();
-        let cs_enabled = ecs.resource::<UiState>().params.cross_section.enabled;
+        let cs_enabled = ecs.resource::<RenderParams>().params.cross_section.enabled;
         (cs_enabled && frame.clip_enabled == 1, frame.clip_dirs)
     };
 
@@ -132,7 +152,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     });
 
     let draws = {
-        let ui = ecs.resource::<UiState>();
+        let render_params = ecs.resource::<RenderParams>();
         let pipeline_registry = ecs.resource::<PipelineRegistry>();
         let shadow_bind_group = ecs.resource::<ShadowBindGroup>();
         let shadow_depth_view = ecs.resource::<ShadowDepthView>();
@@ -151,7 +171,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let palette_pass = ecs.resource::<PalettePass>();
         let upscale_pass = ecs.resource::<UpscalePass>();
 
-        let terrain_pipeline = if ui.params.debug.show_wireframe {
+        let terrain_pipeline = if render_params.params.debug.show_wireframe {
             &pipeline_registry.terrain_wireframe_pipeline
         } else {
             &pipeline_registry.terrain_pipeline
@@ -185,12 +205,12 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         
         let player_pass = ecs.resource::<PlayerPass>();
 
-        let room_enclosed = ecs.resource::<crate::world::room::RoomState>().enclosed;
+        let room_enclosed = render_params.room_enclosed;
 
         let sky = if room_enclosed {
             [0.02, 0.02, 0.028] // dark void-gray while enclosed; the wireframe sits just above this
         } else {
-            ui.params.render_pipeline.sky_color
+            render_params.params.render_pipeline.sky_color
         };
         let scene_node = MainScenePassNode {
             sky_color: wgpu::Color {
@@ -218,10 +238,10 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             canopy_pass: &canopy_pass,
             canopy_pipeline: &pipeline_registry.canopy_core_pipeline,
             skeleton_preview_pass: &skeleton_preview_pass,
-            show_canopy_cores: ui.params.debug.show_canopy_cores,
+            show_canopy_cores: render_params.params.debug.show_canopy_cores,
             debug_line_pass: &debug_line_pass,
-            show_debug_lines: ui.params.debug.show_chunk_boundaries,
-            hide_foliage: ui.params.debug.hide_foliage,
+            show_debug_lines: render_params.params.debug.show_chunk_boundaries,
+            hide_foliage: render_params.params.debug.hide_foliage,
             player_pass: &player_pass,
         };
 
@@ -242,8 +262,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             capsule_pass: &capsule_pass,
             capsule_pipeline: &pipeline_registry.capsule_pipeline,
             player_pass: &player_pass,
-            hide_foliage: ui.params.debug.hide_foliage,
-            enabled: !ui.params.debug.hide_water && !water_pass.chunk_meshes.is_empty(),
+            hide_foliage: render_params.params.debug.hide_foliage,
+            enabled: !render_params.params.debug.hide_water && !water_pass.chunk_meshes.is_empty(),
         };
 
         let water_node = crate::rendering::water_scene_pass::WaterScenePassNode {
@@ -251,7 +271,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             global_bind_group: &uniform_bind_group.0,
             water_pass: &water_pass,
             frustum: &frame.camera.frustum,
-            hide_water: ui.params.debug.hide_water,
+            hide_water: render_params.params.debug.hide_water,
             scene_tex: &render_targets.scene,
             scene_copy_tex: &render_targets.scene_copy,
             tex_size: wgpu::Extent3d {
@@ -295,7 +315,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
 
         graph.execute(&mut encoder, &resources)
     };
-    ecs.resource_mut::<UiState>().draws = draws;
+    ecs.resource_mut::<RenderFeedback>().stats.draws = draws;
 
     // --- Egui paint ---
     // Laid out main-side by `egui_layout_system`; this only paints it.
@@ -314,5 +334,5 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     let present_start = std::time::Instant::now();
     surface_frame.present();
     let present_ms = present_start.elapsed().as_secs_f32() * 1000.0;
-    ecs.resource_mut::<FrameTimings>().add_present(present_ms);
+    ecs.resource_mut::<RenderFeedback>().present_ms += present_ms;
 }

@@ -13,6 +13,7 @@ use crate::rendering::palette_pass::PalettePass;
 use crate::rendering::pipelines::{PipelineRegistry, PipelineResources};
 use crate::rendering::post_process::PostProcessPass;
 use crate::rendering::render_context::RenderContext;
+use crate::rendering::render_world::RenderFeedback;
 use crate::shader_reload::ShaderWatcher;
 use crate::ui::panels::UiState;
 
@@ -25,7 +26,8 @@ pub fn shader_watch_system(
 }
 
 /// Rebuild the pipelines of the shaders `shader_watch_system` queued. Runs in
-/// UniformWrite, beside the other GPU work.
+/// the render world, before the frame draws; its log lines reach the panel
+/// through `RenderFeedback`.
 pub fn shader_reload_system(
     mut requests: ResMut<RenderRequests>,
     ctx: Res<RenderContext>,
@@ -35,7 +37,7 @@ pub fn shader_reload_system(
     mut outline_pass: ResMut<OutlinePass>,
     mut palette_pass: ResMut<PalettePass>,
     mut cap_pass: ResMut<CapPass>,
-    mut ui: ResMut<UiState>,
+    mut feedback: ResMut<RenderFeedback>,
 ) {
     let changed = std::mem::take(&mut requests.shader_changes);
     for path in changed {
@@ -50,17 +52,17 @@ pub fn shader_reload_system(
                     match post_process.try_reload_shader(&ctx, &source) {
                         Ok(()) => {
                             log::info!("Reloaded post_process.wgsl");
-                            ui.push_shader_log("post_process.wgsl reloaded".into(), false);
+                            feedback.push_shader_log("post_process.wgsl reloaded".into(), false);
                         }
                         Err(e) => {
                             log::warn!("post_process.wgsl compile error: {}", e);
-                            ui.push_shader_log(format!("post_process.wgsl: {}", e), true);
+                            feedback.push_shader_log(format!("post_process.wgsl: {}", e), true);
                         }
                     }
                 }
                 Err(e) => {
                     log::warn!("Failed to read post_process.wgsl: {}", e);
-                    ui.push_shader_log(format!("post_process.wgsl read error: {}", e), true);
+                    feedback.push_shader_log(format!("post_process.wgsl read error: {}", e), true);
                 }
             }
             continue;
@@ -72,17 +74,17 @@ pub fn shader_reload_system(
                     match outline_pass.try_reload_shader(&ctx, &source) {
                         Ok(()) => {
                             log::info!("Reloaded outline.wgsl");
-                            ui.push_shader_log("outline.wgsl reloaded".into(), false);
+                            feedback.push_shader_log("outline.wgsl reloaded".into(), false);
                         }
                         Err(e) => {
                             log::warn!("outline.wgsl compile error: {}", e);
-                            ui.push_shader_log(format!("outline.wgsl: {}", e), true);
+                            feedback.push_shader_log(format!("outline.wgsl: {}", e), true);
                         }
                     }
                 }
                 Err(e) => {
                     log::warn!("Failed to read outline.wgsl: {}", e);
-                    ui.push_shader_log(format!("outline.wgsl read error: {}", e), true);
+                    feedback.push_shader_log(format!("outline.wgsl read error: {}", e), true);
                 }
             }
             continue;
@@ -94,17 +96,17 @@ pub fn shader_reload_system(
                     match palette_pass.try_reload_shader(&ctx, &source) {
                         Ok(()) => {
                             log::info!("Reloaded palette.wgsl");
-                            ui.push_shader_log("palette.wgsl reloaded".into(), false);
+                            feedback.push_shader_log("palette.wgsl reloaded".into(), false);
                         }
                         Err(e) => {
                             log::warn!("palette.wgsl compile error: {}", e);
-                            ui.push_shader_log(format!("palette.wgsl: {}", e), true);
+                            feedback.push_shader_log(format!("palette.wgsl: {}", e), true);
                         }
                     }
                 }
                 Err(e) => {
                     log::warn!("Failed to read palette.wgsl: {}", e);
-                    ui.push_shader_log(format!("palette.wgsl read error: {}", e), true);
+                    feedback.push_shader_log(format!("palette.wgsl read error: {}", e), true);
                 }
             }
             continue;
@@ -120,17 +122,17 @@ pub fn shader_reload_system(
                     ) {
                         Ok(()) => {
                             log::info!("Reloaded cap.wgsl");
-                            ui.push_shader_log("cap.wgsl reloaded".into(), false);
+                            feedback.push_shader_log("cap.wgsl reloaded".into(), false);
                         }
                         Err(e) => {
                             log::warn!("cap.wgsl compile error: {}", e);
-                            ui.push_shader_log(format!("cap.wgsl: {}", e), true);
+                            feedback.push_shader_log(format!("cap.wgsl: {}", e), true);
                         }
                     }
                 }
                 Err(e) => {
                     log::warn!("Failed to read cap.wgsl: {}", e);
-                    ui.push_shader_log(format!("cap.wgsl read error: {}", e), true);
+                    feedback.push_shader_log(format!("cap.wgsl read error: {}", e), true);
                 }
             }
             continue;
@@ -147,7 +149,7 @@ pub fn shader_reload_system(
             } else {
                 log::warn!("{}: {}", result.filename, result.message);
             }
-            ui.push_shader_log(
+            feedback.push_shader_log(
                 format!("{}: {}", result.filename, result.message),
                 !result.success,
             );

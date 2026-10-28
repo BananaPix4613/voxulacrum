@@ -28,3 +28,4 @@ pub mod player_pass;
 pub mod versioned;
 pub mod cloud_textures;
 pub mod egui_painter;
+pub mod render_world;

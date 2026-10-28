@@ -112,8 +112,8 @@ pub fn room_detection_system(
 /// mask uniforms every frame (FrameState is rebuilt per frame). The mask marks the
 /// visible set dilated by one cell - the +1 pulls in the solid cave-wall shell so
 /// walls render; everything else stays 0 (capped), which is what hides the surface
-/// world (R3). Runs in UniformWrite before `write_uniforms_system` and before
-/// `render_upload_system`, which uploads the texels.
+/// world (R3). Runs in Extract before `extract_system`, which uploads the
+/// texels and copies the frame state with its mask fields.
 pub fn visibility_mask_system(
     mut room: ResMut<crate::world::room::RoomState>,
     mut frame: ResMut<FrameState>,
