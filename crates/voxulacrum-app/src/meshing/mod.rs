@@ -113,6 +113,11 @@ pub struct MeshingPipeline {
     requests: HashMap<IVec3, MeshRequest>,
     /// Chunks whose current mesh is out of date.
     dirty: HashSet<IVec3>,
+    /// Chunks that unloaded while a mesh of theirs was in flight. Each stays
+    /// `InProgress` until that mesh lands, so a chunk that loads again in the
+    /// meantime is not meshed twice at once, and the mesh is dropped when it
+    /// lands: it was built from the chunk before it unloaded.
+    discarded: HashSet<IVec3>,
 
     pub stats: MeshingStats,
     batch_start: Option<Instant>,
@@ -165,6 +170,7 @@ impl MeshingPipeline {
             chunk_states: HashMap::new(),
             requests: HashMap::new(),
             dirty: HashSet::new(),
+            discarded: HashSet::new(),
             stats: MeshingStats { worker_count, ..Default::default() },
             batch_start: None,
             pending_submissions: Vec::new(),
@@ -324,6 +330,9 @@ impl MeshingPipeline {
         while let Ok(result) = rx.try_recv() {
             self.chunk_states.remove(&result.chunk_key);
             self.stats.total_meshed += 1;
+            if self.discarded.remove(&result.chunk_key) {
+                continue;
+            }
             completed.push(result);
         }
 
@@ -370,8 +379,14 @@ impl MeshingPipeline {
             && self.chunk_states.values().all(|s| *s == ChunkMeshState::Idle)
     }
 
+    /// Forget a chunk that unloaded. A mesh of it still in flight stays tracked
+    /// until it lands, and is dropped then (see `discarded`).
     pub fn remove_chunk_state(&mut self, pos: IVec3) {
-        self.chunk_states.remove(&pos);
+        if self.is_chunk_in_flight(pos) {
+            self.discarded.insert(pos);
+        } else {
+            self.chunk_states.remove(&pos);
+        }
         self.dirty.remove(&pos);
         self.requests.remove(&pos);
         if self.pending_set.remove(&pos) {
@@ -385,6 +400,7 @@ impl MeshingPipeline {
 
     pub fn reset_for_new_world(&mut self) {
         self.chunk_states.clear();
+        self.discarded.clear();
         self.pending_submissions.clear();
         self.pending_set.clear();
         self.batch_start = None;
@@ -567,5 +583,52 @@ mod tests {
         let (files, hits, misses, vertices) = run_task(false, "off");
         assert_eq!((files, hits, misses), (0, 0, 0));
         assert_eq!(vertices, enabled_vertices, "the same mesh, just not cached");
+    }
+
+    /// A chunk that unloads while its mesh is in flight, and loads again before
+    /// that mesh lands, is not meshed a second time meanwhile, and the old mesh
+    /// is dropped rather than drawn for the chunk as it is now.
+    #[test]
+    fn a_mesh_in_flight_when_its_chunk_unloads_is_dropped() {
+        let mut pipeline = MeshingPipeline::new(&crate::params::MeshCacheParams {
+            enabled: false,
+            ..Default::default()
+        });
+        let pos = IVec3::new(3, 0, -2);
+        // Meshing, as `drain_pending_submissions` leaves a chunk it submitted.
+        pipeline.invalidate(pos, false);
+        pipeline.chunk_states.insert(pos, ChunkMeshState::InProgress);
+        let seq = pipeline.requests[&pos].seq;
+
+        // It unloads and loads again before its mesh lands.
+        pipeline.remove_chunk_state(pos);
+        pipeline.invalidate(pos, false);
+        pipeline.submit_dirty();
+        assert!(
+            pipeline.pending_submissions.is_empty(),
+            "not resubmitted while the first mesh is in flight",
+        );
+
+        // The first mesh lands.
+        pipeline
+            .result_tx
+            .lock()
+            .unwrap()
+            .send(MeshResult {
+                chunk_key: pos,
+                vertices: Vec::new(),
+                indices: Vec::new(),
+                mesh_seq: seq,
+                version: ChunkVersion::default(),
+            })
+            .unwrap();
+        assert!(pipeline.poll().is_empty(), "built from the chunk before it unloaded");
+
+        pipeline.submit_dirty();
+        assert_eq!(
+            pipeline.pending_submissions,
+            [pos],
+            "the reloaded chunk meshes once the old mesh is gone",
+        );
     }
 }

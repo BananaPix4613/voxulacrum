@@ -9,7 +9,6 @@ use crate::diagnostics::{
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
 use crate::meshing::coordinator::MeshingCoordinator;
-use crate::rendering::uploads::ChunkUploads;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
@@ -23,7 +22,6 @@ pub fn streaming_tick_system(
     mut meshing: ResMut<MeshingCoordinator>,
     mut jobs: ResMut<JobSystem>,
     sim: Res<SimulationManager>,
-    mut uploads: ResMut<ChunkUploads>,
     mut ui: ResMut<UiState>,
     persistence: Res<WorldPersistence>,
     mut timings: ResMut<FrameTimings>,
@@ -61,12 +59,6 @@ pub fn streaming_tick_system(
             }
         },
     );
-
-    // Queue the removal of the unloaded chunks' meshes and per-chunk buffers.
-    // R6 moves this to the client's chunk view.
-    for pos in &tick_result.unloaded {
-        uploads.remove(*pos);
-    }
 
     // NOTE: We do NOT add foliage/water here for inserted chunks.
     // Inserted chunks don't have meshes yet. Foliage/water are added

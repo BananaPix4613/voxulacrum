@@ -21,7 +21,7 @@ use voxel_core::{ChunkCoord, LocalPos, ResolvedBlueprint, Voxel, Yaw};
 
 use super::fluid_sim::ChunkPlan;
 use super::layers::PrefabId;
-use super::changes::{ChunkFaces, ChunkLayers};
+use super::changes::{ChunkFaces, ChunkLayers, ChunkVersion};
 use super::chunk::LoadedChunk;
 use super::world_generator::WorldGenerator;
 
@@ -112,6 +112,9 @@ pub struct MutationOutcome {
     /// Chunks whose data changed, with the layers and boundary faces changed,
     /// one entry per chunk. `World::execute` stamps each with a version.
     pub changed: SmallVec<[(IVec3, ChunkLayers, ChunkFaces); 4]>,
+    /// Chunks the command removed from the resident set, with the version each
+    /// last carried. `World::execute` publishes each as having left.
+    pub unloaded: SmallVec<[(IVec3, ChunkVersion); 1]>,
 }
 
 impl MutationOutcome {
@@ -121,6 +124,7 @@ impl MutationOutcome {
         for (chunk, layers, faces) in other.changed {
             self.touch(chunk, layers, faces);
         }
+        self.unloaded.extend(other.unloaded);
     }
     
     /// Record that the command changed `layers` and `faces` of `chunk`, merged
@@ -184,7 +188,8 @@ pub enum WorldMutation {
     /// every layer and face changed, so its six face neighbors re-cull against it.
     /// Issued by streaming when a generation task completes.
     InsertLoadedChunk { chunk: LoadedChunk },
-    /// Drop a chunk from the resident set (streaming eviction). The caller
+    /// Drop a chunk from the resident set (streaming eviction) and report that
+    /// it left, so the client drops what it built from it. The caller
     /// persists it first if dirty, since persistence lives outside `World`;
     /// this is the residency change itself. The door owns it so insert and
     /// evict are symmetric - per-observer streaming (0.6.0) and the streaming

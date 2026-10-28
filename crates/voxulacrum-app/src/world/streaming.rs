@@ -547,10 +547,8 @@ impl ChunkStreamingManager {
             if evicted > 0 && mark.elapsed() >= unload_budget {
                 break;
             }
-            if meshing.pipeline.is_chunk_in_flight(pos) {
-                continue;
-            }
-            meshing.pipeline.remove_chunk_state(pos);
+            // The eviction reaches the client through the change feed, which
+            // forgets the chunk's mesh state and drops its render entries.
             // Save before dropping: persistence lives outside `World`, so the
             // save reads the chunk here and the door performs the residency
             // change itself.
