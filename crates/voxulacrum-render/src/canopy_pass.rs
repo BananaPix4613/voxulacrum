@@ -12,7 +12,7 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
-use crate::rendering::pipelines::LobeInstanceGpu;
+use crate::pipelines::LobeInstanceGpu;
 use voxel_core::ChunkVersion;
 
 /// One chunk's lobe instances.

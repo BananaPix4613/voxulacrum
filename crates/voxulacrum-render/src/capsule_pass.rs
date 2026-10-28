@@ -12,7 +12,7 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
-use crate::rendering::pipelines::CapsuleInstanceGpu;
+use crate::pipelines::CapsuleInstanceGpu;
 use voxel_core::ChunkVersion;
 
 /// One chunk's capsule instances.

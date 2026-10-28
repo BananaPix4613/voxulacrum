@@ -1,6 +1,6 @@
-use crate::rendering::frustum::Frustum;
-use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::water_pass::WaterPass;
+use crate::frustum::Frustum;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::water_pass::WaterPass;
 
 /// Dedicated water pass (design §7 rendering). Runs after the opaque scene: copies
 /// SCENE into SCENE_COPY so the water shader can sample the terrain behind it

@@ -1,9 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 use bevy_ecs::prelude::Resource;
 
-use crate::rendering::cap_pass::CapVertex;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::versioned::{Uploaded, Versioned};
+use crate::cap_pass::CapVertex;
+use crate::render_context::RenderContext;
+use crate::versioned::{Uploaded, Versioned};
 
 /// Upper bound for the avatar mesh (capsule + visor + shadow disc = 180 verts / 860 indices).
 const MAX_VERTICES: usize = 512;
@@ -84,7 +84,7 @@ impl PlayerPass {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+                format: crate::render_targets::SCENE_DEPTH_FORMAT,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
@@ -131,7 +131,7 @@ impl PlayerPass {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+                format: crate::render_targets::SCENE_DEPTH_FORMAT,
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Always, // ignore depth: draw over
 
@@ -194,7 +194,7 @@ impl PlayerPass {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+                format: crate::render_targets::SCENE_DEPTH_FORMAT,
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::Greater, // only where behind terrain
                 stencil: wgpu::StencilState {

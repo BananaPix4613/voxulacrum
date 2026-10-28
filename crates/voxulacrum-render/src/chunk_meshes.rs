@@ -7,7 +7,7 @@ use glam::IVec3;
 use voxel_core::ChunkVersion;
 use wgpu::util::DeviceExt;
 
-use crate::rendering::pipelines::FaceVertex;
+use crate::pipelines::FaceVertex;
 
 /// One chunk's terrain mesh on the GPU.
 pub struct ChunkMesh {

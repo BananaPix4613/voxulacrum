@@ -1,11 +1,11 @@
 use wgpu::CommandEncoder;
-use crate::rendering::detail_paint_pass::DetailPaintPass;
-use crate::rendering::frustum::Frustum;
-use crate::rendering::player_pass::PlayerPass;
-use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::chunk_meshes::ChunkMesh;
+use crate::detail_paint_pass::DetailPaintPass;
+use crate::frustum::Frustum;
+use crate::player_pass::PlayerPass;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::scatter_pass::ScatterPass;
+use crate::capsule_pass::CapsulePass;
+use crate::chunk_meshes::ChunkMesh;
 
 /// Planar water reflection pass. Re-renders terrain + foliage + scatter + player
 /// into the half-res reflection targets with the mirrored view-projection
@@ -91,7 +91,7 @@ impl<'a> RenderPassNode for ReflectionPassNode<'a> {
                     pass.draw_indexed(
                         0..self.detail_paint_pass.blade_index_count,
                         0,
-                        0..crate::rendering::detail_paint_pass::INSTANCES_PER_CHUNK,
+                        0..crate::detail_paint_pass::INSTANCES_PER_CHUNK,
                     );
                 }
             }

@@ -3,26 +3,26 @@
 //! buffers.
 
 use bevy_ecs::prelude::*;
-use crate::rendering::canopy_pass::CanopyPass;
-use crate::rendering::cap_pass::CapPass;
-use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::chunk_meshes::ChunkMeshes;
-use crate::rendering::detail_paint_pass::DetailPaintPass;
-use crate::rendering::frame_state::FrameState;
-use crate::rendering::outline_pass::OutlinePass;
-use crate::rendering::palette_pass::PalettePass;
-use crate::rendering::pipelines::{PipelineRegistry, PipelineResources};
-use crate::rendering::post_process::PostProcessPass;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_world::{RenderFeedback, RenderParams};
-use crate::rendering::resources::{
+use crate::canopy_pass::CanopyPass;
+use crate::cap_pass::CapPass;
+use crate::capsule_pass::CapsulePass;
+use crate::chunk_meshes::ChunkMeshes;
+use crate::detail_paint_pass::DetailPaintPass;
+use crate::frame_state::FrameState;
+use crate::outline_pass::OutlinePass;
+use crate::palette_pass::PalettePass;
+use crate::pipelines::{PipelineRegistry, PipelineResources};
+use crate::post_process::PostProcessPass;
+use crate::render_context::RenderContext;
+use crate::render_world::{RenderFeedback, RenderParams};
+use crate::resources::{
     GlobalUniformBuffer, ReflectionUniformBuffer, RenderRequests, ShadowUniformBuffer,
 };
-use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::surface_state::SurfaceState;
-use crate::rendering::upscale_pass::UpscalePass;
-use crate::rendering::uploads::{ChunkUpload, ChunkUploads};
-use crate::rendering::water_pass::WaterPass;
+use crate::scatter_pass::ScatterPass;
+use crate::surface_state::SurfaceState;
+use crate::upscale_pass::UpscalePass;
+use crate::uploads::{ChunkUpload, ChunkUploads};
+use crate::water_pass::WaterPass;
 
 /// Drain the render world's `ChunkUploads` into the terrain meshes and the
 /// per-chunk passes. Runs before everything in the render schedule that reads
@@ -237,7 +237,7 @@ pub fn write_uniforms_system(
     water_pass: Res<WaterPass>,
 ) {
     let reflect_plane = water_pass.avg_surface_y;
-    crate::rendering::uniform_writer::write_all_uniforms(
+    crate::uniform_writer::write_all_uniforms(
         &ctx,
         &frame,
         &render_params.settings,

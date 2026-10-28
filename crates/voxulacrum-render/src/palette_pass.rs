@@ -1,19 +1,51 @@
+use bytemuck::{Pod, Zeroable};
 use bevy_ecs::prelude::Resource;
 
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::uniforms::UpscaleUniforms;
+use crate::render_context::RenderContext;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+
+pub const MAX_PALETTE_COLORS: usize = 32;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct PaletteUniforms {
+    pub colors_srgb: [[f32; 4]; MAX_PALETTE_COLORS],
+    pub colors_lab: [[f32; 4]; MAX_PALETTE_COLORS],
+    pub count: u32,
+    pub enabled: u32,
+    pub mode: u32,
+    pub l_levels: u32,
+    pub ab_levels: u32,
+    pub l_gamma: f32,
+    pub _padding: [u32; 2],
+}
+
+impl Default for PaletteUniforms {
+    fn default() -> Self {
+        Self {
+            colors_srgb: [[0.0; 4]; MAX_PALETTE_COLORS],
+            colors_lab: [[0.0; 4]; MAX_PALETTE_COLORS],
+            count: 0,
+            enabled: 0,
+            mode: 0,
+            l_levels: 8,
+            ab_levels: 8,
+            l_gamma: 1.0,
+            _padding: [0; 2],
+        }
+    }
+}
 
 #[derive(Resource)]
-pub struct UpscalePass {
+pub struct PalettePass {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
-    pub sampler: wgpu::Sampler,
     pub uniform_buffer: wgpu::Buffer,
+    pub sampler: wgpu::Sampler,
 }
 
-impl UpscalePass {
+impl PalettePass {
     pub fn new(
         ctx: &RenderContext,
         source_view: &wgpu::TextureView,
@@ -21,10 +53,20 @@ impl UpscalePass {
     ) -> Self {
         let bind_group_layout =
             ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("upscale_bind_group_layout"),
+                label: Some("palette_bind_group_layout"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float {
@@ -36,30 +78,20 @@ impl UpscalePass {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 1,
+                        binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(
                             wgpu::SamplerBindingType::Filtering,
                         ),
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
                 ],
             });
 
         let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("upscale_bilinear_sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            label: Some("palette_point_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -67,8 +99,8 @@ impl UpscalePass {
         });
 
         let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("upscale_uniform_buffer"),
-            size: std::mem::size_of::<UpscaleUniforms>() as u64,
+            label: Some("palette_uniform_buffer"),
+            size: std::mem::size_of::<PaletteUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -76,9 +108,9 @@ impl UpscalePass {
         let bind_group = Self::create_bind_group(
             &ctx.device,
             &bind_group_layout,
+            &uniform_buffer,
             source_view,
             &sampler,
-            &uniform_buffer,
         );
 
         let pipeline = Self::create_pipeline(
@@ -92,33 +124,33 @@ impl UpscalePass {
             pipeline,
             bind_group,
             bind_group_layout,
-            sampler,
             uniform_buffer,
+            sampler,
         }
     }
 
     fn create_bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
+        uniform_buffer: &wgpu::Buffer,
         source_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
-        uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("upscale_bind_group"),
+            label: Some("palette_bind_group"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(source_view),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::TextureView(source_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: uniform_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         })
@@ -132,19 +164,19 @@ impl UpscalePass {
     ) -> wgpu::RenderPipeline {
         let shader_module =
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("upscale_shader"),
+                label: Some("palette_shader"),
                 source: wgpu::ShaderSource::Wgsl(shader_source.into()),
             });
 
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("upscale_pipeline_layout"),
+                label: Some("palette_pipeline_layout"),
                 bind_group_layouts: &[bind_group_layout],
                 push_constant_ranges: &[],
             });
 
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("upscale_pipeline"),
+            label: Some("palette_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader_module,
@@ -190,13 +222,36 @@ impl UpscalePass {
         self.bind_group = Self::create_bind_group(
             &ctx.device,
             &self.bind_group_layout,
+            &self.uniform_buffer,
             source_view,
             &self.sampler,
-            &self.uniform_buffer,
         );
     }
-    
-    pub fn update_uniforms(&self, queue: &wgpu::Queue, uniforms: UpscaleUniforms) {
+
+    pub fn try_reload_shader(
+        &mut self,
+        ctx: &RenderContext,
+        shader_source: &str,
+    ) -> Result<(), String> {
+        ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        let new_pipeline = Self::create_pipeline(
+            &ctx.device,
+            ctx.surface_format,
+            &self.bind_group_layout,
+            shader_source,
+        );
+
+        match pollster::block_on(ctx.device.pop_error_scope()) {
+            Some(err) => Err(format!("Shader compile error: {}", err)),
+            None => {
+                self.pipeline = new_pipeline;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, uniforms: PaletteUniforms) {
         queue.write_buffer(
             &self.uniform_buffer,
             0,
@@ -205,20 +260,20 @@ impl UpscalePass {
     }
 }
 
-impl RenderPassNode for UpscalePass {
+impl RenderPassNode for PalettePass {
     fn declaration(&self) -> PassDecl {
         PassDecl {
-            name: "upscale",
-            reads: &[ResourceId::PROCESSED],
-            writes: &[ResourceId::SURFACE],
+            name: "palette",
+            reads: &[ResourceId::SCENE],
+            writes: &[ResourceId::PROCESSED],
         }
     }
 
     fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32 {
         let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("upscale_pass"),
+            label: Some("palette_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: resources.get(ResourceId::SURFACE),
+                view: resources.get(ResourceId::PROCESSED),
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),

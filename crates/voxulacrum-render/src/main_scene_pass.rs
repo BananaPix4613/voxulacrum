@@ -1,14 +1,14 @@
-use crate::rendering::cap_pass::CapPass;
-use crate::rendering::debug_lines::DebugLinePass;
-use crate::rendering::frustum::Frustum;
-use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::detail_paint_pass::DetailPaintPass;
-use crate::rendering::player_pass::PlayerPass;
-use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::canopy_pass::CanopyPass;
-use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
-use crate::rendering::chunk_meshes::ChunkMesh;
+use crate::cap_pass::CapPass;
+use crate::debug_lines::DebugLinePass;
+use crate::frustum::Frustum;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::detail_paint_pass::DetailPaintPass;
+use crate::player_pass::PlayerPass;
+use crate::scatter_pass::ScatterPass;
+use crate::capsule_pass::CapsulePass;
+use crate::canopy_pass::CanopyPass;
+use crate::skeleton_preview_pass::SkeletonPreviewPass;
+use crate::chunk_meshes::ChunkMesh;
 
 /// Configuration for cross-section cap rendering within the main scene pass.
 pub struct CapConfig {
@@ -209,7 +209,7 @@ impl<'a> RenderPassNode for MainScenePassNode<'a> {
                     pass.draw_indexed(
                         0..self.detail_paint_pass.blade_index_count,
                         0,
-                        0..crate::rendering::detail_paint_pass::INSTANCES_PER_CHUNK,
+                        0..crate::detail_paint_pass::INSTANCES_PER_CHUNK,
                     );
                 }
             }

@@ -4,7 +4,7 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
-use crate::rendering::pipelines::WaterVertex;
+use crate::pipelines::WaterVertex;
 use voxel_core::ChunkVersion;
 
 /// One chunk's water surface, built on the CPU (`meshing::water`).
@@ -52,7 +52,7 @@ impl WaterPass {
     ) -> Self {
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("water_uniform_buffer"),
-            size: std::mem::size_of::<crate::rendering::uniforms::WaterUniforms>() as u64,
+            size: std::mem::size_of::<crate::uniforms::WaterUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -65,7 +65,7 @@ impl WaterPass {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let bind_group = crate::rendering::uniforms::create_water_bind_group(
+        let bind_group = crate::uniforms::create_water_bind_group(
             device, layout, &uniform_buffer, scene_copy_view, &sampler, scene_depth_view,
             reflection_color_view, reflection_depth_view,
         );
@@ -97,7 +97,7 @@ impl WaterPass {
         reflection_color_view: &wgpu::TextureView,
         reflection_depth_view: &wgpu::TextureView,
     ) {
-        self.bind_group = crate::rendering::uniforms::create_water_bind_group(
+        self.bind_group = crate::uniforms::create_water_bind_group(
             device, layout, &self.uniform_buffer, scene_copy_view, &self.sampler, scene_depth_view,
             reflection_color_view, reflection_depth_view,
         );
@@ -107,7 +107,7 @@ impl WaterPass {
     pub fn update_uniforms(
         &self,
         queue: &wgpu::Queue,
-        u: &crate::rendering::uniforms::WaterUniforms,
+        u: &crate::uniforms::WaterUniforms,
     ) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(std::slice::from_ref(u)));
     }

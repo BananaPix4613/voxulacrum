@@ -1,9 +1,9 @@
 use bevy_ecs::prelude::Resource;
 
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::pipelines;
-use crate::rendering::uniforms::{self, PostProcessUniforms};
+use crate::render_context::RenderContext;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::pipelines;
+use crate::uniforms::{self, PostProcessUniforms};
 
 #[derive(Resource)]
 pub struct PostProcessPass {

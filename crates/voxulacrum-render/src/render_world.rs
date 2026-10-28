@@ -6,10 +6,10 @@
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{ExecutorKind, IntoScheduleConfigs, Schedule};
 
-use crate::rendering::{draw, prepare};
-use crate::rendering::settings::{RenderSettings, SceneOptions};
-use crate::rendering::palette_pass::PaletteUniforms;
-use crate::rendering::uniform_writer::CloudFrame;
+use crate::{draw, prepare};
+use crate::settings::{RenderSettings, SceneOptions};
+use crate::palette_pass::PaletteUniforms;
+use crate::uniform_writer::CloudFrame;
 
 #[derive(Resource)]
 pub struct RenderWorld {

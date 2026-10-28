@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use bevy_ecs::prelude::Resource;
 
-use crate::rendering::versioned::{Uploaded, Versioned};
+use crate::versioned::{Uploaded, Versioned};
 
 // ---------------------------------------------------------------------------
 // GPU uniform buffers

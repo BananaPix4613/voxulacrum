@@ -4,8 +4,8 @@
 use bevy_ecs::prelude::Resource;
 use glam::Mat4;
 
-use crate::rendering::camera_desc::CameraDesc;
-use crate::rendering::render_dims::RenderDims;
+use crate::camera_desc::CameraDesc;
+use crate::render_dims::RenderDims;
 
 /// All computed per-frame data that rendering needs. `SimulationManager` fills
 /// it on the main side, and Extract copies it into the render world.

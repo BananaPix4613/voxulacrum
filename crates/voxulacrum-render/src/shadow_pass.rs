@@ -1,6 +1,6 @@
-use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::chunk_meshes::ChunkMesh;
+use crate::capsule_pass::CapsulePass;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::chunk_meshes::ChunkMesh;
 
 /// Transient per-frame node - borrows from AppState.
 pub struct ShadowPassNode<'a> {

@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::path::Path;
 use bevy_ecs::prelude::Resource;
-use crate::rendering::render_context::RenderContext;
+use crate::render_context::RenderContext;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Serialize, Deserialize)]
@@ -95,7 +95,7 @@ pub fn create_terrain_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+            format: crate::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -164,7 +164,7 @@ pub fn create_terrain_wireframe_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+            format: crate::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -318,9 +318,9 @@ pub fn create_detail_paint_pipeline(
     });
 
     let chunk_layout =
-        crate::rendering::detail_paint_pass::create_detail_chunk_layout(device);
+        crate::detail_paint_pass::create_detail_chunk_layout(device);
     let species_layout =
-        crate::rendering::detail_paint_pass::create_detail_species_layout(device);
+        crate::detail_paint_pass::create_detail_species_layout(device);
     
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("detail_paint_pipeline_layout"),
@@ -381,7 +381,7 @@ pub fn create_detail_paint_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+            format: crate::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -553,7 +553,7 @@ pub fn create_scatter_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+            format: crate::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -636,7 +636,7 @@ pub fn create_capsule_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+            format: crate::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -787,7 +787,7 @@ pub fn create_canopy_core_pipeline(
             conservative: false,
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+            format: crate::render_targets::SCENE_DEPTH_FORMAT,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),

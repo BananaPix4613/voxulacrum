@@ -1,6 +1,6 @@
 use bevy_ecs::prelude::Resource;
 
-use crate::rendering::render_context::RenderContext;
+use crate::render_context::RenderContext;
 
 /// Low-resolution render targets for the stylized pixel-art pipeline.
 ///
@@ -70,7 +70,7 @@ pub struct RenderTargets {
 }
 
 impl RenderTargets {
-    pub fn new(ctx: &RenderContext, dims: &crate::rendering::render_dims::RenderDims) -> Self {
+    pub fn new(ctx: &RenderContext, dims: &crate::render_dims::RenderDims) -> Self {
         let tex_width = dims.alloc_w.max(1);
         let tex_height = dims.alloc_h.max(1);
 
@@ -196,7 +196,7 @@ impl RenderTargets {
         })
     }
 
-    pub fn needs_recreate(&self, dims: &crate::rendering::render_dims::RenderDims) -> bool {
+    pub fn needs_recreate(&self, dims: &crate::render_dims::RenderDims) -> bool {
         self.alloc_w != dims.alloc_w || self.alloc_h != dims.alloc_h
     }
 }

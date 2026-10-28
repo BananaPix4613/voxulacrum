@@ -12,8 +12,8 @@
 use bevy_ecs::prelude::Resource;
 use wgpu::util::DeviceExt;
 
-use crate::rendering::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu};
-use crate::rendering::versioned::{Uploaded, Versioned};
+use crate::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu};
+use crate::versioned::{Uploaded, Versioned};
 
 /// The preview's two instance streams, built on the main side by
 /// `skeleton_debug_system`. Both empty when there is no preview.

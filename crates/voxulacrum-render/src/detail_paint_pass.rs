@@ -18,8 +18,8 @@ use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
-use crate::rendering::pipelines::GrassVertex;
-use crate::rendering::render_context::RenderContext;
+use crate::pipelines::GrassVertex;
+use crate::render_context::RenderContext;
 use voxel_core::{ChunkVersion, CHUNK_DIM as CHUNK_SIZE, VOXEL_SCALE};
 
 /// Columns per chunk footprint; also the per-chunk instance count (one blade

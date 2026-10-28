@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::Resource;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
-use crate::rendering::uniforms::OutlineUniforms;
+use crate::render_context::RenderContext;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::uniforms::OutlineUniforms;
 
 #[derive(Resource)]
 pub struct OutlinePass {

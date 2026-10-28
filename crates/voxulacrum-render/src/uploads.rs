@@ -12,10 +12,10 @@ use glam::IVec3;
 
 use voxel_core::ChunkVersion;
 
-use crate::rendering::chunk_meshes::TerrainMesh;
-use crate::rendering::detail_paint_pass::DetailPaintData;
-use crate::rendering::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu, ScatterInstanceGpu};
-use crate::rendering::water_pass::WaterSurface;
+use crate::chunk_meshes::TerrainMesh;
+use crate::detail_paint_pass::DetailPaintData;
+use crate::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu, ScatterInstanceGpu};
+use crate::water_pass::WaterSurface;
 
 /// One queued change to a chunk's entry in a pass.
 pub enum ChunkUpload<T> {

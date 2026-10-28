@@ -11,8 +11,8 @@ use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 use wgpu::util::DeviceExt;
 
-use crate::rendering::pipelines::{ScatterInstanceGpu, ScatterVertex};
-use crate::rendering::render_context::RenderContext;
+use crate::pipelines::{ScatterInstanceGpu, ScatterVertex};
+use crate::render_context::RenderContext;
 use voxel_core::ChunkVersion;
 
 /// GPU mesh for one prefab shape.

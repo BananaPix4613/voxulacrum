@@ -1,3 +1,13 @@
+//! The render world and its passes (design §12, "Render world and extract").
+//!
+//! This crate owns every GPU resource: the passes with their pipelines and
+//! shaders, the per-chunk entries, and the render world's schedule
+//! (`render_world::build_render_schedule`). It depends on `voxel-core` and the
+//! GPU stack and on no world code, so what it draws is only what the app's
+//! extract step hands it: `FrameState`, `RenderParams`, the `ChunkUploads`
+//! queue, the render requests and egui's output, and the versioned values the
+//! passes upload.
+
 pub mod camera_desc;
 pub mod debug_lines;
 pub mod frustum;

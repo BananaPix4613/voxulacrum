@@ -1,15 +1,15 @@
-use crate::rendering::outline_pass::OutlinePass;
-use crate::rendering::palette_pass::{PalettePass, PaletteUniforms};
-use crate::rendering::post_process::PostProcessPass;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::settings::{RenderSettings, SceneOptions};
-use crate::rendering::uniforms::{
+use crate::outline_pass::OutlinePass;
+use crate::palette_pass::{PalettePass, PaletteUniforms};
+use crate::post_process::PostProcessPass;
+use crate::render_context::RenderContext;
+use crate::settings::{RenderSettings, SceneOptions};
+use crate::uniforms::{
     GlobalUniforms, OutlineUniforms, PostProcessUniforms, ShadowUniforms, UpscaleUniforms,
     WaterUniforms,
 };
-use crate::rendering::water_pass::WaterPass;
-use crate::rendering::upscale_pass::UpscalePass;
-use crate::rendering::frame_state::FrameState;
+use crate::water_pass::WaterPass;
+use crate::upscale_pass::UpscalePass;
+use crate::frame_state::FrameState;
 
 /// Number of independently-moving cloud layers. Each gets its own wind
 /// deflection and simulated macro-grid, composited together in the terrain

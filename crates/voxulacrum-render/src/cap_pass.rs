@@ -1,8 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use bevy_ecs::prelude::Resource;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::versioned::{Uploaded, Versioned};
+use crate::render_context::RenderContext;
+use crate::versioned::{Uploaded, Versioned};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -123,7 +123,7 @@ impl CapPass {
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: crate::rendering::render_targets::SCENE_DEPTH_FORMAT,
+                format: crate::render_targets::SCENE_DEPTH_FORMAT,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),

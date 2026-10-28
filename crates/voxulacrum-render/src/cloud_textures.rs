@@ -6,7 +6,7 @@
 
 use bevy_ecs::prelude::Resource;
 
-use crate::rendering::versioned::{Uploaded, Versioned};
+use crate::versioned::{Uploaded, Versioned};
 
 /// Bytes per texel: `Rgba8Unorm`, one channel per cloud layer.
 const BYTES_PER_TEXEL: u32 = 4;

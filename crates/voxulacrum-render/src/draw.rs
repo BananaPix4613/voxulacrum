@@ -3,35 +3,35 @@
 //! render world's schedule; what it reports goes back through `RenderFeedback`.
 
 use bevy_ecs::prelude::{Res, ResMut};
-use crate::rendering::resources::{
+use crate::resources::{
     GlobalUniformBindGroup, ReflectionUniformBindGroup, ShadowBindGroup, ShadowDepthView,
 };
-use crate::rendering::canopy_pass::CanopyPass;
-use crate::rendering::egui_painter::{EguiFrame, EguiPainter};
-use crate::rendering::cap_pass::CapPass;
-use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::debug_lines::DebugLinePass;
-use crate::rendering::detail_paint_pass::DetailPaintPass;
-use crate::rendering::frustum::Frustum;
-use crate::rendering::main_scene_pass::{CapConfig, MainScenePassNode};
-use crate::rendering::outline_pass::OutlinePass;
-use crate::rendering::palette_pass::PalettePass;
-use crate::rendering::pipelines::{PipelineRegistry, PipelineResources};
-use crate::rendering::player_pass::PlayerPass;
-use crate::rendering::post_process::PostProcessPass;
-use crate::rendering::reflection_pass::ReflectionPassNode;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::render_graph::{RenderGraph, ResourceId, ResourceMap};
-use crate::rendering::render_targets::RenderTargets;
-use crate::rendering::render_world::{RenderFeedback, RenderParams};
-use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::shadow_pass::ShadowPassNode;
-use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
-use crate::rendering::surface_state::SurfaceState;
-use crate::rendering::upscale_pass::UpscalePass;
-use crate::rendering::water_pass::WaterPass;
-use crate::rendering::chunk_meshes::{ChunkMesh, ChunkMeshes};
-use crate::rendering::frame_state::FrameState;
+use crate::canopy_pass::CanopyPass;
+use crate::egui_painter::{EguiFrame, EguiPainter};
+use crate::cap_pass::CapPass;
+use crate::capsule_pass::CapsulePass;
+use crate::debug_lines::DebugLinePass;
+use crate::detail_paint_pass::DetailPaintPass;
+use crate::frustum::Frustum;
+use crate::main_scene_pass::{CapConfig, MainScenePassNode};
+use crate::outline_pass::OutlinePass;
+use crate::palette_pass::PalettePass;
+use crate::pipelines::{PipelineRegistry, PipelineResources};
+use crate::player_pass::PlayerPass;
+use crate::post_process::PostProcessPass;
+use crate::reflection_pass::ReflectionPassNode;
+use crate::render_context::RenderContext;
+use crate::render_graph::{RenderGraph, ResourceId, ResourceMap};
+use crate::render_targets::RenderTargets;
+use crate::render_world::{RenderFeedback, RenderParams};
+use crate::scatter_pass::ScatterPass;
+use crate::shadow_pass::ShadowPassNode;
+use crate::skeleton_preview_pass::SkeletonPreviewPass;
+use crate::surface_state::SurfaceState;
+use crate::upscale_pass::UpscalePass;
+use crate::water_pass::WaterPass;
+use crate::chunk_meshes::{ChunkMesh, ChunkMeshes};
+use crate::frame_state::FrameState;
 
 /// Count what the renderer holds, for the main side's stats: meshed chunks,
 /// those inside the camera frustum and their triangles, and the mesh bytes on
@@ -268,7 +268,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             enabled: !render_params.scene.hide_water && !water_pass.chunk_meshes.is_empty(),
         };
 
-        let water_node = crate::rendering::water_scene_pass::WaterScenePassNode {
+        let water_node = crate::water_scene_pass::WaterScenePassNode {
             pipeline: &pipeline_registry.water_pipeline,
             global_bind_group: &uniform_bind_group.0,
             water_pass: &water_pass,

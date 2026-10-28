@@ -1,6 +1,6 @@
 //! The client's foliage builders: what each chunk's detail paint, scatter, tree
 //! capsules and canopy lobes look like to the GPU, built from the chunk on the
-//! CPU. The passes in `rendering/` upload the results and read no chunk.
+//! CPU. The passes in `voxulacrum-render` upload the results and read no chunk.
 
 use crate::foliage::FoliageRegistry;
 use crate::prefabs::{PrefabRegistry, PrefabShape};
