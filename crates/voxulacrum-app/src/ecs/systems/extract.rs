@@ -11,6 +11,7 @@ use crate::meshing::cap::CapMesh;
 use crate::meshing::overlay::{DebugLines, SkeletonPreview};
 use crate::meshing::player::PlayerMesh;
 use crate::meshing::uploads::ChunkUploads;
+use crate::params::EngineParams;
 use crate::rendering::cap_pass::CapPass;
 use crate::rendering::cloud_textures::CloudTextures;
 use crate::rendering::debug_lines::DebugLinePass;
@@ -18,6 +19,7 @@ use crate::rendering::egui_painter::EguiFrame;
 use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_world::{RenderFeedback, RenderParams, RenderStats, RenderWorld};
+use crate::rendering::settings::SceneOptions;
 use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
 use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui::panels::UiState;
@@ -102,13 +104,36 @@ fn copy_frame(main: &World, render: &mut World) {
         main.resource::<LoadedPalette>().0.as_ref(),
         &ui.params.palette,
     );
+    let cloud_shadow = &main.resource::<SimulationManager>().cloud_shadow;
     render.insert_resource(main.resource::<FrameState>().clone());
     render.insert_resource(RenderParams {
-        params: ui.params.clone(),
-        cloud: main.resource::<SimulationManager>().cloud_shadow.frame(),
+        settings: ui.params.render.clone(),
+        scene: scene_options(&ui.params),
+        cloud: cloud_shadow.frame(&ui.params.cloud),
         palette,
         room_enclosed: main.resource::<RoomState>().enclosed,
     });
+}
+
+/// The values the renderer reads from settings groups the main side shares with
+/// other systems.
+fn scene_options(params: &EngineParams) -> SceneOptions {
+    let meshing = &params.meshing;
+    let cross_section = &params.cross_section;
+    let debug = &params.debug;
+    SceneOptions {
+        edge_strength: meshing.edge_strength,
+        ao_strength: if meshing.ortho_ao_enabled { meshing.ortho_ao_strength } else { 0.0 },
+        cross_section: cross_section.enabled,
+        clip_edges: cross_section.show_edges,
+        clip_fog_color: cross_section.fog_color,
+        clip_fog_density: cross_section.fog_density,
+        wireframe: debug.show_wireframe,
+        chunk_boundaries: debug.show_chunk_boundaries,
+        canopy_cores: debug.show_canopy_cores,
+        hide_foliage: debug.hide_foliage,
+        hide_water: debug.hide_water,
+    }
 }
 
 /// Run the render world's schedule for this frame, then copy back what it

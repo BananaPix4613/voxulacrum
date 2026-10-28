@@ -1,8 +1,8 @@
-use crate::params::{EngineParams, CLOUD_LAYER_COUNT};
 use crate::rendering::outline_pass::OutlinePass;
 use crate::rendering::palette_pass::{PalettePass, PaletteUniforms};
 use crate::rendering::post_process::PostProcessPass;
 use crate::rendering::render_context::RenderContext;
+use crate::rendering::settings::{RenderSettings, SceneOptions};
 use crate::rendering::uniforms::{
     GlobalUniforms, OutlineUniforms, PostProcessUniforms, ShadowUniforms, UpscaleUniforms,
     WaterUniforms,
@@ -11,10 +11,19 @@ use crate::rendering::water_pass::WaterPass;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::simulation::manager::FrameState;
 
+/// Number of independently-moving cloud layers. Each gets its own wind
+/// deflection and simulated macro-grid, composited together in the terrain
+/// shader. A named constant (not a growable Vec) because both the shared
+/// texture (one channel per layer) and the uniform buffer layout are sized
+/// for it at compile time.
+pub const CLOUD_LAYER_COUNT: usize = 4;
+
 /// The cloud layers' per-frame uniform inputs, copied out of the main side's
 /// `CloudShadowState` at Extract.
 #[derive(Clone, Copy)]
 pub struct CloudFrame {
+    /// Each layer's world-to-UV scale for sampling the cloud texture.
+    pub uv_scales: [f32; CLOUD_LAYER_COUNT],
     pub offsets: [glam::Vec2; CLOUD_LAYER_COUNT],
     pub coverages: [f32; CLOUD_LAYER_COUNT],
     pub cloud_defaults: [f32; CLOUD_LAYER_COUNT],
@@ -26,7 +35,8 @@ pub struct CloudFrame {
 pub fn write_all_uniforms(
     ctx: &RenderContext,
     frame: &FrameState,
-    params: &EngineParams,
+    settings: &RenderSettings,
+    scene: &SceneOptions,
     cloud: &CloudFrame,
     global_buf: &wgpu::Buffer,
     shadow_buf: &wgpu::Buffer,
@@ -85,27 +95,23 @@ pub fn write_all_uniforms(
         debug_mode: frame.debug_mode,
         cloud_offset_0: cloud.offsets[0].into(),
         cloud_coverage_0: cloud.coverages[0],
-        cloud_uv_scale_0: params.cloud.layers[0].uv_scale,
+        cloud_uv_scale_0: cloud.uv_scales[0],
         cloud_offset_1: cloud.offsets[1].into(),
         cloud_coverage_1: cloud.coverages[1],
-        cloud_uv_scale_1: params.cloud.layers[1].uv_scale,
+        cloud_uv_scale_1: cloud.uv_scales[1],
         cloud_offset_2: cloud.offsets[2].into(),
         cloud_coverage_2: cloud.coverages[2],
-        cloud_uv_scale_2: params.cloud.layers[2].uv_scale,
+        cloud_uv_scale_2: cloud.uv_scales[2],
         cloud_offset_3: cloud.offsets[3].into(),
         cloud_coverage_3: cloud.coverages[3],
-        cloud_uv_scale_3: params.cloud.layers[3].uv_scale,
+        cloud_uv_scale_3: cloud.uv_scales[3],
         env_origin: cloud.env_origin_world.into(),
         env_extent: cloud.env_extent_world,
         _pad_env: 0.0,
         cloud_defaults: cloud.cloud_defaults,
         env_typical: cloud.env_typical,
-        edge_strength: params.meshing.edge_strength,
-        ortho_ao_strength: if params.meshing.ortho_ao_enabled {
-            params.meshing.ortho_ao_strength
-        } else {
-            0.0
-        },
+        edge_strength: scene.edge_strength,
+        ortho_ao_strength: scene.ao_strength,
         clip_enabled: frame.clip_enabled,
         _pad_a: 0.0,
         clip_min: frame.clip_min,
@@ -171,8 +177,7 @@ pub fn write_all_uniforms(
     ctx.queue.write_buffer(reflection_buf, 0, bytemuck::cast_slice(&[reflection_uniforms]));
 
     // Post-process uniforms
-    let pp = &params.post_process;
-    let cs = &params.cross_section;
+    let pp = &settings.post_process;
 
     let vp_mat = frame.camera.iso.snapped_view_proj;
     let inv_vp = vp_mat.inverse().to_cols_array_2d();
@@ -185,8 +190,8 @@ pub fn write_all_uniforms(
         },
     );
 
-    let clip_fog_enabled: u32 = if cs.enabled {
-        if cs.show_edges { 2 } else { 1 }
+    let clip_fog_enabled: u32 = if scene.cross_section {
+        if scene.clip_edges { 2 } else { 1 }
     } else {
         0
     };
@@ -203,8 +208,8 @@ pub fn write_all_uniforms(
         vignette_strength: pp.vignette_strength,
         exposure: pp.exposure,
         clip_fog_enabled,
-        fog_color: cs.fog_color,
-        fog_density: cs.fog_density,
+        fog_color: scene.clip_fog_color,
+        fog_density: scene.clip_fog_density,
         clip_max: frame.clip_max,
         _pad0: 0.0,
         clip_min: frame.clip_min,
@@ -216,7 +221,7 @@ pub fn write_all_uniforms(
     post_process.update_uniforms(&ctx.queue, pp_uniforms);
 
     // Outline uniforms
-    let op = &params.outline;
+    let op = &settings.outline;
     outline.update_uniforms(
         &ctx.queue,
         OutlineUniforms {

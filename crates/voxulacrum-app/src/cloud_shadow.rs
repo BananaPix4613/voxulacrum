@@ -6,8 +6,8 @@ use glam::Vec2;
 use nodegraph_eval::WorldEvaluator;
 use std::collections::HashMap;
 use crate::world::climate::{self, ClimateGrid};
-use crate::params::{CloudParams, CLOUD_LAYER_COUNT};
-use crate::rendering::uniform_writer::CloudFrame;
+use crate::params::CloudParams;
+use crate::rendering::uniform_writer::{CloudFrame, CLOUD_LAYER_COUNT};
 use crate::rendering::versioned::Versioned;
 
 /// Side length of the baked Layer B (detail) texture. Static, baked once at
@@ -267,8 +267,9 @@ impl CloudShadowState {
     }
 
     /// This frame's uniform inputs, for the render world.
-    pub fn frame(&self) -> CloudFrame {
+    pub fn frame(&self, params: &CloudParams) -> CloudFrame {
         CloudFrame {
+            uv_scales: std::array::from_fn(|i| params.layers[i].uv_scale),
             offsets: self.offsets,
             coverages: self.coverages,
             cloud_defaults: self.cloud_defaults,

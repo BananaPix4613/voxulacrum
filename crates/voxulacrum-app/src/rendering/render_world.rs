@@ -6,7 +6,7 @@
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::Schedule;
 
-use crate::params::EngineParams;
+use crate::rendering::settings::{RenderSettings, SceneOptions};
 use crate::rendering::palette_pass::PaletteUniforms;
 use crate::rendering::uniform_writer::CloudFrame;
 
@@ -32,8 +32,9 @@ impl RenderWorld {
 /// beyond `FrameState`. Copied at Extract.
 #[derive(Resource)]
 pub struct RenderParams {
-    /// The panel's parameters as they stand this frame.
-    pub params: EngineParams,
+    /// The render settings groups as the panel has them this frame.
+    pub settings: RenderSettings,
+    pub scene: SceneOptions,
     pub cloud: CloudFrame,
     /// The palette pass's uniforms, built main-side from the loaded palette.
     pub palette: PaletteUniforms,

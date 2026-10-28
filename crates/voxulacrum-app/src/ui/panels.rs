@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use bevy_ecs::prelude::Resource;
 
 use crate::params::*;
+use crate::rendering::settings::{OutlineParams, PostProcessParams};
 use crate::meshing::MeshingStats;
 use crate::ui::hierarchy_editor::HierarchyEditor;
 
@@ -239,9 +240,9 @@ pub fn draw_engine_panel(
                 ui.separator();
                 draw_cloud(ui, &mut state.params.cloud);
                 ui.separator();
-                draw_post_process(ui, &mut state.params.post_process);
+                draw_post_process(ui, &mut state.params.render.post_process);
                 ui.separator();
-                draw_outline(ui, &mut state.params.outline);
+                draw_outline(ui, &mut state.params.render.outline);
                 ui.separator();
                 draw_palette(ui, &mut state.params.palette, &state.palette_list,
                              &state.loaded_palette_preview, &mut state.palette_load_requested);

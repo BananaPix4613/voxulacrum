@@ -29,3 +29,4 @@ pub mod versioned;
 pub mod cloud_textures;
 pub mod egui_painter;
 pub mod render_world;
+pub mod settings;

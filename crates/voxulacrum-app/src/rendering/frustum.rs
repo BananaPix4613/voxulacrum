@@ -1,6 +1,6 @@
 use glam::{IVec3, Mat4, Vec3, Vec4};
 
-use crate::world::chunk::CHUNK_WORLD_SIZE;
+use voxel_core::CHUNK_WORLD_SIZE;
 
 /// A half-space plane in Hessian normal form: dot(normal, P) + d = 0.
 /// The normal points inward (toward the visible half-space).

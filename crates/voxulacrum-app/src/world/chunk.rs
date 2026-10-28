@@ -13,8 +13,8 @@ use voxel_core::{ChunkCoord, Voxel};
 
 pub const CHUNK_SIZE: usize = voxel_core::CHUNK_DIM;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-pub const VOXEL_SCALE: f32 = 1.0;
-pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 32.0
+pub const VOXEL_SCALE: f32 = voxel_core::VOXEL_SCALE;
+pub const CHUNK_WORLD_SIZE: f32 = voxel_core::CHUNK_WORLD_SIZE; // 32.0
 pub const SNAP_PAD: usize = 1;
 /// Padded snapshot size: CHUNK_SIZE + 2*SNAP_PAD
 pub const SNAP_SIZE: usize = CHUNK_SIZE + 2 * SNAP_PAD;

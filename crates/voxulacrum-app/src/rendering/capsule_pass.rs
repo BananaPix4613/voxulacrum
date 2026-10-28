@@ -13,7 +13,7 @@ use glam::IVec3;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::CapsuleInstanceGpu;
-use crate::world::changes::ChunkVersion;
+use voxel_core::ChunkVersion;
 
 /// One chunk's capsule instances.
 pub struct ChunkCapsules {

@@ -5,7 +5,7 @@ use glam::IVec3;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::WaterVertex;
-use crate::world::changes::ChunkVersion;
+use voxel_core::ChunkVersion;
 
 /// One chunk's water surface, built on the CPU (`meshing::water`).
 pub struct WaterSurface {

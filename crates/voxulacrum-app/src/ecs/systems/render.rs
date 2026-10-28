@@ -5,7 +5,6 @@
 use bevy_ecs::prelude::{Res, ResMut};
 use crate::ecs::resources::{
     GlobalUniformBindGroup, ReflectionUniformBindGroup, ShadowBindGroup, ShadowDepthView,
-    WindowHandle,
 };
 use crate::rendering::canopy_pass::CanopyPass;
 use crate::rendering::egui_painter::{EguiFrame, EguiPainter};
@@ -119,8 +118,11 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     let surface_frame = match surface_result {
         Ok(f) => f,
         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-            let size = ecs.resource::<WindowHandle>().0.inner_size();
-            ecs.resource_mut::<SurfaceState>().resize(&ctx.device, size.width, size.height);
+            // Reconfigure at the size last configured. A resize the window
+            // reported since then arrives as a request on the next frame.
+            let mut surface = ecs.resource_mut::<SurfaceState>();
+            let (width, height) = (surface.surface_config.width, surface.surface_config.height);
+            surface.resize(&ctx.device, width, height);
             return;
         }
         Err(wgpu::SurfaceError::Timeout) => {
@@ -142,7 +144,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     // decides whether to draw it.
     let (cap_enabled, clip_dirs) = {
         let frame = ecs.resource::<FrameState>();
-        let cs_enabled = ecs.resource::<RenderParams>().params.cross_section.enabled;
+        let cs_enabled = ecs.resource::<RenderParams>().scene.cross_section;
         (cs_enabled && frame.clip_enabled == 1, frame.clip_dirs)
     };
 
@@ -171,7 +173,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let palette_pass = ecs.resource::<PalettePass>();
         let upscale_pass = ecs.resource::<UpscalePass>();
 
-        let terrain_pipeline = if render_params.params.debug.show_wireframe {
+        let terrain_pipeline = if render_params.scene.wireframe {
             &pipeline_registry.terrain_wireframe_pipeline
         } else {
             &pipeline_registry.terrain_pipeline
@@ -210,7 +212,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         let sky = if room_enclosed {
             [0.02, 0.02, 0.028] // dark void-gray while enclosed; the wireframe sits just above this
         } else {
-            render_params.params.render_pipeline.sky_color
+            frame.sky_color
         };
         let scene_node = MainScenePassNode {
             sky_color: wgpu::Color {
@@ -238,10 +240,10 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             canopy_pass: &canopy_pass,
             canopy_pipeline: &pipeline_registry.canopy_core_pipeline,
             skeleton_preview_pass: &skeleton_preview_pass,
-            show_canopy_cores: render_params.params.debug.show_canopy_cores,
+            show_canopy_cores: render_params.scene.canopy_cores,
             debug_line_pass: &debug_line_pass,
-            show_debug_lines: render_params.params.debug.show_chunk_boundaries,
-            hide_foliage: render_params.params.debug.hide_foliage,
+            show_debug_lines: render_params.scene.chunk_boundaries,
+            hide_foliage: render_params.scene.hide_foliage,
             player_pass: &player_pass,
         };
 
@@ -262,8 +264,8 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             capsule_pass: &capsule_pass,
             capsule_pipeline: &pipeline_registry.capsule_pipeline,
             player_pass: &player_pass,
-            hide_foliage: render_params.params.debug.hide_foliage,
-            enabled: !render_params.params.debug.hide_water && !water_pass.chunk_meshes.is_empty(),
+            hide_foliage: render_params.scene.hide_foliage,
+            enabled: !render_params.scene.hide_water && !water_pass.chunk_meshes.is_empty(),
         };
 
         let water_node = crate::rendering::water_scene_pass::WaterScenePassNode {
@@ -271,7 +273,7 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
             global_bind_group: &uniform_bind_group.0,
             water_pass: &water_pass,
             frustum: &frame.camera.frustum,
-            hide_water: render_params.params.debug.hide_water,
+            hide_water: render_params.scene.hide_water,
             scene_tex: &render_targets.scene,
             scene_copy_tex: &render_targets.scene_copy,
             tex_size: wgpu::Extent3d {

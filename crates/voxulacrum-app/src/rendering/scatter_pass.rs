@@ -13,7 +13,7 @@ use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::{ScatterInstanceGpu, ScatterVertex};
 use crate::rendering::render_context::RenderContext;
-use crate::world::changes::ChunkVersion;
+use voxel_core::ChunkVersion;
 
 /// GPU mesh for one prefab shape.
 pub struct PrefabMesh {

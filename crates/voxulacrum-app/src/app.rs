@@ -531,7 +531,6 @@ fn init_ecs(
     // The render world owns every GPU resource. The main world holds it as a
     // resource and hands it each frame's data at Extract.
     let mut render = World::new();
-    render.insert_resource(WindowHandle(window.clone()));
     ecs.insert_resource(WindowHandle(window));
     render.insert_resource(GlobalUniformBuffer(uniform_buffer));
     render.insert_resource(GlobalUniformBindGroup(uniform_bind_group));

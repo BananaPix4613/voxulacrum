@@ -105,7 +105,8 @@ pub fn write_uniforms_system(
     crate::rendering::uniform_writer::write_all_uniforms(
         &ctx,
         &frame,
-        &render_params.params,
+        &render_params.settings,
+        &render_params.scene,
         &render_params.cloud,
         &global_buf.0,
         &shadow_buf.0,

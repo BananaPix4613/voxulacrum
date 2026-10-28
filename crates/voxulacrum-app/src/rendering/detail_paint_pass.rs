@@ -20,8 +20,7 @@ use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::GrassVertex;
 use crate::rendering::render_context::RenderContext;
-use crate::world::changes::ChunkVersion;
-use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
+use voxel_core::{ChunkVersion, CHUNK_DIM as CHUNK_SIZE, VOXEL_SCALE};
 
 /// Columns per chunk footprint; also the per-chunk instance count (one blade
 /// candidate per column - empty columns are culled in the shader).

@@ -12,17 +12,11 @@
 use std::ops::{BitOr, BitOrAssign};
 use glam::IVec3;
 use voxel_core::ChunkCoord;
+/// Defined in `voxel-core` so the renderer can tag its entries without reading
+/// the world code. Every change the door applies stamps a chunk with one.
+pub use voxel_core::ChunkVersion;
 
 use super::mutation::MutationOrigin;
-
-/// A chunk's data version. Every change the door applies stamps the chunk with a
-/// fresh one from a counter the world owns, so a version is never reused, even
-/// by a chunk that unloads and loads again. Anything built from a chunk records
-/// the version it was built from, and is stale once the chunk moves past it.
-///
-/// Runtime only: versions are not saved, and each session counts from zero.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ChunkVersion(pub u64);
 
 /// The chunk layers a change touched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
