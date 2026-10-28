@@ -1,6 +1,5 @@
 //! The render stage: render target upkeep, the render graph, egui, and present.
 
-use glam::IVec3;
 use crate::diagnostics::FrameTimings;
 use crate::ecs::resources::{
     GlobalUniformBindGroup, ReflectionUniformBindGroup, ShadowBindGroup, ShadowDepthView,
@@ -118,46 +117,14 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
 
-    // --- Debug lines update ---
-    let show_debug = ecs.resource::<UiState>().params.debug.show_chunk_boundaries;
-    if show_debug {
-        let chunk_positions: Vec<IVec3> = ecs
-            .resource::<VoxelWorld>()
-            .0
-            .chunks
-            .keys()
-            .map(|c| IVec3::from(*c))
-            .collect();
-        ecs.resource_scope::<DebugLinePass, _>(|ecs, mut debug| {
-            let frame = ecs.resource::<FrameState>();
-            debug.update(&ctx, &chunk_positions, &frame.camera.frustum);
-        });
-    }
-
-    // --- Cap mesh update ---
-    let (cap_enabled, clip_dirs, clip_max, clip_min) = {
+    // --- Cap draw flag ---
+    // The cap mesh is rebuilt main-side (`cross_section_cap_system`); this only
+    // decides whether to draw it.
+    let (cap_enabled, clip_dirs) = {
         let frame = ecs.resource::<FrameState>();
         let cs_enabled = ecs.resource::<UiState>().params.cross_section.enabled;
-        (
-            cs_enabled && frame.clip_enabled == 1,
-            frame.clip_dirs,
-            frame.clip_max,
-            frame.clip_min,
-        )
+        (cs_enabled && frame.clip_enabled == 1, frame.clip_dirs)
     };
-
-    if cap_enabled {
-        let clip_pos = [
-            if clip_dirs[0] > 0.0 { clip_max[0] } else { clip_min[0] },
-            clip_max[1],
-            if clip_dirs[2] > 0.0 { clip_max[2] } else { clip_min[2] },
-        ];
-        ecs.resource_scope::<CapPass, _>(|ecs, mut cap| {
-            let world = ecs.resource::<VoxelWorld>();
-            let ui = ecs.resource::<UiState>();
-            cap.maybe_rebuild(&ctx, &world.0, &ui.params.cross_section, clip_pos, clip_dirs);
-        });
-    }
 
     // --- Build and execute render graph ---
     let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

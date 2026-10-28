@@ -12,8 +12,7 @@ use voxel_core::Voxel;
 use crate::ecs::resources::VoxelWorld;
 use crate::input::{GameAction, InputState, PointerState, RawInputBuffer};
 use crate::player::systems::Player;
-use crate::rendering::debug_lines::DebugLinePass;
-use crate::rendering::render_context::RenderContext;
+use crate::meshing::overlay::DebugLines;
 use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::camera_desc::CameraDesc;
 use crate::simulation::manager::FrameState;
@@ -38,9 +37,8 @@ pub fn picking_system(
     frame: Res<FrameState>,
     surface: Res<SurfaceState>,
     world: Res<VoxelWorld>,
-    ctx: Res<RenderContext>,
     mut pick: ResMut<PickState>,
-    mut debug_lines: ResMut<DebugLinePass>,
+    mut debug_lines: ResMut<DebugLines>,
 ) {
     // Authoring's dev-tool pick only - Play mode has its own reach-aware
     // targeting/highlight (player_targeting_system). Without this gate, both
@@ -56,7 +54,7 @@ pub fn picking_system(
     } else {
         compute_pick(&pointer, &frame.camera, &surface, &world.0)
     };
-    debug_lines.set_highlight(&ctx, pick.anchor, HIGHLIGHT_ACTIVE);
+    debug_lines.set_highlight(pick.anchor, HIGHLIGHT_ACTIVE);
 }
 
 /// Unproject the cursor to a world-space ray (origin, direction), or `None` if
@@ -77,7 +75,7 @@ fn cursor_ray(
     // Window pixels -> NDC (y flipped).
     let ndc_x = cx / w * 2.0 - 1.0;
     let ndc_y = 1.0 - cy / h * 2.0;
-    
+
     let inv = camera.view_proj.inverse();
     let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
     let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
@@ -218,11 +216,10 @@ pub fn player_targeting_system(
     frame: Res<FrameState>,
     surface: Res<SurfaceState>,
     world: Res<VoxelWorld>,
-    ctx: Res<RenderContext>,
     players: Query<&Player>,
     play: Option<Res<crate::play::PlaySettings>>,
     mut target: ResMut<TargetState>,
-    mut debug_lines: ResMut<DebugLinePass>,
+    mut debug_lines: ResMut<DebugLines>,
 ) {
     let miss = world.0.mode != EngineMode::Play || buffer.egui_wants_pointer;
     let player = players.iter().next();
@@ -246,8 +243,13 @@ pub fn player_targeting_system(
         _ => (None, None),
     };
 
-    let color = if target.in_reach { HIGHLIGHT_ACTIVE } else { HIGHLIGHT_OUT_OF_REACH };
-    debug_lines.set_highlight(&ctx, target.hover, color);
+    // Play's highlight only; Authoring's belongs to `picking_system`. Writing it
+    // here in every mode left the two systems racing for it, with whichever the
+    // scheduler ran second deciding what showed.
+    if world.0.mode == EngineMode::Play {
+        let color = if target.in_reach { HIGHLIGHT_ACTIVE } else { HIGHLIGHT_OUT_OF_REACH };
+        debug_lines.set_highlight(target.hover, color);
+    }
 }
 
 /// Cycle the build tool's material on `CycleTool(delta)`, wrapping through the

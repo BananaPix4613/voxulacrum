@@ -1,7 +1,10 @@
 pub mod cache;
+pub mod cap;
 pub mod coordinator;
 mod cube_mesher;
 pub mod foliage;
+pub mod overlay;
+pub mod player;
 pub mod water;
 
 use glam::IVec3;

@@ -15,7 +15,8 @@ pub enum FrameStage {
     Simulation,
     /// Poll meshing workers, upload completed meshes.
     Meshing,
-    /// Write uniform buffers to GPU, compute stats.
+    /// Build the main side's render data and upload what moved, write uniform
+    /// buffers to GPU, compute stats.
     UniformWrite,
     /// Acquire swapchain, build/execute render graph, egui, present.
     Render,
@@ -146,13 +147,25 @@ pub fn build_frame_schedule() -> Schedule {
     schedule.add_systems(
         crate::ui::field_probe::field_probe_system.in_set(FrameStage::Meshing),
     );
-    // UniformWrite
+    // UniformWrite. The main side's render data (mask texels, player mesh,
+    // chunk boundaries, cap) is built first; the upload system then copies
+    // whatever moved into the passes.
     schedule.add_systems((
-        systems::visibility::visibility_mask_upload_system
+        systems::visibility::visibility_mask_system
             .in_set(FrameStage::UniformWrite)
-            .before(systems::uniforms::write_uniforms_system),
+            .before(systems::uniforms::write_uniforms_system)
+            .before(systems::uniforms::render_upload_system),
+        systems::player::player_render_prep_system
+            .in_set(FrameStage::UniformWrite)
+            .before(systems::uniforms::render_upload_system),
+        systems::editor_tools::chunk_boundary_lines_system
+            .in_set(FrameStage::UniformWrite)
+            .before(systems::uniforms::render_upload_system),
+        systems::editor_tools::cross_section_cap_system
+            .in_set(FrameStage::UniformWrite)
+            .before(systems::uniforms::render_upload_system),
+        systems::uniforms::render_upload_system.in_set(FrameStage::UniformWrite),
         systems::uniforms::write_uniforms_system.in_set(FrameStage::UniformWrite),
-        systems::player::player_render_prep_system.in_set(FrameStage::UniformWrite),
         systems::diagnostics::compute_stats_system.in_set(FrameStage::UniformWrite),
     ));
     // Render

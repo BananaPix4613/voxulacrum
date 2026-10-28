@@ -1,5 +1,6 @@
 //! Authoring tools: the column inspector, blueprint capture and stamping, the
-//! tree skeleton preview, and the biome map.
+//! tree skeleton preview, and the biome map. Also the debug views drawn over the
+//! world: chunk boundaries and the cross-section cap.
 
 use bevy_ecs::prelude::*;
 use glam::IVec3;
@@ -8,10 +9,11 @@ use crate::input::{InputState, PointerState};
 use crate::interaction::PickState;
 use crate::jobs::JobSystem;
 use crate::materials::MaterialRegistryRes;
-use crate::rendering::debug_lines::{voxel_box_lines, DebugLinePass};
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
-use crate::simulation::manager::SimulationManager;
+use crate::meshing::cap::CapMesh;
+use crate::meshing::overlay::{
+    generate_chunk_boundary_lines, voxel_box_lines, DebugLines, SkeletonPreview,
+};
+use crate::simulation::manager::{FrameState, SimulationManager};
 use crate::ui::panels::UiState;
 use crate::world::mutation::{MutationCommand, WorldMutation};
 
@@ -240,15 +242,14 @@ pub fn blueprint_authoring_system(
 /// Cyan, to stay distinct from the pick highlight's yellow.
 const SELECTION_COLOR: [f32; 3] = [0.2, 0.9, 1.0];
 
-/// Mirror the blueprint panel's capture region into the debug-line pass.
+/// Mirror the blueprint panel's capture region into the debug lines.
 /// 
 /// A separate system from `blueprint_authoring_system` because that one has
 /// early returns in its click handling, and a tail appended after them would be
 /// skipped on exactly the paths that change the selection.
 pub fn blueprint_selection_gizmo_system(
     ui: Res<UiState>,
-    ctx: Res<RenderContext>,
-    mut debug_lines: ResMut<DebugLinePass>,
+    mut debug_lines: ResMut<DebugLines>,
 ) {
     let state = &ui.blueprint_panel;
     // A collapsed section shows no gizmo: the selection is still held, but
@@ -264,7 +265,7 @@ pub fn blueprint_selection_gizmo_system(
     } else {
         None
     };
-    debug_lines.set_selection(&ctx, corners, SELECTION_COLOR);
+    debug_lines.set_selection(corners, SELECTION_COLOR);
 }
 
 /// The heavy path, in the color the decomposition is supposed to find.
@@ -303,14 +304,14 @@ pub fn skeleton_debug_system(
     pick: Res<PickState>,
     pointer: Res<PointerState>,
     input: Res<InputState>,
-    ctx: Res<RenderContext>,
     mut ui: ResMut<UiState>,
-    mut debug_lines: ResMut<DebugLinePass>,
-    mut preview: ResMut<SkeletonPreviewPass>,
+    mut debug_lines: ResMut<DebugLines>,
+    mut preview: ResMut<SkeletonPreview>,
 ) {
     use crate::input::GameAction;
     use crate::rendering::debug_lines::DebugLineVertex;
     use crate::rendering::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu};
+    use crate::rendering::skeleton_preview_pass::PreviewInstances;
     use crate::ui::blueprint_panel::ArmedTool;
     use crate::ui::skeleton_panel::PreviewRender;
     use crate::world::chunk::VOXEL_SCALE;
@@ -414,8 +415,8 @@ pub fn skeleton_debug_system(
 
     let Some((origin, seed, age, species, show_radii, show_wood, show_capsules, render)) = key
     else {
-        debug_lines.set_overlay(&ctx, None);
-        preview.clear();
+        debug_lines.set_overlay(Vec::new());
+        preview.0.set(PreviewInstances::default());
         state.nodes = 0;
         state.lobes = 0;
         state.wood = 0;
@@ -476,9 +477,9 @@ pub fn skeleton_debug_system(
                 radii: (l.radii() * VOXEL_SCALE).to_array(),
             })
             .collect();
-        preview.set(&ctx, &capsules, &lobe_instances);
+        preview.0.set(PreviewInstances { capsules, lobes: lobe_instances });
 
-        debug_lines.set_overlay(&ctx, Some(&lines));
+        debug_lines.set_overlay(lines);
         state.wood = wood.len();
         state.nodes = skeleton.nodes.len();
         state.chains = skeleton.chains;
@@ -488,7 +489,7 @@ pub fn skeleton_debug_system(
         return;
     }
 
-    preview.clear();
+    preview.0.set(PreviewInstances::default());
     for seg in skeleton.segments() {
         let color = skeleton_chain_color(seg.chain);
         let a = base + seg.a * VOXEL_SCALE;
@@ -570,8 +571,8 @@ pub fn skeleton_debug_system(
             }
         }
     }
-    
-    debug_lines.set_overlay(&ctx, Some(&lines));
+
+    debug_lines.set_overlay(lines);
     state.wood = wood.len();
     state.nodes = skeleton.nodes.len();
     state.chains = skeleton.chains;
@@ -625,4 +626,42 @@ pub fn biome_map_system(
             state.error = Some(e);
         }
     }
+}
+
+/// Rebuild the chunk-boundary lines each frame they are shown: every loaded
+/// chunk, green inside the camera frustum and red outside it.
+pub fn chunk_boundary_lines_system(
+    ui: Res<UiState>,
+    world: Res<VoxelWorld>,
+    frame: Res<FrameState>,
+    mut debug_lines: ResMut<DebugLines>,
+) {
+    if !ui.params.debug.show_chunk_boundaries {
+        return;
+    }
+    let chunk_positions: Vec<IVec3> = world.0.chunks.keys().map(|c| IVec3::from(*c)).collect();
+    debug_lines
+        .boundaries
+        .set(generate_chunk_boundary_lines(&chunk_positions, &frame.camera.frustum));
+}
+
+/// Rebuild the cross-section cap when the cut moved. Gated like the draw: the
+/// cap is built only while the cross-section is on and the clip is live.
+pub fn cross_section_cap_system(
+    ui: Res<UiState>,
+    world: Res<VoxelWorld>,
+    frame: Res<FrameState>,
+    mut cap: ResMut<CapMesh>,
+) {
+    let cs = &ui.params.cross_section;
+    if !(cs.enabled && frame.clip_enabled == 1) {
+        return;
+    }
+    let clip_dirs = frame.clip_dirs;
+    let clip_pos = [
+        if clip_dirs[0] > 0.0 { frame.clip_max[0] } else { frame.clip_min[0] },
+        frame.clip_max[1],
+        if clip_dirs[2] > 0.0 { frame.clip_max[2] } else { frame.clip_min[2] },
+    ];
+    cap.maybe_rebuild(&world.0, cs, clip_pos, clip_dirs);
 }

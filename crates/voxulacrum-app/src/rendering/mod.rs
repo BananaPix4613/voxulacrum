@@ -25,3 +25,4 @@ pub mod main_scene_pass;
 pub mod uniform_writer;
 pub mod render_context;
 pub mod player_pass;
+pub mod versioned;

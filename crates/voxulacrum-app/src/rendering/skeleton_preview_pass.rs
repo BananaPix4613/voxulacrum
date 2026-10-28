@@ -13,7 +13,15 @@ use bevy_ecs::prelude::Resource;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu};
-use crate::rendering::render_context::RenderContext;
+use crate::rendering::versioned::{Uploaded, Versioned};
+
+/// The preview's two instance streams, built on the main side by
+/// `skeleton_debug_system`. Both empty when there is no preview.
+#[derive(Default)]
+pub struct PreviewInstances {
+    pub capsules: Vec<CapsuleInstanceGpu>,
+    pub lobes: Vec<LobeInstanceGpu>,
+}
 
 #[derive(Resource, Default)]
 pub struct SkeletonPreviewPass {
@@ -21,40 +29,30 @@ pub struct SkeletonPreviewPass {
     pub capsule_count: u32,
     pub lobe_buffer: Option<wgpu::Buffer>,
     pub lobe_count: u32,
+    uploaded: Uploaded,
 }
 
 impl SkeletonPreviewPass {
-    /// Replace both instance streams. Buffers are recreated rather than mapped
-    /// and written: this runs only when a panel input changes, and the counts
-    /// change with it.
-    pub fn set(
-        &mut self,
-        ctx: &RenderContext,
-        capsules: &[CapsuleInstanceGpu],
-        lobes: &[LobeInstanceGpu],
-    ) {
-        self.capsule_count = capsules.len() as u32;
-        self.capsule_buffer = (!capsules.is_empty()).then(|| {
-            ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+    /// Replace both instance streams when the preview moved. Buffers are
+    /// recreated rather than mapped and written: this runs only when a panel
+    /// input changes, and the counts change with it.
+    pub fn upload(&mut self, device: &wgpu::Device, source: &Versioned<PreviewInstances>) {
+        let Some(preview) = self.uploaded.changed(source) else { return };
+        self.capsule_count = preview.capsules.len() as u32;
+        self.capsule_buffer = (!preview.capsules.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("skeleton_preview_capsules"),
-                contents: bytemuck::cast_slice(capsules),
+                contents: bytemuck::cast_slice(&preview.capsules),
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
-        self.lobe_count = lobes.len() as u32;
-        self.lobe_buffer = (!lobes.is_empty()).then(|| {
-            ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        self.lobe_count = preview.lobes.len() as u32;
+        self.lobe_buffer = (!preview.lobes.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("skeleton_preview_lobes"),
-                contents: bytemuck::cast_slice(lobes),
+                contents: bytemuck::cast_slice(&preview.lobes),
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
-    }
-
-    pub fn clear(&mut self) {
-        self.capsule_buffer = None;
-        self.capsule_count = 0;
-        self.lobe_buffer = None;
-        self.lobe_count = 0;
     }
 }

@@ -275,7 +275,7 @@ fn init_ecs(
     let cloud_shadow = CloudShadowState::new(&ctx);
 
     // Visibility mask (group 0, binding 6): a 64^3 window of one-byte cell states
-    // centered on the player, rewritten on movement by visibility_mask_upload_system.
+    // centered on the player, rewritten on movement from VisibilityMaskTexels.
     let visibility_mask_texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("visibility_mask"),
         size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 64 },
@@ -532,7 +532,8 @@ fn init_ecs(
     ecs.insert_resource(ShadowBindGroup(shadow_bind_group));
     ecs.insert_resource(ShadowDepthView(shadow_depth_view));
     ecs.insert_resource(MaterialColorBuffer(material_color_buffer));
-    ecs.insert_resource(VisibilityMask(visibility_mask_texture));
+    ecs.insert_resource(VisibilityMask::new(visibility_mask_texture));
+    ecs.insert_resource(VisibilityMaskTexels::default());
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
@@ -563,6 +564,11 @@ fn init_ecs(
     ecs.insert_resource(capsule_pass);
     ecs.insert_resource(canopy_pass);
     ecs.insert_resource(rendering::skeleton_preview_pass::SkeletonPreviewPass::default());
+    // Main-side render data; `render_upload_system` copies it into the passes.
+    ecs.insert_resource(crate::meshing::overlay::DebugLines::default());
+    ecs.insert_resource(crate::meshing::overlay::SkeletonPreview::default());
+    ecs.insert_resource(crate::meshing::player::PlayerMesh::default());
+    ecs.insert_resource(crate::meshing::cap::CapMesh::default());
     ecs.insert_resource(water_pass);
     ecs.insert_resource(post_process);
     ecs.insert_resource(outline_pass);
