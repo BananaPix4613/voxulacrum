@@ -26,3 +26,4 @@ pub mod uniform_writer;
 pub mod render_context;
 pub mod player_pass;
 pub mod versioned;
+pub mod cloud_textures;

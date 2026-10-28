@@ -7,13 +7,13 @@ use nodegraph_eval::WorldEvaluator;
 use std::collections::HashMap;
 use crate::world::climate::{self, ClimateGrid};
 use crate::params::{CloudParams, CLOUD_LAYER_COUNT};
-use crate::rendering::render_context::RenderContext;
+use crate::rendering::versioned::Versioned;
 
 /// Side length of the baked Layer B (detail) texture. Static, baked once at
 /// startup, sampled with `Repeat` - see `docs/cloud-shadow-architecture.md`.
 /// This is the fix for the panning shimmer: nothing here is ever
 /// re-rasterized, so there's no camera-coupled sampling phase to shift.
-const DETAIL_TEX_SIZE: u32 = 512;
+pub const DETAIL_TEX_SIZE: u32 = 512;
 
 /// Width (in texels) of the edge-blend region used to make each baked layer
 /// tile seamlessly under `Repeat` sampling.
@@ -22,7 +22,7 @@ const TILE_MARGIN: f32 = 32.0;
 /// Side length (in macro cells) of the envelope (Layer A) texture - one
 /// texel per `climate::CELL_SIZE` cell, so the window spans
 /// `ENV_SIZE * CELL_SIZE` = 16,384 world units (architecture doc §2).
-const ENV_SIZE: i32 = 32;
+pub const ENV_SIZE: i32 = 32;
 
 /// How many cells out from the camera's cell each layer's `ClimateGrid`
 /// stays active/seeded - half of `ENV_SIZE`, matching the envelope window.
@@ -226,18 +226,14 @@ pub struct CloudShadowState {
     /// multiple of `climate::CELL_SIZE`.
     pub env_origin_world: Vec2,
     pub env_extent_world: f32,
-    #[allow(dead_code)] // RAII: owns the storage texture_view borrows
-    pub texture: wgpu::Texture,
-    pub texture_view: wgpu::TextureView,
-    pub sampler: wgpu::Sampler,
-    #[allow(dead_code)]
-    pub env_texture: wgpu::Texture,
-    pub env_texture_view: wgpu::TextureView,
-    pub env_sampler: wgpu::Sampler,
+    /// Layer B: the baked detail tiles, one channel per layer. Set once, in `new`.
+    pub detail_texels: Versioned<Vec<u8>>,
+    /// Layer A: the envelope window, one channel per layer. Set every tick.
+    pub envelope_texels: Versioned<Vec<u8>>,
 }
 
 impl CloudShadowState {
-    pub fn new(ctx: &RenderContext) -> Self {
+    pub fn new() -> Self {
         let mut pixels = vec![0u8; (DETAIL_TEX_SIZE * DETAIL_TEX_SIZE) as usize * CLOUD_LAYER_COUNT];
         // Calibration histogram (§6) built once here from the baked tile -
         // not resampled from world space every tick. See `tick` for why.
@@ -249,72 +245,9 @@ impl CloudShadowState {
             build_histogram(&tile)
         });
 
-        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cloud_shadow_texture"),
-            size: wgpu::Extent3d { width: DETAIL_TEX_SIZE, height: DETAIL_TEX_SIZE, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        ctx.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(DETAIL_TEX_SIZE * CLOUD_LAYER_COUNT as u32),
-                rows_per_image: Some(DETAIL_TEX_SIZE),
-            },
-            wgpu::Extent3d { width: DETAIL_TEX_SIZE, height: DETAIL_TEX_SIZE, depth_or_array_layers: 1 },
-        );
-
-        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Repeat: this is now a genuinely static, infinite-by-construction
-        // tiling texture (baked once, seamlessly, above) - not a
-        // camera-centered window, so there's no edge to clamp.
-        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("cloud_shadow_sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        // Layer A - the envelope: shared Rgba8Unorm, one texel per macro
-        // cell, rebuilt unconditionally every climate tick from the sim's
-        // `ClimateGrid's (architecture doc §2). Unlike Layer B this is
-        // genuinely dynamic - ClampToEdge is fine because the shader
-        // explicitly substitutes `cloud_default_N` outside the window rather
-        // than relying on texture clamping (§3).
-        let env_texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cloud_envelope_texture"),
-            size: wgpu::Extent3d { width: ENV_SIZE as u32, height: ENV_SIZE as u32, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let env_texture_view = env_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let env_sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("cloud_envelope_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        // Layer B is baked once, here; the renderer uploads it on its first frame.
+        let mut detail_texels = Versioned::default();
+        detail_texels.set(pixels);
 
         Self {
             histograms,
@@ -327,12 +260,8 @@ impl CloudShadowState {
             biome_cache: HashMap::new(),
             env_origin_world: Vec2::ZERO,
             env_extent_world: ENV_SIZE as f32 * climate::CELL_SIZE,
-            texture,
-            texture_view,
-            sampler,
-            env_texture,
-            env_texture_view,
-            env_sampler,
+            detail_texels,
+            envelope_texels: Versioned::default(),
         }
     }
 
@@ -347,12 +276,11 @@ impl CloudShadowState {
     /// settle -> evict, the same rhythm `pan_and_return_preserves_density`
     /// exercises in `climate.rs`) using the same per-layer wind already
     /// driving Layer B's scroll, then all four grids' `density_at` are
-    /// packed into one shared 32x32 envelope texture centered on the
-    /// camera's cell and re-uploaded unconditionally every tick - small
-    /// enough (1,024 lookups x 4 layers) that there's no reason to diff it.
+    /// packed into one shared 32x32 envelope centered on the camera's cell
+    /// and handed to the renderer unconditionally every tick - small enough
+    /// (1,024 lookups x 4 layers) that there's no reason to diff it.
     pub fn tick(
         &mut self,
-        ctx: &RenderContext,
         params: &CloudParams,
         camera_xz: Vec2,
         base_wind: Vec2,
@@ -495,7 +423,7 @@ impl CloudShadowState {
             self.coverages[i] += (calibrated - self.coverages[i]) * alpha;
         }
 
-        // Pack all four grids' density into the shared envelope texture.
+        // Pack all four grids' density into the shared envelope texels.
         let mut env_pixels = vec![0u8; (ENV_SIZE * ENV_SIZE) as usize * CLOUD_LAYER_COUNT];
         for i in 0..CLOUD_LAYER_COUNT {
             for cz in 0..ENV_SIZE {
@@ -506,20 +434,6 @@ impl CloudShadowState {
                 }
             }
         }
-        ctx.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.env_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &env_pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(ENV_SIZE as u32 * CLOUD_LAYER_COUNT as u32),
-                rows_per_image: Some(ENV_SIZE as u32),
-            },
-            wgpu::Extent3d { width: ENV_SIZE as u32, height: ENV_SIZE as u32, depth_or_array_layers: 1 },
-        );
+        self.envelope_texels.set(env_pixels);
     }
 }

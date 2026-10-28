@@ -37,7 +37,8 @@ use crate::world::regen::WorldRegenCoordinator;
 use crate::world::persistence::WorldPersistence;
 use crate::world::config::ServerConfig;
 use crate::camera::IsometricCamera;
-use crate::cloud_shadow::CloudShadowState;
+use crate::cloud_shadow::{CloudShadowState, DETAIL_TEX_SIZE, ENV_SIZE};
+use crate::rendering::cloud_textures::CloudTextures;
 use crate::params::EngineParams;
 use crate::ui::panels::UiState;
 use crate::materials::MaterialRegistryRes;
@@ -272,7 +273,10 @@ fn init_ecs(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    let cloud_shadow = CloudShadowState::new(&ctx);
+    // The cloud state bakes Layer B's texels; the textures start empty and take
+    // them on the first frame's upload.
+    let cloud_shadow = CloudShadowState::new();
+    let cloud_textures = CloudTextures::new(&ctx.device, DETAIL_TEX_SIZE, ENV_SIZE as u32);
 
     // Visibility mask (group 0, binding 6): a 64^3 window of one-byte cell states
     // centered on the player, rewritten on movement from VisibilityMaskTexels.
@@ -293,10 +297,10 @@ fn init_ecs(
         &ctx.device,
         &global_bind_group_layout,
         &uniform_buffer,
-        &cloud_shadow.texture_view,
-        &cloud_shadow.sampler,
-        &cloud_shadow.env_texture_view,
-        &cloud_shadow.env_sampler,
+        &cloud_textures.detail_view,
+        &cloud_textures.detail_sampler,
+        &cloud_textures.envelope_view,
+        &cloud_textures.envelope_sampler,
         &shadow_depth_view,
         &shadow_sampler,
         &material_color_buffer,
@@ -313,10 +317,10 @@ fn init_ecs(
         &ctx.device,
         &global_bind_group_layout,
         &reflection_uniform_buffer,
-        &cloud_shadow.texture_view,
-        &cloud_shadow.sampler,
-        &cloud_shadow.env_texture_view,
-        &cloud_shadow.env_sampler,
+        &cloud_textures.detail_view,
+        &cloud_textures.detail_sampler,
+        &cloud_textures.envelope_view,
+        &cloud_textures.envelope_sampler,
         &shadow_depth_view,
         &shadow_sampler,
         &material_color_buffer,
@@ -554,6 +558,7 @@ fn init_ecs(
     ecs.insert_resource(ctx);
     ecs.insert_resource(surface_state);
     ecs.insert_resource(simulation);
+    ecs.insert_resource(cloud_textures);
     ecs.insert_resource(pipeline_registry);
     ecs.insert_resource(pipeline_resources);
     ecs.insert_resource(render_targets);

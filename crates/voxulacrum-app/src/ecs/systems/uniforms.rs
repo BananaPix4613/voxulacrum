@@ -10,6 +10,7 @@ use crate::meshing::cap::CapMesh;
 use crate::meshing::overlay::{DebugLines, SkeletonPreview};
 use crate::meshing::player::PlayerMesh;
 use crate::rendering::cap_pass::CapPass;
+use crate::rendering::cloud_textures::CloudTextures;
 use crate::rendering::debug_lines::DebugLinePass;
 use crate::rendering::outline_pass::OutlinePass;
 use crate::rendering::palette_pass::PalettePass;
@@ -25,8 +26,8 @@ use crate::ui::panels::UiState;
 
 /// Copy the main side's render data into the passes, each only when its version
 /// moved: the debug lines, the skeleton preview, the player mesh, the
-/// cross-section cap and the visibility mask. Runs in UniformWrite after the
-/// systems that build that data.
+/// cross-section cap, the visibility mask and the cloud texels. Runs in
+/// UniformWrite after the systems that build that data.
 pub fn render_upload_system(
     ctx: Res<RenderContext>,
     debug_lines: Res<DebugLines>,
@@ -34,11 +35,13 @@ pub fn render_upload_system(
     player_mesh: Res<PlayerMesh>,
     cap_mesh: Res<CapMesh>,
     mask_texels: Res<VisibilityMaskTexels>,
+    sim: Res<SimulationManager>,
     mut debug_line_pass: ResMut<DebugLinePass>,
     mut preview_pass: ResMut<SkeletonPreviewPass>,
     mut player_pass: ResMut<PlayerPass>,
     mut cap_pass: ResMut<CapPass>,
     mut mask: ResMut<VisibilityMask>,
+    mut cloud_textures: ResMut<CloudTextures>,
 ) {
     debug_line_pass.upload(
         &ctx.device,
@@ -51,6 +54,11 @@ pub fn render_upload_system(
     player_pass.upload(&ctx.queue, &player_mesh.0);
     cap_pass.upload(&ctx.device, &cap_mesh.mesh);
     mask.upload(&ctx.queue, &mask_texels.0);
+    cloud_textures.upload(
+        &ctx.queue,
+        &sim.cloud_shadow.detail_texels,
+        &sim.cloud_shadow.envelope_texels,
+    );
 }
 
 pub fn write_uniforms_system(

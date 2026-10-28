@@ -5,7 +5,6 @@ use glam::IVec3;
 use crate::diagnostics::{FrameTimings, SUB_CLIMATE};
 use crate::ecs::clocks::PresentationClock;
 use crate::ecs::resources::VoxelWorld;
-use crate::rendering::render_context::RenderContext;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
@@ -30,15 +29,14 @@ fn regional_weather_data_at(world: &crate::world::World, world_pos: glam::Vec2) 
     None
 }
 
-/// Advance the simulated cloud layers, rasterize them into the shared cloud
-/// texture, and refresh the offsets and coverages `write_uniforms_system`
-/// sends to the shaders. Runs after `simulation_tick_system`, so it reads this
-/// frame's camera position and wind.
+/// Advance the simulated cloud layers, pack them into the envelope texels
+/// `render_upload_system` uploads, and refresh the offsets and coverages
+/// `write_uniforms_system` sends to the shaders. Runs after
+/// `simulation_tick_system`, so it reads this frame's camera position and wind.
 pub fn climate_tick_system(
     mut sim: ResMut<SimulationManager>,
     ui: Res<UiState>,
     world: Res<VoxelWorld>,
-    ctx: Res<RenderContext>,
     clock: Res<PresentationClock>,
     mut timings: ResMut<FrameTimings>,
 ) {
@@ -53,7 +51,6 @@ pub fn climate_tick_system(
     let world_eval = world.0.generator.world_eval();
 
     sim.cloud_shadow.tick(
-        &ctx,
         &ui.params.cloud,
         camera_xz,
         base_wind,
