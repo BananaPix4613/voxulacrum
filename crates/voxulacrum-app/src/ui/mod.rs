@@ -7,9 +7,9 @@ pub mod biome_map;
 pub mod blueprint_panel;
 pub mod skeleton_panel;
 
-use egui_wgpu::ScreenDescriptor;
+use bevy_ecs::prelude::*;
 
-use crate::rendering::render_context::RenderContext;
+use crate::rendering::egui_painter::EguiFrame;
 use colormap::Colormap;
 use hierarchy_editor::HierarchyEditor;
 
@@ -29,10 +29,11 @@ struct ProbeTexture {
     handle: egui::TextureHandle,
 }
 
-pub struct EguiRenderer {
+/// The egui context and everything the panels keep between frames. Lays the
+/// UI out on the main side; `EguiPainter` paints the result.
+pub struct EguiUi {
     pub ctx: egui::Context,
     pub winit_state: egui_winit::State,
-    pub renderer: egui_wgpu::Renderer,
     pub visible: bool,
     /// The embedded node-graph editor + the world's graph hierarchy/selector.
     /// Loaded from the world manifest at startup (see `main.rs`); the panel is
@@ -46,11 +47,10 @@ pub struct EguiRenderer {
     map_texture: Option<(u64, egui::TextureHandle)>,
 }
 
-impl EguiRenderer {
-    pub fn new(
-        render_ctx: &RenderContext,
-        window: &winit::window::Window,
-    ) -> Self {
+impl EguiUi {
+    /// `max_texture_side` is the device's largest 2D texture, which egui sizes
+    /// its font atlas against.
+    pub fn new(window: &winit::window::Window, max_texture_side: usize) -> Self {
         let ctx = egui::Context::default();
 
         let winit_state = egui_winit::State::new(
@@ -59,21 +59,12 @@ impl EguiRenderer {
             window,
             Some(window.scale_factor() as f32),
             None,
-            Some(render_ctx.device.limits().max_texture_dimension_2d as usize),
+            Some(max_texture_side),
         );
 
-        let renderer = egui_wgpu::Renderer::new(
-            &render_ctx.device,
-            render_ctx.surface_format,
-            None,
-            1,
-            false,
-        );
-        
         Self {
             ctx,
             winit_state,
-            renderer,
             visible: true,
             graph_editor: HierarchyEditor::new(),
             editor_visible: false,
@@ -81,7 +72,7 @@ impl EguiRenderer {
             map_texture: None,
         }
     }
-    
+
     /// Feed a winit WindowEvent to egui. Returns true if egui consumed the event.
     pub fn handle_event(
         &mut self,
@@ -90,11 +81,11 @@ impl EguiRenderer {
     ) -> bool {
         self.winit_state.on_window_event(window, event).consumed
     }
-    
+
     pub fn toggle_visibility(&mut self) {
         self.visible = !self.visible;
     }
-    
+
     pub fn toggle_editor(&mut self) {
         self.editor_visible = !self.editor_visible;
     }
@@ -152,27 +143,22 @@ impl EguiRenderer {
         self.map_texture = Some((state.version, handle));
     }
 
-    /// Run the egui UI and render it onto the given surface view.
-    /// The surface view should already contain the post-processed scene.
-    pub fn draw(
+    /// Run the egui UI and lay it out into `frame`: this frame's primitives and
+    /// screen, with its texture changes appended to the ones not yet painted.
+    pub fn run(
         &mut self,
         ui_state: &mut panels::UiState,
         probe: &mut field_probe::FieldProbe,
         registry: &voxel_core::MaterialRegistry,
-        ctx: &RenderContext,
-        encoder: &mut wgpu::CommandEncoder,
-        output_view: &wgpu::TextureView,
         window: &winit::window::Window,
         play_hud: Option<(&str, [f32; 3])>,
+        frame: &mut EguiFrame,
     ) {
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
+            frame.primitives.clear();
             return;
         }
-        let screen_descriptor = ScreenDescriptor {
-            size_in_pixels: [size.width, size.height],
-            pixels_per_point: window.scale_factor() as f32,
-        };
 
         // Refresh the probe's slice texture before tessellation so the upload
         // is flushed in this frame's `textures_delta`.
@@ -182,7 +168,7 @@ impl EguiRenderer {
         if ui_state.biome_map.open {
             self.refresh_map_texture(&ui_state.biome_map);
         }
-        
+
         let raw_input = self.winit_state.take_egui_input(window);
         let full_output = self.ctx.run(raw_input, |ctx| {
             if self.visible {
@@ -213,43 +199,43 @@ impl EguiRenderer {
                 panels::draw_play_hud(ctx, material_name, material_color);
             }
         });
-        
+
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
-        
-        let tris = self
+
+        frame.primitives = self
             .ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
-        
-        for (id, image_delta) in &full_output.textures_delta.set {
-            self.renderer.update_texture(&ctx.device, &ctx.queue, *id, image_delta);
-        }
-
-        self.renderer
-            .update_buffers(&ctx.device, &ctx.queue, encoder, &tris, &screen_descriptor);
-
-        {
-            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("egui_render_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: output_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            
-            self.renderer
-                .render(&mut render_pass.forget_lifetime(), &tris, &screen_descriptor);
-        }
-        
-        for id in &full_output.textures_delta.free {
-            self.renderer.free_texture(id);
-        }
+        frame.size_in_pixels = [size.width, size.height];
+        frame.pixels_per_point = window.scale_factor() as f32;
+        frame.textures.append(full_output.textures_delta);
     }
+}
+
+/// Lay out this frame's UI into `EguiFrame`, which the Render stage paints.
+/// Runs last in UniformWrite, after the uniforms are written, so a panel edit
+/// takes effect on the next frame, as it did when layout ran in the Render stage.
+pub fn egui_layout_system(
+    mut egui: NonSendMut<EguiUi>,
+    mut ui_state: ResMut<panels::UiState>,
+    mut probe: ResMut<field_probe::FieldProbe>,
+    registry: Res<crate::materials::MaterialRegistryRes>,
+    window: Res<crate::ecs::resources::WindowHandle>,
+    world: Res<crate::ecs::resources::VoxelWorld>,
+    tool: Res<crate::interaction::PlayerToolState>,
+    play: Option<Res<crate::play::PlaySettings>>,
+    mut frame: ResMut<EguiFrame>,
+) {
+    // The build tool's selected material, when the package shows it in Play.
+    let in_play = world.0.mode == crate::world::mutation::EngineMode::Play;
+    let play_hud = play
+        .as_deref()
+        .filter(|play| in_play && play.hud)
+        .and_then(|play| play.build.as_ref())
+        .and_then(|build| build.materials.get(tool.selected))
+        .and_then(|material| material.id())
+        .and_then(|id| registry.0.get(id))
+        .map(|def| (def.display_name.as_str(), def.color));
+
+    egui.run(&mut *ui_state, &mut *probe, &registry.0, &window.0, play_hud, &mut *frame);
 }

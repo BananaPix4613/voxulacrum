@@ -505,13 +505,14 @@ fn init_ecs(
         &upscale_source,
     );
 
-    // Egui
-    let mut egui_renderer = ui::EguiRenderer::new(&ctx, &window);
+    // Egui: laid out on the main side, painted by the render side.
+    let mut egui_ui = ui::EguiUi::new(&window, ctx.device.limits().max_texture_dimension_2d as usize);
+    let egui_painter = rendering::egui_painter::EguiPainter::new(&ctx.device, ctx.surface_format);
     // Load the world's graph hierarchy into the embedded editor's selector;
     // the canvas opens on the primary biome.
     let manifest_path = world::world_generator::world_manifest_path();
     match world::world_generator::load_world_graphs(&manifest_path) {
-        Ok(graphs) => egui_renderer.graph_editor.load(manifest_path, graphs),
+        Ok(graphs) => egui_ui.graph_editor.load(manifest_path, graphs),
         Err(e) => log::error!("Failed to load editor graph hierarchy: {e}"),
     }
     let mut ui_state = UiState::new(initial_params, presets_dir);
@@ -614,8 +615,10 @@ fn init_ecs(
     ecs.insert_resource(interaction::TargetState::default());
     ecs.insert_resource(interaction::PlayerToolState::default());
 
-    // EguiRenderer — NonSend because egui_winit::State may be !Send
-    ecs.insert_non_send_resource(egui_renderer);
+    // EguiUi - NonSend because egui_winit::State may be !Send
+    ecs.insert_non_send_resource(egui_ui);
+    ecs.insert_resource(egui_painter);
+    ecs.insert_resource(rendering::egui_painter::EguiFrame::default());
 
     // Initialize a default FrameState so systems don't panic on first frame
     ecs.insert_resource(simulation::manager::FrameState {
@@ -830,7 +833,7 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::KeyboardInput { ref event, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-               ecs.non_send_resource_mut::<ui::EguiRenderer>()
+               ecs.non_send_resource_mut::<ui::EguiUi>()
                    .handle_event(&window, e);
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let raw = if event.state == ElementState::Pressed {
@@ -844,7 +847,7 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::MouseWheel { ref delta, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, e);
                 let scroll = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
@@ -859,7 +862,7 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::CursorMoved { position, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, e);
                 ecs.resource_mut::<RawInputBuffer>()
                     .events
@@ -868,7 +871,7 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::MouseInput { state, button, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, e);
                 let mapped = match button {
                     winit::event::MouseButton::Left => Some(PointerButton::Left),
@@ -886,7 +889,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 // Update egui consumption flags before the frame schedule.
                 {
-                    let egui = ecs.non_send_resource::<ui::EguiRenderer>();
+                    let egui = ecs.non_send_resource::<ui::EguiUi>();
                     let wants_kb = egui.ctx.wants_keyboard_input();
                     let wants_ptr = egui.ctx.wants_pointer_input();
                     let mut buf = ecs.resource_mut::<RawInputBuffer>();
@@ -919,7 +922,7 @@ impl ApplicationHandler for App {
 
             ref other => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, other);
             }
         }

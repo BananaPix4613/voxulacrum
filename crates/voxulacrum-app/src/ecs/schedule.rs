@@ -16,9 +16,9 @@ pub enum FrameStage {
     /// Poll meshing workers, upload completed meshes.
     Meshing,
     /// Build the main side's render data and upload what moved, write uniform
-    /// buffers to GPU, compute stats.
+    /// buffers to GPU, compute stats, lay out the UI.
     UniformWrite,
-    /// Acquire swapchain, build/execute render graph, egui, present.
+    /// Acquire swapchain, build/execute render graph, paint egui, present.
     Render,
     /// World regen polling.
     PostFrame,
@@ -167,6 +167,13 @@ pub fn build_frame_schedule() -> Schedule {
         systems::uniforms::render_upload_system.in_set(FrameStage::UniformWrite),
         systems::uniforms::write_uniforms_system.in_set(FrameStage::UniformWrite),
         systems::diagnostics::compute_stats_system.in_set(FrameStage::UniformWrite),
+        // Last, so panel edits reach the uniforms next frame and the panels show
+        // this frame's stats.
+        crate::ui::egui_layout_system
+            .in_set(FrameStage::UniformWrite)
+            .after(systems::uniforms::render_upload_system)
+            .after(systems::uniforms::write_uniforms_system)
+            .after(systems::diagnostics::compute_stats_system),
     ));
     // Render
     schedule.add_systems(

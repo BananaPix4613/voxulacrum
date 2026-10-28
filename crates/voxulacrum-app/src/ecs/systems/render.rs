@@ -1,12 +1,13 @@
-//! The render stage: render target upkeep, the render graph, egui, and present.
+//! The render stage: render target upkeep, the render graph, the egui paint,
+//! and present.
 
 use crate::diagnostics::FrameTimings;
 use crate::ecs::resources::{
     GlobalUniformBindGroup, ReflectionUniformBindGroup, ShadowBindGroup, ShadowDepthView,
-    VoxelWorld, WindowHandle,
+    WindowHandle,
 };
-use crate::materials::MaterialRegistryRes;
 use crate::rendering::canopy_pass::CanopyPass;
+use crate::rendering::egui_painter::{EguiFrame, EguiPainter};
 use crate::rendering::cap_pass::CapPass;
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::debug_lines::DebugLinePass;
@@ -29,7 +30,6 @@ use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::water_pass::WaterPass;
 use crate::simulation::manager::FrameState;
-use crate::ui;
 use crate::ui::panels::UiState;
 use crate::meshing::coordinator::{ChunkMesh, ChunkMeshes};
 
@@ -297,35 +297,16 @@ pub fn render_present_system(ecs: &mut bevy_ecs::world::World) {
     };
     ecs.resource_mut::<UiState>().draws = draws;
 
-    // --- Egui draw ---
-    let window_arc = ecs.resource::<WindowHandle>().0.clone();
-    let registry = ecs.resource::<MaterialRegistryRes>().0.clone();
-    ecs.resource_scope::<UiState, _>(|ecs, mut ui_state| {
-        ecs.resource_scope::<ui::field_probe::FieldProbe, _>(|ecs, mut probe| {
-            // The build tool's selected material, when the package shows it in Play.
-            let in_play = ecs.resource::<VoxelWorld>().0.mode == crate::world::mutation::EngineMode::Play;
-            let selected = ecs.resource::<crate::interaction::PlayerToolState>().selected;
-            let play_hud: Option<(String, [f32; 3])> = ecs
-                .get_resource::<crate::play::PlaySettings>()
-                .filter(|play| in_play && play.hud)
-                .and_then(|play| play.build.as_ref())
-                .and_then(|build| build.materials.get(selected))
-                .and_then(|material| material.id())
-                .and_then(|id| registry.get(id))
-                .map(|def| (def.display_name.clone(), def.color));
-
-            let mut egui = ecs.non_send_resource_mut::<ui::EguiRenderer>();
-            egui.draw(
-                &mut *ui_state,
-                &mut *probe,
-                &registry,
-                &ctx,
-                &mut encoder,
-                &surface_view,
-                &window_arc,
-                play_hud.as_ref().map(|(name, color)| (name.as_str(), *color)),
-            );
-        });
+    // --- Egui paint ---
+    // Laid out main-side by `egui_layout_system`; this only paints it.
+    ecs.resource_scope::<EguiFrame, _>(|ecs, mut egui_frame| {
+        ecs.resource_mut::<EguiPainter>().paint(
+            &ctx.device,
+            &ctx.queue,
+            &mut encoder,
+            &surface_view,
+            &mut egui_frame,
+        );
     });
 
     // --- Submit + present ---

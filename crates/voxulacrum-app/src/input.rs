@@ -609,10 +609,10 @@ pub fn process_input_system(
     state.move_vector = mv;
 }
 
-/// Handles UI / editor toggles via InputState (needs NonSend access for EguiRenderer).
+/// Handles UI / editor toggles via InputState (needs NonSend access for EguiUi).
 pub fn toggle_ui_system(
     state: Res<InputState>,
-    mut egui: NonSendMut<ui::EguiRenderer>,
+    mut egui: NonSendMut<ui::EguiUi>,
     mut probe: ResMut<ui::field_probe::FieldProbe>,
 ) {
     if state.just_pressed(GameAction::ToggleUI) {
