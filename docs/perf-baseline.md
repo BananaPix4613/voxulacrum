@@ -811,7 +811,7 @@ The stage `uniform` is named `extract` from R4 on, in the panel and in
   which are gated on their means, have not been measured since the baseline.
   S4's edits remesh chunks through the same per-chunk path, so it is the one to
   watch. To attribute the increase, take one S3 reading on `master` before R4
-  (`ac6043b`), which separates R4 from the items before it.
+  (`ac6043b`), which separates R4 from the items before it (T12, #124).
 
 ---
 
