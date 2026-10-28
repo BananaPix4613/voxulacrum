@@ -1,4 +1,4 @@
-use bevy_ecs::schedule::{ExecutorKind, Schedule, SystemSet, IntoScheduleConfigs};
+use bevy_ecs::schedule::{Schedule, SystemSet, IntoScheduleConfigs};
 use crate::ecs::systems;
 use crate::input;
 use crate::world::tick::{TickPhase, TickSchedule};
@@ -182,26 +182,6 @@ pub fn build_frame_schedule() -> Schedule {
         systems::regen::world_regen_system.in_set(FrameStage::PostFrame),
     );
 
-    schedule
-}
-
-/// Build the render world's schedule: apply the frame's requests and uploads,
-/// count stats, write the uniforms, then draw and present. Single-threaded and
-/// chained: the work is one sequence ending in an exclusive draw.
-pub fn build_render_schedule() -> Schedule {
-    let mut schedule = Schedule::default();
-    schedule.set_executor_kind(ExecutorKind::SingleThreaded);
-    schedule.add_systems(
-        (
-            systems::uniforms::surface_resize_system,
-            systems::hot_reload::shader_reload_system,
-            systems::uniforms::chunk_upload_system,
-            systems::render::render_stats_system,
-            systems::uniforms::write_uniforms_system,
-            systems::render::render_present_system,
-        )
-            .chain(),
-    );
     schedule
 }
 

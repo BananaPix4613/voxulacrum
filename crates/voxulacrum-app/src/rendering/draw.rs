@@ -3,7 +3,7 @@
 //! render world's schedule; what it reports goes back through `RenderFeedback`.
 
 use bevy_ecs::prelude::{Res, ResMut};
-use crate::ecs::resources::{
+use crate::rendering::resources::{
     GlobalUniformBindGroup, ReflectionUniformBindGroup, ShadowBindGroup, ShadowDepthView,
 };
 use crate::rendering::canopy_pass::CanopyPass;
@@ -30,8 +30,8 @@ use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
 use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::upscale_pass::UpscalePass;
 use crate::rendering::water_pass::WaterPass;
-use crate::simulation::manager::FrameState;
-use crate::meshing::coordinator::{ChunkMesh, ChunkMeshes};
+use crate::rendering::chunk_meshes::{ChunkMesh, ChunkMeshes};
+use crate::rendering::frame_state::FrameState;
 
 /// Count what the renderer holds, for the main side's stats: meshed chunks,
 /// those inside the camera frustum and their triangles, and the mesh bytes on

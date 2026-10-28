@@ -1,7 +1,8 @@
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::Resource;
 
-use crate::app::{compute_render_dimensions, RenderDims};
+use crate::rendering::frame_state::FrameState;
+use crate::rendering::render_dims::compute_render_dimensions;
 use crate::camera::{IsometricCamera, SnappedCamera};
 use crate::input::InputState;
 use crate::cloud_shadow::CloudShadowState;
@@ -11,38 +12,6 @@ use crate::rendering::frustum::Frustum;
 use crate::simulation::time_of_day::TimeOfDay;
 use crate::simulation::wind::WindState;
 use crate::world::chunk::VOXEL_SCALE;
-
-/// All computed per-frame data that rendering needs.
-#[derive(Resource, Clone)]
-pub struct FrameState {
-    pub dt: f32,
-    pub elapsed: f32,
-    /// This frame's camera description.
-    pub camera: CameraDesc,
-    /// The pixel lattice this frame is drawn on, sized from the window and the
-    /// camera's zoom. Beside the camera rather than in its block, because the
-    /// render targets are sized from it; V8 decides who owns it.
-    pub dims: RenderDims,
-    pub light_space: Mat4,
-    pub sun_direction: [f32; 3],
-    pub sun_color: [f32; 3],
-    pub ambient_color: [f32; 3],
-    pub wind_vector: [f32; 2],
-    pub clip_min: [f32; 3],
-    pub clip_max: [f32; 3],
-    pub clip_enabled: u32,
-    pub mask_origin: [f32; 3],
-    pub mask_enabled: u32,
-    pub volume_radius: f32,
-    pub debug_mode: u32,
-    #[allow(dead_code)] // sky tint uniform; retained for shader wiring
-    pub sky_color: [f32; 3],
-    pub warm_tint_color: [f32; 3],
-    pub warm_tint_strength: f32,
-    /// Which way the cross-section cap faces on each axis (+1 or -1), from the
-    /// camera's settled rotation.
-    pub clip_dirs: [f32; 3],
-}
 
 #[derive(Resource)]
 pub struct SimulationManager {

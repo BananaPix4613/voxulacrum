@@ -8,7 +8,7 @@ use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::capsule_pass::CapsulePass;
 use crate::rendering::canopy_pass::CanopyPass;
 use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
-use crate::meshing::coordinator::ChunkMesh;
+use crate::rendering::chunk_meshes::ChunkMesh;
 
 /// Configuration for cross-section cap rendering within the main scene pass.
 pub struct CapConfig {

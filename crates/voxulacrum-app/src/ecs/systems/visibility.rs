@@ -5,7 +5,7 @@ use bevy_ecs::prelude::*;
 use glam::IVec3;
 use crate::ecs::resources::{VisibilityMaskTexels, VoxelWorld};
 use crate::player::sim::WorldView;
-use crate::simulation::manager::FrameState;
+use crate::rendering::frame_state::FrameState;
 use crate::world::mutation::EngineMode;
 
 /// Visibility flood each time the player crosses into a new head cell. Produces

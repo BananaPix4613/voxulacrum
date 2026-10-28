@@ -14,7 +14,7 @@ use crate::input::{GameAction, InputState, PointerState, RawInputBuffer};
 use crate::player::systems::Player;
 use crate::meshing::overlay::DebugLines;
 use crate::rendering::camera_desc::CameraDesc;
-use crate::simulation::manager::FrameState;
+use crate::rendering::frame_state::FrameState;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 use crate::world::World;

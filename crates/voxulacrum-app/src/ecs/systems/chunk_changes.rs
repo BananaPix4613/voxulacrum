@@ -9,7 +9,7 @@ use crate::diagnostics::{FrameTimings, SUB_FLUID};
 use crate::ecs::resources::VoxelWorld;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::meshing::foliage::build_scatter;
-use crate::meshing::uploads::{ChunkUpload, ChunkUploads};
+use crate::rendering::uploads::{ChunkUpload, ChunkUploads};
 use crate::prefabs::PrefabRegistryRes;
 use crate::world::changes::{ChunkChange, ChunkLayers};
 use crate::world::mutation::MutationOrigin;

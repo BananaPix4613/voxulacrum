@@ -10,11 +10,12 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 
-use crate::meshing::coordinator::TerrainMesh;
+use voxel_core::ChunkVersion;
+
+use crate::rendering::chunk_meshes::TerrainMesh;
 use crate::rendering::detail_paint_pass::DetailPaintData;
 use crate::rendering::pipelines::{CapsuleInstanceGpu, LobeInstanceGpu, ScatterInstanceGpu};
 use crate::rendering::water_pass::WaterSurface;
-use crate::world::changes::ChunkVersion;
 
 /// One queued change to a chunk's entry in a pass.
 pub enum ChunkUpload<T> {

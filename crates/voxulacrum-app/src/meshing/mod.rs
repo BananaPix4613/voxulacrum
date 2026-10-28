@@ -5,7 +5,6 @@ mod cube_mesher;
 pub mod foliage;
 pub mod overlay;
 pub mod player;
-pub mod uploads;
 pub mod water;
 
 use glam::IVec3;

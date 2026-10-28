@@ -9,7 +9,7 @@ use crate::foliage::FoliageRegistryRes;
 use crate::jobs::JobSystem;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::meshing::foliage::{build_capsules, build_detail_paint, build_lobes, build_scatter};
-use crate::meshing::uploads::{ChunkUpload, ChunkUploads};
+use crate::rendering::uploads::{ChunkUpload, ChunkUploads};
 use crate::meshing::water::build_water_surface;
 use crate::prefabs::PrefabRegistryRes;
 use crate::simulation::manager::SimulationManager;

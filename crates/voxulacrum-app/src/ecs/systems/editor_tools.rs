@@ -13,7 +13,8 @@ use crate::meshing::cap::CapMesh;
 use crate::meshing::overlay::{
     generate_chunk_boundary_lines, voxel_box_lines, DebugLines, SkeletonPreview,
 };
-use crate::simulation::manager::{FrameState, SimulationManager};
+use crate::rendering::frame_state::FrameState;
+use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::mutation::{MutationCommand, WorldMutation};
 

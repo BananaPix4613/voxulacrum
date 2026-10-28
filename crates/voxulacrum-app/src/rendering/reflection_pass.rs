@@ -5,7 +5,7 @@ use crate::rendering::player_pass::PlayerPass;
 use crate::rendering::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
 use crate::rendering::scatter_pass::ScatterPass;
 use crate::rendering::capsule_pass::CapsulePass;
-use crate::meshing::coordinator::ChunkMesh;
+use crate::rendering::chunk_meshes::ChunkMesh;
 
 /// Planar water reflection pass. Re-renders terrain + foliage + scatter + player
 /// into the half-res reflection targets with the mirrored view-projection

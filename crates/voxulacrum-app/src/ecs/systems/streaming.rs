@@ -9,7 +9,7 @@ use crate::diagnostics::{
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
 use crate::meshing::coordinator::MeshingCoordinator;
-use crate::meshing::uploads::ChunkUploads;
+use crate::rendering::uploads::ChunkUploads;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;

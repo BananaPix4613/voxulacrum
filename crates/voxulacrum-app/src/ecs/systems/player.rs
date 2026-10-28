@@ -3,7 +3,7 @@
 use bevy_ecs::prelude::*;
 use crate::ecs::resources::VoxelWorld;
 use crate::meshing::player::{build_player_mesh, PlayerMesh};
-use crate::simulation::manager::FrameState;
+use crate::rendering::frame_state::FrameState;
 use crate::world::mutation::EngineMode;
 
 /// Rebuild the player avatar mesh each frame at the interpolated render position

@@ -9,7 +9,7 @@ use crate::rendering::uniforms::{
 };
 use crate::rendering::water_pass::WaterPass;
 use crate::rendering::upscale_pass::UpscalePass;
-use crate::simulation::manager::FrameState;
+use crate::rendering::frame_state::FrameState;
 
 /// Number of independently-moving cloud layers. Each gets its own wind
 /// deflection and simulated macro-grid, composited together in the terrain

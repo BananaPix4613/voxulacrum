@@ -4,8 +4,9 @@
 //! `render_world_system` runs it and reads back what it reports.
 
 use bevy_ecs::prelude::*;
-use bevy_ecs::schedule::Schedule;
+use bevy_ecs::schedule::{ExecutorKind, IntoScheduleConfigs, Schedule};
 
+use crate::rendering::{draw, prepare};
 use crate::rendering::settings::{RenderSettings, SceneOptions};
 use crate::rendering::palette_pass::PaletteUniforms;
 use crate::rendering::uniform_writer::CloudFrame;
@@ -26,6 +27,26 @@ impl RenderWorld {
     pub fn run(&mut self) {
         self.schedule.run(&mut self.world);
     }
+}
+
+/// Build the render world's schedule: apply the frame's requests and uploads,
+/// count stats, write the uniforms, then draw and present. Single-threaded and
+/// chained: the work is one sequence ending in an exclusive draw.
+pub fn build_render_schedule() -> Schedule {
+    let mut schedule = Schedule::default();
+    schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+    schedule.add_systems(
+        (
+            prepare::surface_resize_system,
+            prepare::shader_reload_system,
+            prepare::chunk_upload_system,
+            draw::render_stats_system,
+            prepare::write_uniforms_system,
+            draw::render_present_system,
+        )
+            .chain(),
+    );
+    schedule
 }
 
 /// What the main side's settings and state say about this frame's render,

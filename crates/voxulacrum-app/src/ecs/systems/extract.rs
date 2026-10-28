@@ -6,11 +6,12 @@
 use bevy_ecs::prelude::*;
 
 use crate::diagnostics::FrameTimings;
-use crate::ecs::resources::{LoadedPalette, RenderRequests, VisibilityMask, VisibilityMaskTexels};
+use crate::ecs::resources::{LoadedPalette, VisibilityMaskTexels};
 use crate::meshing::cap::CapMesh;
 use crate::meshing::overlay::{DebugLines, SkeletonPreview};
 use crate::meshing::player::PlayerMesh;
-use crate::meshing::uploads::ChunkUploads;
+use crate::rendering::resources::{RenderRequests, VisibilityMask};
+use crate::rendering::uploads::ChunkUploads;
 use crate::params::EngineParams;
 use crate::rendering::cap_pass::CapPass;
 use crate::rendering::cloud_textures::CloudTextures;
@@ -21,7 +22,8 @@ use crate::rendering::render_context::RenderContext;
 use crate::rendering::render_world::{RenderFeedback, RenderParams, RenderStats, RenderWorld};
 use crate::rendering::settings::SceneOptions;
 use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
-use crate::simulation::manager::{FrameState, SimulationManager};
+use crate::rendering::frame_state::FrameState;
+use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::room::RoomState;
 
