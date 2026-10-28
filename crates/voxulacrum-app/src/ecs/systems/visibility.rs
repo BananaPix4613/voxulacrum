@@ -1,12 +1,11 @@
 //! Underground visibility: the flood from the player's head cell, and the
-//! mask texture the terrain shader reads.
+//! mask texels the terrain shader reads.
 
 use bevy_ecs::prelude::*;
 use glam::IVec3;
-use crate::ecs::resources::{VisibilityMask, VoxelWorld};
+use crate::ecs::resources::{VisibilityMaskTexels, VoxelWorld};
 use crate::player::sim::WorldView;
-use crate::rendering::render_context::RenderContext;
-use crate::simulation::manager::FrameState;
+use crate::rendering::frame_state::FrameState;
 use crate::world::mutation::EngineMode;
 
 /// Visibility flood each time the player crosses into a new head cell. Produces
@@ -109,17 +108,17 @@ pub fn room_detection_system(
     );
 }
 
-/// Rebuild + upload the 64^3 visibility mask when the flood changed, and drive the
+/// Rebuild the 64^3 visibility mask's texels when the flood changed, and drive the
 /// mask uniforms every frame (FrameState is rebuilt per frame). The mask marks the
 /// visible set dilated by one cell - the +1 pulls in the solid cave-wall shell so
 /// walls render; everything else stays 0 (capped), which is what hides the surface
-/// world (R3). Runs in UniformWrite before `write_uniforms_system`.
-pub fn visibility_mask_upload_system(
-    ctx: Res<RenderContext>,
+/// world (R3). Runs in Extract before `extract_system`, which uploads the
+/// texels and copies the frame state with its mask fields.
+pub fn visibility_mask_system(
     mut room: ResMut<crate::world::room::RoomState>,
-    mask: Res<VisibilityMask>,
     mut frame: ResMut<FrameState>,
     world: Res<VoxelWorld>,
+    mut texels: ResMut<VisibilityMaskTexels>,
 ) {
     const N: i32 = 64;
     const HALF: i32 = 32;
@@ -134,7 +133,7 @@ pub fn visibility_mask_upload_system(
     frame.mask_enabled = if room.enclosed { 1 } else { 0 };
     frame.volume_radius = room.volume_radius;
 
-    // Re-upload texture contents only when the flood actually changed.
+    // Rebuild the texels only when the flood actually changed.
     if !room.dirty {
         return;
     }
@@ -154,19 +153,5 @@ pub fn visibility_mask_upload_system(
         }
     }
 
-    ctx.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &mask.0,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(N as u32),
-            rows_per_image: Some(N as u32),
-        },
-        wgpu::Extent3d { width: N as u32, height: N as u32, depth_or_array_layers: N as u32 },
-    );
+    texels.0.set(bytes);
 }

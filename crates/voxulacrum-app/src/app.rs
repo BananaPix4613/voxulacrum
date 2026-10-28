@@ -11,7 +11,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::{
     bench, core_budget, diagnostics, graph_reload, interaction, jobs, libraries, materials,
-    paths, prefabs, rendering, simulation, ui, validate, verify, world, determinism,
+    paths, prefabs, rendering, ui, validate, verify, world, determinism,
 };
 use crate::rendering::render_targets::RenderTargets;
 use crate::rendering::render_context::RenderContext;
@@ -32,20 +32,25 @@ use crate::rendering::cap_pass::CapPass;
 use crate::shader_reload::ShaderWatcher;
 use crate::simulation::manager::SimulationManager;
 use crate::meshing::coordinator::MeshingCoordinator;
+use crate::rendering::chunk_meshes::ChunkMeshes;
+use crate::rendering::render_dims::compute_render_dimensions;
 use crate::meshing::MeshingPipeline;
 use crate::world::regen::WorldRegenCoordinator;
 use crate::world::persistence::WorldPersistence;
 use crate::world::config::ServerConfig;
 use crate::camera::IsometricCamera;
-use crate::cloud_shadow::CloudShadowState;
+use crate::cloud_shadow::{CloudShadowState, DETAIL_TEX_SIZE, ENV_SIZE};
+use crate::rendering::cloud_textures::CloudTextures;
 use crate::params::EngineParams;
 use crate::ui::panels::UiState;
 use crate::materials::MaterialRegistryRes;
 
 use crate::ecs::resources::*;
+use crate::rendering::resources::*;
 use crate::ecs::events::*;
 use crate::ecs::clocks::{PresentationClock, TickDriver};
 use crate::ecs::schedule::{build_frame_schedule, build_tick_schedule};
+use crate::rendering::render_world::build_render_schedule;
 use crate::input::{InputMap, InputState, PointerButton, PointerState, RawInputBuffer, RawInputEvent};
 use crate::world::room::RoomState;
 
@@ -79,50 +84,6 @@ impl FrameCounter {
             self.last_second = std::time::Instant::now();
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// compute_render_dimensions
-// ---------------------------------------------------------------------------
-
-/// The pixel-art lattice for one frame. `k` fixes the world->texel mapping
-/// (integer texels per voxel - the image is always painted at this density);
-/// `s` is how big one texel appears on screen (continuous, non-integer fine).
-/// Zoom only ever changes `s` (and, in octaves, `k`) - never the lattice phase.
-pub struct RenderDims {
-    /// Texels per voxel — integer, stepped in octaves.
-    pub k: u32,
-    /// Native pixels per texel — continuous screen magnification.
-    pub s: f32,
-    /// Visible content in texels (= surface / s, fractional).
-    pub view_w: f32,
-    pub view_h: f32,
-    /// Texture allocation in texels (bucketed so zoom doesn't reallocate).
-    pub alloc_w: u32,
-    pub alloc_h: u32,
-}
-
-pub fn compute_render_dimensions(
-    surface_w: u32,
-    surface_h: u32,
-    zoom: f32,
-    world_pixel_density: f32
-) -> RenderDims {
-    let base_k = world_pixel_density.round().max(1.0) as u32;
-    let mut k = base_k;
-    let mut s = surface_h as f32 / (2.0 * zoom * k as f32);
-    // Octave ladder: partial minify (s < 1 downsamples the texel image).
-    while s < 0.85 && k > 1 {
-        k /= 2;
-        s *= 2.0;
-    }
-    let view_w = surface_w as f32 / s;
-    let view_h = surface_h as f32 / s;
-    // Bucket allocation to 64-texel steps (+2 guard) so continuous zoom only
-    // reallocates at bucket boundaries, not every tick.
-    let alloc_w = (view_w.ceil() as u32 + 2).div_ceil(64) * 64;
-    let alloc_h = (view_h.ceil() as u32 + 2).div_ceil(64) * 64;
-    RenderDims { k, s, view_w, view_h, alloc_w, alloc_h }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,10 +232,13 @@ fn init_ecs(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    let cloud_shadow = CloudShadowState::new(&ctx);
+    // The cloud state bakes Layer B's texels; the textures start empty and take
+    // them on the first frame's upload.
+    let cloud_shadow = CloudShadowState::new();
+    let cloud_textures = CloudTextures::new(&ctx.device, DETAIL_TEX_SIZE, ENV_SIZE as u32);
 
     // Visibility mask (group 0, binding 6): a 64^3 window of one-byte cell states
-    // centered on the player, rewritten on movement by visibility_mask_upload_system.
+    // centered on the player, rewritten on movement from VisibilityMaskTexels.
     let visibility_mask_texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("visibility_mask"),
         size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 64 },
@@ -292,10 +256,10 @@ fn init_ecs(
         &ctx.device,
         &global_bind_group_layout,
         &uniform_buffer,
-        &cloud_shadow.texture_view,
-        &cloud_shadow.sampler,
-        &cloud_shadow.env_texture_view,
-        &cloud_shadow.env_sampler,
+        &cloud_textures.detail_view,
+        &cloud_textures.detail_sampler,
+        &cloud_textures.envelope_view,
+        &cloud_textures.envelope_sampler,
         &shadow_depth_view,
         &shadow_sampler,
         &material_color_buffer,
@@ -312,10 +276,10 @@ fn init_ecs(
         &ctx.device,
         &global_bind_group_layout,
         &reflection_uniform_buffer,
-        &cloud_shadow.texture_view,
-        &cloud_shadow.sampler,
-        &cloud_shadow.env_texture_view,
-        &cloud_shadow.env_sampler,
+        &cloud_textures.detail_view,
+        &cloud_textures.detail_sampler,
+        &cloud_textures.envelope_view,
+        &cloud_textures.envelope_sampler,
         &shadow_depth_view,
         &shadow_sampler,
         &material_color_buffer,
@@ -442,12 +406,16 @@ fn init_ecs(
     log::info!("World generated in {:.2?}", gen_start.elapsed());
     world.print_debug_stats(&material_registry);
 
-    // Tier-1 detail paint + Tier-2/3 scatter + water
+    // Tier-1 detail paint + Tier-2/3 scatter + water. The passes start empty:
+    // each chunk's entries are built as its mesh lands, startup chunks included.
     let foliage_registry = crate::foliage::load_foliage_registry();
-    let detail_paint_pass = DetailPaintPass::new(&ctx, &world, &foliage_registry);
-    let scatter_pass = ScatterPass::new(&ctx, &world, &prefab_registry);
-    let capsule_pass = CapsulePass::new(&ctx, &world);
-    let canopy_pass = CanopyPass::new(&ctx, &world);
+    let detail_paint_pass = DetailPaintPass::new(&ctx, &foliage_registry.species_color_table());
+    let scatter_pass = ScatterPass::new(
+        &ctx,
+        &crate::meshing::foliage::prefab_meshes(&prefab_registry),
+    );
+    let capsule_pass = CapsulePass::default();
+    let canopy_pass = CanopyPass::default();
     let water_pass = WaterPass::new(
         &ctx.device,
         &pipeline_resources.water_bind_group_layout,
@@ -496,21 +464,22 @@ fn init_ecs(
         &upscale_source,
     );
 
-    // Egui
-    let mut egui_renderer = ui::EguiRenderer::new(&ctx, &window);
+    // Egui: laid out on the main side, painted by the render side.
+    let mut egui_ui = ui::EguiUi::new(&window, ctx.device.limits().max_texture_dimension_2d as usize);
+    let egui_painter = rendering::egui_painter::EguiPainter::new(&ctx.device, ctx.surface_format);
     // Load the world's graph hierarchy into the embedded editor's selector;
     // the canvas opens on the primary biome.
     let manifest_path = world::world_generator::world_manifest_path();
     match world::world_generator::load_world_graphs(&manifest_path) {
-        Ok(graphs) => egui_renderer.graph_editor.load(manifest_path, graphs),
+        Ok(graphs) => egui_ui.graph_editor.load(manifest_path, graphs),
         Err(e) => log::error!("Failed to load editor graph hierarchy: {e}"),
     }
     let mut ui_state = UiState::new(initial_params, presets_dir);
     ui_state.gpu = gpu_label;
 
     // Meshing
-    let mut meshing_pipeline = MeshingPipeline::new(&ui_state.params.mesh_cache);
-    meshing_pipeline.submit_all_dirty(&world);
+    // The startup chunks reach it through the change feed, like any other load.
+    let meshing_pipeline = MeshingPipeline::new(&ui_state.params.mesh_cache);
     let meshing = MeshingCoordinator::new(meshing_pipeline);
 
     // -----------------------------------------------------------------------
@@ -518,20 +487,29 @@ fn init_ecs(
     // -----------------------------------------------------------------------
 
     // Newtype wrappers
+    // The render world owns every GPU resource. The main world holds it as a
+    // resource and hands it each frame's data at Extract.
+    let mut render = World::new();
     ecs.insert_resource(WindowHandle(window));
-    ecs.insert_resource(GlobalUniformBuffer(uniform_buffer));
-    ecs.insert_resource(GlobalUniformBindGroup(uniform_bind_group));
-    ecs.insert_resource(ShadowUniformBuffer(shadow_uniform_buffer));
-    ecs.insert_resource(ReflectionUniformBuffer(reflection_uniform_buffer));
-    ecs.insert_resource(ReflectionUniformBindGroup(reflection_bind_group));
-    ecs.insert_resource(ShadowBindGroup(shadow_bind_group));
-    ecs.insert_resource(ShadowDepthView(shadow_depth_view));
-    ecs.insert_resource(MaterialColorBuffer(material_color_buffer));
-    ecs.insert_resource(VisibilityMask(visibility_mask_texture));
+    render.insert_resource(GlobalUniformBuffer(uniform_buffer));
+    render.insert_resource(GlobalUniformBindGroup(uniform_bind_group));
+    render.insert_resource(ShadowUniformBuffer(shadow_uniform_buffer));
+    render.insert_resource(ReflectionUniformBuffer(reflection_uniform_buffer));
+    render.insert_resource(ReflectionUniformBindGroup(reflection_bind_group));
+    render.insert_resource(ShadowBindGroup(shadow_bind_group));
+    render.insert_resource(ShadowDepthView(shadow_depth_view));
+    render.insert_resource(MaterialColorBuffer(material_color_buffer));
+    render.insert_resource(VisibilityMask::new(visibility_mask_texture));
+    ecs.insert_resource(VisibilityMaskTexels::default());
+    // Queues the main side fills and Extract hands across. The render world
+    // keeps its own copy of each to apply.
+    ecs.insert_resource(RenderRequests::default());
+    render.insert_resource(RenderRequests::default());
+    ecs.insert_resource(crate::rendering::uploads::ChunkUploads::default());
+    render.insert_resource(crate::rendering::uploads::ChunkUploads::default());
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
-    ecs.insert_resource(FluidChanges::default());
     ecs.insert_resource(PresentationClock::new());
     ecs.insert_resource(TickDriver::default());
     ecs.insert_resource(world::tick::CurrentTick::default());
@@ -542,31 +520,39 @@ fn init_ecs(
     ecs.insert_resource(RoomState::default());
     ecs.insert_resource(MaterialRegistryRes(material_registry.clone()));
     ecs.insert_resource(prefabs::PrefabRegistryRes(prefab_registry));
+    ecs.insert_resource(crate::foliage::FoliageRegistryRes(foliage_registry));
     ecs.insert_resource(libraries::LibrariesRes(libraries));
 
     // Direct Resource types
-    ecs.insert_resource(ctx);
-    ecs.insert_resource(surface_state);
+    render.insert_resource(ctx);
+    render.insert_resource(surface_state);
     ecs.insert_resource(simulation);
-    ecs.insert_resource(pipeline_registry);
-    ecs.insert_resource(pipeline_resources);
-    ecs.insert_resource(render_targets);
-    ecs.insert_resource(debug_line_pass);
-    ecs.insert_resource(upscale_pass);
-    ecs.insert_resource(detail_paint_pass);
-    ecs.insert_resource(scatter_pass);
-    ecs.insert_resource(capsule_pass);
-    ecs.insert_resource(canopy_pass);
-    ecs.insert_resource(rendering::skeleton_preview_pass::SkeletonPreviewPass::default());
-    ecs.insert_resource(water_pass);
-    ecs.insert_resource(post_process);
-    ecs.insert_resource(outline_pass);
-    ecs.insert_resource(palette_pass);
-    ecs.insert_resource(cap_pass);
-    ecs.insert_resource(player_pass);
+    render.insert_resource(cloud_textures);
+    render.insert_resource(pipeline_registry);
+    render.insert_resource(pipeline_resources);
+    render.insert_resource(render_targets);
+    render.insert_resource(debug_line_pass);
+    render.insert_resource(upscale_pass);
+    render.insert_resource(detail_paint_pass);
+    render.insert_resource(scatter_pass);
+    render.insert_resource(capsule_pass);
+    render.insert_resource(canopy_pass);
+    render.insert_resource(rendering::skeleton_preview_pass::SkeletonPreviewPass::default());
+    // Main-side render data; `extract_system` uploads it into the passes.
+    ecs.insert_resource(crate::meshing::overlay::DebugLines::default());
+    ecs.insert_resource(crate::meshing::overlay::SkeletonPreview::default());
+    ecs.insert_resource(crate::meshing::player::PlayerMesh::default());
+    ecs.insert_resource(crate::meshing::cap::CapMesh::default());
+    render.insert_resource(water_pass);
+    render.insert_resource(post_process);
+    render.insert_resource(outline_pass);
+    render.insert_resource(palette_pass);
+    render.insert_resource(cap_pass);
+    render.insert_resource(player_pass);
     ecs.insert_resource(shader_watcher);
     ecs.insert_resource(graph_watcher);
     ecs.insert_resource(meshing);
+    render.insert_resource(ChunkMeshes::default());
     ecs.insert_resource(WorldRegenCoordinator::new(gen_pool.clone()));
     // `persistence` was opened earlier, before world generation (see above).
     let db_path = persistence.db_path.clone();
@@ -597,15 +583,18 @@ fn init_ecs(
     ecs.insert_resource(interaction::TargetState::default());
     ecs.insert_resource(interaction::PlayerToolState::default());
 
-    // EguiRenderer — NonSend because egui_winit::State may be !Send
-    ecs.insert_non_send_resource(egui_renderer);
+    // EguiUi - NonSend because egui_winit::State may be !Send
+    ecs.insert_non_send_resource(egui_ui);
+    render.insert_resource(egui_painter);
+    ecs.insert_resource(rendering::egui_painter::EguiFrame::default());
+    render.insert_resource(rendering::egui_painter::EguiFrame::default());
 
     // Initialize a default FrameState so systems don't panic on first frame
-    ecs.insert_resource(simulation::manager::FrameState {
+    let frame_state = rendering::frame_state::FrameState {
         dt: 0.0,
         elapsed: 0.0,
-        view_proj: [[0.0; 4]; 4],
-        subpixel_offset: [0.0; 2],
+        camera: crate::rendering::camera_desc::CameraDesc::default(),
+        dims,
         light_space: glam::Mat4::IDENTITY,
         sun_direction: [0.0, 1.0, 0.0],
         sun_color: [1.0; 3],
@@ -617,16 +606,14 @@ fn init_ecs(
         mask_origin: [0.0; 3],
         mask_enabled: 0,
         volume_radius: 0.0,
-        view_dir: [0.0, -1.0, 0.0],
-        view_right: [1.0, 0.0, 0.0],
-        view_up: [0.0, 1.0, 0.0],
         debug_mode: 0,
         sky_color: [0.5, 0.7, 1.0],
         warm_tint_color: [1.0; 3],
         warm_tint_strength: 0.0,
-        cos_r: 1.0,
-        sin_r: 0.0,
-    });
+        clip_dirs: [1.0, 1.0, 1.0],
+    };
+    render.insert_resource(frame_state.clone());
+    ecs.insert_resource(frame_state);
 
     // Initialize event queues
     ecs.init_resource::<Events<RegenerateWorld>>();
@@ -638,6 +625,13 @@ fn init_ecs(
     // -----------------------------------------------------------------------
     // Build the schedule
     // -----------------------------------------------------------------------
+
+    render.insert_resource(crate::rendering::render_world::RenderFeedback::default());
+    ecs.insert_resource(crate::rendering::render_world::RenderStats::default());
+    ecs.insert_resource(crate::rendering::render_world::RenderWorld::new(
+        render,
+        build_render_schedule(),
+    ));
 
     ecs.add_schedule(build_tick_schedule());
     let mut schedule = build_frame_schedule();
@@ -760,64 +754,19 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Resized(new_size) => {
-                // Clone RenderContext (cheap Arc bumps) to avoid borrow conflicts.
-                let ctx = ecs.resource::<RenderContext>().clone();
-
-                ecs.resource_mut::<SurfaceState>()
-                    .resize(&ctx.device, new_size.width, new_size.height);
+                // The camera is main-side and follows at once. The surface is the
+                // render world's: it resizes from the request Extract hands it, and
+                // the render targets follow the frame's dims when it draws.
                 ecs.resource_mut::<SimulationManager>()
                     .camera
                     .resize(new_size.width, new_size.height);
-
-                let zoom = ecs.resource::<SimulationManager>().camera.zoom;
-                let density = ecs
-                    .resource::<UiState>()
-                    .params
-                    .render_pipeline
-                    .world_pixel_density;
-                let dims = compute_render_dimensions(
-                    new_size.width,
-                    new_size.height,
-                    zoom,
-                    density,
-                );
-                let water_layout = ecs
-                    .resource::<PipelineResources>()
-                    .water_bind_group_layout
-                    .clone();
-
-                let new_rt = RenderTargets::new(&ctx, &dims);
-
-                ecs.resource_mut::<OutlinePass>().rebuild_bind_group(
-                    &ctx,
-                    &new_rt.scene_view,
-                    &new_rt.depth_sample_view,
-                    &new_rt.normal_view,
-                );
-                ecs.resource_mut::<PostProcessPass>().rebuild_bind_group(
-                    &ctx,
-                    &new_rt.processed_view,
-                    &new_rt.depth_sample_view,
-                );
-                ecs.resource_mut::<PalettePass>()
-                    .rebuild_bind_group(&ctx, &new_rt.scene_view);
-                ecs.resource_mut::<UpscalePass>()
-                    .rebuild_bind_group(&ctx, &new_rt.processed_view);
-                ecs.resource_mut::<WaterPass>().rebuild_bind_group(
-                    &ctx.device,
-                    &water_layout,
-                    &new_rt.scene_copy_view,
-                    &new_rt.depth_sample_view,
-                    &new_rt.reflection_color_view,
-                    &new_rt.reflection_depth_sample_view,
-                );
-
-                *ecs.resource_mut::<RenderTargets>() = new_rt;
+                ecs.resource_mut::<RenderRequests>().surface_size =
+                    Some((new_size.width, new_size.height));
             }
 
             ref e @ WindowEvent::KeyboardInput { ref event, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-               ecs.non_send_resource_mut::<ui::EguiRenderer>()
+               ecs.non_send_resource_mut::<ui::EguiUi>()
                    .handle_event(&window, e);
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let raw = if event.state == ElementState::Pressed {
@@ -831,7 +780,7 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::MouseWheel { ref delta, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, e);
                 let scroll = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
@@ -846,7 +795,7 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::CursorMoved { position, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, e);
                 ecs.resource_mut::<RawInputBuffer>()
                     .events
@@ -855,7 +804,7 @@ impl ApplicationHandler for App {
 
             ref e @ WindowEvent::MouseInput { state, button, .. } => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, e);
                 let mapped = match button {
                     winit::event::MouseButton::Left => Some(PointerButton::Left),
@@ -873,7 +822,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 // Update egui consumption flags before the frame schedule.
                 {
-                    let egui = ecs.non_send_resource::<ui::EguiRenderer>();
+                    let egui = ecs.non_send_resource::<ui::EguiUi>();
                     let wants_kb = egui.ctx.wants_keyboard_input();
                     let wants_ptr = egui.ctx.wants_pointer_input();
                     let mut buf = ecs.resource_mut::<RawInputBuffer>();
@@ -906,7 +855,7 @@ impl ApplicationHandler for App {
 
             ref other => {
                 let window = ecs.resource::<WindowHandle>().0.clone();
-                ecs.non_send_resource_mut::<ui::EguiRenderer>()
+                ecs.non_send_resource_mut::<ui::EguiUi>()
                     .handle_event(&window, other);
             }
         }

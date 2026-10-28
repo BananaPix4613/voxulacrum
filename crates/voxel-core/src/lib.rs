@@ -56,6 +56,7 @@ mod name;
 mod neighbor;
 mod palette;
 mod shape;
+mod version;
 mod voxel;
 
 pub use blueprint::{
@@ -71,8 +72,15 @@ pub use name::{QualifiedName, ENGINE_NAMESPACE};
 pub use neighbor::{NeighborView, BorderAxis};
 pub use palette::{Palettable, PaletteStorage};
 pub use shape::ShapeId;
+pub use version::ChunkVersion;
 pub use voxel::Voxel;
 
 /// Edge length of a chunk along each axis — the single source of truth shared
 /// by the engine and the evaluator.
 pub const CHUNK_DIM: usize = 32;
+
+/// Edge length of one voxel in world units.
+pub const VOXEL_SCALE: f32 = 1.0;
+
+/// Edge length of a chunk in world units.
+pub const CHUNK_WORLD_SIZE: f32 = CHUNK_DIM as f32 * VOXEL_SCALE;

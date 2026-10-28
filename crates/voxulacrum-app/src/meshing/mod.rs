@@ -1,6 +1,11 @@
 pub mod cache;
+pub mod cap;
 pub mod coordinator;
 mod cube_mesher;
+pub mod foliage;
+pub mod overlay;
+pub mod player;
+pub mod water;
 
 use glam::IVec3;
 use std::collections::{HashMap, HashSet};
@@ -14,6 +19,7 @@ use bevy_ecs::prelude::Resource;
 use crate::core_budget::CoreBudget;
 use crate::jobs::{JobKind, JobSystem, Priority};
 use crate::rendering::pipelines::FaceVertex;
+use crate::world::changes::ChunkVersion;
 use crate::world::chunk::ChunkSnapshot;
 use cache::AtomicCacheStats;
 use cube_mesher::generate_chunk_mesh;
@@ -27,6 +33,8 @@ pub struct MeshResult {
     pub vertices: Vec<FaceVertex>,
     pub indices: Vec<u32>,
     pub mesh_seq: u64,
+    /// The chunk's version when it was snapshotted for this mesh.
+    pub version: ChunkVersion,
 }
 
 // ============================================================================
@@ -37,6 +45,21 @@ pub struct MeshResult {
 enum ChunkMeshState {
     Idle,
     InProgress,
+}
+
+/// What a chunk's mesh needs, as the client tracks it. Moved here from
+/// `LoadedChunk`, which holds no mesh state (R4); the change feed drives it
+/// through [`MeshingPipeline::invalidate`].
+#[derive(Clone, Copy, Default)]
+struct MeshRequest {
+    /// Bumped on every invalidation. A result built from an older sequence
+    /// leaves the chunk dirty: a neighbor loaded or an edit landed while it was
+    /// meshing, so its borders may be wrong.
+    seq: u64,
+    /// When an edit last invalidated the chunk. An edited chunk waits out a
+    /// short debounce and meshes ahead of streaming; `None` for one only
+    /// generation and streaming have touched.
+    edited_at: Option<Instant>,
 }
 
 #[derive(Clone, Default)]
@@ -86,6 +109,10 @@ pub struct MeshingPipeline {
     cache_config: Arc<CacheConfig>,
 
     chunk_states: HashMap<IVec3, ChunkMeshState>,
+    /// Every chunk the pipeline has been asked to mesh, until it unloads.
+    requests: HashMap<IVec3, MeshRequest>,
+    /// Chunks whose current mesh is out of date.
+    dirty: HashSet<IVec3>,
 
     pub stats: MeshingStats,
     batch_start: Option<Instant>,
@@ -136,6 +163,8 @@ impl MeshingPipeline {
             result_rx: Mutex::new(res_rx),
             cache_config,
             chunk_states: HashMap::new(),
+            requests: HashMap::new(),
+            dirty: HashSet::new(),
             stats: MeshingStats { worker_count, ..Default::default() },
             batch_start: None,
             pending_submissions: Vec::new(),
@@ -146,16 +175,27 @@ impl MeshingPipeline {
         }
     }
 
-    /// Queue all dirty chunks for meshing. Actual snapshot creation happens
-    /// incrementally in drain_pending_submissions() to avoid blocking the main thread.
-    pub fn submit_all_dirty(&mut self, world: &crate::world::World) {
+    /// Mark the chunk at `pos` as needing a new mesh. `edit` is true when an
+    /// actor's edit caused it, which debounces the chunk and meshes it ahead of
+    /// streaming.
+    pub fn invalidate(&mut self, pos: IVec3, edit: bool) {
+        let request = self.requests.entry(pos).or_default();
+        request.seq = request.seq.wrapping_add(1);
+        if edit {
+            request.edited_at = Some(Instant::now());
+        }
+        self.dirty.insert(pos);
+    }
+    
+    /// Queue every dirty chunk that is past its edit debounce and not already
+    /// meshing. Snapshots are taken incrementally in `drain_pending_submissions`
+    /// to avoid blocking the main thread.
+    pub fn submit_dirty(&mut self) {
         const DEBOUNCE_MS: u128 = 50;
-        for (coord, chunk) in &world.chunks {
-            if !chunk.mesh_dirty { continue; }
-            if let Some(t) = chunk.mesh_debounce {
+        for &pos in &self.dirty {
+            if let Some(t) = self.requests.get(&pos).and_then(|r| r.edited_at) {
                 if t.elapsed().as_millis() < DEBOUNCE_MS { continue; }
             }
-            let pos: IVec3 = (*coord).into();
             let state = self.chunk_states.get(&pos).copied().unwrap_or(ChunkMeshState::Idle);
             if state != ChunkMeshState::Idle { continue; }
             if self.pending_set.insert(pos) {
@@ -164,6 +204,14 @@ impl MeshingPipeline {
         }
         if !self.pending_submissions.is_empty() && self.batch_start.is_none() {
             self.batch_start = Some(Instant::now());
+        }
+    }
+    
+    /// Record that a mesh built at `seq` landed. The chunk is clean unless it
+    /// was invalidated again while meshing.
+    pub fn mark_meshed(&mut self, pos: IVec3, seq: u64) {
+        if self.requests.get(&pos).is_some_and(|r| r.seq == seq) {
+            self.dirty.remove(&pos);
         }
     }
 
@@ -214,8 +262,11 @@ impl MeshingPipeline {
             let chunk = match world.get_chunk(pos) {
                 Some(c) => c,
                 None => {
+                    // Unloaded: nothing left to mesh, and nothing to track.
                     self.pending_submissions.swap_remove(i);
                     self.pending_set.remove(&pos);
+                    self.dirty.remove(&pos);
+                    self.requests.remove(&pos);
                     continue;
                 }
             };
@@ -236,7 +287,10 @@ impl MeshingPipeline {
                 world.max_chunk_y,
                 world.materials.render_delegated_mask(),
             );
-            let mesh_seq = chunk.mesh_seq;
+            let request = self.requests.get(&pos).copied().unwrap_or_default();
+            let mesh_seq = request.seq;
+            // The version this mesh is built from, for its render entry to record.
+            let version = chunk.version;
 
             // Submit to the scheduler; the job returns over the result channel,
             // which `poll` drains. An edit-dirtied chunk (the only thing that sets
@@ -245,7 +299,7 @@ impl MeshingPipeline {
             let dx = pos.x - camera_chunk.x;
             let dz = pos.z - camera_chunk.z;
             let distance = (dx * dx + dz * dz).max(0) as u32;
-            let priority = if chunk.mesh_debounce.is_some() {
+            let priority = if request.edited_at.is_some() {
                 Priority::interactive(distance)
             } else {
                 Priority::streaming(distance)
@@ -254,7 +308,7 @@ impl MeshingPipeline {
             let res_tx = self.result_tx.lock().unwrap().clone();
             let cache_config = self.cache_config.clone();
             jobs.submit(JobKind::Mesh, pos, priority, move || {
-                mesh_chunk_task(pos, snapshot, mesh_seq, res_tx, cache_config);
+                mesh_chunk_task(pos, snapshot, mesh_seq, version, res_tx, cache_config);
             });
             self.chunk_states.insert(pos, ChunkMeshState::InProgress);
             submitted += 1;
@@ -318,6 +372,8 @@ impl MeshingPipeline {
 
     pub fn remove_chunk_state(&mut self, pos: IVec3) {
         self.chunk_states.remove(&pos);
+        self.dirty.remove(&pos);
+        self.requests.remove(&pos);
         if self.pending_set.remove(&pos) {
             self.pending_submissions.retain(|p| *p != pos);
         }
@@ -365,6 +421,7 @@ fn mesh_chunk_task(
     chunk_key: IVec3,
     snapshot: ChunkSnapshot,
     mesh_seq: u64,
+    version: ChunkVersion,
     res_tx: Sender<MeshResult>,
     cache_config: Arc<CacheConfig>,
 ) {
@@ -372,7 +429,7 @@ fn mesh_chunk_task(
     // hash of the whole 34^3 snapshot) is not computed either.
     if !cache_config.enabled {
         let (vertices, indices) = generate_chunk_mesh(&snapshot);
-        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq, version });
         return;
     }
 
@@ -391,7 +448,7 @@ fn mesh_chunk_task(
         if let Ok(mut lru) = cache_config.lru.lock() {
             lru.touch(snapshot.position);
         }
-        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq, version });
         return;
     }
 
@@ -439,7 +496,7 @@ fn mesh_chunk_task(
         }
     }
 
-    let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+    let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq, version });
 }
 
 #[cfg(test)]
@@ -480,7 +537,7 @@ mod tests {
             enabled,
         });
         let (tx, rx) = mpsc::channel::<MeshResult>();
-        mesh_chunk_task(IVec3::ZERO, snapshot_with_a_cube(), 1, tx, config);
+        mesh_chunk_task(IVec3::ZERO, snapshot_with_a_cube(), 1, ChunkVersion::default(), tx, config);
         let result = rx.recv().expect("the task always sends a result");
 
         let files = std::fs::read_dir(&dir).expect("cache directory").count();

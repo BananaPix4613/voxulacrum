@@ -6,7 +6,9 @@ mod cloud_shadow;
 mod ecs;
 mod meshing;
 mod params;
-mod rendering;
+// The render world is its own crate; the app's modules reach it by the module
+// path they have always used.
+use voxulacrum_render as rendering;
 mod shader_reload;
 mod graph_reload;
 mod simulation;

@@ -10,7 +10,7 @@ use glam::{IVec3, Vec2, Vec3};
 use voxel_core::{ChunkCoord, MaterialId, Voxel};
 
 use crate::ecs::clocks::TickDriver;
-use crate::ecs::resources::{FluidChanges, VoxelWorld};
+use crate::ecs::resources::VoxelWorld;
 use crate::ecs::schedule::build_tick_schedule;
 use crate::play::{PlaySettings, PlayerTuning, SpawnRule};
 use crate::player::sim::{InputFrame, PlayerState};
@@ -103,7 +103,6 @@ fn tick_world() -> (World, Entity) {
     let mut ecs = World::new();
     ecs.insert_resource(VoxelWorld(basin_world()));
     ecs.insert_resource(ServerConfig::default());
-    ecs.insert_resource(FluidChanges::default());
     ecs.insert_resource(WorldPersistence::disabled());
     ecs.insert_resource(CurrentTick::default());
     ecs.insert_resource(TickTimings::new());

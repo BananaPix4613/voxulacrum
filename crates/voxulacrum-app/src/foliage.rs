@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bevy_ecs::prelude::Resource;
 use nodegraph_ir::{Graph, NodeKind, ScatterTypeRef};
 use serde::Deserialize;
 use voxel_core::QualifiedName;
@@ -317,6 +318,18 @@ pub fn load_foliage_registry() -> Arc<FoliageRegistry> {
             );
             Arc::new(FoliageRegistry::load_initial(namespace))
         }
+    }
+}
+
+/// The shared foliage registry held as an ECS resource, for the client's
+/// foliage builders.
+#[derive(Resource, Clone)]
+pub struct FoliageRegistryRes(pub Arc<FoliageRegistry>);
+
+impl std::ops::Deref for FoliageRegistryRes {
+    type Target = FoliageRegistry;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

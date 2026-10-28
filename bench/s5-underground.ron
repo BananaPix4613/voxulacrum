@@ -1,0 +1,29 @@
+// S5: underground, with the visibility cutaway engaged (R4, #20).
+//
+// From the launch view, Play spawns the player on the surface under the
+// camera. The walk, 14 s screen-left and then 16 s screen-forward, ends in the
+// nearest cave the underground visibility flood marks enclosed. With
+// RUST_LOG=info, the last `visibility:` line logged before the window must end
+// in `, enclosed`; if it doesn't, the walk missed the cave and the readings
+// don't describe this pose.
+//
+// The walk is timed in wall-clock seconds, so it can end a frame or two
+// shorter or longer from run to run. Nothing is pressed while walking; `every`
+// is required by the step but unused with no presses.
+(
+    name: "S5",
+    package: "sandbox",
+    steps: [
+        Camera(target: (64.0, 32.0, 64.0), zoom: 40.0),
+        Settle(timeout: 60.0),
+        Wait(15.0),
+        Press(TogglePlayMode),
+        Move(direction: (-1.0, 0.0), seconds: 14.0, every: 1.0, presses: []),
+        Move(direction: (0.0, 1.0), seconds: 16.0, every: 1.0, presses: []),
+        Settle(timeout: 60.0),
+        Wait(15.0),
+        Measure([
+            Wait(60.0),
+        ]),
+    ],
+)

@@ -1,0 +1,238 @@
+use bevy_ecs::prelude::Resource;
+
+use crate::render_context::RenderContext;
+use crate::render_graph::{CountingPass, PassDecl, RenderPassNode, ResourceId, ResourceMap};
+use crate::uniforms::UpscaleUniforms;
+
+#[derive(Resource)]
+pub struct UpscalePass {
+    pub pipeline: wgpu::RenderPipeline,
+    pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub sampler: wgpu::Sampler,
+    pub uniform_buffer: wgpu::Buffer,
+}
+
+impl UpscalePass {
+    pub fn new(
+        ctx: &RenderContext,
+        source_view: &wgpu::TextureView,
+        shader_source: &str,
+    ) -> Self {
+        let bind_group_layout =
+            ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("upscale_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float {
+                                filterable: true,
+                            },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(
+                            wgpu::SamplerBindingType::Filtering,
+                        ),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("upscale_bilinear_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        let uniform_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("upscale_uniform_buffer"),
+            size: std::mem::size_of::<UpscaleUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = Self::create_bind_group(
+            &ctx.device,
+            &bind_group_layout,
+            source_view,
+            &sampler,
+            &uniform_buffer,
+        );
+
+        let pipeline = Self::create_pipeline(
+            &ctx.device,
+            ctx.surface_format,
+            &bind_group_layout,
+            shader_source,
+        );
+
+        Self {
+            pipeline,
+            bind_group,
+            bind_group_layout,
+            sampler,
+            uniform_buffer,
+        }
+    }
+
+    fn create_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        source_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        uniform_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("upscale_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    fn create_pipeline(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        shader_source: &str,
+    ) -> wgpu::RenderPipeline {
+        let shader_module =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("upscale_shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            });
+
+        let pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("upscale_pipeline_layout"),
+                bind_group_layouts: &[bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("upscale_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    pub fn rebuild_bind_group(
+        &mut self,
+        ctx: &RenderContext,
+        source_view: &wgpu::TextureView,
+    ) {
+        self.bind_group = Self::create_bind_group(
+            &ctx.device,
+            &self.bind_group_layout,
+            source_view,
+            &self.sampler,
+            &self.uniform_buffer,
+        );
+    }
+    
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, uniforms: UpscaleUniforms) {
+        queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[uniforms]),
+        );
+    }
+}
+
+impl RenderPassNode for UpscalePass {
+    fn declaration(&self) -> PassDecl {
+        PassDecl {
+            name: "upscale",
+            reads: &[ResourceId::PROCESSED],
+            writes: &[ResourceId::SURFACE],
+        }
+    }
+
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, resources: &ResourceMap) -> u32 {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("upscale_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: resources.get(ResourceId::SURFACE),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        let mut pass = CountingPass::new(pass);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+        pass.draws()
+    }
+}

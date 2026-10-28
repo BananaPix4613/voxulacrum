@@ -100,7 +100,7 @@ pub(super) fn fluid(
                 anchor: IVec3::new(x, y, z),
             }))
             .map_err(|e| format!("fluid: the pour was refused: {e:?}"))?;
-        poured_into.extend(outcome.water_rebuild);
+        poured_into.extend(outcome.changed.iter().map(|&(chunk, _, _)| chunk));
     }
 
     let mut records = fluid_records(&world, 0);

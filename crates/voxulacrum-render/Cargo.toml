@@ -1,0 +1,20 @@
+[package]
+name = "voxulacrum-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The render world and its passes. Depends on voxel-core and the GPU stack and
+# on no world code: rendering draws only what the app's extract step hands it.
+[dependencies]
+voxel-core = { path = "../voxel-core" }
+
+wgpu.workspace = true
+bevy_ecs.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+serde.workspace = true
+log.workspace = true
+pollster.workspace = true

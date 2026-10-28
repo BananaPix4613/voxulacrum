@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.18
+**Status:** Baseline reference, v1.19
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -28,6 +28,7 @@
 - v1.16 — Settled **Tier-1 math in generation** (roadmap M3, R7) in §12 Determinism. glam's `libm` feature turned out not to be enough: its `Quat`, `Vec4` and other SIMD-backed types sum dot products in a different order on SSE2 than on NEON, so the rule now bans those types in Tier-1 code as well, and tree skeletons rotate with a scalar quaternion of their own. The rules are enforced by clippy lists in `crates/nodegraph-eval/clippy.toml`, which a CI step denies. The determinism manifest gains a `kernels` section. Runtime spine's interim shapes retire R7's row and gain one for the lists covering only `nodegraph-eval` until server-core exists (R3b).
 - v1.17 — Recorded the **in-place decoupling of the world code** (roadmap M3, R3a) in Runtime spine's interim shapes. The world code now reads no editor setting: its streaming budgets, fluid limits and autosave interval are a `ServerConfig` it owns, and the terrain-generation parameters the editor carried are gone, since generation read none of them. Four rows are added, each with the item that retires it: regeneration's render rebuild (R4), streaming's mesher and view-test coupling (R6), `ServerConfig` built from defaults (R3c), and the two client modules that live under `world/` (R3b).
 - v1.18 — Built the **tick framework** (roadmap M3, R2) and recorded what it settled in §12 Runtime spine. `TICK_RATE_HZ` is defined once and can be overridden at build time, which is how CI runs the tests again at 20 Hz; a frame-jitter test holds the state at tick 3,000 to one hash under three frame-time sequences. The fluid throttle is decided from world state, dropped ticks include time past the 0.25 s frame clamp, and the tick inspector publishes once per second like the rest of the Performance panel. Runtime architecture's interim schedule now runs the tick schedule from `Simulation`. Runtime spine's interim shapes retire R2's row and gain five: world time on the client until R5, commands applied between ticks until R5, fluid changes drained per frame until R4, residency outside the tick until R6, and a tick counter that restarts each session. The driver's pause and time scale are recorded as not built.
+- v1.19 — Built the **render world and extract** (roadmap M3, R4) and recorded what it settled in §12 Runtime spine. `voxulacrum-render` holds every GPU resource and depends on `voxel-core` and the GPU stack alone. The client holds the render world as a resource (Bevy's sub-app pattern), and the frame's `Extract` stage moves the queued per-chunk uploads, render requests and egui output across, uploads `Versioned` data only where its version moved, and copies `FrameState` and `RenderParams`; `Render` runs the render world's own single-threaded, chained schedule and reads back stats, present time and the shader log through `RenderFeedback`, so the panels' stats trail by one frame. The changed-chunk feed's entries carry the faces whose boundary cells changed and the command's origin, from which the client decides which neighbors to re-mesh and whether to debounce. `ChunkVersion` moved to `voxel-core`. The camera description gains the view basis, and its isometric block the snapped view-projection. The render-only settings groups are the render crate's `RenderSettings`, flattened into `EngineParams` so presets keep their shape. Runtime architecture's interim schedule names `Extract` and now waits only on R5. Runtime spine's interim shapes retire `LoadedChunk`'s mesh state with the door's rebuild lists, and regeneration's render rebuild; narrow the one-schedule row to the simulation half, until R5; replace water changes drained from `FluidChanges` with one change feed on `World`, drained per frame until R5; and gain two: the camera description's isometric reads until V8, and per-chunk entries as maps rather than entities until V6. The object model's camera row now waits on R6 and V8.
 
 ---
 
@@ -985,7 +986,7 @@ FrameStage::PostFrame — client housekeeping
 
 These orderings are the engine's scheduling contract: a new system declares its side, and the tick phase or frame stage it runs in. The stage names may change as M3 builds them; the order is the contract. Resources (the chunk store, graph registry, material registry, render context, etc.) live as ECS resources accessed through system parameters, each in the world of the side that owns it.
 
-**Interim shape:** until the render world and the client/server boundary land (roadmap M3, R4 and R5), one schedule runs both sides on the main thread: `Input → Simulation → Meshing → UniformWrite → Render → PostFrame`. In `Simulation`, an exclusive system runs the tick schedule as many times as the frame's time owes (R2); the player step, fluids and autosave are its phases. Climate, time of day, picking and the editor tools run in `Simulation` once per frame; streaming, seam finalization and meshing run in `Meshing`.
+**Interim shape:** until the client/server boundary lands (roadmap M3, R5), one frame schedule runs both sides on the main thread: `Input → Simulation → Meshing → Extract → Render → PostFrame`. In `Simulation`, an exclusive system runs the tick schedule as many times as the frame's time owes (R2); the player step, fluids and autosave are its phases. Climate, time of day, picking and the editor tools run in `Simulation` once per frame; streaming, seam finalization, the client's application of the change feed (`chunk_change_system`) and meshing run in `Meshing`, in that order. `Extract` and `Render` already have their target shape, with a render world of their own (R4; "Render world and extract" below).
 
 The choice of `bevy_ecs` is an implementation detail of the runtime — it does not affect the data model, the graph hierarchy, or any other system described in this document. Any compatible ECS could substitute. The choice is documented here because every cross-cutting system (hot reload, streaming, persistence) integrates through a schedule and must know its ordering.
 
@@ -1001,7 +1002,7 @@ Every engine API belongs to one side. **Shared** code is the world and the simul
 |---|---|---|
 | `voxel-core`, `nodegraph-ir`, `nodegraph-eval`, `nodegraph-hotreload` | Shared | Voxel and chunk primitives; the graph IR, evaluator and file watcher |
 | `voxulacrum-server-core` | Shared, with server-only code in a `pub(crate)` module | World and chunk state, generation glue, fluids, persistence, the mutation door, the event bus, residency, the tick framework, `player_step`, the job system, packages and registries, and the boundary types |
-| `voxulacrum-render` | Client | wgpu, the render passes and the render world |
+| `voxulacrum-render` | Client | wgpu, the render passes, the render world and its schedule, and the render settings |
 | `voxulacrum-app` | Client | Window, input, camera modules, editor panels, extract and mesh scheduling |
 | `nodegraph-editor` | Client | The graph canvas |
 | `voxulacrum` | Facade | The only surface games use; re-exports server-core's boundary types |
@@ -1010,7 +1011,7 @@ Every engine API belongs to one side. **Shared** code is the world and the simul
 Two dependency rules make the boundaries compiler-enforced rather than conventions:
 
 - **Server-core never depends on `wgpu`, `naga`, `winit`, `raw-window-handle`, `egui` or `eframe`**, directly or transitively. CI checks the resolved dependency graph and builds server-core on a Linux runner with no windowing or GPU packages installed, which a Windows build cannot prove.
-- **The render crate does not depend on server-core.** Render code therefore cannot name a simulation type, which is what "rendering reads only the render world" means in practice.
+- **The render crate does not depend on server-core.** Render code therefore cannot name a simulation type, which is what "rendering reads only the render world" means in practice. Since R4 the render crate depends on `voxel-core` and the GPU stack alone, and builds on its own.
 
 Shared and server code share one crate until M7, because no server-only code exists before then; the split comes when M7 needs a client build without it. This departs from the design review's three crates (shared, client and server), one of which would have had nothing in it. `bevy_ecs` is allowed on every side, with its default features off. The editor binary (roadmap P9) is a client like any other.
 
@@ -1077,7 +1078,7 @@ No kind carries `System` origin. System writes (fluid commits, chunk insertion, 
 **Server to client:** one `ServerUpdate { tick, events, changed, acks, players, world_time }` per tick, in a tick-stamped outbox that the client drains by cursor. A frame that ran three ticks reads three updates; a frame that ran none reads none. bevy's double-buffered `Events` stay an intra-schedule tool on each side: they age per schedule run, so across the boundary they would lose the first tick's events whenever a frame ran several ticks.
 
 - `events`: the world events this tick published (`roadmap.md` §6.7).
-- `changed`: `(chunk, version, layers)` for every chunk whose data changed this tick. It replaces the rebuild lists the door returns today (`MutationOutcome`), which name render work rather than data.
+- `changed`: `(chunk, version, layers, faces, origin)` for every chunk whose data changed this tick: the layers that changed, the faces whose boundary cells changed, and the origin of the command that changed them. It names data, never render work. Which neighbors re-mesh and whether an edit is debounced are the client's decisions, and `faces` and `origin` are what it decides them from (revised in R4, which replaced the door's render-shaped rebuild lists with this feed).
 - `acks`: each command accepted, or rejected with a reason.
 - `players`: each player's state at this tick.
 
@@ -1096,9 +1097,27 @@ Rendering reads only a **render world**: a separate `bevy_ecs` world owned by th
 - **Per-frame data:** the camera description, lighting and time of day, wind, clip bounds, the visibility mask, player render state, debug lines and HUD data.
 - **Per-chunk entries**, keyed by chunk coordinate: the terrain mesh, water mesh, scatter instances, detail paint, and tree capsules and canopy lobes. Each records the chunk version it was built from. They are derived data (roadmap P17): any of them can be rebuilt from a snapshot at any time, including after a GPU device loss.
 
+**Chunk versions** come from one counter the world owns. Every change the door applies stamps the chunk with the next value, so a version is never reused, even by a chunk that unloads and loads again. Versions are runtime state and are not saved. The startup set is published to the feed as loads, so the client builds it the way it builds a streamed chunk (R4). The type, `ChunkVersion`, lives in `voxel-core`, so the render crate tags its entries without reading the world code.
+
 **Extract** runs once per frame, after the client drains its updates. It copies the per-frame data and applies `changed` to the per-chunk entries, marking stale ones for rebuild. It never scans every loaded chunk.
 
-**The camera description** has four fields core code reads: view, projection (with view-projection), frustum, and area of interest. A camera module adds a block of its own for its presentation; the isometric module's holds the texel snap offset, rotation and pitch. Nothing outside that module reads the block (roadmap P20). This is the minimal description the engine object model's camera boundary adopts (roadmap B8). Render code still makes orthographic assumptions after M3; V8 (M5) removes them.
+**How the client holds it (R4).** The render world is a resource of the client's world, `RenderWorld`, which holds a `bevy_ecs` world and the render schedule. This is Bevy's sub-app pattern, and it keeps the frame schedule the one place that orders a frame, frame timings and benchmarks included. Two exclusive systems take it out with `resource_scope`: `extract_system`, which ends the `Extract` stage, and `render_world_system`, which is the whole `Render` stage.
+
+**What `Extract` does.** The client's builders run first: the visibility-mask texels, the player mesh, the chunk-boundary lines, the cross-section cap, the stats and the UI layout. Then `extract_system` hands the frame over in three ways:
+
+- **It moves the queues** the client filled since the last frame: the per-chunk upload queue (below), the render requests (a new surface size, the shader files that changed) and egui's tessellated output. Each merges with anything the render world has not applied yet; egui's texture changes keep their order.
+- **It uploads versioned data.** Per-frame data that rarely changes is a `Versioned<T>` on the client, whose version moves each time it is set. Each GPU pass records the version it last uploaded and uploads only when the two differ. This covers the debug lines, the skeleton preview, the player mesh, the cap mesh, and the mask and cloud texels. Uploading during extract avoids cloning megabytes of mostly unchanged texels into the render world every frame.
+- **It copies the frame's values:** `FrameState` (the camera description, the pixel lattice, lighting, wind, the sky color, clip bounds and the mask's placement) and `RenderParams` (the render settings, the scene options below, the cloud layers' uniform inputs, the palette uniforms and whether the player is enclosed underground).
+
+**Render settings.** The settings groups only rendering reads, post-process and outline, are the render crate's `RenderSettings`. The editor's `EngineParams` holds them with `#[serde(flatten)]`, so a parameter preset keeps them as top-level keys. Groups the client shares with other systems stay in `EngineParams`, and extract copies the values the renderer reads out of them each frame: `SceneOptions` carries the edge and ambient-occlusion strengths, the cross-section flag and clip fog, and the debug draw toggles; `CloudFrame` carries the cloud layers' UV scales.
+
+**Per-chunk entries.** CPU builders under `meshing/` read the world and return plain data: terrain meshes, water surfaces, detail paint, scatter instances, capsules and lobes. They live client-side, because the render crate cannot read the world. The meshing coordinator queues each result in `ChunkUploads`, one map per kind: either `Set { version, data }` or `Remove`. The last write for a chunk wins, so a chunk that changes twice before the next frame uploads once. The render schedule drains the queue into one resource per kind: `ChunkMeshes` for terrain, and the water, detail-paint, scatter, capsule and canopy passes. Each entry records the version it was built from, and debug builds assert that an entry's version never goes backward.
+
+**The render schedule** is single-threaded and chained: surface resize, shader reload, the per-chunk upload drain, the stats count, the uniform writes, then the draw and present. It is one sequence ending in an exclusive draw, so its order is fixed rather than left to the scheduler.
+
+**Feedback.** What a render learns goes back through `RenderFeedback`, taken after every run: the draw count, the meshed and visible chunks and their triangles, GPU mesh bytes, swapchain acquire and present time, and the shader reload log. The client keeps the stats as `RenderStats`, which the panels read during the next frame's `Extract`, so they trail the render by one frame.
+
+**The camera description** has five fields core code reads: view, projection (with view-projection), frustum, the view basis (right, up and forward), and area of interest. The view-projection is the one mapped to the window, which picking inverts. The basis is there because shaders that reconstruct a ray (the capsule impostors and canopy lobes) need it, and taking it from the camera keeps the camera's own values rather than ones re-derived from a matrix (R4). A camera module adds a block of its own for its presentation; the isometric module's holds the texel-snapped view-projection the scene is drawn with, the snap offset, rotation and pitch. Nothing outside that module reads the block (roadmap P20). This is the minimal description the engine object model's camera boundary adopts (roadmap B8). Render code still makes orthographic assumptions after M3; V8 (M5) removes them.
 
 **Pipelining**, with the GPU drawing frame N while simulation prepares N+1, is not built in M3. A self-contained render world is what keeps it possible.
 
@@ -1126,14 +1145,14 @@ On the client, a camera module computes its area of interest and sends it with `
 |---|---|---|
 | Time of day and wind are client state in `SimulationManager`, advanced each frame to the simulation time the frame draws (ticks run plus `alpha`), and the editor's time controls set them directly | World time is server state, advanced in tick phase 5 and sent as `ServerUpdate.world_time`; the time controls become `Admin` commands | R5 |
 | Edits, pours and the editor's tools reach the door from the frame, between ticks, as soon as they are issued | Commands queue and apply in tick phase 1 | R5 |
-| Water changes collect in `FluidChanges`, which a frame system drains once per frame to rebuild water meshes | The `changed` feed | R4 |
+| Changes collect in a feed on `World` that `chunk_change_system` drains once per frame, however many ticks ran | `ServerUpdate.changed`, one per tick, drained by cursor | R5 |
 | Residency (`streaming_tick_system`) runs once per frame, outside the tick | Tick phase 6 | R6 |
 | `CurrentTick` is not saved, so every session starts at tick 0 | Saved with the world, so due ticks survive a reload | The first scheduled tick (D4's registrable layers) |
-| One `FrameStage` schedule runs simulation and rendering on the main thread | Server tick phases; a client frame with extract; a separate render world | R4, R5 |
-| `LoadedChunk` holds GPU buffers and mesh state; the door returns render rebuild lists | Per-chunk render entries; the `changed` feed | R4 |
+| One `FrameStage` schedule runs the simulation and the client frame on the main thread. The client frame already extracts into a separate render world (R4) | Server tick phases on the server's own schedule; the client frame on its own | R5 |
+| The camera description (`camera_desc.rs` in `voxulacrum-render`) lives in `FrameState`, filled by `SimulationManager` from the one isometric camera. The uniform writer reads the isometric block's snapped view-projection and snap offset, and the frame's `RenderDims` sit beside the description rather than in a camera module | The isometric camera as a kit module; render code reads only the core fields | V8 (M5) |
+| Per-chunk render entries are maps keyed by chunk coordinate, one per kind, each held by a render-world resource (`ChunkMeshes` and the per-chunk passes), and draw loops iterate the maps | One entity per chunk, with a component per kind of entry, if a per-chunk pass added by game code needs to query them | V6 |
 | Residency follows one isometric camera, and streaming drives meshing | Observers; the client chunk view | R6 |
-| The whole engine is one app crate. The world code under `world/` reads no editor setting and imports no client module, apart from the two couplings in the rows below this one (R3a) | The crates above | R3 |
-| Regeneration (`world/regen.rs`) swaps the new chunks in through the door and, in the same step, resets the mesh pipeline and rebuilds the scatter, detail-paint and water passes and the streaming manager | A server swap through the door; the client rebuilds from the `changed` feed | R4 |
+| Apart from `voxulacrum-render` (R4), the engine is one app crate. The world code under `world/` reads no editor setting and imports no client module, apart from streaming's coupling in the row below this one (R3a; R4 removed regeneration's) | The crates above | R3 |
 | Streaming (`world/streaming.rs`) submits to the mesher, checks it before evicting, and evaluates the isometric view test itself; `ServerConfig`'s load and unload margins size that test | Residency from observers; the margins belong to the camera's area of interest | R6 |
 | `ServerConfig` (`world/config.rs`: streaming budgets, fluid limits, autosave interval) is built from defaults in the app, and nothing loads it from a file | The headless server fills it from its command line | R3c |
 | The cloud automaton (`world/climate.rs`) and the visibility flood (`world/room.rs`) are client modules that live under `world/` | They stay in the app crate when the world code moves | R3b |
@@ -1564,6 +1583,7 @@ The core makes no camera assumption (roadmap P20). It takes a **camera descripti
 
 - **View** and **projection**, with the view-projection.
 - **Frustum**, for culling.
+- **View basis**: right, up and forward, for anything that reconstructs a view ray.
 - **Area of interest**: a center, a horizontal radius and a vertical range, which the client sends as its observer area (`SetInterest`).
 
 Core systems read only these. Streaming takes the area of interest through observers ("Residency" above); culling and shadows take the frustum; picking takes the view-projection; level of detail and audio take positions from the description, never from a projection type. One view is active through M5; render-to-texture (minimaps, portraits, item icons) adds views, each with its own description.
@@ -1592,7 +1612,7 @@ The isometric camera is the kit's default module, and P8's rule of no head-on re
 | `PackageKind` has `Game` and `Mod`, nothing branches on it, any kind may name a world, and no package can replace another's asset | Four kinds and the override rules above | Before V7 (M5), whose gate is the first client-only override |
 | Library kernels are the closed `LibraryKernel` enum | The kernel registry | B10 (M4) |
 | The foliage stack: procedural `PrefabShape` props, skeleton trees drawn as capsule impostors, canopy cores, the tier-1 detail-paint schema and `render_delegated` | Clips (D9) for voxel trees and structures, fixtures and sub-voxel models (D11) for props, registered layers (D4) for detail and scatter, sprites, depth sprites and billboard clumps for grass and canopies | M4, M6 |
-| One isometric camera in the app; streaming evaluates its view itself, and render code assumes an orthographic projection | Camera modules in the kit over the camera description | R4 and R6 (M3), V8 (M5) |
+| One isometric camera in the app, which fills the camera description (R4); streaming evaluates its view itself, and render code assumes an orthographic projection | Camera modules in the kit over the camera description | R6 (M3), V8 (M5) |
 
 The foliage stack gets no new work in the meantime (roadmap §8, v2.1). The skeleton generator stays, as a generator that outputs clips.
 
@@ -1686,7 +1706,7 @@ These are toggleable in the engine's debug UI.
 - **BiomeGraph**: graph type defining terrain density, material, fluid output, and fade behavior for one biome.
 - **BiomeParams**: per-biome typed scalar-metadata sidecar. Addressable by name from the biome manifest entry and by `BiomeParam(name)` nodes inside a `BiomeGraph`. Home for `traversal_smoothing_distance` and future biome-scoped scalars.
 - **Block**: a 2×2×2 group of 0.5 m voxels on the 1 m lattice. A spatial unit, never a type.
-- **Camera description**: what the core takes from a camera, per view: view, projection with view-projection, frustum and area of interest.
+- **Camera description**: what the core takes from a camera, per view: view, projection with view-projection, frustum, view basis and area of interest.
 - **Camera module**: kit code that turns input and game state into a camera description, and owns everything particular to one kind of camera. The isometric camera is the default one.
 - **ChunkTags**: per-chunk metadata identifying which Zone, Biomes, and Libraries contributed to it. Drives invalidation. Called chunk tags, to keep them apart from registry tags.
 - **Clip**: one format for any piece of voxel content outside a grid: structures, blueprints, copy and paste, packed vehicles, test fixtures.
@@ -1706,7 +1726,7 @@ These are toggleable in the engine's debug UI.
 - **FluidCell**: a single cell's fluid state: type, mass, flags.
 - **FluidFillMode**: chunk-level default for fluid presence. Enables ocean fast path.
 - **FluidOutput**: `BiomeGraph` terminal for water bodies. Renamed from `FluidProvider` to describe the terminal position, not the role.
-- **FrameStage**: ordered schedule of the client's per-frame work: Input, Tick, Sync, Extract, Render, PostFrame. Until M3's render world and boundary land, one FrameStage schedule (Input, Simulation, Meshing, UniformWrite, Render, PostFrame) runs simulation and rendering together.
+- **FrameStage**: ordered schedule of the client's per-frame work: Input, Tick, Sync, Extract, Render, PostFrame. Until M3's client/server boundary lands, one FrameStage schedule (Input, Simulation, Meshing, Extract, Render, PostFrame) runs simulation and rendering together.
 - **Generated content**: chunk data reproducible from seed + graph. Not serialized in detail.
 - **GraphOutput**: terminal node placed inside a producing graph, marking a named typed output that other graphs (via `GraphRef`) can consume.
 - **GraphRef**: source node placed inside a consuming graph, referencing a target graph and one of its `GraphOutput` names. Resolved via the manifest at evaluation time.

@@ -746,6 +746,53 @@ samples of the same distribution.
 established world, where a benchmark starts from a fresh one; that is the
 likely cause, untested.
 
+### Interim reading after R4's render world
+
+`27b8ac8`, on `feat/render-world`: R3a, R2 and R4's render world have landed
+since the baseline, and R4's crate step has not. S1 and S3 only, taken early
+because R5's 5% gate leaves little room. Conditions as above: discrete GPU, five
+runs 30 s apart, each started from the built binary. Spread is the harness's
+`(max - min) / median`, as in the baseline.
+
+| | Baseline | This build | Ratio | Gate |
+|---|---|---|---|---|
+| S1 frame CPU mean | 2.12 ms | **2.14 ms** (2.1%) | 1.009× | ≤ 1.05×, passes |
+| S1 frame CPU p95 | 2.78 ms | 2.75 ms (3.1%) | 0.989× | |
+| S1 frame CPU max | 27.45 ms | 31.92 ms (21.4%) | 1.163× | |
+| S1 process CPU | 0.14 s/s | 0.17 s/s (19.4%) | 1.21× | |
+| S3 frame CPU mean | 5.16 ms | **5.53 ms** (4.3%) | **1.072×** | |
+| S3 frame CPU p95 | 14.92 ms | **15.33 ms** (4.1%) | 1.027× | ≤ 1.10×, passes |
+| S3 frame CPU max | 141.95 ms | 149.13 ms (21.7%) | 1.051× | |
+| S3 process CPU | 3.11 s/s | 3.11 s/s (3.3%) | 1.00× | |
+| S3 `generate` mean | 84.69 ms | 84.66 ms (2.6%) | 1.00× | |
+| S3 `mesh` mean | 0.51 ms | 0.53 ms (6.0%) | 1.04× | |
+| S3 fill mean | 640.16 ms | 638.99 ms (2.3%) | 0.998× | |
+
+Per run, frame CPU mean, in ms:
+
+```
+S1   2.16  2.11  2.15  2.13  2.14
+S3   5.50  5.53  5.53  5.51  5.74
+```
+
+**At rest, the render world costs almost nothing.** S1's mean is up 0.02 ms,
+which bounds the fixed per-frame cost of extract (the parameter clone, the queue
+moves) and of running a second schedule.
+
+**While streaming, the main thread spends about 0.37 ms more a frame.** S3's
+worker-side figures (`generate`, `mesh`, fill, process CPU) match the baseline,
+so the added time is on the main thread, and it appears only while chunks
+arrive. It is not attributed: five items landed since the baseline, and no
+reading was taken between them. S3's gate is on p95, which passes; the 7.2% is
+above the 5% that S1, S2 and S4 are held to on their means.
+
+S3's run 5 is the highest on every figure, including `generate` and fill, which
+run on worker threads; that points at the machine rather than the build, and the
+median absorbs it.
+
+The stage `uniform` is named `extract` from R4 on, in the panel and in
+`stage_mean_ms`; the readings in earlier sections keep the old name.
+
 ### Carried forward
 
 - **At-rest frames over 100 ms at r=14.** S2's maximum is 100–113 ms in every
@@ -759,6 +806,12 @@ likely cause, untested.
   same place each run (the integrated runs read 208.9 three times), so
   readings compare; `walked` is the check.
 - **The revised comparison method** above, to agree before R5 closes.
+- **S3's mean is 7.2% over the baseline after R4's render world**, from
+  main-thread time while chunks stream (interim reading above). S2 and S4,
+  which are gated on their means, have not been measured since the baseline.
+  S4's edits remesh chunks through the same per-chunk path, so it is the one to
+  watch. To attribute the increase, take one S3 reading on `master` before R4
+  (`ac6043b`), which separates R4 from the items before it (T12, #124).
 
 ---
 

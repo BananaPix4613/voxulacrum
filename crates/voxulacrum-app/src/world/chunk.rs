@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use glam::IVec3;
 use smallvec::SmallVec;
-use std::time::Instant;
 
+use super::changes::ChunkVersion;
 use super::layers::{DecalLayer, DetailLayers, FluidLayer, LightData, ScatterStore};
 use super::overrides::EditState;
 use super::tags::{BiomeId, ChunkTags, ZoneId};
@@ -13,8 +13,8 @@ use voxel_core::{ChunkCoord, Voxel};
 
 pub const CHUNK_SIZE: usize = voxel_core::CHUNK_DIM;
 pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
-pub const VOXEL_SCALE: f32 = 1.0;
-pub const CHUNK_WORLD_SIZE: f32 = CHUNK_SIZE as f32 * VOXEL_SCALE; // 32.0
+pub const VOXEL_SCALE: f32 = voxel_core::VOXEL_SCALE;
+pub const CHUNK_WORLD_SIZE: f32 = voxel_core::CHUNK_WORLD_SIZE; // 32.0
 pub const SNAP_PAD: usize = 1;
 /// Padded snapshot size: CHUNK_SIZE + 2*SNAP_PAD
 pub const SNAP_SIZE: usize = CHUNK_SIZE + 2 * SNAP_PAD;
@@ -23,20 +23,11 @@ pub const SNAP_VOLUME: usize = SNAP_SIZE * SNAP_SIZE * SNAP_SIZE;
 /// full snapshot instead of a delta.
 pub const DELTA_THRESHOLD: usize = CHUNK_VOLUME / 4; // 8192
 
-pub struct ChunkMesh {
-    pub vertex_buffer: wgpu::Buffer,
-    pub index_buffer: wgpu::Buffer,
-    pub index_count: u32,
-    /// Vertex + index buffer bytes. Recorded at upload rather than inferred from
-    /// `index_count` and quad topology, so the residency panel reports the real
-    /// GPU footprint instead of an estimate.
-    pub gpu_bytes: u64,
-}
-
 /// Serializable chunk content: voxels plus the sidecar layers. This is the
 /// data-model `Chunk` from the engine design (§3); persistence, serialization,
-/// and the generation pipeline operate on this. Runtime state (meshing, dirty
-/// flags) lives on [`LoadedChunk`], which wraps this as its `data` field.
+/// and the generation pipeline operate on this. Runtime state (dirty flags,
+/// seam state, version) lives on [`LoadedChunk`], which wraps this as its `data`
+/// field.
 pub struct Chunk {
     pub coord: ChunkCoord,
     pub voxels: Arc<ChunkStorage>,
@@ -83,24 +74,16 @@ impl Chunk {
 }
 
 /// A chunk in the live set: the data-model [`Chunk`] plus the runtime state the
-/// engine needs while it is loaded (meshing handles, dirty flags, debounce).
+/// engine needs while it is loaded. It holds no mesh state: meshes and what
+/// needs re-meshing are the client's (R4).
 pub struct LoadedChunk {
     pub data: Chunk,
-    pub mesh_dirty: bool,
-    /// Monotonic counter incremented each time mesh_dirty is set to true.
-    /// Used to detect stale mesh results: if a neighbor loads while this chunk
-    /// is mid-mesh, the returned mesh has incorrect borders. The pipeline records
-    /// mesh_seq at snapshot time and only clears mesh_dirty on upload if it matches.
-    pub mesh_seq: u64,
-    pub mesh: Option<ChunkMesh>,
     pub persist_dirty: bool,
     /// The chunk's saved record failed to load, so what is in memory is not the
     /// whole story and saving it would replace that record on disk with a smaller
     /// one. Set by `apply_persisted_record`; `build_chunk_edits` then builds
     /// nothing for the chunk for as long as it stays loaded.
     pub persist_blocked: bool,
-    /// When the last edit occurred. None = generation-triggered dirty (no debounce).
-    pub mesh_debounce: Option<Instant>,
     /// True once the cross-chunk seam pass (`world::seam`) has finalized this
     /// chunk's boundary slab demotions. Gates the one-shot pass.
     pub seam_finalized: bool,
@@ -108,28 +91,28 @@ pub struct LoadedChunk {
     /// seam pass knows which columns smooth without re-evaluating the graph.
     /// `None` until a generation path sets it (air/failed-gen chunks stay `None`).
     pub smoothing_distances: Option<Box<[u8; COLUMN_COUNT]>>,
-    /// Wood capsules rooted in this chunk, in world space. Beside `mesh` rather
-    /// than in `data` because it is render-side derived output, not chunk state.
+    /// Wood capsules rooted in this chunk, in world space. Beside `data` rather
+    /// than in it because it is generation output only rendering reads.
     pub segments: Vec<nodegraph_eval::feature::BranchSegment>,
     /// Canopy lobes rooted in this chunk, in world space. Beside `segments` and
     /// for the same reason: render-side derived output, not chunk state.
     pub lobes: Vec<nodegraph_eval::feature::CanopyLobe>,
+    /// The version the door last stamped this chunk with (`world::changes`).
+    /// The default until the chunk's first change.
+    pub version: ChunkVersion,
 }
 
 impl LoadedChunk {
     pub fn new(position: IVec3, storage: Arc<ChunkStorage>) -> Self {
         Self {
             data: Chunk::new(position, storage),
-            mesh_dirty: true,
-            mesh_seq: 0,
-            mesh: None,
             persist_dirty: false,
             persist_blocked: false,
-            mesh_debounce: None,
             seam_finalized: false,
             smoothing_distances: None,
             segments: Vec::new(),
             lobes: Vec::new(),
+            version: ChunkVersion::default(),
         }
     }
 
@@ -174,20 +157,6 @@ impl LoadedChunk {
         chunk.segments = generated.segments;
         chunk.lobes = generated.lobes;
         chunk
-    }
-
-    /// Mark this chunk as needing re-meshing, incrementing the sequence counter.
-    pub fn mark_mesh_dirty(&mut self) {
-        self.mesh_dirty = true;
-        self.mesh_seq = self.mesh_seq.wrapping_add(1);
-    }
-
-    /// Mark dirty due to a voxel edit (applies debounce timer).
-    #[allow(dead_code)] // voxel-edit toolkit; wired when editing lands
-    pub fn mark_mesh_dirty_from_edit(&mut self) {
-        self.mesh_dirty = true;
-        self.mesh_seq = self.mesh_seq.wrapping_add(1);
-        self.mesh_debounce = Some(Instant::now());
     }
 
     #[inline]

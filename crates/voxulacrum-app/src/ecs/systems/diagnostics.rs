@@ -7,7 +7,9 @@ use crate::app::FrameCounter;
 use crate::diagnostics::FrameTimings;
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
-use crate::simulation::manager::{FrameState, SimulationManager};
+use crate::rendering::render_world::RenderStats;
+use crate::rendering::frame_state::FrameState;
+use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
 use crate::world::streaming::ChunkStreamingManager;
@@ -77,7 +79,7 @@ pub fn frame_timings_end_meshing(mut t: ResMut<FrameTimings>) {
     t.end_stage(2);
 }
 
-pub fn frame_timings_end_uniform(mut t: ResMut<FrameTimings>) {
+pub fn frame_timings_end_extract(mut t: ResMut<FrameTimings>) {
     t.end_stage(3);
 }
 
@@ -106,31 +108,24 @@ pub fn frame_timings_frame_end(
 
 pub fn compute_stats_system(
     world: Res<VoxelWorld>,
+    render_stats: Res<RenderStats>,
     sim: Res<SimulationManager>,
     frame: Res<FrameState>,
     jobs: Res<JobSystem>,
     mut ui: ResMut<UiState>,
 ) {
     ui.frame_time_ms = frame.dt * 1000.0;
-    let mut total_tris: u64 = 0;
-    let mut chunks_visible: u32 = 0;
-    let mut chunks_total: u32 = 0;
     let mut branch_segments: u64 = 0;
     let mut canopy_lobes: u64 = 0;
     for chunk in world.0.chunks.values() {
         branch_segments += chunk.segments.len() as u64;
         canopy_lobes += chunk.lobes.len() as u64;
-        if chunk.mesh.is_some() {
-            chunks_total += 1;
-            if sim.frustum.is_chunk_visible(chunk.data.coord.into()) {
-                chunks_visible += 1;
-                total_tris += chunk.mesh.as_ref().unwrap().index_count as u64 / 3;
-            }
-        }
     }
-    ui.total_triangles = total_tris;
-    ui.chunks_visible = chunks_visible;
-    ui.chunks_total = chunks_total;
+    // What the renderer drew and holds, as of the last frame's render.
+    ui.total_triangles = render_stats.triangles;
+    ui.chunks_visible = render_stats.chunks_visible;
+    ui.chunks_total = render_stats.chunks_meshed;
+    ui.draws = render_stats.draws;
     ui.branch_segments = branch_segments;
     ui.canopy_lobes = canopy_lobes;
 
@@ -153,7 +148,11 @@ pub fn compute_stats_system(
     // it runs about once a second rather than joining the per-frame full-set
     // scans that audit §4.9 identifies as the secondary cost at high zoom.
     if ui.residency_countdown == 0 {
-        ui.residency = world.0.sample_residency(ui.residency);
+        let mut residency = world.0.sample_residency(ui.residency);
+        // GPU memory is the client's, so it joins the world's figures here.
+        residency.gpu_mesh_bytes = render_stats.gpu_mesh_bytes;
+        residency.peak_gpu_bytes = residency.peak_gpu_bytes.max(residency.gpu_mesh_bytes);
+        ui.residency = residency;
         ui.residency_countdown = 60;
     } else {
         ui.residency_countdown -= 1;

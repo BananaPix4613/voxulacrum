@@ -3861,9 +3861,26 @@ dependencies = [
  "serde_json",
  "smallvec",
  "voxel-core",
+ "voxulacrum-render",
  "wgpu",
  "winit",
  "zstd",
+]
+
+[[package]]
+name = "voxulacrum-render"
+version = "0.5.0"
+dependencies = [
+ "bevy_ecs",
+ "bytemuck",
+ "egui",
+ "egui-wgpu",
+ "glam",
+ "log",
+ "pollster",
+ "serde",
+ "voxel-core",
+ "wgpu",
 ]
 
 [[package]]

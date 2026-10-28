@@ -64,6 +64,7 @@ pub struct BenchResult {
     pub chunks_visible: u32,
     pub chunks_meshed: u32,
     pub triangles: u64,
+    pub draws: u32,
     /// Resident memory when the window closed, in MB: chunk layers on the CPU,
     /// and chunk mesh buffers on the GPU.
     pub cpu_memory_mb: f32,

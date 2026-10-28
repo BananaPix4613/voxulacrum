@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use bevy_ecs::prelude::Resource;
 
 use crate::params::*;
+use crate::rendering::settings::{OutlineParams, PostProcessParams};
 use crate::meshing::MeshingStats;
 use crate::ui::hierarchy_editor::HierarchyEditor;
 
@@ -79,6 +80,8 @@ pub struct UiState {
     pub total_triangles: u64,
     pub chunks_visible: u32,
     pub chunks_total: u32,
+    /// Draws the render graph issued last frame; egui's are not counted.
+    pub draws: u32,
     /// Wood capsules across resident chunks, awaiting the impostor pass.
     pub branch_segments: u64,
     /// Canopy lobes across resident chunks, awaiting the depth-core pass.
@@ -159,6 +162,7 @@ impl UiState {
             total_triangles: 0,
             chunks_visible: 0,
             chunks_total: 0,
+            draws: 0,
             branch_segments: 0,
             canopy_lobes: 0,
             shader_log: Vec::new(),
@@ -236,9 +240,9 @@ pub fn draw_engine_panel(
                 ui.separator();
                 draw_cloud(ui, &mut state.params.cloud);
                 ui.separator();
-                draw_post_process(ui, &mut state.params.post_process);
+                draw_post_process(ui, &mut state.params.render.post_process);
                 ui.separator();
-                draw_outline(ui, &mut state.params.outline);
+                draw_outline(ui, &mut state.params.render.outline);
                 ui.separator();
                 draw_palette(ui, &mut state.params.palette, &state.palette_list,
                              &state.loaded_palette_preview, &mut state.palette_load_requested);
@@ -1106,6 +1110,7 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
         }
         ui.separator();
         ui.label(format!("Triangles: {}", format_number(state.total_triangles)));
+        ui.label(format!("Draws: {}", format_number(u64::from(state.draws))));
         ui.label(format!("Chunks: {}/{}", state.chunks_visible, state.chunks_total));
         if state.chunks_total > 0 {
             let cull_pct = (1.0 - state.chunks_visible as f64 / state.chunks_total as f64) * 100.0;
@@ -1171,13 +1176,11 @@ fn draw_performance(ui: &mut egui::Ui, state: &mut UiState) {
                         any_recent = true;
                     }
                     ui.label(format!(
-                        "  {:<18}{:<6}{:<10}mesh {}  scatter {}  water {}",
+                        "  {:<18}{:<6}{:<10}chunks {}",
                         r.intent,
                         r.origin.label(),
                         format!("{:?}", r.mode).to_lowercase(),
-                        r.mesh_invalidated,
-                        r.scatter_rebuild,
-                        r.water_rebuild,
+                        r.changed,
                     ));
                 }
             });

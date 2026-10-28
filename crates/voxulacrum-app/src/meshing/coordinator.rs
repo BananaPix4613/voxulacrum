@@ -1,12 +1,9 @@
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
-use voxel_core::ChunkCoord;
-use wgpu::util::DeviceExt;
 use crate::meshing::MeshingPipeline;
-use crate::rendering::pipelines::FaceVertex;
-use crate::rendering::render_context::RenderContext;
+use crate::rendering::chunk_meshes::TerrainMesh;
+use crate::rendering::uploads::{ChunkUpload, ChunkUploads};
 use crate::ui::panels::UiState;
-use crate::world::chunk::ChunkMesh;
 use crate::world::World;
 
 #[derive(Resource)]
@@ -23,9 +20,9 @@ impl MeshingCoordinator {
     /// Returns the chunk positions that received new mesh data this frame.
     pub fn tick(
         &mut self,
-        world: &mut World,
+        world: &World,
+        uploads: &mut ChunkUploads,
         jobs: &mut crate::jobs::JobSystem,
-        ctx: &RenderContext,
         ui_state: &mut UiState,
         camera_chunk: IVec3,
         max_snapshots: usize,
@@ -35,7 +32,7 @@ impl MeshingCoordinator {
         // one after) picks it up once the window clears - this is what makes an
         // edit's mesh update land within a frame or two instead of only on the next
         // incidental streaming-triggered sweep.
-        self.pipeline.submit_all_dirty(world);
+        self.pipeline.submit_dirty();
 
         // Drain pending snapshot submissions (bounded per frame)
         self.pipeline.drain_pending_submissions(world, jobs, camera_chunk, max_snapshots);
@@ -45,14 +42,15 @@ impl MeshingCoordinator {
         let mut meshed_positions = Vec::with_capacity(completed.len());
         for result in completed {
             let pos = result.chunk_key;
-            upload_mesh_result(
-                world,
-                pos,
-                &result.vertices,
-                &result.indices,
-                &ctx.device,
-                result.mesh_seq,
-            );
+            // The chunk unloaded while its mesh was in flight.
+            if world.get_chunk(pos).is_none() {
+                continue;
+            }
+            self.pipeline.mark_meshed(pos, result.mesh_seq);
+            uploads.terrain.insert(pos, ChunkUpload::Set {
+                version: result.version,
+                data: Some(TerrainMesh { vertices: result.vertices, indices: result.indices }),
+            });
             meshed_positions.push(pos);
         }
         
@@ -73,62 +71,12 @@ impl MeshingCoordinator {
             ui_state.mesh_params_pending = false;
             log::info!("Remesh requested by user");
             self.pipeline.reset_for_new_world();
-            for chunk in world.chunks.values_mut() {
-                chunk.mark_mesh_dirty();
+            for &coord in world.chunks.keys() {
+                self.pipeline.invalidate(coord.into(), false);
             }
-            self.pipeline.submit_all_dirty(world);
+            self.pipeline.submit_dirty();
         }
         
         meshed_positions
-    }
-}
-
-/// Upload a completed mesh result to the GPU for a specific chunk.
-///
-/// Here rather than on `World`, so the world code names no render type. It
-/// still writes the GPU state `LoadedChunk` holds; R4 moves that state into the
-/// render world.
-fn upload_mesh_result(
-    world: &mut World,
-    chunk_key: IVec3,
-    vertices: &[FaceVertex],
-    indices: &[u32],
-    device: &wgpu::Device,
-    mesh_seq: u64,
-) {
-    let chunk = match world.chunks.get_mut(&ChunkCoord::from(chunk_key)) {
-        Some(c) => c,
-        None => return, // Chunk was unloaded while mesh was in flight
-    };
-
-    if vertices.is_empty() || indices.is_empty() {
-        chunk.mesh = None;
-        // Only clear mesh_dirty if the chunk wasn't re-dirtied during meshing
-        if chunk.mesh_seq == mesh_seq {
-            chunk.mesh_dirty = false;
-        }
-        return;
-    }
-
-    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("chunk_vertex_buffer"),
-        contents: bytemuck::cast_slice(vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-
-    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("chunk_index_buffer"),
-        contents: bytemuck::cast_slice(indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-
-    chunk.mesh = Some(ChunkMesh {
-        vertex_buffer,
-        index_buffer,
-        index_count: indices.len() as u32,
-        gpu_bytes: (size_of_val(vertices) + size_of_val(indices)) as u64,
-    });
-    if chunk.mesh_seq == mesh_seq {
-        chunk.mesh_dirty = false;
     }
 }

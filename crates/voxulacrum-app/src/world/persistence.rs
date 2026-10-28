@@ -1505,6 +1505,8 @@ mod tests {
             mode: EngineMode::Authoring,
             mutation_log: MutationLog::default(),
             event_outbox: Vec::new(),
+            last_version: Default::default(),
+            change_feed: Vec::new(),
         }
     }
 

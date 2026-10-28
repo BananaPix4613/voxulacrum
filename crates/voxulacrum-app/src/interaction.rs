@@ -6,16 +6,15 @@
 //! anchor is highlighted by reusing the debug-line pipeline.
 
 use bevy_ecs::prelude::*;
-use glam::{IVec3, Mat4, Vec3};
+use glam::{IVec3, Vec3};
 use voxel_core::Voxel;
 
-use crate::ecs::resources::VoxelWorld;
+use crate::ecs::resources::{VoxelWorld, WindowHandle};
 use crate::input::{GameAction, InputState, PointerState, RawInputBuffer};
 use crate::player::systems::Player;
-use crate::rendering::debug_lines::DebugLinePass;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::surface_state::SurfaceState;
-use crate::simulation::manager::SimulationManager;
+use crate::meshing::overlay::DebugLines;
+use crate::rendering::camera_desc::CameraDesc;
+use crate::rendering::frame_state::FrameState;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 use crate::world::World;
@@ -34,12 +33,11 @@ const MAX_PICK_STEPS: i32 = 4096;
 pub fn picking_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
-    sim: Res<SimulationManager>,
-    surface: Res<SurfaceState>,
+    frame: Res<FrameState>,
+    window: Res<WindowHandle>,
     world: Res<VoxelWorld>,
-    ctx: Res<RenderContext>,
     mut pick: ResMut<PickState>,
-    mut debug_lines: ResMut<DebugLinePass>,
+    mut debug_lines: ResMut<DebugLines>,
 ) {
     // Authoring's dev-tool pick only - Play mode has its own reach-aware
     // targeting/highlight (player_targeting_system). Without this gate, both
@@ -53,22 +51,22 @@ pub fn picking_system(
     pick.anchor = if buffer.egui_wants_pointer {
         None
     } else {
-        compute_pick(&pointer, &sim, &surface, &world.0)
+        compute_pick(&pointer, &frame.camera, window.inner_size(), &world.0)
     };
-    debug_lines.set_highlight(&ctx, pick.anchor, HIGHLIGHT_ACTIVE);
+    debug_lines.set_highlight(pick.anchor, HIGHLIGHT_ACTIVE);
 }
 
 /// Unproject the cursor to a world-space ray (origin, direction), or `None` if
-/// the cursor is outside the window or the surface has zero extent. Shared by
+/// the cursor is outside the window or the window has zero extent. Shared by
 /// Authoring's pick and Play mode's reach targeting.
 fn cursor_ray(
     pointer: &PointerState,
-    sim: &SimulationManager,
-    surface: &SurfaceState,
+    camera: &CameraDesc,
+    window_size: winit::dpi::PhysicalSize<u32>,
 ) -> Option<(Vec3, Vec3)> {
     let (cx, cy) = pointer.cursor?;
-    let w = surface.surface_config.width as f32;
-    let h = surface.surface_config.height as f32;
+    let w = window_size.width as f32;
+    let h = window_size.height as f32;
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
@@ -77,8 +75,7 @@ fn cursor_ray(
     let ndc_x = cx / w * 2.0 - 1.0;
     let ndc_y = 1.0 - cy / h * 2.0;
 
-    let vp = Mat4::from_cols_array_2d(&sim.camera.view_projection());
-    let inv = vp.inverse();
+    let inv = camera.view_proj.inverse();
     let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
     let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
     let dir = (far - near).normalize_or_zero();
@@ -92,11 +89,11 @@ fn cursor_ray(
 /// unbounded dev-tool pick).
 fn compute_pick(
     pointer: &PointerState,
-    sim: &SimulationManager,
-    surface: &SurfaceState,
+    camera: &CameraDesc,
+    window_size: winit::dpi::PhysicalSize<u32>,
     world: &World,
 ) -> Option<IVec3> {
-    let (near, dir) = cursor_ray(pointer, sim, surface)?;
+    let (near, dir) = cursor_ray(pointer, camera, window_size)?;
     raycast_voxel(world, near, dir)
 }
 
@@ -215,14 +212,13 @@ pub struct PlayerToolState {
 pub fn player_targeting_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
-    sim: Res<SimulationManager>,
-    surface: Res<SurfaceState>,
+    frame: Res<FrameState>,
+    window: Res<WindowHandle>,
     world: Res<VoxelWorld>,
-    ctx: Res<RenderContext>,
     players: Query<&Player>,
     play: Option<Res<crate::play::PlaySettings>>,
     mut target: ResMut<TargetState>,
-    mut debug_lines: ResMut<DebugLinePass>,
+    mut debug_lines: ResMut<DebugLines>,
 ) {
     let miss = world.0.mode != EngineMode::Play || buffer.egui_wants_pointer;
     let player = players.iter().next();
@@ -232,7 +228,7 @@ pub fn player_targeting_system(
     } else if let (Some(player), Some(play)) = (player, play.as_deref()) {
         let tuning = &play.player;
         let eye = (player.curr.position + Vec3::new(0.0, tuning.eye_height, 0.0)) / VOXEL_SCALE;
-        cursor_ray(&pointer, &sim, &surface)
+        cursor_ray(&pointer, &frame.camera, window.inner_size())
             .and_then(|(origin, dir)| raycast_voxel_faced(&world.0, origin, dir, f32::INFINITY))
             .map(|(hit, prev)| (hit, prev, hit.as_vec3().distance(eye) <= tuning.reach))
     } else {
@@ -246,8 +242,13 @@ pub fn player_targeting_system(
         _ => (None, None),
     };
 
-    let color = if target.in_reach { HIGHLIGHT_ACTIVE } else { HIGHLIGHT_OUT_OF_REACH };
-    debug_lines.set_highlight(&ctx, target.hover, color);
+    // Play's highlight only; Authoring's belongs to `picking_system`. Writing it
+    // here in every mode left the two systems racing for it, with whichever the
+    // scheduler ran second deciding what showed.
+    if world.0.mode == EngineMode::Play {
+        let color = if target.in_reach { HIGHLIGHT_ACTIVE } else { HIGHLIGHT_OUT_OF_REACH };
+        debug_lines.set_highlight(target.hover, color);
+    }
 }
 
 /// Cycle the build tool's material on `CycleTool(delta)`, wrapping through the

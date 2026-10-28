@@ -18,14 +18,14 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9, R3a and R2 are merged.
-The runtime spine and the engine object model are designed in
+Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9, R3a, R2, R4 and F15
+are merged. The runtime spine and the engine object model are designed in
 `engine-design.md`, the CPU baseline M3's exit gate compares against is
 recorded, CI compares Tier-1 results across Windows, Linux and macOS,
 generation no longer calls the platform's math library, the API docs build
 without warnings, package-load errors name each path once, the world code no
-longer reads the editor's settings, and one 30 Hz tick drives all simulation
-time.
+longer reads the editor's settings, one 30 Hz tick drives all simulation
+time, and rendering reads only a render world in a crate of its own.
 
 ### Added
 
@@ -67,6 +67,12 @@ time.
   run in the last second and the most in one frame, ticks dropped in the last
   second and this session, and each tick phase's mean and longest cost per
   tick.
+- **A draw count** (R4, #20) on the Performance panel and as `draws` in
+  benchmark results: the draws the render graph issued in the last frame, not
+  counting egui's.
+- **An underground benchmark scenario** (R4, #20), `bench/s5-underground.ron`:
+  Play from the launch view, a walk into the nearest cave the visibility flood
+  marks enclosed, then 60 s at rest with the cutaway engaged.
 
 ### Changed
 
@@ -117,6 +123,28 @@ time.
   constant; building with `VOXULACRUM_TICK_RATE_HZ` set overrides it, which CI
   uses to run the tests again at 20 Hz. The generation hash is unchanged at
   `0xed02babdf0f40420`; saves need nothing.
+- **Rendering reads only a render world** (R4, #20) — every GPU resource now
+  lives in a render world with its own schedule, in a new `voxulacrum-render`
+  crate that depends on `voxel-core` and the GPU stack and on no world code.
+  Each frame an `Extract` stage hands it what to draw: the camera description,
+  the frame's lighting and settings, and each chunk's terrain, water and
+  foliage data tagged with the chunk version it was built from. The world holds
+  no mesh state. The door and generation report changed chunks through one
+  feed, by layer and version, and the client rebuilds meshes, water and foliage
+  from it without scanning the resident set; regeneration swaps the new chunks
+  in through the door and the client rebuilds from the same feed. The
+  Performance panel's triangle, chunk and draw counts trail the render by one
+  frame, and the frame-timing stage `uniform` is now `extract`, on the panel
+  and in benchmark results' `stage_mean_ms`. Panel edits reach the GPU in the
+  frame they are made, except the sky color, a frame later. At the launch zoom,
+  at r=14 and underground, the triangle, visible-chunk and draw counts match
+  the build before. `voxel-core` gains `ChunkVersion`, `VOXEL_SCALE` and
+  `CHUNK_WORLD_SIZE`. Parameter presets keep their shape: `post_process` and
+  `outline` are the render crate's settings, flattened into `EngineParams`.
+  Generation is not touched; saves need nothing.
+- **The dead world-cache clear is gone** (F15, #116) — regeneration no longer
+  deletes `cache/world_*.bin`, files nothing had written since the world cache
+  was disabled. The mesh cache, which regeneration clears, is unaffected.
 
 ### Fixed
 

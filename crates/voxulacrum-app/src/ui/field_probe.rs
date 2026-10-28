@@ -20,7 +20,7 @@ use voxel_core::{ChunkBuffer, MaterialRegistry, Voxel};
 
 use crate::ui::colormap::Colormap;
 use crate::materials::MaterialRegistryRes;
-use crate::ui::EguiRenderer;
+use crate::ui::EguiUi;
 
 /// A captured node output, ready for the panel to render. The variant follows
 /// whatever the evaluator cached for the selected node.
@@ -140,11 +140,11 @@ impl FieldProbe {
 
 /// Poll completed evaluations and dispatch a new one when the selection, the
 /// graph, or the probed chunk changes. Runs in `FrameStage::Meshing`; the
-/// editor selection it reads was written during the previous frame's render,
+/// editor selection it reads was written during the previous frame's UI layout,
 /// so the panel trails live edits by one frame (imperceptible).
 pub fn field_probe_system(
     mut probe: ResMut<FieldProbe>,
-    egui: NonSendMut<EguiRenderer>,
+    egui: NonSendMut<EguiUi>,
     materials: Res<MaterialRegistryRes>,
 ) {
     // 1. Drain a completed evaluation, if one finished.

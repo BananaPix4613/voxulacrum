@@ -429,7 +429,8 @@ impl ChunkStreamingManager {
                     continue;
                 }
 
-                // Insert + face-neighbor mesh-dirty flow through the mutation API.
+                // Insert through the mutation API; the change feed carries it to
+                // the mesher.
                 world
                     .execute(MutationCommand::system(WorldMutation::InsertLoadedChunk {
                         chunk: gen_result.chunk,
@@ -438,9 +439,8 @@ impl ChunkStreamingManager {
                 result.inserted.push(pos);
                 inserted_count += 1;
 
-                // Face-neighbor mesh-dirty marking is the `InsertLoadedChunk`
-                // handler's job, and it already happened above; it used to be
-                // repeated here, marking every neighbor twice per insert.
+                // The client re-meshes the face neighbors from the change the
+                // insert publishes.
 
                 // Stop draining channel when cap is hit. Remaining results stay in
                 // the channel and their chunks stay in `in_flight`, so they are
@@ -452,9 +452,9 @@ impl ChunkStreamingManager {
         }
         close_phase(0, &mut mark, &mut phase_ms);
 
-        if !result.inserted.is_empty() {
-            meshing.pipeline.submit_all_dirty(world);
-        }
+        // Inserted chunks reach the mesher through the change feed
+        // (`chunk_change_system`), so the submit phase has nothing left to time.
+        // The slot stays until R6 splits streaming from meshing.
         close_phase(1, &mut mark, &mut phase_ms);
 
         // --- Spawn new generation tasks, nearest-first, up to the budget ---

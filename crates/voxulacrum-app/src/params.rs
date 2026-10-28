@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use crate::rendering::settings::RenderSettings;
+use crate::rendering::uniform_writer::CLOUD_LAYER_COUNT;
 
 // ============================================================================
 // Lighting parameters
@@ -70,13 +72,6 @@ impl Default for WindParams {
 // ============================================================================
 // Cloud parameters
 // ============================================================================
-
-/// Number of independently-moving cloud layers. Each gets its own wind
-/// deflection and simulated macro-grid, composited together in the terrain
-/// shader. A named constant (not a growable Vec) because both the shared
-/// texture (one channel per layer) and the uniform buffer layout are sized
-/// for it at compile time.
-pub const CLOUD_LAYER_COUNT: usize = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CloudLayerParams {
@@ -202,27 +197,6 @@ impl Default for WaterVisualParams {
 }
 
 // ============================================================================
-// Post-process parameters
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct PostProcessParams {
-    pub vignette_strength: f32,
-    pub exposure: f32,
-    pub overcast_desaturation_factor: f32,
-}
-
-impl Default for PostProcessParams {
-    fn default() -> Self {
-        Self {
-            vignette_strength: 0.0,
-            exposure: 1.1,
-            overcast_desaturation_factor: 0.3,
-        }
-    }
-}
-
-// ============================================================================
 // Palette parameters
 // ============================================================================
 
@@ -246,36 +220,6 @@ impl Default for PaletteParams {
             l_levels: 64,
             ab_levels: 64,
             l_gamma: 0.5,
-        }
-    }
-}
-
-// ============================================================================
-// Outline parameters
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct OutlineParams {
-    pub enabled: bool,
-    pub depth_threshold: f32,
-    pub depth_strength: f32,
-    pub normal_threshold: f32,
-    pub normal_strength: f32,
-    pub darken_strength: f32,
-    pub brighten_strength: f32,
-}
-
-impl Default for OutlineParams {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            depth_threshold: 0.0005,
-            depth_strength: 1.0,
-            normal_threshold: 0.3,
-            normal_strength: 0.8,
-            darken_strength: 0.4,
-            brighten_strength: 0.3,
         }
     }
 }
@@ -490,14 +434,16 @@ pub struct EngineParams {
     pub wind: WindParams,
     pub cloud: CloudParams,
     pub water: WaterVisualParams,
-    pub post_process: PostProcessParams,
+    /// The renderer's own groups (`post_process`, `outline`), flattened so a
+    /// preset keeps them as top-level keys.
+    #[serde(flatten)]
+    pub render: RenderSettings,
     pub palette: PaletteParams,
     pub time_control: TimeControlParams,
     pub camera: CameraParams,
     pub debug: DebugParams,
     pub meshing: MeshingParams,
     pub render_pipeline: RenderPipelineParams,
-    pub outline: OutlineParams,
     pub cross_section: CrossSectionParams,
     pub mesh_cache: MeshCacheParams,
 }
@@ -509,14 +455,13 @@ impl Default for EngineParams {
             wind: WindParams::default(),
             cloud: CloudParams::default(),
             water: WaterVisualParams::default(),
-            post_process: PostProcessParams::default(),
+            render: RenderSettings::default(),
             palette: PaletteParams::default(),
             time_control: TimeControlParams::default(),
             camera: CameraParams::default(),
             debug: DebugParams::default(),
             meshing: MeshingParams::default(),
             render_pipeline: RenderPipelineParams::default(),
-            outline: OutlineParams::default(),
             cross_section: CrossSectionParams::default(),
             mesh_cache: MeshCacheParams::default(),
         }
@@ -628,5 +573,25 @@ mod tests {
         let json = r#"{ "terrain_gen": { "base_height": 40.0, "cave_enabled": false } }"#;
         let params: EngineParams = serde_json::from_str(json).expect("an old preset loads");
         assert_eq!(params, EngineParams::default());
+    }
+
+    /// The render settings are flattened into `EngineParams`, so a preset keeps
+    /// `post_process` and `outline` as top-level keys, written and read.
+    #[test]
+    fn the_render_settings_stay_top_level_keys_of_a_preset() {
+        let written = serde_json::to_value(EngineParams::default()).expect("params serialize");
+        assert!(written.get("post_process").is_some(), "post_process is a top-level key");
+        assert!(written.get("outline").is_some(), "outline is a top-level key");
+        assert!(written.get("render").is_none(), "no nested render block");
+
+        let json = r#"{
+            "post_process": { "vignette_strength": 0.5, "exposure": 1.0,
+                              "overcast_desaturation_factor": 0.2 },
+            "outline": { "enabled": false }
+        }"#;
+        let params: EngineParams = serde_json::from_str(json).expect("a preset loads");
+        assert_eq!(params.render.post_process.vignette_strength, 0.5);
+        assert!(!params.render.outline.enabled);
+        assert_eq!(params.lighting, EngineParams::default().lighting);
     }
 }

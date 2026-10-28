@@ -1,14 +1,11 @@
-//! The fluid simulation: its tick phase, the editor's pour, and the frame's
-//! rebuild of the water meshes they change.
+//! The fluid simulation: its tick phase and the editor's pour. The water meshes
+//! they change are rebuilt from the change feed (`chunk_changes`).
 
 use bevy_ecs::prelude::*;
-use super::meshing::rebuild_water_with_neighbors;
 use crate::diagnostics::{FrameTimings, SUB_FLUID};
-use crate::ecs::resources::{FluidChanges, VoxelWorld};
+use crate::ecs::resources::VoxelWorld;
 use crate::input::InputState;
 use crate::interaction::PickState;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::water_pass::WaterPass;
 use crate::world::config::ServerConfig;
 use crate::world::mutation::{EngineMode, MutationCommand, WorldMutation};
 use crate::world::tick::{ticks_per_step, CurrentTick};
@@ -20,13 +17,12 @@ const FLUID_RATE_HZ: u32 = 10;
 /// Ticks between fluid steps.
 const FLUID_TICK_INTERVAL: u64 = ticks_per_step(FLUID_RATE_HZ);
 
-/// Tick phase `SubRates`: one fluid step on each fluid tick, queuing the chunks
-/// whose water changed for the frame to rebuild.
+/// Tick phase `SubRates`: one fluid step on each fluid tick. Its commit
+/// publishes the chunks whose water changed to the change feed.
 pub fn fluid_tick_system(
     tick: Res<CurrentTick>,
     mut world: ResMut<VoxelWorld>,
     config: Res<ServerConfig>,
-    mut changes: ResMut<FluidChanges>,
 ) {
     if !tick.0.is_multiple_of(FLUID_TICK_INTERVAL) {
         return;
@@ -48,9 +44,7 @@ pub fn fluid_tick_system(
     }
     // One two-phase step over every active chunk; its commit goes through the
     // mutation door, which also does the persistence marking.
-    if let Some(out) = world.0.step_fluids() {
-        changes.chunks.extend(out.water_rebuild);
-    }
+    world.0.step_fluids();
 }
 
 /// Debug disturbance (Authoring dev tool): press G with the cursor over terrain
@@ -63,7 +57,6 @@ pub fn fluid_pour_system(
     input: Res<InputState>,
     pick: Res<PickState>,
     mut world: ResMut<VoxelWorld>,
-    mut changes: ResMut<FluidChanges>,
     mut timings: ResMut<FrameTimings>,
 ) {
     let _timer = timings.sub_timer(SUB_FLUID);
@@ -73,24 +66,9 @@ pub fn fluid_pour_system(
         return;
     }
     if let Some(anchor) = pick.anchor {
-        let out = world
+        world
             .0
             .execute(MutationCommand::authoring(WorldMutation::PourFluidColumn { anchor }))
             .expect("authoring pour in authoring mode");
-        changes.chunks.extend(out.water_rebuild);
     }
-}
-
-/// Rebuild the water meshes of every chunk whose fluid changed since the last
-/// frame, however many ticks ran in between.
-pub fn water_rebuild_system(
-    mut changes: ResMut<FluidChanges>,
-    world: Res<VoxelWorld>,
-    mut water_pass: ResMut<WaterPass>,
-    ctx: Res<RenderContext>,
-    mut timings: ResMut<FrameTimings>,
-) {
-    let _timer = timings.sub_timer(SUB_FLUID);
-    let chunks = std::mem::take(&mut changes.chunks);
-    rebuild_water_with_neighbors(&mut water_pass, &world.0, &ctx.device, chunks);
 }

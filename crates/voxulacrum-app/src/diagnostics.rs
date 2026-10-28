@@ -27,7 +27,7 @@ pub const STAGE_COUNT: usize = 6;
 
 /// Display labels for the six stages, in schedule order.
 pub const STAGE_NAMES: [&str; STAGE_COUNT] =
-    ["input", "sim", "mesh", "uniform", "render", "post"];
+    ["input", "sim", "mesh", "extract", "render", "post"];
 
 /// Per-frame CPU-work budget in milliseconds (roadmap §7.3: 16.6 ms sustained).
 pub const FRAME_BUDGET_MS: f32 = 16.6;
@@ -77,8 +77,9 @@ pub const SUB_UNLOAD: usize = 7;
 
 // `FrameStage::Simulation` candidates. Each is an item carried out of 0.3.0
 // with a stated trigger; the reference world met the conditions.
-/// `fluid_pour_system` and `water_rebuild_system` - the editor's pour and the
-/// water meshes the ticks changed. The fluid step itself runs inside the tick.
+/// `fluid_pour_system` and `water_rebuild_system` - the editor's pour, and the
+/// water meshes rebuilt from the change feed. The fluid step itself runs inside
+/// the tick.
 pub const SUB_FLUID: usize = 8;
 /// `climate_tick_system` - cleared at ≤2.2 ms in Phase 10, before an ocean existed.
 pub const SUB_CLIMATE: usize = 9;

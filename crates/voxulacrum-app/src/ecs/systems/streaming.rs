@@ -9,12 +9,7 @@ use crate::diagnostics::{
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
 use crate::meshing::coordinator::MeshingCoordinator;
-use crate::rendering::canopy_pass::CanopyPass;
-use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::detail_paint_pass::DetailPaintPass;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::water_pass::WaterPass;
+use crate::rendering::uploads::ChunkUploads;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
@@ -28,13 +23,8 @@ pub fn streaming_tick_system(
     mut meshing: ResMut<MeshingCoordinator>,
     mut jobs: ResMut<JobSystem>,
     sim: Res<SimulationManager>,
-    mut detail_paint: ResMut<DetailPaintPass>,
-    mut scatter: ResMut<ScatterPass>,
-    mut capsules: ResMut<CapsulePass>,
-    mut canopy: ResMut<CanopyPass>,
-    mut water_pass: ResMut<WaterPass>,
+    mut uploads: ResMut<ChunkUploads>,
     mut ui: ResMut<UiState>,
-    _ctx: Res<RenderContext>,
     persistence: Res<WorldPersistence>,
     mut timings: ResMut<FrameTimings>,
 ) {
@@ -72,13 +62,10 @@ pub fn streaming_tick_system(
         },
     );
 
-    // Remove detail paint and water for unloaded chunks
+    // Queue the removal of the unloaded chunks' meshes and per-chunk buffers.
+    // R6 moves this to the client's chunk view.
     for pos in &tick_result.unloaded {
-        detail_paint.remove_chunk(*pos);
-        scatter.remove_chunk(*pos);
-        capsules.remove_chunk(*pos);
-        canopy.remove_chunk(*pos);
-        water_pass.remove_chunk_water(*pos);
+        uploads.remove(*pos);
     }
 
     // NOTE: We do NOT add foliage/water here for inserted chunks.
