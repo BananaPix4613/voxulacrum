@@ -7,7 +7,7 @@ use crate::camera::{IsometricCamera, SnappedCamera};
 use crate::input::InputState;
 use crate::cloud_shadow::CloudShadowState;
 use crate::params::EngineParams;
-use crate::rendering::camera_desc::{AreaOfInterest, CameraDesc, IsoCameraBlock};
+use crate::rendering::camera_desc::{CameraDesc, IsoCameraBlock};
 use crate::rendering::frustum::Frustum;
 use crate::simulation::time_of_day::TimeOfDay;
 use crate::simulation::wind::WindState;
@@ -55,14 +55,16 @@ impl SimulationManager {
     /// Advance the camera and frustum by one frame and build its `FrameState`.
     /// Time of day and wind come from [`Self::advance_world_time`], called
     /// first. `surface` is the window's drawable size in pixels, at least 1 on
-    /// each axis. `dt` and `elapsed` are the frame's presentation time
-    /// (`PresentationClock`).
+    /// each axis. `chunk_y` is the chunk layers the world holds, which the
+    /// camera's area of interest covers. `dt` and `elapsed` are the frame's
+    /// presentation time (`PresentationClock`).
     pub fn tick(
         &mut self,
         params: &EngineParams,
         surface: (u32, u32),
         input: &InputState,
         follow: Option<Vec3>,
+        chunk_y: (i32, i32),
         dt: f32,
         elapsed: f32,
     ) -> FrameState {
@@ -151,10 +153,6 @@ impl SimulationManager {
 
         let view = self.camera.view_matrix();
         let projection = self.camera.projection_matrix();
-        // The cube `visible_radius` describes. Streaming still runs its own view
-        // test; R6 derives this area from it.
-        let center = self.camera.smooth_target;
-        let reach = self.camera.visible_radius();
         let camera = CameraDesc {
             view,
             projection,
@@ -163,11 +161,7 @@ impl SimulationManager {
             right: Vec3::from(view_right),
             up: Vec3::from(view_up),
             forward: Vec3::from(view_dir),
-            area_of_interest: AreaOfInterest {
-                center,
-                horizontal_radius: reach,
-                vertical_range: (center.y - reach, center.y + reach),
-            },
+            area_of_interest: self.camera.area_of_interest(chunk_y, &params.camera),
             iso: IsoCameraBlock {
                 snapped_view_proj: Mat4::from_cols_array_2d(&snapped.view_proj),
                 snap_offset: snapped.subpixel_offset,

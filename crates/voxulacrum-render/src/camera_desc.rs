@@ -4,6 +4,7 @@
 //! never a projection type or a camera's settings.
 
 use glam::{Mat4, Vec3};
+use voxel_core::{AreaOfInterest, Footprint};
 
 use super::frustum::Frustum;
 
@@ -32,15 +33,6 @@ pub struct CameraDesc {
     /// The isometric camera module's own values. Only that module should read
     /// them; the uniform writer still does, which V8 removes.
     pub iso: IsoCameraBlock,
-}
-
-/// What an observer needs resident (design §12, "Residency"), in world units.
-#[allow(dead_code)] // read once residency comes from observers (R6)
-#[derive(Clone, Copy)]
-pub struct AreaOfInterest {
-    pub center: Vec3,
-    pub horizontal_radius: f32,
-    pub vertical_range: (f32, f32),
 }
 
 /// The isometric camera's block of the description.
@@ -72,10 +64,12 @@ impl Default for CameraDesc {
             right: Vec3::X,
             up: Vec3::Y,
             forward: Vec3::NEG_Y,
+            // No layers, so nothing.
             area_of_interest: AreaOfInterest {
-                center: Vec3::ZERO,
-                horizontal_radius: 0.0,
-                vertical_range: (0.0, 0.0),
+                center: (0, 0),
+                chunk_y: (0, 0),
+                load: Footprint::Disc { radius: 0.0 },
+                retain: Footprint::Disc { radius: 0.0 },
             },
             iso: IsoCameraBlock {
                 snapped_view_proj: Mat4::ZERO,

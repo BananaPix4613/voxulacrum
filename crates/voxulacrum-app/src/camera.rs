@@ -1,4 +1,5 @@
 use glam::{Mat4, Vec3};
+use voxel_core::{AreaOfInterest, Footprint, CHUNK_WORLD_SIZE};
 
 use crate::input::{GameAction, InputState};
 use crate::params::CameraParams;
@@ -86,6 +87,90 @@ impl IsometricCamera {
         let pitch = (1.0_f32 / 2.0_f32.sqrt()).atan();
         let ground_reach = half_height / pitch.sin();
         ground_reach.max(half_width)
+    }
+
+    /// What this camera's observer needs resident (design §12, "Residency"):
+    /// the chunk columns in view over the layers `chunk_y` covers, loading
+    /// within `params.load_margin` and staying loaded within
+    /// `params.unload_margin`.
+    pub fn area_of_interest(&self, chunk_y: (i32, i32), params: &CameraParams) -> AreaOfInterest {
+        let center = (
+            (self.smooth_target.x / CHUNK_WORLD_SIZE).floor() as i32,
+            (self.smooth_target.z / CHUNK_WORLD_SIZE).floor() as i32,
+        );
+        AreaOfInterest {
+            center,
+            chunk_y,
+            load: self.view_footprint(chunk_y, params.load_margin),
+            retain: self.view_footprint(chunk_y, params.unload_margin),
+        }
+    }
+
+    /// The chunk columns in view: the screen rectangle projected onto the
+    /// ground, which turns with the camera, widened by `margin_fraction`.
+    ///
+    /// For rotation `r` and isometric pitch θ = atan(1/√2), the rectangle's axes
+    /// are the screen's on the ground:
+    ///   right = (sin(r), -cos(r))   - screen X on the ground
+    ///   up    = (-cos(r), -sin(r))  - screen Y on the ground (foreshortened)
+    ///
+    /// Altitude shifts a chunk up-screen, so a column whose footprint sits
+    /// outside the band can still have raised geometry on screen - tall terrain
+    /// at the near edge, which once failed to load at all. Each column therefore
+    /// spans the up-screen shift of the lowest and highest layers, and is in view
+    /// when that span meets the band.
+    ///
+    /// This is column-granular by necessity: a per-chunk Y test would be
+    /// tighter, but skipping a middle layer would leave the layer above it
+    /// permanently unmeshable, since meshing requires both Y neighbors resident.
+    fn view_footprint(&self, chunk_y: (i32, i32), margin_fraction: f32) -> Footprint {
+        let (half_right, half_up) = self.view_half_extents(margin_fraction);
+        Footprint::Rect {
+            yaw: self.rotation,
+            right: (-half_right, half_right),
+            up: (-half_up, half_up),
+            span: (
+                self.altitude_shift_chunks(chunk_y.0 as f32 * CHUNK_WORLD_SIZE),
+                self.altitude_shift_chunks(chunk_y.1 as f32 * CHUNK_WORLD_SIZE),
+            ),
+        }
+    }
+
+    /// Ground-equivalent offset, in chunks, along the screen-up axis produced by
+    /// a point at altitude `world_y`.
+    ///
+    /// Under the isometric projection, moving `d` along the ground's away-axis
+    /// shifts a point up-screen by `d·sin(pitch)`, while raising it by `Δy`
+    /// shifts it up-screen by `Δy·cos(pitch)`. An altitude is therefore
+    /// screen-equivalent to `Δy/tan(pitch)` = `Δy·√2` of ground. Altitude has no
+    /// screen-X component - the camera's right vector is horizontal - which is
+    /// why only the up axis needs correcting.
+    fn altitude_shift_chunks(&self, world_y: f32) -> f32 {
+        // 1/tan(atan(1/√2)) = √2
+        const INV_TAN_PITCH: f32 = std::f32::consts::SQRT_2;
+        (world_y - self.smooth_target.y) * INV_TAN_PITCH / CHUNK_WORLD_SIZE
+    }
+
+    /// The half-extents of the view rectangle with proportional margin, as
+    /// `(half_right, half_up)` in chunks.
+    ///
+    /// The margin is computed as a fraction of the larger visible axis and then
+    /// applied equally to both axes. This ensures the forward/backward direction
+    /// (foreshortened by the isometric pitch) gets the same absolute buffer as
+    /// the horizontal direction, preventing pop-in when the camera moves forward.
+    fn view_half_extents(&self, margin_fraction: f32) -> (f32, f32) {
+        const MIN_MARGIN: f32 = 2.0; // minimum buffer in chunks, prevents pop-in at low zoom
+
+        // `zoom` is the orthographic half-height in world units, so the screen-X
+        // ground axis covers `zoom * aspect`. The screen-Y ground axis is
+        // foreshortened by the isometric tilt, so filling the same screen height
+        // takes more ground: `zoom / sin(pitch)`, as `visible_radius` states.
+        let sin_pitch = (1.0_f32 / 3.0).sqrt(); // sin(atan(1/√2)) = 1/√3
+        let half_right_vis = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
+        let half_up_vis = self.zoom / sin_pitch / CHUNK_WORLD_SIZE;
+
+        let margin_chunks = (half_right_vis.max(half_up_vis) * margin_fraction).max(MIN_MARGIN);
+        (half_right_vis + margin_chunks, half_up_vis + margin_chunks)
     }
 
     /// Advance camera state. In Play mode `follow` is the interpolated player
@@ -190,5 +275,147 @@ impl IsometricCamera {
             view_proj: snapped_vp.to_cols_array_2d(),
             subpixel_offset,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::IVec3;
+    use std::f32::consts::FRAC_PI_4;
+
+    /// The view test streaming ran before R6 (`CameraView` in
+    /// `world/streaming.rs` at 35bef22), kept as the reference the camera's area
+    /// is checked against.
+    struct OldCameraView {
+        zoom: f32,
+        aspect: f32,
+        rotation: f32,
+        camera_chunk: IVec3,
+        camera_world_pos: Vec3,
+        world_y_range: (f32, f32),
+    }
+
+    impl OldCameraView {
+        fn altitude_shift_chunks(&self, world_y: f32) -> f32 {
+            const INV_TAN_PITCH: f32 = std::f32::consts::SQRT_2;
+            (world_y - self.camera_world_pos.y) * INV_TAN_PITCH / CHUNK_WORLD_SIZE
+        }
+
+        fn is_in_view_rect(&self, chunk_x: i32, chunk_z: i32, margin_fraction: f32) -> bool {
+            let (half_right, half_up) = self.half_extents(margin_fraction);
+            let dx = (chunk_x - self.camera_chunk.x) as f32;
+            let dz = (chunk_z - self.camera_chunk.z) as f32;
+            let cos_r = self.rotation.cos();
+            let sin_r = self.rotation.sin();
+            let local_right = dx * sin_r - dz * cos_r;
+            let local_up = -dx * cos_r - dz * sin_r;
+            if local_right.abs() > half_right {
+                return false;
+            }
+            let span_lo = local_up + self.altitude_shift_chunks(self.world_y_range.0);
+            let span_hi = local_up + self.altitude_shift_chunks(self.world_y_range.1);
+            span_lo <= half_up && span_hi >= -half_up
+        }
+
+        fn half_extents(&self, margin_fraction: f32) -> (f32, f32) {
+            const MIN_MARGIN: f32 = 2.0;
+            let sin_pitch = (1.0_f32 / 3.0).sqrt();
+            let half_right_vis = self.zoom * self.aspect / CHUNK_WORLD_SIZE;
+            let half_up_vis = self.zoom / sin_pitch / CHUNK_WORLD_SIZE;
+            let margin_chunks = (half_right_vis.max(half_up_vis) * margin_fraction).max(MIN_MARGIN);
+            (half_right_vis + margin_chunks, half_up_vis + margin_chunks)
+        }
+
+        fn bounding_radius(&self, margin_fraction: f32) -> i32 {
+            let (half_right, half_up) = self.half_extents(margin_fraction);
+            let lift = self
+                .altitude_shift_chunks(self.world_y_range.0)
+                .abs()
+                .max(self.altitude_shift_chunks(self.world_y_range.1).abs());
+            let half_up = half_up + lift;
+            let cos_r = self.rotation.cos().abs();
+            let sin_r = self.rotation.sin().abs();
+            let aabb_half_x = half_right * sin_r + half_up * cos_r;
+            let aabb_half_z = half_right * cos_r + half_up * sin_r;
+            aabb_half_x.max(aabb_half_z).ceil() as i32
+        }
+    }
+
+    /// The camera's area holds exactly the columns the old view test streamed,
+    /// for loading and for keeping, and its scan reaches exactly as far.
+    #[test]
+    fn the_area_holds_the_columns_the_old_view_test_streamed() {
+        let params = CameraParams::default();
+        let mut camera = IsometricCamera::new(&params);
+        let zooms = [params.zoom_min, 12.0, params.initial_zoom, 70.0, params.zoom_max];
+        let aspects = [16.0 / 9.0, 4.0 / 3.0, 21.0 / 9.0];
+        let rotations = [FRAC_PI_4, 3.0 * FRAC_PI_4, -FRAC_PI_4, -3.0 * FRAC_PI_4, 0.3, 1.9];
+        // Inside the layers, far from the origin, below the lowest and above the highest.
+        let targets = [
+            Vec3::new(64.0, 32.0, 64.0),
+            Vec3::new(-517.3, 140.0, 2049.9),
+            Vec3::new(10.0, -60.0, -10.0),
+            Vec3::new(0.0, 400.0, 0.0),
+        ];
+        let layers = [(0, 8), (-4, 12)];
+        let (mut inside, mut outside) = (0usize, 0usize);
+        for &zoom in &zooms {
+            for &aspect in &aspects {
+                for &rotation in &rotations {
+                    for &target in &targets {
+                        for &chunk_y in &layers {
+                            camera.zoom = zoom;
+                            camera.aspect = aspect;
+                            camera.rotation = rotation;
+                            camera.smooth_target = target;
+                            let area = camera.area_of_interest(chunk_y, &params);
+                            let old = OldCameraView {
+                                zoom,
+                                aspect,
+                                rotation,
+                                camera_chunk: IVec3::new(
+                                    (target.x / CHUNK_WORLD_SIZE).floor() as i32,
+                                    0,
+                                    (target.z / CHUNK_WORLD_SIZE).floor() as i32,
+                                ),
+                                camera_world_pos: target,
+                                world_y_range: (
+                                    chunk_y.0 as f32 * CHUNK_WORLD_SIZE,
+                                    chunk_y.1 as f32 * CHUNK_WORLD_SIZE,
+                                ),
+                            };
+                            assert_eq!(area.center, (old.camera_chunk.x, old.camera_chunk.z));
+                            assert_eq!(area.chunk_y, chunk_y);
+                            for (footprint, margin) in [
+                                (area.load, params.load_margin),
+                                (area.retain, params.unload_margin),
+                            ] {
+                                let reach = old.bounding_radius(margin);
+                                assert_eq!(footprint.reach(), reach, "zoom {zoom}, rotation {rotation}");
+                                for dz in -reach - 2..=reach + 2 {
+                                    for dx in -reach - 2..=reach + 2 {
+                                        let old_in = old.is_in_view_rect(
+                                            old.camera_chunk.x + dx,
+                                            old.camera_chunk.z + dz,
+                                            margin,
+                                        );
+                                        assert_eq!(
+                                            footprint.contains(dx, dz),
+                                            old_in,
+                                            "zoom {zoom}, aspect {aspect}, rotation {rotation}, \
+                                             target {target}, layers {chunk_y:?}, margin {margin}, \
+                                             column ({dx}, {dz})",
+                                        );
+                                        if old_in { inside += 1 } else { outside += 1 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(inside > 0 && outside > 0, "{inside} inside, {outside} outside");
     }
 }
