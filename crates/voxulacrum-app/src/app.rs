@@ -568,6 +568,7 @@ fn init_ecs(
         dict_bytes, 
     );
     ecs.insert_resource(streaming_manager);
+    ecs.insert_resource(world::streaming::Observers::default());
     ecs.insert_resource(server_config);
     ecs.insert_resource(jobs::JobSystem::new(gen_pool.clone()));
     ecs.insert_resource(ui_state);

@@ -1,5 +1,5 @@
-//! Chunk streaming, and the seam pass that finalizes a chunk once its
-//! neighbors are resident.
+//! Chunk streaming, the local camera's area of interest, and the seam pass that
+//! finalizes a chunk once its neighbors are resident.
 
 use bevy_ecs::prelude::*;
 use glam::IVec3;
@@ -8,20 +8,27 @@ use crate::diagnostics::{
 };
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
-use crate::meshing::coordinator::MeshingCoordinator;
-use crate::simulation::manager::SimulationManager;
+use crate::rendering::frame_state::FrameState;
 use crate::ui::panels::UiState;
-use crate::world::chunk::CHUNK_WORLD_SIZE;
 use crate::world::mutation::{MutationCommand, WorldMutation};
 use crate::world::persistence::WorldPersistence;
-use crate::world::streaming::{CameraView, ChunkStreamingManager};
+use crate::world::streaming::{ChunkStreamingManager, ObserverId, Observers};
+
+/// Send the local camera's area of interest to residency when it changes, as
+/// observer 0, the local player (design §12, "Residency"). The camera module
+/// computes the area into this frame's camera description.
+pub fn local_interest_system(frame: Res<FrameState>, mut observers: ResMut<Observers>) {
+    let area = frame.camera.area_of_interest;
+    if observers.get(ObserverId::LOCAL) != Some(&area) {
+        observers.set(ObserverId::LOCAL, area);
+    }
+}
 
 pub fn streaming_tick_system(
     mut streaming: ResMut<ChunkStreamingManager>,
     mut world: ResMut<VoxelWorld>,
-    mut meshing: ResMut<MeshingCoordinator>,
     mut jobs: ResMut<JobSystem>,
-    sim: Res<SimulationManager>,
+    observers: Res<Observers>,
     mut ui: ResMut<UiState>,
     persistence: Res<WorldPersistence>,
     mut timings: ResMut<FrameTimings>,
@@ -31,26 +38,10 @@ pub fn streaming_tick_system(
     // it free. Safe here specifically because this system has one exit — the
     // condition the guard exists to protect against does not apply.
     let started = std::time::Instant::now();
-    let cam_pos = sim.camera.smooth_target;
-    let cam_cx = (cam_pos.x / CHUNK_WORLD_SIZE).floor() as i32;
-    let cam_cz = (cam_pos.z / CHUNK_WORLD_SIZE).floor() as i32;
-    let camera_view = CameraView {
-        zoom: sim.camera.zoom,
-        aspect: sim.camera.aspect,
-        rotation: sim.camera.rotation,
-        camera_chunk: IVec3::new(cam_cx, 0, cam_cz),
-        camera_world_pos: cam_pos,
-        world_y_range: (
-            world.min_chunk_y as f32 * CHUNK_WORLD_SIZE,
-            world.max_chunk_y as f32 * CHUNK_WORLD_SIZE,
-        ),
-    };
-
     let tick_result = streaming.tick(
         &mut world.0,
-        &mut meshing,
         &mut jobs,
-        &camera_view,
+        &observers,
         &mut |chunk: &crate::world::chunk::LoadedChunk| {
             if chunk.persist_dirty {
                 if let Err(e) = persistence.save_chunk_on_unload(chunk) {

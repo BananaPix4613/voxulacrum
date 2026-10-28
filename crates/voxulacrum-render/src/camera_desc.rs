@@ -28,7 +28,6 @@ pub struct CameraDesc {
     pub up: Vec3,
     pub forward: Vec3,
     /// What the observer behind this camera needs resident.
-    #[allow(dead_code)] // read once residency comes from observers (R6)
     pub area_of_interest: AreaOfInterest,
     /// The isometric camera module's own values. Only that module should read
     /// them; the uniform writer still does, which V8 removes.

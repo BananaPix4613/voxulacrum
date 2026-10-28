@@ -17,20 +17,11 @@ pub struct ServerConfig {
     pub autosave: AutosaveConfig,
 }
 
-/// Chunk streaming margins and per-frame budgets.
-///
-/// The two margins size the isometric view test, which R6 moves into the
-/// camera module as that camera's area of interest. They stay here until then.
+/// Chunk streaming's per-frame budgets. How far past a view chunks load and
+/// stay loaded belongs to the observer's area of interest, which its camera
+/// sizes (the isometric camera's margins are in `CameraParams`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamingConfig {
-    /// Proportional load margin: fraction of visible extent added as buffer.
-    /// E.g., 0.15 = 15% buffer on each side beyond the visible view rect.
-    /// A minimum of 2 chunks is always enforced regardless of zoom.
-    pub load_margin: f32,
-    /// Proportional unload margin: fraction of visible extent beyond which
-    /// chunks are unloaded. Should be larger than load_margin to prevent
-    /// load/unload thrashing (hysteresis).
-    pub unload_margin: f32,
     /// Completed generation results inserted into the world per frame.
     pub max_gen_per_frame: u32,
     /// Main-thread time budget for the unload phase, in milliseconds.
@@ -55,8 +46,6 @@ pub struct StreamingConfig {
 impl Default for StreamingConfig {
     fn default() -> Self {
         Self {
-            load_margin: 0.40,
-            unload_margin: 0.55,
             max_gen_per_frame: 64,
             unload_budget_ms: 4.0,
         }

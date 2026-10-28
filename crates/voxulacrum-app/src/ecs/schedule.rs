@@ -127,6 +127,9 @@ pub fn build_frame_schedule() -> Schedule {
     ));
     // Streaming + Meshing
     schedule.add_systems((
+        systems::streaming::local_interest_system
+            .in_set(FrameStage::Meshing)
+            .before(systems::streaming::streaming_tick_system),
         systems::streaming::streaming_tick_system
             .in_set(FrameStage::Meshing)
             .before(systems::meshing::meshing_tick_system),

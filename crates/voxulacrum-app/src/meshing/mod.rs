@@ -369,11 +369,6 @@ impl MeshingPipeline {
         completed
     }
 
-    pub fn pending_count(&self) -> usize {
-        self.pending_submissions.len()
-            + self.chunk_states.values().filter(|s| **s != ChunkMeshState::Idle).count()
-    }
-
     pub fn is_idle(&self) -> bool {
         self.pending_submissions.is_empty()
             && self.chunk_states.values().all(|s| *s == ChunkMeshState::Idle)
