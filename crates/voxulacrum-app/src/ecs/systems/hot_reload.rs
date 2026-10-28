@@ -3,7 +3,7 @@
 
 use bevy_ecs::prelude::*;
 use crate::diagnostics::{FrameTimings, SUB_PARAMS};
-use crate::ecs::resources::LoadedPalette;
+use crate::ecs::resources::{LoadedPalette, RenderRequests};
 use crate::graph_reload::GraphWatcherRes;
 use crate::palette;
 use crate::params::ParamChangeKind;
@@ -16,8 +16,18 @@ use crate::rendering::render_context::RenderContext;
 use crate::shader_reload::ShaderWatcher;
 use crate::ui::panels::UiState;
 
-pub fn shader_hot_reload_system(
+/// Queue the shader files that changed on disk, for `shader_reload_system`.
+pub fn shader_watch_system(
     shader_watcher: Res<ShaderWatcher>,
+    mut requests: ResMut<RenderRequests>,
+) {
+    requests.shader_changes.extend(shader_watcher.poll_changes());
+}
+
+/// Rebuild the pipelines of the shaders `shader_watch_system` queued. Runs in
+/// UniformWrite, beside the other GPU work.
+pub fn shader_reload_system(
+    mut requests: ResMut<RenderRequests>,
     ctx: Res<RenderContext>,
     mut pipeline_registry: ResMut<PipelineRegistry>,
     pipeline_resources: Res<PipelineResources>,
@@ -27,7 +37,7 @@ pub fn shader_hot_reload_system(
     mut cap_pass: ResMut<CapPass>,
     mut ui: ResMut<UiState>,
 ) {
-    let changed = shader_watcher.poll_changes();
+    let changed = std::mem::take(&mut requests.shader_changes);
     for path in changed {
         let filename = match path.file_name().and_then(|f| f.to_str()) {
             Some(f) => f.to_string(),

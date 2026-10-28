@@ -20,6 +20,7 @@ use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::GrassVertex;
 use crate::rendering::render_context::RenderContext;
+use crate::world::changes::ChunkVersion;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
 
 /// Columns per chunk footprint; also the per-chunk instance count (one blade
@@ -71,6 +72,8 @@ pub struct DetailPaintData {
 /// Per-chunk GPU detail-paint data.
 pub struct ChunkDetailPaint {
     pub bind_group: wgpu::BindGroup,
+    /// The chunk version this paint was built from.
+    pub version: ChunkVersion,
 }
 
 #[derive(Resource)]
@@ -129,12 +132,22 @@ impl DetailPaintPass {
         }
     }
 
-    /// Replace `pos`'s paint buffers with `data`, or drop them when the chunk
-    /// has no paint (`None`).
-    pub fn set(&mut self, pos: IVec3, data: Option<&DetailPaintData>, device: &wgpu::Device) {
+    /// Replace `pos`'s paint buffers with `data`, built from the chunk at
+    /// `version`, or drop them when the chunk has no paint (`None`).
+    pub fn set(
+        &mut self,
+        pos: IVec3,
+        version: ChunkVersion,
+        data: Option<&DetailPaintData>,
+        device: &wgpu::Device,
+    ) {
+        debug_assert!(
+            self.chunk_paint.get(&pos).map_or(true, |old| old.version <= version),
+            "detail paint for chunk {pos} was built from an older version than the one it replaces",
+        );
         match data {
             Some(data) => {
-                let entry = make_chunk_paint(device, &self.chunk_bind_group_layout, data);
+                let entry = make_chunk_paint(device, &self.chunk_bind_group_layout, data, version);
                 self.chunk_paint.insert(pos, entry);
             }
             None => {
@@ -225,6 +238,7 @@ fn make_chunk_paint(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     data: &DetailPaintData,
+    version: ChunkVersion,
 ) -> ChunkDetailPaint {
     let uniform = ChunkUniform {
         origin: data.origin,
@@ -250,5 +264,5 @@ fn make_chunk_paint(
             wgpu::BindGroupEntry { binding: 1, resource: uniform_buffer.as_entire_binding() },
         ],
     });
-    ChunkDetailPaint { bind_group }
+    ChunkDetailPaint { bind_group, version }
 }

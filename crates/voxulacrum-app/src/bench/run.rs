@@ -17,7 +17,7 @@ use crate::ecs::schedule::FrameStage;
 use crate::input::{GameAction, InputState, PointerState};
 use crate::jobs::{JobKind, JobKindStats, JobSystem};
 use crate::player::systems::Player;
-use crate::rendering::surface_state::SurfaceState;
+use crate::ecs::resources::WindowHandle;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::mutation::{MutationLog, MutationOrigin};
@@ -173,7 +173,7 @@ impl Recording {
         jobs: &JobSystem,
         streaming: &ChunkStreamingManager,
         ui: &UiState,
-        surface: &SurfaceState,
+        surface: (u32, u32),
     ) -> BenchResult {
         let seconds = self.started.elapsed().as_secs_f64();
         let frames = self.frame_cpu.len();
@@ -187,7 +187,7 @@ impl Recording {
             package: scenario.package.clone(),
             engine: env!("CARGO_PKG_VERSION").to_string(),
             gpu: ui.gpu.clone(),
-            surface: (surface.surface_config.width, surface.surface_config.height),
+            surface,
             seconds,
             frames,
             frontier_frames: self.frontier_frames,
@@ -312,7 +312,7 @@ pub fn bench_drive_system(
     streaming: Res<ChunkStreamingManager>,
     jobs: Res<JobSystem>,
     ui: Res<UiState>,
-    surface: Res<SurfaceState>,
+    window: Res<WindowHandle>,
     mut input: ResMut<InputState>,
     mut pointer: ResMut<PointerState>,
 ) {
@@ -337,8 +337,8 @@ pub fn bench_drive_system(
                 arrived
             }
             Op::Cursor { x, y } => {
-                let config = &surface.surface_config;
-                pointer.cursor = Some((x * config.width as f32, y * config.height as f32));
+                let size = window.inner_size();
+                pointer.cursor = Some((x * size.width as f32, y * size.height as f32));
                 true
             }
             Op::Press(action) => {
@@ -397,8 +397,14 @@ pub fn bench_drive_system(
             }
             Op::EndMeasure => {
                 if let Some(recording) = bench.recording.take() {
-                    bench.result =
-                        Some(recording.end(&bench.setup.scenario, &jobs, &streaming, &ui, &surface));
+                    let size = window.inner_size();
+                    bench.result = Some(recording.end(
+                        &bench.setup.scenario,
+                        &jobs,
+                        &streaming,
+                        &ui,
+                        (size.width, size.height),
+                    ));
                 }
                 true
             }

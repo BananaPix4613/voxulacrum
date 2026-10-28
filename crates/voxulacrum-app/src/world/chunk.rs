@@ -99,7 +99,6 @@ pub struct LoadedChunk {
     pub lobes: Vec<nodegraph_eval::feature::CanopyLobe>,
     /// The version the door last stamped this chunk with (`world::changes`).
     /// The default until the chunk's first change.
-    #[allow(dead_code)] // read when render entries are tagged with it (R4)
     pub version: ChunkVersion,
 }
 

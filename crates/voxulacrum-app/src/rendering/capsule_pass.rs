@@ -13,11 +13,14 @@ use glam::IVec3;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::CapsuleInstanceGpu;
+use crate::world::changes::ChunkVersion;
 
 /// One chunk's capsule instances.
 pub struct ChunkCapsules {
     pub instance_buffer: wgpu::Buffer,
     pub instance_count: u32,
+    /// The chunk version these instances were built from.
+    pub version: ChunkVersion,
 }
 
 #[derive(Resource, Default)]
@@ -26,14 +29,19 @@ pub struct CapsulePass {
 }
 
 impl CapsulePass {
-    /// Replace `pos`'s instance buffer with `instances`, or drop it when the
-    /// chunk owns no capsules (`None`).
+    /// Replace `pos`'s instance buffer with `instances`, built from the chunk at
+    /// `version`, or drop it when the chunk owns no capsules (`None`).
     pub fn set(
         &mut self,
         pos: IVec3,
+        version: ChunkVersion,
         instances: Option<&[CapsuleInstanceGpu]>,
         device: &wgpu::Device,
     ) {
+        debug_assert!(
+            self.chunks.get(&pos).map_or(true, |old| old.version <= version),
+            "capsules for chunk {pos} were built from an older version than the ones they replace",
+        );
         let Some(instances) = instances else {
             self.chunks.remove(&pos);
             return;
@@ -45,7 +53,7 @@ impl CapsulePass {
         });
         self.chunks.insert(
             pos,
-            ChunkCapsules { instance_buffer, instance_count: instances.len() as u32 },
+            ChunkCapsules { instance_buffer, instance_count: instances.len() as u32, version },
         );
     }
 

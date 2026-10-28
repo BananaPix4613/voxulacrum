@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use bevy_ecs::prelude::Resource;
 use glam::IVec3;
 use wgpu::util::DeviceExt;
+use crate::meshing::uploads::{ChunkUpload, ChunkUploads};
 use crate::meshing::MeshingPipeline;
 use crate::rendering::pipelines::FaceVertex;
-use crate::rendering::render_context::RenderContext;
 use crate::ui::panels::UiState;
+use crate::world::changes::ChunkVersion;
 use crate::world::World;
 
 #[derive(Resource)]
@@ -22,26 +23,43 @@ pub struct ChunkMesh {
     /// `index_count` and quad topology, so the residency panel reports the real
     /// GPU footprint instead of an estimate.
     pub gpu_bytes: u64,
+    /// The chunk version this mesh was built from.
+    pub version: ChunkVersion,
+}
+
+/// One chunk's terrain mesh as the mesher produced it, queued for upload.
+pub struct TerrainMesh {
+    pub vertices: Vec<FaceVertex>,
+    pub indices: Vec<u32>,
 }
 
 /// The terrain meshes of resident chunks, keyed by chunk coordinate. Client
-/// state: the world holds no mesh (R4). An entry goes when its chunk unloads
-/// (`streaming_tick_system`); the render world takes these over later in R4.
+/// state: the world holds no mesh (R4). Filled and emptied from `ChunkUploads`
+/// by `chunk_upload_system`; the render world takes these over later in R4.
 #[derive(Resource, Default)]
 pub struct ChunkMeshes {
     pub meshes: HashMap<IVec3, ChunkMesh>,
 }
 
 impl ChunkMeshes {
-    /// Upload a finished mesh for `pos`, replacing the old one. An empty mesh
-    /// removes the entry, since the chunk has nothing to draw.
-    pub fn upload(
+    /// Upload `mesh`, built from the chunk at `version`, replacing the old one.
+    /// An empty or absent mesh removes the entry, since the chunk has nothing
+    /// to draw.
+    pub fn set(
         &mut self,
         pos: IVec3,
-        vertices: &[FaceVertex],
-        indices: &[u32],
+        version: ChunkVersion,
+        mesh: Option<&TerrainMesh>,
         device: &wgpu::Device,
     ) {
+        debug_assert!(
+            self.meshes.get(&pos).map_or(true, |old| old.version <= version),
+            "terrain for chunk {pos} was built from an older version than the one it replaces",
+        );
+        let Some(TerrainMesh { vertices, indices }) = mesh else {
+            self.meshes.remove(&pos);
+            return;
+        };
         if vertices.is_empty() || indices.is_empty() {
             self.meshes.remove(&pos);
             return;
@@ -65,7 +83,8 @@ impl ChunkMeshes {
                 vertex_buffer,
                 index_buffer,
                 index_count: indices.len() as u32,
-                gpu_bytes: (size_of_val(vertices) + size_of_val(indices)) as u64,
+                gpu_bytes: (size_of_val(vertices.as_slice()) + size_of_val(indices.as_slice())) as u64,
+                version,
             },
         );
     }
@@ -91,9 +110,8 @@ impl MeshingCoordinator {
     pub fn tick(
         &mut self,
         world: &World,
-        meshes: &mut ChunkMeshes,
+        uploads: &mut ChunkUploads,
         jobs: &mut crate::jobs::JobSystem,
-        ctx: &RenderContext,
         ui_state: &mut UiState,
         camera_chunk: IVec3,
         max_snapshots: usize,
@@ -117,8 +135,11 @@ impl MeshingCoordinator {
             if world.get_chunk(pos).is_none() {
                 continue;
             }
-            meshes.upload(pos, &result.vertices, &result.indices, &ctx.device);
             self.pipeline.mark_meshed(pos, result.mesh_seq);
+            uploads.terrain.insert(pos, ChunkUpload::Set {
+                version: result.version,
+                data: Some(TerrainMesh { vertices: result.vertices, indices: result.indices }),
+            });
             meshed_positions.push(pos);
         }
         

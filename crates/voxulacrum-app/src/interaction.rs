@@ -9,11 +9,10 @@ use bevy_ecs::prelude::*;
 use glam::{IVec3, Vec3};
 use voxel_core::Voxel;
 
-use crate::ecs::resources::VoxelWorld;
+use crate::ecs::resources::{VoxelWorld, WindowHandle};
 use crate::input::{GameAction, InputState, PointerState, RawInputBuffer};
 use crate::player::systems::Player;
 use crate::meshing::overlay::DebugLines;
-use crate::rendering::surface_state::SurfaceState;
 use crate::rendering::camera_desc::CameraDesc;
 use crate::simulation::manager::FrameState;
 use crate::world::chunk::{CHUNK_SIZE, VOXEL_SCALE};
@@ -35,7 +34,7 @@ pub fn picking_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
     frame: Res<FrameState>,
-    surface: Res<SurfaceState>,
+    window: Res<WindowHandle>,
     world: Res<VoxelWorld>,
     mut pick: ResMut<PickState>,
     mut debug_lines: ResMut<DebugLines>,
@@ -52,22 +51,22 @@ pub fn picking_system(
     pick.anchor = if buffer.egui_wants_pointer {
         None
     } else {
-        compute_pick(&pointer, &frame.camera, &surface, &world.0)
+        compute_pick(&pointer, &frame.camera, window.inner_size(), &world.0)
     };
     debug_lines.set_highlight(pick.anchor, HIGHLIGHT_ACTIVE);
 }
 
 /// Unproject the cursor to a world-space ray (origin, direction), or `None` if
-/// the cursor is outside the window or the surface has zero extent. Shared by
+/// the cursor is outside the window or the window has zero extent. Shared by
 /// Authoring's pick and Play mode's reach targeting.
 fn cursor_ray(
     pointer: &PointerState,
     camera: &CameraDesc,
-    surface: &SurfaceState,
+    window_size: winit::dpi::PhysicalSize<u32>,
 ) -> Option<(Vec3, Vec3)> {
     let (cx, cy) = pointer.cursor?;
-    let w = surface.surface_config.width as f32;
-    let h = surface.surface_config.height as f32;
+    let w = window_size.width as f32;
+    let h = window_size.height as f32;
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
@@ -91,10 +90,10 @@ fn cursor_ray(
 fn compute_pick(
     pointer: &PointerState,
     camera: &CameraDesc,
-    surface: &SurfaceState,
+    window_size: winit::dpi::PhysicalSize<u32>,
     world: &World,
 ) -> Option<IVec3> {
-    let (near, dir) = cursor_ray(pointer, camera, surface)?;
+    let (near, dir) = cursor_ray(pointer, camera, window_size)?;
     raycast_voxel(world, near, dir)
 }
 
@@ -214,7 +213,7 @@ pub fn player_targeting_system(
     pointer: Res<PointerState>,
     buffer: Res<RawInputBuffer>,
     frame: Res<FrameState>,
-    surface: Res<SurfaceState>,
+    window: Res<WindowHandle>,
     world: Res<VoxelWorld>,
     players: Query<&Player>,
     play: Option<Res<crate::play::PlaySettings>>,
@@ -229,7 +228,7 @@ pub fn player_targeting_system(
     } else if let (Some(player), Some(play)) = (player, play.as_deref()) {
         let tuning = &play.player;
         let eye = (player.curr.position + Vec3::new(0.0, tuning.eye_height, 0.0)) / VOXEL_SCALE;
-        cursor_ray(&pointer, &frame.camera, &surface)
+        cursor_ray(&pointer, &frame.camera, window.inner_size())
             .and_then(|(origin, dir)| raycast_voxel_faced(&world.0, origin, dir, f32::INFINITY))
             .map(|(hit, prev)| (hit, prev, hit.as_vec3().distance(eye) <= tuning.reach))
     } else {

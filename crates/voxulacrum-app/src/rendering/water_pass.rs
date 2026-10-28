@@ -5,6 +5,7 @@ use glam::IVec3;
 use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::WaterVertex;
+use crate::world::changes::ChunkVersion;
 
 /// One chunk's water surface, built on the CPU (`meshing::water`).
 pub struct WaterSurface {
@@ -20,6 +21,8 @@ pub struct ChunkWaterMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
+    /// The chunk version this mesh was built from.
+    pub version: ChunkVersion,
 }
 
 /// Water surface pass: holds one surface mesh per chunk that has visible water.
@@ -109,9 +112,19 @@ impl WaterPass {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(std::slice::from_ref(u)));
     }
 
-    /// Replace the water mesh for `pos` with `surface`, or drop it when the
-    /// chunk has no visible water surface (`None`).
-    pub fn set(&mut self, pos: IVec3, surface: Option<&WaterSurface>, device: &wgpu::Device) {
+    /// Replace the water mesh for `pos` with `surface`, built from the chunk at
+    /// `version`, or drop it when the chunk has no visible water surface (`None`).
+    pub fn set(
+        &mut self,
+        pos: IVec3,
+        version: ChunkVersion,
+        surface: Option<&WaterSurface>,
+        device: &wgpu::Device,
+    ) {
+        debug_assert!(
+            self.chunk_meshes.get(&pos).map_or(true, |old| old.version <= version),
+            "water for chunk {pos} was built from an older version than the one it replaces",
+        );
         let Some(surface) = surface else {
             self.remove(pos);
             return;
@@ -130,6 +143,7 @@ impl WaterPass {
             vertex_buffer,
             index_buffer,
             index_count: surface.indices.len() as u32,
+            version,
         });
         self.chunk_surface.insert(pos, surface.surface_y);
         self.recompute_avg();

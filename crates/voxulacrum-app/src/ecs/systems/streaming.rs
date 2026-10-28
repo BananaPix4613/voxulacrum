@@ -8,13 +8,8 @@ use crate::diagnostics::{
 };
 use crate::ecs::resources::VoxelWorld;
 use crate::jobs::JobSystem;
-use crate::meshing::coordinator::{ChunkMeshes, MeshingCoordinator};
-use crate::rendering::canopy_pass::CanopyPass;
-use crate::rendering::capsule_pass::CapsulePass;
-use crate::rendering::detail_paint_pass::DetailPaintPass;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::water_pass::WaterPass;
+use crate::meshing::coordinator::MeshingCoordinator;
+use crate::meshing::uploads::ChunkUploads;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
 use crate::world::chunk::CHUNK_WORLD_SIZE;
@@ -26,16 +21,10 @@ pub fn streaming_tick_system(
     mut streaming: ResMut<ChunkStreamingManager>,
     mut world: ResMut<VoxelWorld>,
     mut meshing: ResMut<MeshingCoordinator>,
-    mut meshes: ResMut<ChunkMeshes>,
     mut jobs: ResMut<JobSystem>,
     sim: Res<SimulationManager>,
-    mut detail_paint: ResMut<DetailPaintPass>,
-    mut scatter: ResMut<ScatterPass>,
-    mut capsules: ResMut<CapsulePass>,
-    mut canopy: ResMut<CanopyPass>,
-    mut water_pass: ResMut<WaterPass>,
+    mut uploads: ResMut<ChunkUploads>,
     mut ui: ResMut<UiState>,
-    _ctx: Res<RenderContext>,
     persistence: Res<WorldPersistence>,
     mut timings: ResMut<FrameTimings>,
 ) {
@@ -73,15 +62,10 @@ pub fn streaming_tick_system(
         },
     );
 
-    // Drop the unloaded chunks' meshes and per-chunk buffers. R6 moves this to
-    // the client's chunk view.
+    // Queue the removal of the unloaded chunks' meshes and per-chunk buffers.
+    // R6 moves this to the client's chunk view.
     for pos in &tick_result.unloaded {
-        meshes.remove(*pos);
-        detail_paint.remove(*pos);
-        scatter.remove(*pos);
-        capsules.remove(*pos);
-        canopy.remove(*pos);
-        water_pass.remove(*pos);
+        uploads.remove(*pos);
     }
 
     // NOTE: We do NOT add foliage/water here for inserted chunks.

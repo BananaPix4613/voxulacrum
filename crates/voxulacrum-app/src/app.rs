@@ -539,6 +539,8 @@ fn init_ecs(
     ecs.insert_resource(MaterialColorBuffer(material_color_buffer));
     ecs.insert_resource(VisibilityMask::new(visibility_mask_texture));
     ecs.insert_resource(VisibilityMaskTexels::default());
+    ecs.insert_resource(RenderRequests::default());
+    ecs.insert_resource(crate::meshing::uploads::ChunkUploads::default());
     ecs.insert_resource(ShaderDir(shader_dir));
     ecs.insert_resource(LoadedPalette(None));
     ecs.insert_resource(VoxelWorld(world));
@@ -776,59 +778,14 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Resized(new_size) => {
-                // Clone RenderContext (cheap Arc bumps) to avoid borrow conflicts.
-                let ctx = ecs.resource::<RenderContext>().clone();
-
-                ecs.resource_mut::<SurfaceState>()
-                    .resize(&ctx.device, new_size.width, new_size.height);
+                // The camera is main-side and follows at once. The surface is the
+                // renderer's: it resizes from the request in UniformWrite, and the
+                // render targets follow the frame's dims in the Render stage.
                 ecs.resource_mut::<SimulationManager>()
                     .camera
                     .resize(new_size.width, new_size.height);
-
-                let zoom = ecs.resource::<SimulationManager>().camera.zoom;
-                let density = ecs
-                    .resource::<UiState>()
-                    .params
-                    .render_pipeline
-                    .world_pixel_density;
-                let dims = compute_render_dimensions(
-                    new_size.width,
-                    new_size.height,
-                    zoom,
-                    density,
-                );
-                let water_layout = ecs
-                    .resource::<PipelineResources>()
-                    .water_bind_group_layout
-                    .clone();
-
-                let new_rt = RenderTargets::new(&ctx, &dims);
-
-                ecs.resource_mut::<OutlinePass>().rebuild_bind_group(
-                    &ctx,
-                    &new_rt.scene_view,
-                    &new_rt.depth_sample_view,
-                    &new_rt.normal_view,
-                );
-                ecs.resource_mut::<PostProcessPass>().rebuild_bind_group(
-                    &ctx,
-                    &new_rt.processed_view,
-                    &new_rt.depth_sample_view,
-                );
-                ecs.resource_mut::<PalettePass>()
-                    .rebuild_bind_group(&ctx, &new_rt.scene_view);
-                ecs.resource_mut::<UpscalePass>()
-                    .rebuild_bind_group(&ctx, &new_rt.processed_view);
-                ecs.resource_mut::<WaterPass>().rebuild_bind_group(
-                    &ctx.device,
-                    &water_layout,
-                    &new_rt.scene_copy_view,
-                    &new_rt.depth_sample_view,
-                    &new_rt.reflection_color_view,
-                    &new_rt.reflection_depth_sample_view,
-                );
-
-                *ecs.resource_mut::<RenderTargets>() = new_rt;
+                ecs.resource_mut::<RenderRequests>().surface_size =
+                    Some((new_size.width, new_size.height));
             }
 
             ref e @ WindowEvent::KeyboardInput { ref event, .. } => {

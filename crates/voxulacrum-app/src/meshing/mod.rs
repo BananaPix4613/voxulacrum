@@ -5,6 +5,7 @@ mod cube_mesher;
 pub mod foliage;
 pub mod overlay;
 pub mod player;
+pub mod uploads;
 pub mod water;
 
 use glam::IVec3;
@@ -19,6 +20,7 @@ use bevy_ecs::prelude::Resource;
 use crate::core_budget::CoreBudget;
 use crate::jobs::{JobKind, JobSystem, Priority};
 use crate::rendering::pipelines::FaceVertex;
+use crate::world::changes::ChunkVersion;
 use crate::world::chunk::ChunkSnapshot;
 use cache::AtomicCacheStats;
 use cube_mesher::generate_chunk_mesh;
@@ -32,6 +34,8 @@ pub struct MeshResult {
     pub vertices: Vec<FaceVertex>,
     pub indices: Vec<u32>,
     pub mesh_seq: u64,
+    /// The chunk's version when it was snapshotted for this mesh.
+    pub version: ChunkVersion,
 }
 
 // ============================================================================
@@ -286,6 +290,8 @@ impl MeshingPipeline {
             );
             let request = self.requests.get(&pos).copied().unwrap_or_default();
             let mesh_seq = request.seq;
+            // The version this mesh is built from, for its render entry to record.
+            let version = chunk.version;
 
             // Submit to the scheduler; the job returns over the result channel,
             // which `poll` drains. An edit-dirtied chunk (the only thing that sets
@@ -303,7 +309,7 @@ impl MeshingPipeline {
             let res_tx = self.result_tx.lock().unwrap().clone();
             let cache_config = self.cache_config.clone();
             jobs.submit(JobKind::Mesh, pos, priority, move || {
-                mesh_chunk_task(pos, snapshot, mesh_seq, res_tx, cache_config);
+                mesh_chunk_task(pos, snapshot, mesh_seq, version, res_tx, cache_config);
             });
             self.chunk_states.insert(pos, ChunkMeshState::InProgress);
             submitted += 1;
@@ -416,6 +422,7 @@ fn mesh_chunk_task(
     chunk_key: IVec3,
     snapshot: ChunkSnapshot,
     mesh_seq: u64,
+    version: ChunkVersion,
     res_tx: Sender<MeshResult>,
     cache_config: Arc<CacheConfig>,
 ) {
@@ -423,7 +430,7 @@ fn mesh_chunk_task(
     // hash of the whole 34^3 snapshot) is not computed either.
     if !cache_config.enabled {
         let (vertices, indices) = generate_chunk_mesh(&snapshot);
-        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq, version });
         return;
     }
 
@@ -442,7 +449,7 @@ fn mesh_chunk_task(
         if let Ok(mut lru) = cache_config.lru.lock() {
             lru.touch(snapshot.position);
         }
-        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+        let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq, version });
         return;
     }
 
@@ -490,7 +497,7 @@ fn mesh_chunk_task(
         }
     }
 
-    let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq });
+    let _ = res_tx.send(MeshResult { chunk_key, vertices, indices, mesh_seq, version });
 }
 
 #[cfg(test)]
@@ -531,7 +538,7 @@ mod tests {
             enabled,
         });
         let (tx, rx) = mpsc::channel::<MeshResult>();
-        mesh_chunk_task(IVec3::ZERO, snapshot_with_a_cube(), 1, tx, config);
+        mesh_chunk_task(IVec3::ZERO, snapshot_with_a_cube(), 1, ChunkVersion::default(), tx, config);
         let result = rx.recv().expect("the task always sends a result");
 
         let files = std::fs::read_dir(&dir).expect("cache directory").count();

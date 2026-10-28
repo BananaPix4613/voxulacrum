@@ -1,12 +1,18 @@
-//! Writes this frame's uniform buffers, and uploads the main side's versioned
-//! render data.
+//! Writes this frame's uniform buffers, uploads the main side's versioned and
+//! per-chunk render data, and applies its render requests.
 
 use bevy_ecs::prelude::*;
 use crate::ecs::resources::{
-    GlobalUniformBuffer, LoadedPalette, ReflectionUniformBuffer, ShadowUniformBuffer,
-    VisibilityMask, VisibilityMaskTexels,
+    GlobalUniformBuffer, LoadedPalette, ReflectionUniformBuffer, RenderRequests,
+    ShadowUniformBuffer, VisibilityMask, VisibilityMaskTexels,
 };
 use crate::meshing::cap::CapMesh;
+use crate::meshing::coordinator::ChunkMeshes;
+use crate::meshing::uploads::{ChunkUpload, ChunkUploads};
+use crate::rendering::canopy_pass::CanopyPass;
+use crate::rendering::capsule_pass::CapsulePass;
+use crate::rendering::detail_paint_pass::DetailPaintPass;
+use crate::rendering::scatter_pass::ScatterPass;
 use crate::meshing::overlay::{DebugLines, SkeletonPreview};
 use crate::meshing::player::PlayerMesh;
 use crate::rendering::cap_pass::CapPass;
@@ -59,6 +65,72 @@ pub fn render_upload_system(
         &sim.cloud_shadow.detail_texels,
         &sim.cloud_shadow.envelope_texels,
     );
+}
+
+/// Drain `ChunkUploads` into the terrain meshes and the per-chunk passes. Runs
+/// in UniformWrite before everything that reads them: the stats, the uniforms
+/// (the water plane) and the render graph.
+pub fn chunk_upload_system(
+    ctx: Res<RenderContext>,
+    mut uploads: ResMut<ChunkUploads>,
+    mut meshes: ResMut<ChunkMeshes>,
+    mut water_pass: ResMut<WaterPass>,
+    mut detail_paint: ResMut<DetailPaintPass>,
+    mut scatter: ResMut<ScatterPass>,
+    mut capsules: ResMut<CapsulePass>,
+    mut canopy: ResMut<CanopyPass>,
+) {
+    let device = &ctx.device;
+    let uploads = &mut *uploads;
+    for (pos, upload) in uploads.terrain.drain() {
+        match upload {
+            ChunkUpload::Set { version, data } => meshes.set(pos, version, data.as_ref(), device),
+            ChunkUpload::Remove => meshes.remove(pos),
+        }
+    }
+    for (pos, upload) in uploads.water.drain() {
+        match upload {
+            ChunkUpload::Set { version, data } => water_pass.set(pos, version, data.as_ref(), device),
+            ChunkUpload::Remove => water_pass.remove(pos),
+        }
+    }
+    for (pos, upload) in uploads.detail_paint.drain() {
+        match upload {
+            ChunkUpload::Set { version, data } => detail_paint.set(pos, version, data.as_ref(), device),
+            ChunkUpload::Remove => detail_paint.remove(pos),
+        }
+    }
+    for (pos, upload) in uploads.scatter.drain() {
+        match upload {
+            ChunkUpload::Set { version, data } => scatter.set(pos, version, data.as_deref(), device),
+            ChunkUpload::Remove => scatter.remove(pos),
+        }
+    }
+    for (pos, upload) in uploads.capsules.drain() {
+        match upload {
+            ChunkUpload::Set { version, data } => capsules.set(pos, version, data.as_deref(), device),
+            ChunkUpload::Remove => capsules.remove(pos),
+        }
+    }
+    for (pos, upload) in uploads.lobes.drain() {
+        match upload {
+            ChunkUpload::Set { version, data } => canopy.set(pos, version, data.as_deref(), device),
+            ChunkUpload::Remove => canopy.remove(pos),
+        }
+    }
+}
+
+/// Resize the surface to the window's latest size, when the window reported one
+/// since the last frame. The render targets follow on their own: the Render
+/// stage recreates them when the frame's dims change.
+pub fn surface_resize_system(
+    ctx: Res<RenderContext>,
+    mut requests: ResMut<RenderRequests>,
+    mut surface: ResMut<SurfaceState>,
+) {
+    if let Some((width, height)) = requests.surface_size.take() {
+        surface.resize(&ctx.device, width, height);
+    }
 }
 
 pub fn write_uniforms_system(

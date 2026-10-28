@@ -9,10 +9,8 @@ use crate::diagnostics::{FrameTimings, SUB_FLUID};
 use crate::ecs::resources::VoxelWorld;
 use crate::meshing::coordinator::MeshingCoordinator;
 use crate::meshing::foliage::build_scatter;
+use crate::meshing::uploads::{ChunkUpload, ChunkUploads};
 use crate::prefabs::PrefabRegistryRes;
-use crate::rendering::render_context::RenderContext;
-use crate::rendering::scatter_pass::ScatterPass;
-use crate::rendering::water_pass::WaterPass;
 use crate::world::changes::{ChunkChange, ChunkLayers};
 use crate::world::mutation::MutationOrigin;
 
@@ -29,10 +27,8 @@ use crate::world::mutation::MutationOrigin;
 pub fn chunk_change_system(
     mut world: ResMut<VoxelWorld>,
     mut meshing: ResMut<MeshingCoordinator>,
-    mut water_pass: ResMut<WaterPass>,
-    mut scatter: ResMut<ScatterPass>,
     prefabs: Res<PrefabRegistryRes>,
-    ctx: Res<RenderContext>,
+    mut uploads: ResMut<ChunkUploads>,
     mut timings: ResMut<FrameTimings>,
 ) {
     let changes: Vec<ChunkChange> = world.0.drain_changes().collect();
@@ -55,9 +51,12 @@ pub fn chunk_change_system(
             water.push(pos);
         }
         if change.layers.contains(ChunkLayers::SCATTER) {
-            scatter.set(pos, build_scatter(chunk, &prefabs).as_deref(), &ctx.device);
+            uploads.scatter.insert(pos, ChunkUpload::Set {
+                version: chunk.version,
+                data: build_scatter(chunk, &prefabs),
+            });
         }
     }
     let _timer = timings.sub_timer(SUB_FLUID);
-    rebuild_water_with_neighbors(&mut water_pass, &world.0, &ctx.device, water);
+    rebuild_water_with_neighbors(&mut uploads, &world.0, water);
 }

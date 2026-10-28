@@ -13,6 +13,7 @@ use wgpu::util::DeviceExt;
 
 use crate::rendering::pipelines::{ScatterInstanceGpu, ScatterVertex};
 use crate::rendering::render_context::RenderContext;
+use crate::world::changes::ChunkVersion;
 
 /// GPU mesh for one prefab shape.
 pub struct PrefabMesh {
@@ -30,6 +31,8 @@ pub struct PrefabInstances {
 /// Per-chunk scatter: one optional instance buffer per prefab id (index = `PrefabId`).
 pub struct ChunkScatter {
     pub by_prefab: Vec<Option<PrefabInstances>>,
+    /// The chunk version these instances were built from.
+    pub version: ChunkVersion,
 }
 
 #[derive(Resource)]
@@ -65,13 +68,19 @@ impl ScatterPass {
     }
 
     /// Replace `pos`'s instance buffers with `instances` (one list per
-    /// `PrefabId`), or drop them when the chunk has no scatter (`None`).
+    /// `PrefabId`), built from the chunk at `version`, or drop them when the
+    /// chunk has no scatter (`None`).
     pub fn set(
         &mut self,
         pos: IVec3,
+        version: ChunkVersion,
         instances: Option<&[Vec<ScatterInstanceGpu>]>,
         device: &wgpu::Device,
     ) {
+        debug_assert!(
+            self.chunk_scatter.get(&pos).map_or(true, |old| old.version <= version),
+            "scatter for chunk {pos} was built from an older version than the one it replaces",
+        );
         let Some(instances) = instances else {
             self.chunk_scatter.remove(&pos);
             return;
@@ -91,7 +100,7 @@ impl ScatterPass {
                 }
             })
             .collect();
-        self.chunk_scatter.insert(pos, ChunkScatter { by_prefab });
+        self.chunk_scatter.insert(pos, ChunkScatter { by_prefab, version });
     }
 
     /// Drop a chunk's instances on unload.

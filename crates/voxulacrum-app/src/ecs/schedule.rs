@@ -73,7 +73,7 @@ pub fn build_frame_schedule() -> Schedule {
         input::process_input_system.in_set(FrameStage::Input),
         input::toggle_ui_system.in_set(FrameStage::Input),
         systems::diagnostics::frame_counter_system.in_set(FrameStage::Input),
-        systems::hot_reload::shader_hot_reload_system.in_set(FrameStage::Input),
+        systems::hot_reload::shader_watch_system.in_set(FrameStage::Input),
         systems::hot_reload::graph_hot_reload_system.in_set(FrameStage::Input),
     ));
     // Simulation
@@ -151,6 +151,19 @@ pub fn build_frame_schedule() -> Schedule {
     // chunk boundaries, cap) is built first; the upload system then copies
     // whatever moved into the passes.
     schedule.add_systems((
+        systems::uniforms::surface_resize_system
+            .in_set(FrameStage::UniformWrite)
+            .before(systems::uniforms::write_uniforms_system),
+        systems::hot_reload::shader_reload_system
+            .in_set(FrameStage::UniformWrite)
+            .after(systems::uniforms::surface_resize_system)
+            .before(systems::diagnostics::compute_stats_system),
+        // Before the stats and the uniforms, which read what it uploads: the
+        // meshes this frame counts and the water plane this frame reflects in.
+        systems::uniforms::chunk_upload_system
+            .in_set(FrameStage::UniformWrite)
+            .before(systems::uniforms::write_uniforms_system)
+            .before(systems::diagnostics::compute_stats_system),
         systems::visibility::visibility_mask_system
             .in_set(FrameStage::UniformWrite)
             .before(systems::uniforms::write_uniforms_system)
