@@ -18,14 +18,15 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9, R3a, R2, R4 and F15
-are merged. The runtime spine and the engine object model are designed in
+Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9, R3a, R2, R4, F15 and
+R6 are merged. The runtime spine and the engine object model are designed in
 `engine-design.md`, the CPU baseline M3's exit gate compares against is
 recorded, CI compares Tier-1 results across Windows, Linux and macOS,
 generation no longer calls the platform's math library, the API docs build
 without warnings, package-load errors name each path once, the world code no
 longer reads the editor's settings, one 30 Hz tick drives all simulation
-time, and rendering reads only a render world in a crate of its own.
+time, rendering reads only a render world in a crate of its own, and chunk
+residency follows observers rather than the camera.
 
 ### Added
 
@@ -142,6 +143,28 @@ time, and rendering reads only a render world in a crate of its own.
   `CHUNK_WORLD_SIZE`. Parameter presets keep their shape: `post_process` and
   `outline` are the render crate's settings, flattened into `EngineParams`.
   Generation is not touched; saves need nothing.
+- **Chunk residency follows observers** (R6, #22) — the streaming manager no
+  longer reads the camera or the mesher. Each observer has an area of interest,
+  plain data in `voxel-core` (`AreaOfInterest`, `Footprint`): a center column, a
+  range of chunk layers, and footprints to load and to stay loaded. Chunks
+  inside any observer's load footprint load, nearest observer first; chunks
+  outside every observer's retain footprint unload, except those whose water is
+  still moving. The isometric camera computes its area from the same view test
+  as before, held to it column for column by a test, and sends it as observer 0.
+  Its two margins moved from the world's `StreamingConfig` to `CameraParams`
+  (`load_margin`, `unload_margin`, same defaults), so a parameter preset without
+  them loads as before. Residency and seam finalization now run inside the tick,
+  at 30 Hz, in a new `residency` phase on the tick inspector; the per-frame
+  insertion cap is now `max_inserts_per_tick` (64), the unload budget is 4 ms
+  per tick, and seams finalize 16 per tick. Insertion no longer slows down when
+  the mesher has a backlog. The change feed reports each chunk that unloads, and
+  the client drops what it built from it there; a mesh still being built when
+  its chunk unloads is discarded when it lands, so eviction no longer waits for
+  the mesher. The Performance panel's streaming sub-spans now count under `sim`,
+  and the empty `submit` sub-span is gone. The same chunks load and mesh at the
+  launch zoom and at r=14 as before. S3's fill reads 670 ms against the
+  baseline's 640 ms, since chunks become resident on a tick boundary, and its
+  frame CPU p95 falls 7%. Generation is not touched; saves need nothing.
 - **The dead world-cache clear is gone** (F15, #116) — regeneration no longer
   deletes `cache/world_*.bin`, files nothing had written since the world cache
   was disabled. The mesh cache, which regeneration clears, is unaffected.

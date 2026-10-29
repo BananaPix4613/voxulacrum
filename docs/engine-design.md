@@ -1,6 +1,6 @@
 # Voxel Engine Foundation Design Document
 
-**Status:** Baseline reference, v1.19
+**Status:** Baseline reference, v1.20
 **Scope:** World generation, chunk data model, foliage, water, isometric pixel-art rendering
 **Purpose:** Authoritative goalpost for engine architecture. Every system described here is foundational — implementations may be incremental, but the data model and architectural shape are settled. Where the current implementation diverges from a documented target, the target stays; the divergence is called out as interim shape with future migration.
 
@@ -29,6 +29,7 @@
 - v1.17 — Recorded the **in-place decoupling of the world code** (roadmap M3, R3a) in Runtime spine's interim shapes. The world code now reads no editor setting: its streaming budgets, fluid limits and autosave interval are a `ServerConfig` it owns, and the terrain-generation parameters the editor carried are gone, since generation read none of them. Four rows are added, each with the item that retires it: regeneration's render rebuild (R4), streaming's mesher and view-test coupling (R6), `ServerConfig` built from defaults (R3c), and the two client modules that live under `world/` (R3b).
 - v1.18 — Built the **tick framework** (roadmap M3, R2) and recorded what it settled in §12 Runtime spine. `TICK_RATE_HZ` is defined once and can be overridden at build time, which is how CI runs the tests again at 20 Hz; a frame-jitter test holds the state at tick 3,000 to one hash under three frame-time sequences. The fluid throttle is decided from world state, dropped ticks include time past the 0.25 s frame clamp, and the tick inspector publishes once per second like the rest of the Performance panel. Runtime architecture's interim schedule now runs the tick schedule from `Simulation`. Runtime spine's interim shapes retire R2's row and gain five: world time on the client until R5, commands applied between ticks until R5, fluid changes drained per frame until R4, residency outside the tick until R6, and a tick counter that restarts each session. The driver's pause and time scale are recorded as not built.
 - v1.19 — Built the **render world and extract** (roadmap M3, R4) and recorded what it settled in §12 Runtime spine. `voxulacrum-render` holds every GPU resource and depends on `voxel-core` and the GPU stack alone. The client holds the render world as a resource (Bevy's sub-app pattern), and the frame's `Extract` stage moves the queued per-chunk uploads, render requests and egui output across, uploads `Versioned` data only where its version moved, and copies `FrameState` and `RenderParams`; `Render` runs the render world's own single-threaded, chained schedule and reads back stats, present time and the shader log through `RenderFeedback`, so the panels' stats trail by one frame. The changed-chunk feed's entries carry the faces whose boundary cells changed and the command's origin, from which the client decides which neighbors to re-mesh and whether to debounce. `ChunkVersion` moved to `voxel-core`. The camera description gains the view basis, and its isometric block the snapped view-projection. The render-only settings groups are the render crate's `RenderSettings`, flattened into `EngineParams` so presets keep their shape. Runtime architecture's interim schedule names `Extract` and now waits only on R5. Runtime spine's interim shapes retire `LoadedChunk`'s mesh state with the door's rebuild lists, and regeneration's render rebuild; narrow the one-schedule row to the simulation half, until R5; replace water changes drained from `FluidChanges` with one change feed on `World`, drained per frame until R5; and gain two: the camera description's isometric reads until V8, and per-chunk entries as maps rather than entities until V6. The object model's camera row now waits on R6 and V8.
+- v1.20 — Built **observer residency** (roadmap M3, R6) and recorded what it settled in §12 Runtime spine. An area of interest is plain data in chunk coordinates, defined in `voxel-core`: a center column, a range of chunk layers, and two footprints, `load` and `retain`, whose difference is the hysteresis band. A footprint is a disc, or a rectangle turned about the vertical whose columns may span along its up axis, which is how the isometric camera's altitude-aware view test is expressed exactly; the "center, horizontal radius and vertical range" of v1.13 is the disc case. The isometric camera computes its area, with its margins in `CameraParams`, and the client sends it as observer 0; residency reads only the observers, loads by distance² to the nearest one, and keeps every chunk with active fluid. Residency and seam finalization run in tick phase 6, with per-tick budgets. The changed-chunk feed carries an entry for each chunk that left the resident set, which the client's chunk view acts on, and the mesher drops a mesh whose chunk unloaded while it was built, so residency no longer reads the mesher. Chunk streaming's eviction policy is corrected: it was never LRU. Runtime spine's interim shapes retire the three R6 rows and the R3 row's mention of streaming, and gain three: observer 0's area written directly until R5, generation jobs dispatched by the frame until R3c, and a fixed startup block trimmed by one residency pass at setup until R3c. The object model's camera row now waits on V8 alone.
 
 ---
 
@@ -986,7 +987,7 @@ FrameStage::PostFrame — client housekeeping
 
 These orderings are the engine's scheduling contract: a new system declares its side, and the tick phase or frame stage it runs in. The stage names may change as M3 builds them; the order is the contract. Resources (the chunk store, graph registry, material registry, render context, etc.) live as ECS resources accessed through system parameters, each in the world of the side that owns it.
 
-**Interim shape:** until the client/server boundary lands (roadmap M3, R5), one frame schedule runs both sides on the main thread: `Input → Simulation → Meshing → Extract → Render → PostFrame`. In `Simulation`, an exclusive system runs the tick schedule as many times as the frame's time owes (R2); the player step, fluids and autosave are its phases. Climate, time of day, picking and the editor tools run in `Simulation` once per frame; streaming, seam finalization, the client's application of the change feed (`chunk_change_system`) and meshing run in `Meshing`, in that order. `Extract` and `Render` already have their target shape, with a render world of their own (R4; "Render world and extract" below).
+**Interim shape:** until the client/server boundary lands (roadmap M3, R5), one frame schedule runs both sides on the main thread: `Input → Simulation → Meshing → Extract → Render → PostFrame`. In `Simulation`, an exclusive system runs the tick schedule as many times as the frame's time owes (R2); the player step, fluids, residency with seam finalization, and autosave are its phases. Climate, time of day, picking and the editor tools run in `Simulation` once per frame, and after the ticks the frame reports residency's timings and stats to the panels; in `Meshing` the client sends the camera's area of interest for the next frame's ticks (`local_interest_system`), applies the change feed (`chunk_change_system`) and meshes. `Extract` and `Render` already have their target shape, with a render world of their own (R4; "Render world and extract" below).
 
 The choice of `bevy_ecs` is an implementation detail of the runtime — it does not affect the data model, the graph hierarchy, or any other system described in this document. Any compatible ECS could substitute. The choice is documented here because every cross-cutting system (hot reload, streaming, persistence) integrates through a schedule and must know its ordering.
 
@@ -1028,7 +1029,7 @@ One tick-rate constant, `TICK_RATE_HZ = 30`, and a tick counter, `SimTick(u64)`,
 3. Run scheduled, random and block ticks (designed below; not built yet).
 4. Run sub-rate systems by tick number: fluids when `tick % 3 == 0`.
 5. Advance world time: time of day and wind are functions of the tick.
-6. Update residency: apply observer changes, insert finished generation results, evict.
+6. Update residency: apply observer changes, insert finished generation results, evict, then finalize the seams that became ready.
 7. Autosave every N ticks.
 8. Publish this tick's events and changes to the outbox.
 
@@ -1078,7 +1079,7 @@ No kind carries `System` origin. System writes (fluid commits, chunk insertion, 
 **Server to client:** one `ServerUpdate { tick, events, changed, acks, players, world_time }` per tick, in a tick-stamped outbox that the client drains by cursor. A frame that ran three ticks reads three updates; a frame that ran none reads none. bevy's double-buffered `Events` stay an intra-schedule tool on each side: they age per schedule run, so across the boundary they would lose the first tick's events whenever a frame ran several ticks.
 
 - `events`: the world events this tick published (`roadmap.md` §6.7).
-- `changed`: `(chunk, version, layers, faces, origin)` for every chunk whose data changed this tick: the layers that changed, the faces whose boundary cells changed, and the origin of the command that changed them. It names data, never render work. Which neighbors re-mesh and whether an edit is debounced are the client's decisions, and `faces` and `origin` are what it decides them from (revised in R4, which replaced the door's render-shaped rebuild lists with this feed).
+- `changed`: `(chunk, version, layers, faces, origin)` for every chunk whose data changed this tick: the layers that changed, the faces whose boundary cells changed, and the origin of the command that changed them. It names data, never render work. Which neighbors re-mesh and whether an edit is debounced are the client's decisions, and `faces` and `origin` are what it decides them from (revised in R4, which replaced the door's render-shaped rebuild lists with this feed). A chunk that left the resident set has an entry too, marked not resident, with no layers or faces: the client drops everything it built from that chunk (R6). In M7 a chunk leaving one client's interest reaches that client the same way, though another observer keeps it resident.
 - `acks`: each command accepted, or rejected with a reason.
 - `players`: each player's state at this tick.
 
@@ -1123,13 +1124,20 @@ Rendering reads only a **render world**: a separate `bevy_ecs` world owned by th
 
 #### Residency
 
-The server keeps a chunk resident because some **observer** needs it. An observer is an id and an **area of interest**: a center, a horizontal radius and a vertical range. The local player is observer 0.
+The server keeps a chunk resident because some **observer** needs it. An observer is an id and an **area of interest**. The local player is observer 0.
 
-- The resident set is the union of all observers' areas plus every chunk with active fluid. Entity load anchors and simulation bubbles join it later.
-- Generation priority stays `(class, distance²)`, measured to the nearest observer.
-- Residency changes happen in tick phase 6.
+An area of interest is plain data in chunk coordinates (`voxel_core::AreaOfInterest`, revised in R6): a **center** column, a range of **chunk layers**, and two **footprints**, the columns that `load` and the columns that `retain` (stay loaded once they are). The band between the two is residency's hysteresis, so an observer moving along the edge of its area does not load and unload the same chunks over and over. A footprint is one of:
 
-On the client, a camera module computes its area of interest and sends it with `SetInterest` when it changes; the isometric camera derives its area from the altitude-aware view test ("Chunk streaming" below). The client's **chunk view** reacts to chunks loading, changing and unloading: it takes snapshots, schedules meshing and drops render entries. A headless server takes its observers from its command line or script.
+- a **disc**, the columns within a radius of the center. This is v1.13's "center, horizontal radius and vertical range", and the shape a controller or a headless server's `--observer` gives;
+- a **rectangle** turned about the vertical, measured along two horizontal axes, whose columns may each **span** a stretch along its up axis. A view that shows raised geometry displaced up-screen sees a column as such a stretch; the isometric camera's altitude-aware view test is this shape exactly ("Chunk streaming" below).
+
+A disc alone was not enough: the isometric view is a rotated rectangle stretched by altitude, and the smallest disc around it loads chunks the view never shows. An area holds no projection and no camera setting, so residency tests chunks against geometry and never against a camera.
+
+- The resident set is the union of all observers' `load` areas, kept while inside some `retain` area, plus every chunk with active fluid, which stays until its water settles. Entity load anchors and simulation bubbles join it later.
+- Generation priority stays `(class, distance²)`, measured horizontally to the nearest observer's center column.
+- Residency changes happen in tick phase 6: finished generation results are inserted, new chunks are submitted for generation, chunks no area keeps are evicted (saved first if dirty), and seams are finalized for chunks whose six face neighbors are now resident. Each has a per-tick budget (`ServerConfig`'s `StreamingConfig`, and 16 seams per tick).
+
+On the client, a camera module computes its area of interest and sends it with `SetInterest` when it changes; the isometric camera derives its area from the altitude-aware view test ("Chunk streaming" below), with its load and unload margins in `CameraParams`. The camera description carries the area (`CameraDesc::area_of_interest`). The client's **chunk view** reacts to chunks loading, changing and unloading through the change feed: it schedules meshing from snapshots and, for a chunk that left, forgets its mesh state and drops its render entries. A mesh still being built when its chunk leaves is dropped when it lands, and the chunk is not meshed again until it has, so residency never needs to ask the mesher before evicting. A headless server takes its observers from its command line or script.
 
 #### Determinism tiers
 
@@ -1137,7 +1145,7 @@ On the client, a camera module computes its area of interest and sends it with `
 
 **Tier 2: reproducible on one machine.** `player_step` now; physics, AI and animation later (Rapier's `f32` scenes, M8). This needs a fixed tick, inputs per tick and no wall clock; `f32` is allowed. Server corrections fix clients, and same-machine reproducibility serves replays and tests.
 
-**Not deterministic, by design:** residency timing, since which tick a generated chunk becomes resident depends on when its job finishes; and presentation.
+**Not deterministic, by design:** residency timing, since which tick a generated chunk becomes resident depends on when its job finishes, and which tick a chunk leaves depends on eviction's time budget; and presentation.
 
 #### Interim shapes
 
@@ -1146,14 +1154,14 @@ On the client, a camera module computes its area of interest and sends it with `
 | Time of day and wind are client state in `SimulationManager`, advanced each frame to the simulation time the frame draws (ticks run plus `alpha`), and the editor's time controls set them directly | World time is server state, advanced in tick phase 5 and sent as `ServerUpdate.world_time`; the time controls become `Admin` commands | R5 |
 | Edits, pours and the editor's tools reach the door from the frame, between ticks, as soon as they are issued | Commands queue and apply in tick phase 1 | R5 |
 | Changes collect in a feed on `World` that `chunk_change_system` drains once per frame, however many ticks ran | `ServerUpdate.changed`, one per tick, drained by cursor | R5 |
-| Residency (`streaming_tick_system`) runs once per frame, outside the tick | Tick phase 6 | R6 |
+| The client sets observer 0's area by writing the `Observers` resource from the frame (`local_interest_system`), between ticks | A `SetInterest` command, applied in tick phase 1 | R5 |
+| Generation jobs that residency submits inside the tick are dispatched by the frame's `job_pump_system` | The server pumps its own jobs, so a headless server generates | R3c |
+| The startup set is a fixed 8×8 block of columns (`World::generate`), and one residency pass at setup, before the first frame, evicts the part of it outside observer 0's area so the client never meshes against chunks about to leave | The startup set is generated from the observers' areas, so nothing is evicted at startup | R3c, whose observers come from its command line |
 | `CurrentTick` is not saved, so every session starts at tick 0 | Saved with the world, so due ticks survive a reload | The first scheduled tick (D4's registrable layers) |
 | One `FrameStage` schedule runs the simulation and the client frame on the main thread. The client frame already extracts into a separate render world (R4) | Server tick phases on the server's own schedule; the client frame on its own | R5 |
 | The camera description (`camera_desc.rs` in `voxulacrum-render`) lives in `FrameState`, filled by `SimulationManager` from the one isometric camera. The uniform writer reads the isometric block's snapped view-projection and snap offset, and the frame's `RenderDims` sit beside the description rather than in a camera module | The isometric camera as a kit module; render code reads only the core fields | V8 (M5) |
 | Per-chunk render entries are maps keyed by chunk coordinate, one per kind, each held by a render-world resource (`ChunkMeshes` and the per-chunk passes), and draw loops iterate the maps | One entity per chunk, with a component per kind of entry, if a per-chunk pass added by game code needs to query them | V6 |
-| Residency follows one isometric camera, and streaming drives meshing | Observers; the client chunk view | R6 |
-| Apart from `voxulacrum-render` (R4), the engine is one app crate. The world code under `world/` reads no editor setting and imports no client module, apart from streaming's coupling in the row below this one (R3a; R4 removed regeneration's) | The crates above | R3 |
-| Streaming (`world/streaming.rs`) submits to the mesher, checks it before evicting, and evaluates the isometric view test itself; `ServerConfig`'s load and unload margins size that test | Residency from observers; the margins belong to the camera's area of interest | R6 |
+| Apart from `voxulacrum-render` (R4), the engine is one app crate. The world code under `world/` reads no editor setting and imports no client module (R3a; R4 removed regeneration's coupling and R6 streaming's) | The crates above | R3 |
 | `ServerConfig` (`world/config.rs`: streaming budgets, fluid limits, autosave interval) is built from defaults in the app, and nothing loads it from a file | The headless server fills it from its command line | R3c |
 | The cloud automaton (`world/climate.rs`) and the visibility flood (`world/room.rs`) are client modules that live under `world/` | They stay in the app crate when the world code moves | R3b |
 | Clippy's Tier-1 lists cover `nodegraph-eval` only; the mutation door's handlers and fluid simulation, still in the app crate, keep the rules by review | Server-core's Tier-1 modules under the same lists. Clippy's configuration is per crate, so its Tier-2 modules (the player step) allow the two lints per module, or move to a crate of their own | R3b |
@@ -1168,15 +1176,15 @@ The world is effectively infinite; only chunks some observer needs are resident 
 
 - **Area of interest** is set per observer, by its camera or controller.
 - **Chunk lifecycle**: chunks outside every area evict; chunks inside one load (from persistence if they exist, otherwise generate via the pipeline; §5).
-- **Eviction policy** is LRU among chunks outside every area, with a hysteresis band to avoid thrashing at the boundary.
+- **Eviction policy**: every chunk outside every observer's `retain` area, and holding no active fluid, evicts, in no particular order, within a per-tick time budget; the band between `load` and `retain` is the hysteresis that keeps the boundary from thrashing (revised v1.20: this line said LRU, which the engine never did).
 - **Loaded chunks track their resident state** for systems that need to iterate the resident set (mesher, fluid simulation, AI pathfinding).
 - **Background workers** handle chunk generation and meshing without blocking the main thread. Both submit to the single job system below (revised v1.9); neither owns a pool or spawns threads of its own.
 
 Streaming is foundational: every subsystem must tolerate chunks appearing and disappearing on a frame-by-frame basis. Code that assumes all chunks are resident is incorrect.
 
-**Interim shape:** one observer, the isometric camera, whose view the streaming manager evaluates itself; the same manager also submits dirty chunks to the mesher. Roadmap R6 splits it into server residency and a client chunk view.
+Residency (`ChunkStreamingManager`) and the client's chunk view are separate since R6: residency reads only the observers, and the chunk view meshes from the change feed ("Residency" under Runtime spine).
 
-**The view test is altitude-aware** (added v1.9). Under the isometric projection a ground displacement `d` along the away-axis shifts a point up-screen by `d·sin(pitch)`, while an altitude `Δy` shifts it by `Δy·cos(pitch)` — so altitude is screen-equivalent to `Δy/tan(pitch)` of ground. A residency test comparing a column's *footprint* against the view band therefore misses columns whose footprint lies outside it but whose raised geometry is plainly on screen. The test compares the column's projected **span**. It is column-granular by necessity: a per-chunk test would be tighter, but omitting a middle Y layer leaves the layer above it permanently unmeshable, since meshing requires both Y neighbours resident. The test belongs to the isometric camera module, which turns it into that camera's area of interest (revised v1.13).
+**The view test is altitude-aware** (added v1.9). Under the isometric projection a ground displacement `d` along the away-axis shifts a point up-screen by `d·sin(pitch)`, while an altitude `Δy` shifts it by `Δy·cos(pitch)` — so altitude is screen-equivalent to `Δy/tan(pitch)` of ground. A residency test comparing a column's *footprint* against the view band therefore misses columns whose footprint lies outside it but whose raised geometry is plainly on screen. The test compares the column's projected **span**. It is column-granular by necessity: a per-chunk test would be tighter, but omitting a middle Y layer leaves the layer above it permanently unmeshable, since meshing requires both Y neighbors resident. The test belongs to the isometric camera module, which turns it into that camera's area of interest (revised v1.13): `IsometricCamera::area_of_interest` emits a rectangle footprint turned with the camera, whose columns span the up-screen shift of the lowest and highest layers (R6). A test in `camera.rs` holds the footprint to the pre-R6 view test column for column.
 
 ### The job system (added v1.9)
 
@@ -1584,7 +1592,7 @@ The core makes no camera assumption (roadmap P20). It takes a **camera descripti
 - **View** and **projection**, with the view-projection.
 - **Frustum**, for culling.
 - **View basis**: right, up and forward, for anything that reconstructs a view ray.
-- **Area of interest**: a center, a horizontal radius and a vertical range, which the client sends as its observer area (`SetInterest`).
+- **Area of interest**: a center column, a range of chunk layers, and load and retain footprints ("Residency" above), which the client sends as its observer area (`SetInterest`).
 
 Core systems read only these. Streaming takes the area of interest through observers ("Residency" above); culling and shadows take the frustum; picking takes the view-projection; level of detail and audio take positions from the description, never from a projection type. One view is active through M5; render-to-texture (minimaps, portraits, item icons) adds views, each with its own description.
 
@@ -1612,7 +1620,7 @@ The isometric camera is the kit's default module, and P8's rule of no head-on re
 | `PackageKind` has `Game` and `Mod`, nothing branches on it, any kind may name a world, and no package can replace another's asset | Four kinds and the override rules above | Before V7 (M5), whose gate is the first client-only override |
 | Library kernels are the closed `LibraryKernel` enum | The kernel registry | B10 (M4) |
 | The foliage stack: procedural `PrefabShape` props, skeleton trees drawn as capsule impostors, canopy cores, the tier-1 detail-paint schema and `render_delegated` | Clips (D9) for voxel trees and structures, fixtures and sub-voxel models (D11) for props, registered layers (D4) for detail and scatter, sprites, depth sprites and billboard clumps for grass and canopies | M4, M6 |
-| One isometric camera in the app, which fills the camera description (R4); streaming evaluates its view itself, and render code assumes an orthographic projection | Camera modules in the kit over the camera description | R6 (M3), V8 (M5) |
+| One isometric camera in the app, which fills the camera description, area of interest included (R4, R6); render code assumes an orthographic projection | Camera modules in the kit over the camera description | V8 (M5) |
 
 The foliage stack gets no new work in the meantime (roadmap §8, v2.1). The skeleton generator stays, as a generator that outputs clips.
 
@@ -1702,7 +1710,7 @@ These are toggleable in the engine's debug UI.
 - **Air region**: a connected volume of air, one node of the region graph. Always qualified, because a bare "region" is a world region.
 - **Anchor voxel**: the integer cell that owns a foliage instance for purposes of player interaction.
 - **Appearance**: the client-only half of an asset that has both kinds of field, holding its presentation. Replaceable by resource packs; outside the join handshake's content hash.
-- **Area of interest**: the region an observer needs resident: a center, a horizontal radius and a vertical range. The server's resident set is the union of all observers' areas plus chunks with active fluid.
+- **Area of interest**: the region an observer needs resident: a center column, a range of chunk layers, and footprints for loading and for staying loaded. The server's resident set is the union of all observers' areas plus chunks with active fluid.
 - **BiomeGraph**: graph type defining terrain density, material, fluid output, and fade behavior for one biome.
 - **BiomeParams**: per-biome typed scalar-metadata sidecar. Addressable by name from the biome manifest entry and by `BiomeParam(name)` nodes inside a `BiomeGraph`. Home for `traversal_smoothing_distance` and future biome-scoped scalars.
 - **Block**: a 2×2×2 group of 0.5 m voxels on the 1 m lattice. A spatial unit, never a type.
