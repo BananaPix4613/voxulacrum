@@ -24,6 +24,10 @@ use crate::world::mutation::MutationOrigin;
 /// change that touched voxels needs nothing else here. A change that left the
 /// voxels alone rebuilds what it touched directly: water (with the neighbors its
 /// surface welds to) and scatter.
+///
+/// A chunk that left the resident set is forgotten: its mesh state goes, and
+/// everything drawn for it is removed. This is the client's chunk view (design
+/// §12, "Residency").
 pub fn chunk_change_system(
     mut world: ResMut<VoxelWorld>,
     mut meshing: ResMut<MeshingCoordinator>,
@@ -35,6 +39,11 @@ pub fn chunk_change_system(
     let mut water: Vec<IVec3> = Vec::new();
     for change in changes {
         let pos = IVec3::from(change.chunk);
+        if !change.resident {
+            meshing.pipeline.remove_chunk_state(pos);
+            uploads.remove(pos);
+            continue;
+        }
         // Evicted since the change was published.
         let Some(chunk) = world.0.get_chunk(pos) else { continue };
         if change.layers.contains(ChunkLayers::VOXELS) {

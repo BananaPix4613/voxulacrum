@@ -1,9 +1,10 @@
 //! The changed-chunk feed (design §12, "The client/server boundary"): one entry
 //! for each chunk whose data the mutation door changed, naming the layers that
-//! changed and the version the chunk now carries. The client rebuilds what it
-//! derives from a chunk (meshes, water, foliage buffers) from this feed rather
-//! than from render-shaped rebuild lists, and never scans the resident set to
-//! find what changed.
+//! changed and the version the chunk now carries, and one for each chunk that
+//! left the resident set. The client rebuilds what it derives from a chunk
+//! (meshes, water, foliage buffers) from this feed rather than from
+//! render-shaped rebuild lists, and never scans the resident set to find what
+//! changed.
 //!
 //! The feed describes data, not render work. Which neighbors to re-mesh, and
 //! whether to debounce an edit, are the client's decisions, made from `faces`
@@ -23,6 +24,8 @@ use super::mutation::MutationOrigin;
 pub struct ChunkLayers(u8);
 
 impl ChunkLayers {
+    /// No layer: a chunk that left the resident set.
+    pub const NONE: Self = Self(0);
     pub const VOXELS: Self = Self(1 << 0);
     pub const FLUID: Self = Self(1 << 1);
     pub const SCATTER: Self = Self(1 << 2);
@@ -106,4 +109,8 @@ pub struct ChunkChange {
     /// The origin of the command that made the change: an actor's edit
     /// (`Authoring` or `PlayTime`) or engine infrastructure (`System`).
     pub origin: MutationOrigin,
+    /// Whether the chunk is resident after the change. False when it left the
+    /// resident set: the client drops what it built from it, `version` is the
+    /// last one the chunk carried, and `layers` and `faces` are `NONE`.
+    pub resident: bool,
 }

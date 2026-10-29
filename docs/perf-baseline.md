@@ -793,6 +793,80 @@ median absorbs it.
 The stage `uniform` is named `extract` from R4 on, in the panel and in
 `stage_mean_ms`; the readings in earlier sections keep the old name.
 
+### Reading after R6's observer residency
+
+Branch `feat/observer-streaming` (R6, #22): residency is computed from
+observers and runs in the tick's residency phase, at 30 Hz, with seam
+finalization; the client meshes from the change feed. Discrete GPU, runs started
+from the built binary. S3 was taken before the branch's last commit, the
+residency pass at setup, which changes only the first frames.
+
+**The same chunks load.** R6's done-when compares the counts at the launch zoom
+and at r=14 with the build before. Before: one run each on the branch's base,
+`35bef22`. After: every run below.
+
+| | `load_radius` | `resident_chunks` | `chunks_meshed` | `triangles` | `draws` |
+|---|---|---|---|---|---|
+| S1 before | 9 | 420 | 124 | 315,632 | |
+| S1 after, five runs | 9 | 420 | 124 | 315,632 (one run 315,630) | 1,037 |
+| S2 before | 14 | 1,220 | 412 | 1,252,794 | |
+| S2 after, one run | 14 | 1,220 | 412 | 1,252,794 | |
+| S3 after R4, run 1 | 14 | 1,376 | 546 | 1,368,728 | |
+| S3 after, five runs | 14 | 1,376 | 546 | 1,368,726–1,368,742 | 4,060 |
+
+S1's two-triangle run and S3's spread of 16 triangles are the run-to-run
+variance T10 (#122) is open for, as S2's was in R4. Before the setup pass, S1
+read 124–126 meshed chunks across five runs: the client meshed chunks against
+the part of the fixed startup block that the first tick then evicted. One
+residency pass before the first frame removed it.
+
+**Median of five runs, against the M3 baseline:**
+
+| | Baseline | After R4 | After R6 | Ratio to baseline |
+|---|---|---|---|---|
+| S1 frame CPU mean | 2.12 ms | 2.14 ms | **2.15 ms** (30.6%) | 1.015× |
+| S1 frame CPU p95 | 2.78 ms | 2.75 ms | 2.79 ms (64.5%) | 1.003× |
+| S1 frame CPU max | 27.45 ms | 31.92 ms | 30.01 ms | 1.093× |
+| S1 process CPU | 0.14 s/s | 0.17 s/s | 0.17 s/s | 1.21× |
+| S3 frame CPU mean | 5.16 ms | 5.53 ms | **5.59 ms** (15.1%) | 1.083× |
+| S3 frame CPU p95 | 14.92 ms | 15.33 ms | **13.87 ms** (12.9%) | 0.930× |
+| S3 frame CPU max | 141.95 ms | 149.13 ms | 147.84 ms | 1.041× |
+| S3 process CPU | 3.11 s/s | 3.11 s/s | 3.08 s/s | 0.99× |
+| S3 `generate` mean | 84.69 ms | 84.66 ms | 82.25 ms | 0.97× |
+| S3 `mesh` mean | 0.51 ms | 0.53 ms | 0.57 ms | 1.12× |
+| **S3 fill mean** | 640.16 ms | 638.99 ms | **669.76 ms** (8.1%) | 1.046× |
+
+Per run, frame CPU mean, in ms:
+
+```
+S1   2.37  2.76  2.10  2.15  2.12
+S3   5.48  5.63  5.59  6.26  5.41
+```
+
+**Fill is about 30 ms later a settle.** A generated chunk now becomes resident
+at a tick boundary rather than the next frame, and its seam finalization and
+first mesh follow from there; half a tick alone is about 17 ms. Every settle in
+every run is inside the 2 s budget.
+
+**Residency moved from `mesh` to `sim`, and costs a little less.** In S3, `mesh`
+fell from 1.29 to 0.98 ms and `sim` rose from 1.53 to 1.63 ms, so the two
+together fell from 2.82 to 2.61 ms; at rest in S1, `mesh` fell from 0.046 to
+0.020 ms and `sim` in the three steadiest runs reads 1.24–1.27 ms against R4's
+1.23 ms. S3's p95 fell 7%, since streaming work now lands at 30 Hz instead of
+every frame. S3's mean is a little above R4's reading; the rise since the
+baseline is T12's (#124).
+
+**The fill clock restarts on any change of an observer's area**, where it
+restarted on a change of the camera's chunk or zoom before. A rotation or a
+change of camera height now restarts it too. S1, S2 and S3 hold rotation and
+height still, so their fills compare; S4's walk changes height, so its fill
+figures may not, and S4 has not been read since the baseline (T12).
+
+S1's run 2 and S3's run 4 are the highest on every figure, including stages R6
+does not touch (`extract`) and work on the worker threads (`generate`), so they
+point at the machine; the medians absorb them. Two earlier sets were discarded
+under hazard 6 below.
+
 ### Carried forward
 
 - **At-rest frames over 100 ms at r=14.** S2's maximum is 100–113 ms in every
@@ -806,8 +880,9 @@ The stage `uniform` is named `extract` from R4 on, in the panel and in
   same place each run (the integrated runs read 208.9 three times), so
   readings compare; `walked` is the check.
 - **The revised comparison method** above, to agree before R5 closes.
-- **S3's mean is 7.2% over the baseline after R4's render world**, from
-  main-thread time while chunks stream (interim reading above). S2 and S4,
+- **S3's mean is 7.2% over the baseline after R4's render world**, and 8.3%
+  after R6's residency, from main-thread time while chunks stream (interim
+  readings above). S2 and S4,
   which are gated on their means, have not been measured since the baseline.
   S4's edits remesh chunks through the same per-chunk path, so it is the one to
   watch. To attribute the increase, take one S3 reading on `master` before R4
@@ -841,6 +916,14 @@ caught.
    reading of `CPU worst` reports whichever second it caught: 0.4.0 read 4.1 ms
    and M2 read 10.7 ms from the same distribution (M3 section). Compare
    `--bench` medians, not panel maxima.
+6. **A machine that has not settled.** During R6, a set started 30 s after a
+   release build read S1 at 2.4× and S3 at 6.6× their usual means, and a set
+   taken early after boot slowed run by run, from 3.51 to 2.15 ms. Both looked
+   like regressions. The tell is stages and work the change does not touch
+   rising by the same factor: `input`, `extract` and `post` on the main thread,
+   `generate` on the workers, and CPU time per generation job (process CPU ×
+   seconds ÷ jobs completed). Wait a few minutes after a build or a boot, run
+   one scenario once and discard it, then take the set.
 
 ---
 

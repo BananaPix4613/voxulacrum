@@ -40,7 +40,15 @@ pub fn simulation_tick_system(
     sim.advance_world_time(driver.sim_seconds(tick.0), &ui.params);
     let size = window.inner_size();
     let surface = (size.width.max(1), size.height.max(1));
-    let frame = sim.tick(&ui.params, surface, &input, follow, clock.dt, clock.elapsed);
+    let frame = sim.tick(
+        &ui.params,
+        surface,
+        &input,
+        follow,
+        (world.0.min_chunk_y, world.0.max_chunk_y),
+        clock.dt,
+        clock.elapsed,
+    );
 
     commands.insert_resource(frame);
 }

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use bevy_ecs::event::Events;
+use bevy_ecs::system::RunSystemOnce;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, StartCause, WindowEvent};
@@ -568,8 +569,25 @@ fn init_ecs(
         dict_bytes, 
     );
     ecs.insert_resource(streaming_manager);
+    // Observer 0 starts where the camera does, so the first tick keeps the
+    // startup set rather than evicting it before a frame has sent the area.
+    let mut observers = world::streaming::Observers::default();
+    observers.set(
+        world::streaming::ObserverId::LOCAL,
+        ecs.resource::<SimulationManager>()
+            .camera
+            .area_of_interest((min_y, max_y), &ui_state.params.camera),
+    );
+    ecs.insert_resource(observers);
+    ecs.insert_resource(world::streaming::ResidencyTimings::default());
     ecs.insert_resource(server_config);
     ecs.insert_resource(jobs::JobSystem::new(gen_pool.clone()));
+    // One residency pass before the first frame, as the first tick would run
+    // it. The startup set is a fixed block, and the part of it outside observer
+    // 0's area leaves now, before the client reads the startup feed; otherwise
+    // the client meshes chunks against neighbors that are about to leave.
+    ecs.run_system_once(crate::ecs::systems::streaming::residency_system)
+        .expect("residency's resources are all inserted");
     ecs.insert_resource(ui_state);
     ecs.insert_resource(ui::field_probe::FieldProbe::new(gen_pool.clone()));
     ecs.insert_resource(FrameCounter::new());

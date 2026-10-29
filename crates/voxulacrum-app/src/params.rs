@@ -311,6 +311,13 @@ pub struct CameraParams {
     /// Exponential smoothing speed (s⁻¹) applied to the render target.
     /// Higher = snappier but more jitter; lower = smoother but more lag.
     pub smooth_speed: f32,
+    /// How far past the view chunks load, as a fraction of the larger visible
+    /// extent, and at least 2 chunks whatever the zoom.
+    pub load_margin: f32,
+    /// How far past the view loaded chunks stay loaded, measured the same way.
+    /// Larger than `load_margin`, so chunks at the edge of the view don't load
+    /// and unload over and over.
+    pub unload_margin: f32,
 }
 
 impl Default for CameraParams {
@@ -322,6 +329,8 @@ impl Default for CameraParams {
             pan_speed: 12.0,
             initial_zoom: 40.0,
             smooth_speed: 20.0,
+            load_margin: 0.40,
+            unload_margin: 0.55,
         }
     }
 }

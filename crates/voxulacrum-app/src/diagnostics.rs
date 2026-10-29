@@ -39,52 +39,54 @@ pub const FRAME_BUDGET_MS: f32 = 16.6;
 /// up to meet it.
 pub const FRONTIER_BUDGET_MS: f32 = 33.0;
 
-/// Four at `FrameStage::Meshing` granularity, four splitting `SUB_STREAM`, and
-/// three naming the `sim` systems whose recorded triggers fired when the
-/// reference world's ocean and caves landed. Autosave, the fourth, runs inside
-/// the tick, where the tick inspector times it.
-pub const SUB_COUNT: usize = 11;
+/// Residency and seam finalization, which run inside the tick and so inside the
+/// `sim` stage, summed over the frame's ticks; two at `FrameStage::Meshing`
+/// granularity; three splitting `SUB_STREAM`; and three naming the `sim`
+/// systems whose recorded triggers fired when the reference world's ocean and
+/// caves landed. Autosave, the fourth of those, runs inside the tick, where the
+/// tick inspector times it.
+pub const SUB_COUNT: usize = 10;
 
 /// Display labels, in index order.
 pub const SUB_NAMES: [&str; SUB_COUNT] = [
-    "stream", "seam", "upload", "pump", "drain", "submit", "scan", "unload",
+    "stream", "seam", "upload", "pump", "drain", "scan", "unload",
     "fluid", "climate", "params",
 ];
 
-/// `streaming_tick_system` - result drain, chunk insertion, per-chunk pass rebuilds.
+/// `residency_system`, inside the tick - result drain and insertion, the
+/// candidate scan, and eviction.
 pub const SUB_STREAM: usize = 0;
-/// `seam_smoothing_system` - resident-set scan plus cross-chunk seam finalization.
+/// `seam_smoothing_system`, inside the tick - resident-set scan plus
+/// cross-chunk seam finalization.
 pub const SUB_SEAM: usize = 1;
 /// `meshing_tick_system` - 34³ snapshot extraction and GPU buffer upload.
 pub const SUB_UPLOAD: usize = 2;
 /// `job_pump_system` - dispatch plus the inspector snapshot. Expected
-/// negligible; measured anyway so the four spans sum to the stage and the split
-/// can be shown to be complete rather than assumed to be.
+/// negligible; measured anyway so the mesh stage's split can be checked rather
+/// than assumed.
 pub const SUB_PUMP: usize = 3;
 
 // Phases inside `ChunkStreamingManager::tick`, in the order it runs them. The
 // order is the contract between `StreamingTickResult::phase_ms` and these
-// indices; streaming reports four unnamed spans and this is where they are
+// indices; streaming reports three unnamed spans and this is where they are
 // named.
 /// Draining completed generations and inserting them through the door.
 pub const SUB_DRAIN: usize = 4;
-/// `submit_all_dirty` - the resident scan for mesh-dirty chunks.
-pub const SUB_SUBMIT: usize = 5;
-/// The candidate scan over the load rect, plus generation submission.
-pub const SUB_SCAN: usize = 6;
+/// The candidate scan over the observers' load areas, plus generation submission.
+pub const SUB_SCAN: usize = 5;
 /// The unload scan, save-on-unload, and eviction through the door.
-pub const SUB_UNLOAD: usize = 7;
+pub const SUB_UNLOAD: usize = 6;
 
 // `FrameStage::Simulation` candidates. Each is an item carried out of 0.3.0
 // with a stated trigger; the reference world met the conditions.
 /// `fluid_pour_system` and `water_rebuild_system` - the editor's pour, and the
 /// water meshes rebuilt from the change feed. The fluid step itself runs inside
 /// the tick.
-pub const SUB_FLUID: usize = 8;
+pub const SUB_FLUID: usize = 7;
 /// `climate_tick_system` - cleared at ≤2.2 ms in Phase 10, before an ocean existed.
-pub const SUB_CLIMATE: usize = 9;
+pub const SUB_CLIMATE: usize = 8;
 /// `param_change_detection_system` - deep-clones `EngineParams` every frame.
-pub const SUB_PARAMS: usize = 10;
+pub const SUB_PARAMS: usize = 9;
 
 /// Per-`FrameStage` timing, accumulated per frame and published each second.
 #[derive(Resource)]

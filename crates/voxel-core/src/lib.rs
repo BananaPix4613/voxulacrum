@@ -50,6 +50,7 @@ mod blueprint;
 mod buffer;
 mod coord;
 mod error;
+mod interest;
 mod material;
 mod material_registry;
 mod name;
@@ -66,6 +67,7 @@ pub use blueprint::{
 pub use buffer::{ChunkBuffer, StorageKind};
 pub use coord::{ChunkCoord, FaceAxis, LocalPos};
 pub use error::{VoxelCoreError, VoxelCoreResult};
+pub use interest::{AreaOfInterest, Footprint};
 pub use material::MaterialId;
 pub use material_registry::{MaterialDef, MaterialRegistry};
 pub use name::{QualifiedName, ENGINE_NAMESPACE};

@@ -176,6 +176,7 @@ impl World {
                 .into_iter()
                 .map(|coord| (coord.into(), ChunkLayers::ALL, ChunkFaces::ALL))
                 .collect(),
+            ..Default::default()
         };
         world.publish_changes(&loads, MutationOrigin::System);
         world
@@ -331,7 +332,8 @@ impl World {
     }
 
     /// Stamp each chunk a command changed with a fresh version, and append it to
-    /// the change feed. A chunk that is not resident publishes nothing.
+    /// the change feed; then append each chunk it unloaded, as having left. A
+    /// changed chunk that is not resident publishes nothing.
     fn publish_changes(&mut self, outcome: &MutationOutcome, origin: MutationOrigin) {
         for &(pos, layers, faces) in &outcome.changed {
             let Some(chunk) = self.chunks.get_mut(&ChunkCoord::from(pos)) else { continue };
@@ -343,6 +345,17 @@ impl World {
                 layers,
                 faces,
                 origin,
+                resident: true,
+            });
+        }
+        for &(pos, version) in &outcome.unloaded {
+            self.change_feed.push(ChunkChange {
+                chunk: ChunkCoord::from(pos),
+                version,
+                layers: ChunkLayers::NONE,
+                faces: ChunkFaces::NONE,
+                origin,
+                resident: false,
             });
         }
     }
@@ -587,11 +600,15 @@ impl World {
     }
 
     /// Handler for [`WorldMutation::EvictChunk`]. Drops the chunk from the
-    /// resident set. The caller saves it first if dirty - persistence lives
-    /// outside `World` - so this is only the residency change.
+    /// resident set and reports that it left. The caller saves it first if
+    /// dirty - persistence lives outside `World` - so this is only the
+    /// residency change. A chunk that is not resident reports nothing.
     fn handle_evict_chunk(&mut self, chunk_pos: IVec3) -> MutationOutcome {
-        self.remove_chunk(chunk_pos);
-        MutationOutcome::default()
+        let mut outcome = MutationOutcome::default();
+        if let Some(chunk) = self.remove_chunk(chunk_pos) {
+            outcome.unloaded.push((chunk_pos, chunk.version));
+        }
+        outcome
     }
 
     /// Handler for [`WorldMutation::FinalizeSeam`]. Applies cross-chunk slab
@@ -1791,6 +1808,7 @@ mod mutation_tests {
                     | ChunkFaces::toward(IVec3::NEG_Y)
                     | ChunkFaces::toward(IVec3::NEG_Z),
                 origin: MutationOrigin::Authoring,
+                resident: true,
             }],
         );
         assert!(version > ChunkVersion::default(), "a change stamps a real version");
@@ -1836,6 +1854,34 @@ mod mutation_tests {
         assert_eq!(changes[0].layers, ChunkLayers::ALL);
         assert_eq!(changes[0].faces, ChunkFaces::ALL);
         assert_eq!(changes[0].origin, MutationOrigin::System);
+    }
+
+    #[test]
+    fn an_evicted_chunk_publishes_that_it_left() {
+        let mut world = world_with_air_chunk(EngineMode::Play);
+        let version = world.get_chunk(IVec3::ZERO).unwrap().version;
+        world
+            .execute(MutationCommand::system(WorldMutation::EvictChunk { chunk: IVec3::ZERO }))
+            .expect("system evict accepted");
+        assert!(world.get_chunk(IVec3::ZERO).is_none());
+        let changes: Vec<ChunkChange> = world.drain_changes().collect();
+        assert_eq!(
+            changes,
+            [ChunkChange {
+                chunk: ChunkCoord::from(IVec3::ZERO),
+                version,
+                layers: ChunkLayers::NONE,
+                faces: ChunkFaces::NONE,
+                origin: MutationOrigin::System,
+                resident: false,
+            }],
+        );
+
+        // A chunk that is not resident has nothing to leave.
+        world
+            .execute(MutationCommand::system(WorldMutation::EvictChunk { chunk: IVec3::ZERO }))
+            .expect("system evict accepted");
+        assert_eq!(world.drain_changes().count(), 0);
     }
 
     #[test]

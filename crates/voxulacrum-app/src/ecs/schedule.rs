@@ -13,7 +13,8 @@ pub enum FrameStage {
     /// Simulation ticks, then camera, time-of-day, wind, frustum, param change
     /// detection.
     Simulation,
-    /// Streaming, the change feed, meshing and the per-chunk builds.
+    /// The local camera's area of interest, the change feed, meshing and the
+    /// per-chunk builds.
     Meshing,
     /// Build the main side's render data, compute stats, lay out the UI, then
     /// hand the frame to the render world.
@@ -115,6 +116,9 @@ pub fn build_frame_schedule() -> Schedule {
         systems::visibility::room_detection_system
             .in_set(FrameStage::Simulation)
             .after(systems::tick::run_ticks_system),
+        systems::streaming::residency_report_system
+            .in_set(FrameStage::Simulation)
+            .after(systems::tick::run_ticks_system),
         crate::interaction::player_targeting_system
             .in_set(FrameStage::Simulation)
             .after(systems::simulation::simulation_tick_system),
@@ -125,21 +129,14 @@ pub fn build_frame_schedule() -> Schedule {
             .in_set(FrameStage::Simulation)
             .after(crate::interaction::player_tool_system),
     ));
-    // Streaming + Meshing
+    // Meshing. Residency and seam finalization run inside the tick; this stage
+    // sends the camera's area for the next frame's ticks and builds from the
+    // change feed.
     schedule.add_systems((
-        systems::streaming::streaming_tick_system
-            .in_set(FrameStage::Meshing)
-            .before(systems::meshing::meshing_tick_system),
-        systems::streaming::seam_smoothing_system
-            .in_set(FrameStage::Meshing)
-            .after(systems::streaming::streaming_tick_system)
-            .before(systems::meshing::meshing_tick_system),
-        systems::jobs::job_pump_system
-            .in_set(FrameStage::Meshing)
-            .after(systems::streaming::streaming_tick_system),
+        systems::streaming::local_interest_system.in_set(FrameStage::Meshing),
+        systems::jobs::job_pump_system.in_set(FrameStage::Meshing),
         systems::chunk_changes::chunk_change_system
             .in_set(FrameStage::Meshing)
-            .after(systems::streaming::seam_smoothing_system)
             .before(systems::meshing::meshing_tick_system),
         systems::meshing::meshing_tick_system.in_set(FrameStage::Meshing),
     ));
@@ -192,11 +189,18 @@ pub fn build_frame_schedule() -> Schedule {
 pub fn build_tick_schedule() -> Schedule {
     let mut schedule = Schedule::new(TickSchedule);
     schedule.configure_sets(
-        (TickPhase::Players, TickPhase::SubRates, TickPhase::Autosave).chain()
+        (TickPhase::Players, TickPhase::SubRates, TickPhase::Residency, TickPhase::Autosave)
+            .chain()
     );
     schedule.add_systems((
         crate::player::systems::player_tick_system.in_set(TickPhase::Players),
         systems::fluids::fluid_tick_system.in_set(TickPhase::SubRates),
+        (
+            systems::streaming::residency_system,
+            systems::streaming::seam_smoothing_system,
+        )
+            .chain()
+            .in_set(TickPhase::Residency),
         systems::persistence::persistence_autosave_system.in_set(TickPhase::Autosave),
     ));
     schedule.add_systems((
@@ -206,6 +210,9 @@ pub fn build_tick_schedule() -> Schedule {
             .before(TickPhase::SubRates),
         systems::tick::tick_timings_end_sub_rates
             .after(TickPhase::SubRates)
+            .before(TickPhase::Residency),
+        systems::tick::tick_timings_end_residency
+            .after(TickPhase::Residency)
             .before(TickPhase::Autosave),
         systems::tick::tick_timings_end_autosave.after(TickPhase::Autosave),
     ));
