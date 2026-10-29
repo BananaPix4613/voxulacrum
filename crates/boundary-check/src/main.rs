@@ -1,9 +1,10 @@
-//! `cargo run -p boundary-check`: reads this workspace's `cargo metadata` and
-//! checks the engine/game boundary. Exits 1 on any violation.
+//! `cargo run -p boundary-check`: reads this workspace's full `cargo metadata`
+//! and checks the facade rule and the server rule. Exits 1 on any violation.
 //!
 //! `--manifest-path <Cargo.toml>` checks another workspace instead, such as a
 //! game's, against the engine crates listed by the workspace its `voxulacrum`
-//! dependency belongs to. A game's CI runs it that way.
+//! dependency belongs to. A game's CI runs it that way. Only the facade rule
+//! applies there: the server crates are the engine's.
 
 use std::ffi::OsString;
 use std::process::{Command, ExitCode};
@@ -13,7 +14,7 @@ use boundary_check::Summary;
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let checked = match args.as_slice() {
-        [] => metadata(&["--no-deps".into()]).map(|ws| boundary_check::check(&ws)),
+        [] => check_engine(),
         [flag, path] if flag.to_str() == Some("--manifest-path") => check_outside(path),
         _ => Err("usage: boundary-check [--manifest-path <Cargo.toml>]".to_string()),
     };
@@ -23,13 +24,8 @@ fn main() -> ExitCode {
             eprintln!("boundary-check: {e}");
             ExitCode::FAILURE
         }
-        Ok(Ok(summary)) => {
-            let consumers = if summary.consumers.is_empty() {
-                "0 consumers".to_string()
-            } else {
-                format!("{} consumers ({})", summary.consumers.len(), summary.consumers.join(", "))
-            };
-            println!("boundary-check: {} engine crates, {consumers}, ok", summary.engine_crates);
+        Ok(Ok(report)) => {
+            println!("boundary-check: {report}, ok");
             ExitCode::SUCCESS
         }
         Ok(Err(errors)) => {
@@ -42,9 +38,38 @@ fn main() -> ExitCode {
     }
 }
 
+/// What a run found: `Err` when it could not check at all, else a passing
+/// summary or one message per problem.
+type Checked = Result<Result<String, Vec<String>>, String>;
+
+/// Check this workspace: the facade rule, and the server rule over the full
+/// resolve graph.
+fn check_engine() -> Checked {
+    let workspace = metadata(&[])?;
+    Ok(match (boundary_check::check(&workspace), boundary_check::check_server(&workspace)) {
+        (Ok(summary), Ok(servers)) => Ok(format!(
+            "{}, {} server crates ({})",
+            describe(&summary),
+            servers.len(),
+            servers.join(", ")
+        )),
+        (facade, server) => Err(facade.err().into_iter().chain(server.err()).flatten().collect()),
+    })
+}
+
+/// A passing facade check, as `12 engine crates, 1 consumers (testbed)`.
+fn describe(summary: &Summary) -> String {
+    let consumers = if summary.consumers.is_empty() {
+        "0 consumers".to_string()
+    } else {
+        format!("{} consumers ({})", summary.consumers.len(), summary.consumers.join(", "))
+    };
+    format!("{} engine crates, {consumers}", summary.engine_crates)
+}
+
 /// Check the workspace at `manifest_path` against the engine workspace its
 /// `voxulacrum` dependency belongs to.
-fn check_outside(manifest_path: &OsString) -> Result<Result<Summary, Vec<String>>, String> {
+fn check_outside(manifest_path: &OsString) -> Checked {
     let workspace = metadata(&["--manifest-path".into(), manifest_path.clone()])?;
     let facade = workspace["packages"]
         .as_array()
@@ -61,7 +86,7 @@ fn check_outside(manifest_path: &OsString) -> Result<Result<Summary, Vec<String>
         })?
         .to_string();
     let engine = metadata(&["--no-deps".into(), "--manifest-path".into(), facade.into()])?;
-    Ok(boundary_check::check_consumers(&workspace, &engine))
+    Ok(boundary_check::check_consumers(&workspace, &engine).map(|summary| describe(&summary)))
 }
 
 /// `cargo metadata --format-version 1` with `args`, parsed.

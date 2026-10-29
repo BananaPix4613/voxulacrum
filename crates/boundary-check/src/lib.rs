@@ -1,18 +1,30 @@
-//! Checks the engine/game boundary: a workspace member that is not an engine
-//! crate may depend on the `voxulacrum` facade and on no other engine crate.
+//! Checks the engine's two dependency rules.
 //!
-//! The engine crates are listed in the root `Cargo.toml` under
+//! **The facade rule:** a workspace member that is not an engine crate may
+//! depend on the `voxulacrum` facade and on no other engine crate. The engine
+//! crates are listed in the root `Cargo.toml` under
 //! `[workspace.metadata.voxulacrum] engine-crates`. Every member not on that
 //! list is a consumer (the testbed now, games later), so an engine crate left
-//! off the list fails the check rather than slipping past it.
+//! off the list fails the check rather than slipping past it. Only direct
+//! dependencies are checked: what a consumer reaches through the facade is
+//! allowed by definition.
 //!
 //! [`check`] reads the engine workspace itself. [`check_consumers`] reads a
 //! workspace outside it, such as a game's, where every member is a consumer and
 //! the list comes from the engine workspace its facade dependency belongs to.
 //!
-//! The input is the JSON from `cargo metadata --format-version 1 --no-deps`.
-//! Only direct dependencies are checked: what a consumer reaches through the
-//! facade is allowed by definition.
+//! **The server rule** ([`check_server`]): no crate listed under `server-crates`
+//! may reach a package whose name starts with an entry of `server-forbidden`
+//! (the renderer, windowing and UI crates) through normal or build
+//! dependencies, directly or transitively, on any target (`engine-design.md`
+//! §12, "Crates and sides"). Dev-dependencies don't count: they build only
+//! tests, examples and benchmarks.
+//!
+//! The input is the JSON from `cargo metadata --format-version 1`. The facade
+//! rule reads the package list, so `--no-deps` is enough for it; the server
+//! rule reads the resolve graph, so it needs the full output.
+
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::Value;
 
@@ -85,6 +97,147 @@ pub fn check_consumers(workspace: &Value, engine: &Value) -> Result<Summary, Vec
     }
 }
 
+/// Check the server rule over `metadata`, which must include the resolve graph
+/// (read without `--no-deps`). On success, returns the server crates checked,
+/// in list order; on failure, one message per problem found.
+pub fn check_server(metadata: &Value) -> Result<Vec<String>, Vec<String>> {
+    let servers = string_list(metadata, "server-crates")?;
+    let forbidden = string_list(metadata, "server-forbidden")?;
+    let Some(graph) = Graph::new(metadata) else {
+        return Err(vec![
+            "the metadata has no resolve graph; read it without `--no-deps`".to_string(),
+        ]);
+    };
+
+    let members = members(metadata);
+    let mut errors = Vec::new();
+    for server in &servers {
+        let id = members
+            .iter()
+            .find(|p| p["name"] == server.as_str())
+            .and_then(|p| p["id"].as_str());
+        match id {
+            Some(id) => errors.extend(forbidden_errors(server, id, &graph, &forbidden)),
+            None => errors.push(format!(
+                "server-crates lists `{server}`, which is not a workspace member"
+            )),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(servers)
+    } else {
+        Err(errors)
+    }
+}
+
+/// The resolve graph: each package's name and dependency edges, by package id.
+struct Graph<'a> {
+    names: HashMap<&'a str, &'a str>,
+    deps: HashMap<&'a str, &'a [Value]>,
+}
+
+impl<'a> Graph<'a> {
+    /// `None` when `metadata` has no resolve graph.
+    fn new(metadata: &'a Value) -> Option<Self> {
+        let nodes = metadata["resolve"]["nodes"].as_array()?;
+        let names = metadata["packages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| Some((p["id"].as_str()?, p["name"].as_str()?)))
+            .collect();
+        let deps = nodes
+            .iter()
+            .filter_map(|n| Some((n["id"].as_str()?, n["deps"].as_array()?.as_slice())))
+            .collect();
+        Some(Self { names, deps })
+    }
+
+    fn name(&self, id: &str) -> &'a str {
+        self.names.get(id).copied().unwrap_or("<unknown>")
+    }
+}
+
+/// One message for each forbidden package that server crate `name` (package id
+/// `root`) reaches, naming the shortest chain of dependencies that reaches it.
+/// The walk stops at a forbidden package, so each message names one the server
+/// crate's own graph pulls in, not what that package pulls in after it.
+fn forbidden_errors<'a>(
+    name: &str,
+    root: &'a str,
+    graph: &Graph<'a>,
+    forbidden: &[String],
+) -> Vec<String> {
+    // Each package reached, with the package and edge it was first reached by.
+    let mut reached: HashMap<&'a str, Option<(&'a str, String)>> = HashMap::from([(root, None)]);
+    let mut queue = VecDeque::from([root]);
+    let mut errors = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        for dep in graph.deps.get(id).copied().unwrap_or_default() {
+            let Some(pkg) = dep["pkg"].as_str() else { continue };
+            let Some(edge) = edge(dep) else { continue };
+            if reached.contains_key(pkg) {
+                continue;
+            }
+            reached.insert(pkg, Some((id, edge)));
+            let dep_name = graph.name(pkg);
+            if forbidden.iter().any(|f| dep_name.starts_with(f.as_str())) {
+                errors.push(format!(
+                    "{name}: reaches {dep_name} ({}); a server crate may not depend on a renderer, windowing or UI crate",
+                    chain(pkg, &reached, graph)
+                ));
+            } else {
+                queue.push_back(pkg);
+            }
+        }
+    }
+    errors
+}
+
+/// How `dep` is depended on, for the chain in a message: empty for a normal
+/// dependency on every target, else its kinds, such as `build` or
+/// `normal, cfg(windows)`. `None` when it is a dev-dependency only, which the
+/// server rule doesn't follow.
+fn edge(dep: &Value) -> Option<String> {
+    let kinds: Vec<(&str, Option<&str>)> = dep["dep_kinds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|k| (k["kind"].as_str().unwrap_or("normal"), k["target"].as_str()))
+        .filter(|(kind, _)| *kind != "dev")
+        .collect();
+    if kinds.is_empty() {
+        None
+    } else if kinds.contains(&("normal", None)) {
+        Some(String::new())
+    } else {
+        let kinds: Vec<String> = kinds
+            .iter()
+            .map(|(kind, target)| match target {
+                Some(target) => format!("{kind}, {target}"),
+                None => kind.to_string(),
+            })
+            .collect();
+        Some(kinds.join("; "))
+    }
+}
+
+/// The chain of packages from the server crate to `id`, such as
+/// `server -> codegen (build) -> winit`.
+fn chain<'a>(id: &'a str, reached: &HashMap<&'a str, Option<(&'a str, String)>>, graph: &Graph) -> String {
+    let mut links = Vec::new();
+    let mut at = id;
+    while let Some(Some((parent, edge))) = reached.get(at) {
+        let name = graph.name(at);
+        links.push(if edge.is_empty() { name.to_string() } else { format!("{name} ({edge})") });
+        at = *parent;
+    }
+    links.push(graph.name(at).to_string());
+    links.reverse();
+    links.join(" -> ")
+}
+
 /// The workspace members' package entries, in metadata order.
 fn members(metadata: &Value) -> Vec<&Value> {
     let member_ids: Vec<&Value> = metadata["workspace_members"]
@@ -123,11 +276,15 @@ fn dependency_errors(name: &str, package: &Value, is_engine: &dyn Fn(&str) -> bo
 
 /// The `engine-crates` list from the workspace metadata.
 fn engine_crates(metadata: &Value) -> Result<Vec<String>, Vec<String>> {
-    let Some(list) = metadata["metadata"]["voxulacrum"]["engine-crates"].as_array() else {
-        return Err(vec![
-            "no `engine-crates` list under `[workspace.metadata.voxulacrum]` in the root Cargo.toml"
-                .to_string(),
-        ]);
+    string_list(metadata, "engine-crates")
+}
+
+/// The string list `key` under `[workspace.metadata.voxulacrum]`.
+fn string_list(metadata: &Value, key: &str) -> Result<Vec<String>, Vec<String>> {
+    let Some(list) = metadata["metadata"]["voxulacrum"][key].as_array() else {
+        return Err(vec![format!(
+            "no `{key}` list under `[workspace.metadata.voxulacrum]` in the root Cargo.toml"
+        )]);
     };
     list.iter()
         .map(|v| match v.as_str() {
@@ -286,5 +443,135 @@ mod tests {
         engine["metadata"] = Value::Null;
         let errors = check_consumers(&outside(vec![]), &engine).unwrap_err();
         assert!(errors[0].contains("no `engine-crates` list"), "{errors:?}");
+    }
+
+    const FORBIDDEN: [&str; 6] = ["wgpu", "naga", "winit", "raw-window-handle", "egui", "eframe"];
+
+    /// An edge in [`resolved`]: the package depended on, its kind (`None` for
+    /// normal) and its target (`None` for every target).
+    type Edge<'a> = (&'a str, Option<&'a str>, Option<&'a str>);
+
+    /// Full metadata for a workspace whose one member and one server crate is
+    /// `server`, with the resolve graph `graph`: each package and its edges.
+    fn resolved(graph: Vec<(&str, Vec<Edge>)>) -> Value {
+        fn id(name: &str) -> String {
+            format!("registry+https://example/{name}#1.0.0")
+        }
+        let packages: Vec<Value> =
+            graph.iter().map(|(name, _)| json!({ "name": name, "id": id(name) })).collect();
+        let nodes: Vec<Value> = graph
+            .iter()
+            .map(|(name, edges)| {
+                let deps: Vec<Value> = edges
+                    .iter()
+                    .map(|(dep, kind, target)| {
+                        json!({
+                            "name": dep.replace('-', "_"),
+                            "pkg": id(dep),
+                            "dep_kinds": [{ "kind": kind, "target": target }],
+                        })
+                    })
+                    .collect();
+                json!({ "id": id(name), "deps": deps })
+            })
+            .collect();
+        json!({
+            "packages": packages,
+            "workspace_members": [id("server")],
+            "resolve": { "nodes": nodes, "root": null },
+            "metadata": {
+                "voxulacrum": { "server-crates": ["server"], "server-forbidden": FORBIDDEN },
+            },
+        })
+    }
+
+    fn one_server_error(metadata: &Value) -> String {
+        let errors = check_server(metadata).expect_err("check should fail");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        errors.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_server_crate_clear_of_the_forbidden_crates_passes() {
+        let ws = resolved(vec![
+            ("server", vec![("glam", None, None)]),
+            ("glam", vec![("libm", None, None)]),
+            ("libm", vec![]),
+        ]);
+        assert_eq!(check_server(&ws).unwrap(), vec!["server".to_string()]);
+    }
+
+    #[test]
+    fn a_transitive_forbidden_dependency_fails_and_names_the_chain() {
+        let ws = resolved(vec![
+            ("server", vec![("render-lib", None, None)]),
+            ("render-lib", vec![("wgpu-core", None, None)]),
+            ("wgpu-core", vec![]),
+        ]);
+        let error = one_server_error(&ws);
+        // `wgpu-core` matches the `wgpu` entry by prefix.
+        assert!(
+            error.starts_with("server: reaches wgpu-core (server -> render-lib -> wgpu-core)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_build_dependency_reaching_a_forbidden_crate_fails() {
+        let ws = resolved(vec![
+            ("server", vec![("codegen", Some("build"), None)]),
+            ("codegen", vec![("winit", None, None)]),
+            ("winit", vec![]),
+        ]);
+        let error = one_server_error(&ws);
+        assert!(error.contains("(server -> codegen (build) -> winit)"), "{error}");
+    }
+
+    #[test]
+    fn a_target_specific_forbidden_dependency_fails() {
+        let linux_only = r#"cfg(target_os = "linux")"#;
+        let ws = resolved(vec![("server", vec![("winit", None, Some(linux_only))]), ("winit", vec![])]);
+        let error = one_server_error(&ws);
+        assert!(error.contains(r#"winit (normal, cfg(target_os = "linux"))"#), "{error}");
+    }
+
+    #[test]
+    fn a_dev_dependency_on_a_forbidden_crate_passes() {
+        let ws = resolved(vec![("server", vec![("winit", Some("dev"), None)]), ("winit", vec![])]);
+        assert_eq!(check_server(&ws).unwrap(), vec!["server".to_string()]);
+    }
+
+    #[test]
+    fn a_forbidden_crate_reached_two_ways_is_reported_once() {
+        let ws = resolved(vec![
+            ("server", vec![("a", None, None), ("b", None, None)]),
+            ("a", vec![("winit", None, None)]),
+            ("b", vec![("winit", None, None)]),
+            ("winit", vec![]),
+        ]);
+        assert!(one_server_error(&ws).contains("(server -> a -> winit)"));
+    }
+
+    #[test]
+    fn an_unlisted_server_crate_fails() {
+        let mut ws = resolved(vec![("server", vec![])]);
+        ws["metadata"]["voxulacrum"]["server-crates"] = json!(["server", "old-server"]);
+        assert!(one_server_error(&ws).contains("`old-server`"));
+    }
+
+    #[test]
+    fn metadata_without_the_resolve_graph_fails() {
+        let mut ws = resolved(vec![("server", vec![])]);
+        ws["resolve"] = Value::Null;
+        assert!(one_server_error(&ws).contains("no resolve graph"));
+    }
+
+    #[test]
+    fn missing_server_lists_fail() {
+        for key in ["server-crates", "server-forbidden"] {
+            let mut ws = resolved(vec![("server", vec![])]);
+            ws["metadata"]["voxulacrum"].as_object_mut().unwrap().remove(key);
+            assert!(one_server_error(&ws).contains(&format!("no `{key}` list")), "{key}");
+        }
     }
 }

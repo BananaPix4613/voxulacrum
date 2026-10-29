@@ -24,6 +24,11 @@ engine-crates = [
     "nodegraph-editor", "voxulacrum-server-core", "voxulacrum-render",
     "voxulacrum-app", "voxulacrum", "boundary-check", "determinism-diff",
 ]
+# Server crates, and the crates none of them may reach through normal or build
+# dependencies on any target, matched by name prefix (`wgpu` also catches
+# `wgpu-core`). Checked by the same command, against the full resolve graph.
+server-crates = ["voxulacrum-server-core"]
+server-forbidden = ["wgpu", "naga", "winit", "raw-window-handle", "egui", "eframe"]
 
 [workspace.package]
 edition = "2021"

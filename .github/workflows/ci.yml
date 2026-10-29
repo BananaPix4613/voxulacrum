@@ -35,8 +35,10 @@ jobs:
         run: cargo build --workspace
 
       # Engine/game boundary (roadmap §7.2): consumers depend on the
-      # `voxulacrum` facade only.
-      - name: Facade dependency check
+      # `voxulacrum` facade only. Server rule (design §12, "Crates and
+      # sides"): no server crate reaches a renderer, windowing or UI crate
+      # through normal or build dependencies on any target.
+      - name: Boundary check
         run: cargo run -p boundary-check
 
       # Tier-1 math (design §12, "Determinism"; R7): generation calls no
