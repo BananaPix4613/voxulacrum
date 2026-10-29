@@ -15,6 +15,7 @@ nodegraph-eval = { path = "../nodegraph-eval" }
 nodegraph-hotreload = { path = "../nodegraph-hotreload" }
 nodegraph-editor = { path = "../nodegraph-editor" }
 voxulacrum-render = { path = "../voxulacrum-render" }
+voxulacrum-server-core = { path = "../voxulacrum-server-core" }
 
 wgpu.workspace = true
 winit.workspace = true
@@ -31,14 +32,9 @@ egui-winit.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ron.workspace = true
-semver.workspace = true
 notify.workspace = true
-num_cpus.workspace = true
 bincode.workspace = true
 seahash.workspace = true
 rayon.workspace = true
 bevy_ecs.workspace = true
 lz4_flex.workspace = true
-rusqlite.workspace = true
-zstd.workspace = true
-smallvec.workspace = true

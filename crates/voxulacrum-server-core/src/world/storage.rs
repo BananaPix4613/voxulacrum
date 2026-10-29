@@ -120,7 +120,7 @@ impl PalettedBitArray {
         self.palette.len()
     }
 
-    /// Serialize internal state: [palette_len:u16][palette:u32...][bits_per_entry:u8][word_count:u32][data:u64...]
+    /// Serialize internal state: `[palette_len:u16][palette:u32...][bits_per_entry:u8][word_count:u32][data:u64...]`
     pub fn serialize_to_bytes(&self, buf: &mut Vec<u8>) {
         let palette_len = self.palette.len() as u16;
         buf.extend_from_slice(&palette_len.to_le_bytes());

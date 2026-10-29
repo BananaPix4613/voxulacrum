@@ -3850,21 +3850,17 @@ dependencies = [
  "nodegraph-hotreload",
  "nodegraph-ir",
  "notify",
- "num_cpus",
  "pollster",
  "rayon",
  "ron",
- "rusqlite",
  "seahash",
- "semver",
  "serde",
  "serde_json",
- "smallvec",
  "voxel-core",
  "voxulacrum-render",
+ "voxulacrum-server-core",
  "wgpu",
  "winit",
- "zstd",
 ]
 
 [[package]]
@@ -3881,6 +3877,28 @@ dependencies = [
  "serde",
  "voxel-core",
  "wgpu",
+]
+
+[[package]]
+name = "voxulacrum-server-core"
+version = "0.5.0"
+dependencies = [
+ "bevy_ecs",
+ "glam",
+ "log",
+ "nodegraph-eval",
+ "nodegraph-hotreload",
+ "nodegraph-ir",
+ "num_cpus",
+ "rayon",
+ "ron",
+ "rusqlite",
+ "semver",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "voxel-core",
+ "zstd",
 ]
 
 [[package]]

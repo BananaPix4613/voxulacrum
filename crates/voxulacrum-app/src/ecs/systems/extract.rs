@@ -25,7 +25,7 @@ use crate::rendering::skeleton_preview_pass::SkeletonPreviewPass;
 use crate::rendering::frame_state::FrameState;
 use crate::simulation::manager::SimulationManager;
 use crate::ui::panels::UiState;
-use crate::world::room::RoomState;
+use crate::room::RoomState;
 
 /// Hand the render world this frame's data: the queued per-chunk uploads,
 /// render requests and egui output move across, the versioned data uploads

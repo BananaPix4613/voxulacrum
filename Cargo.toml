@@ -6,6 +6,7 @@ members = [
     "crates/nodegraph-eval",
     "crates/nodegraph-hotreload",
     "crates/nodegraph-editor",
+    "crates/voxulacrum-server-core",
     "crates/voxulacrum-render",
     "crates/voxulacrum-app",
     "crates/voxulacrum",
@@ -20,8 +21,8 @@ members = [
 [workspace.metadata.voxulacrum]
 engine-crates = [
     "voxel-core", "nodegraph-ir", "nodegraph-eval", "nodegraph-hotreload",
-    "nodegraph-editor", "voxulacrum-render", "voxulacrum-app", "voxulacrum",
-    "boundary-check", "determinism-diff",
+    "nodegraph-editor", "voxulacrum-server-core", "voxulacrum-render",
+    "voxulacrum-app", "voxulacrum", "boundary-check", "determinism-diff",
 ]
 
 [workspace.package]
@@ -46,7 +47,7 @@ log = "0.4"
 bincode = "1"
 slotmap = { version = "1", features = ["serde"] }
 
-# Engine-only (used by voxulacrum-app and voxulacrum-render)
+# Engine-only (used by voxulacrum-server-core, voxulacrum-app and voxulacrum-render)
 wgpu = "25"
 winit = "0.30"
 egui = "0.32"

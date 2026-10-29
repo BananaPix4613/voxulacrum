@@ -2,9 +2,9 @@
 //! autosave.
 //!
 //! Kept apart from the editor's `EngineParams` so the world code reads no
-//! client settings and can move to server-core (roadmap R3). Built from
-//! defaults for now; the headless server (R3c) is its first source other than
-//! `Default`.
+//! client settings, which is what let it move to server-core (roadmap R3).
+//! Built from defaults for now; the headless server (R3c) is its first source
+//! other than `Default`.
 
 use bevy_ecs::prelude::Resource;
 
