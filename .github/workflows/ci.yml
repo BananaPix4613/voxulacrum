@@ -42,12 +42,14 @@ jobs:
       - name: Boundary check
         run: cargo run -p boundary-check
 
-      # Tier-1 math (design §12, "Determinism"; R7): generation calls no
-      # platform math library, no fused multiply-add and no SIMD-backed glam
-      # type. The lists are in crates/nodegraph-eval/clippy.toml. Only those two
-      # lints are denied here; the crate's other clippy warnings are not.
+      # Tier-1 math (design §12, "Determinism"; R7): generation, the mutation
+      # door's handlers and fluids call no platform math library, no fused
+      # multiply-add and no SIMD-backed glam type. The lists are in each crate's
+      # clippy.toml; server-core's mirrors nodegraph-eval's, and its Tier-2
+      # player step opts out. Only those two lints are denied here; the crates'
+      # other clippy warnings are not.
       - name: Tier-1 math
-        run: cargo clippy -p nodegraph-eval --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_types
+        run: cargo clippy -p nodegraph-eval -p voxulacrum-server-core --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_types
 
       # Docs (F8, #87): any rustdoc warning, such as a broken intra-doc link or
       # a public doc linking a private item, fails the build. RUSTDOCFLAGS is set

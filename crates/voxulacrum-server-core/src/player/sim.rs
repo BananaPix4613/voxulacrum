@@ -7,6 +7,10 @@
 //! the world for ground contact and turns to face the move direction, but does not
 //! move or collide - that is Substep 5, which fills the physics body of `player_step`.
 
+// Tier 2 (engine-design.md §12, "Determinism tiers"): the player step only has to
+// reproduce on one machine, so the crate's Tier-1 math lists don't apply here.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+
 use glam::{IVec3, Vec2, Vec3};
 
 use crate::play::PlayerTuning;
