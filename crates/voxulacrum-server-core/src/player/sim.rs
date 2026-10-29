@@ -1,11 +1,15 @@
 //! Pure player simulation (Substep 4). No ECS, no renderer, no `World` type - only
-//! `glam`, the [`WorldView`] seam and the package's [`PlayerTuning`] - so this module
-//! moves to the server-core crate unchanged at Phase 10. `player_step` is the
-//! fixed-timestep function the networking proposal specifies both client and server run.
+//! `glam`, the [`WorldView`] seam and the package's [`PlayerTuning`] - so the client
+//! and the server run this module unchanged. `player_step` is the fixed-timestep
+//! function the networking proposal specifies both client and server run.
 //!
 //! Substep 4 scope: state + the pure-function shape + a determinism test. It reads
 //! the world for ground contact and turns to face the move direction, but does not
 //! move or collide - that is Substep 5, which fills the physics body of `player_step`.
+
+// Tier 2 (engine-design.md §12, "Determinism tiers"): the player step only has to
+// reproduce on one machine, so the crate's Tier-1 math lists don't apply here.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use glam::{IVec3, Vec2, Vec3};
 
@@ -14,10 +18,10 @@ use crate::world::tick::TICK_DT;
 
 const EPS: f32 = 1e-4;
 
-/// Read-only world access threaded into the pure step. The app's `World` (and,
-/// later, the server's) implements it; the step never touches ECS or renderer state.
-/// Geometry is the sole authority: standability is decided by the collision
-/// resolution itself (rise, move, snap down, fit), not by a precomputed mask.
+/// Read-only world access threaded into the pure step. `World` implements it (in
+/// the parent module); the step never touches ECS or renderer state. Geometry is the
+/// sole authority: standability is decided by the collision resolution itself (rise,
+/// move, snap down, fit), not by a precomputed mask.
 pub trait WorldView {
     /// The solid vertical interval `[y0, y1]` a voxel occupies, or `None` if empty.
     fn solid_interval(&self, voxel: IVec3) -> Option<(f32, f32)>;

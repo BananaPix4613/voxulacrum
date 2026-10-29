@@ -5,7 +5,7 @@ use fastnoise_lite::{
 use glam::Vec2;
 use nodegraph_eval::WorldEvaluator;
 use std::collections::HashMap;
-use crate::world::climate::{self, ClimateGrid};
+use crate::climate::{self, ClimateGrid};
 use crate::params::CloudParams;
 use crate::rendering::uniform_writer::{CloudFrame, CLOUD_LAYER_COUNT};
 use crate::rendering::versioned::Versioned;

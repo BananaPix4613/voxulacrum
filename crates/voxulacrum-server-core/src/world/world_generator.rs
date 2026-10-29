@@ -586,8 +586,8 @@ pub struct ZoneManifestEntry {
 /// file looked like.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldManifest {
-    /// Schema version. Absent means pre-v1; [`WorldManifest::migrate`] upgrades
-    /// in memory and the next write emits the current version.
+    /// Schema version. Absent means pre-v1; [`WorldManifest::read`] upgrades it
+    /// in memory (`migrate`) and the next write emits the current version.
     #[serde(default)]
     pub version: u32,
     /// World graph file (climate + zone assignment).

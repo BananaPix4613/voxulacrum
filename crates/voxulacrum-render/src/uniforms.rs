@@ -578,3 +578,47 @@ pub fn create_post_process_bind_group(
         ],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `packages/sandbox/materials.ron`, read strictly: a broken file fails here
+    /// rather than falling back to a built-in copy.
+    fn shipped_registry() -> MaterialRegistry {
+        MaterialRegistry::from_ron_str(include_str!("../../../packages/sandbox/materials.ron"), "sandbox")
+            .expect("packages/sandbox/materials.ron loads")
+    }
+
+    /// The table the shader should see for `registry`: each material's color in
+    /// its own slot with alpha 1, and magenta in every slot past the end.
+    fn expected_table(registry: &MaterialRegistry) -> [[f32; 4]; MATERIAL_COLOR_SLOTS] {
+        let mut table = [[1.0, 0.0, 1.0, 1.0]; MATERIAL_COLOR_SLOTS];
+        for i in 0..registry.len().min(MATERIAL_COLOR_SLOTS) {
+            let color = registry.get(MaterialId(i as u16)).expect("id in range").color;
+            table[i] = [color[0], color[1], color[2], 1.0];
+        }
+        table
+    }
+
+    /// The uploaded table is the registry laid out by id: each material's color
+    /// in its own slot with alpha 1, and magenta in every slot past the end.
+    /// Substep 1 showed the old `params.rs` copy produced `expected_table`
+    /// exactly, so this is the proof that no color moved.
+    #[test]
+    fn the_color_table_is_the_registry_laid_out_by_id() {
+        let registry = shipped_registry();
+        let table = material_color_table(&registry);
+
+        assert_eq!(table, expected_table(&registry), "slot for slot");
+        // The padding is visibly wrong on purpose.
+        assert_eq!(table[registry.len()], [1.0, 0.0, 1.0, 1.0], "first slot past the registry");
+        assert_eq!(table[MATERIAL_COLOR_SLOTS - 1], [1.0, 0.0, 1.0, 1.0], "last slot");
+        // One material by name rather than by position.
+        let grass = registry
+            .resolve_str("grass_soil", "sandbox")
+            .expect("grass_soil is registered");
+        let color = registry.get(grass).expect("grass_soil resolves to a definition").color;
+        assert_eq!(table[grass.0 as usize], [color[0], color[1], color[2], 1.0]);
+    }
+}

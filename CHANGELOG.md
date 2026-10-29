@@ -18,15 +18,16 @@ wiped on upgrade until milestone M4, the format freeze.
 
 ## [Unreleased] — Runtime spine
 
-Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9, R3a, R2, R4, F15 and
-R6 are merged. The runtime spine and the engine object model are designed in
+Milestone M3, in progress: R1, T4, B8, T7, R7, F8, F9, R3a, R2, R4, F15, R6
+and R3b are merged. The runtime spine and the engine object model are designed in
 `engine-design.md`, the CPU baseline M3's exit gate compares against is
 recorded, CI compares Tier-1 results across Windows, Linux and macOS,
 generation no longer calls the platform's math library, the API docs build
 without warnings, package-load errors name each path once, the world code no
 longer reads the editor's settings, one 30 Hz tick drives all simulation
-time, rendering reads only a render world in a crate of its own, and chunk
-residency follows observers rather than the camera.
+time, rendering reads only a render world in a crate of its own, chunk
+residency follows observers rather than the camera, and the world code is a
+crate of its own that CI builds with no windowing or GPU dependency.
 
 ### Added
 
@@ -168,6 +169,22 @@ residency follows observers rather than the camera.
 - **The dead world-cache clear is gone** (F15, #116) — regeneration no longer
   deletes `cache/world_*.bin`, files nothing had written since the world cache
   was disabled. The mesh cache, which regeneration clears, is unaffected.
+- **The world code is a crate of its own** (R3b, #18) — the world and chunk
+  code, generation glue, fluids, persistence, the mutation door and its events,
+  residency, the tick framework, the player step, the job system, and package
+  and registry loading moved unchanged from `voxulacrum-app` to a new
+  `voxulacrum-server-core` crate. The cloud automaton and the visibility flood
+  stay in the app, as client modules, and the app still reaches the world types
+  directly until R5. `boundary-check` gains a server rule: it now reads the
+  full `cargo metadata` resolve and fails if a server crate reaches `wgpu`,
+  `naga`, `winit`, `raw-window-handle`, `egui` or `eframe` through normal or
+  build dependencies on any target, matching by name prefix. The server crates
+  and the forbidden names are listed under `[workspace.metadata.voxulacrum]`,
+  and the check's summary line now counts server crates. A new CI job builds
+  and tests server-core on a Linux runner with only the Rust toolchain
+  installed, and the Tier-1 math lints now cover server-core, except the player
+  step, which is Tier 2. The facade is unchanged. The generation hash is
+  unchanged at `0xed02babdf0f40420`; saves need nothing.
 
 ### Fixed
 

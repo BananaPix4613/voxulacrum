@@ -24,7 +24,7 @@ pub enum BorderAxis {
 
 /// A read-only view over the 27 chunks centered on a self-chunk, indexed
 /// in the same `(dx+1)*9 + (dy+1)*3 + (dz+1)` convention used by the
-/// existing `ChunkNeighbors` in `voxulacrum-app/src/world/chunk.rs:103`.
+/// existing `ChunkNeighbors` in `voxulacrum-server-core/src/world/chunk.rs`.
 ///
 /// Indices `[13]` is the self-chunk. Any neighbor slot may be `None` (e.g.
 /// at world edges); the caller decides how to treat missing data - see

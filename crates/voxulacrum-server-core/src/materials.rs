@@ -68,7 +68,6 @@ impl std::ops::Deref for MaterialRegistryRes {
 mod tests {
     use super::*;
     use voxel_core::MaterialId;
-    use crate::rendering::uniforms::{material_color_table, MATERIAL_COLOR_SLOTS};
     
     /// The compiled-in copy is what a broken file on disk degrades to, so it
     /// must parse, and it must be the table the file on disk holds.
@@ -83,44 +82,5 @@ mod tests {
             let id = MaterialId(i as u16);
             assert_eq!(embedded.get(id), from_disk.get(id), "material {i}");
         }
-    }
-
-    /// The shipped table, read strictly: no fallback, so a broken file fails here
-    /// instead of quietly comparing the built-in copy to itself.
-    fn shipped_registry() -> MaterialRegistry {
-        MaterialRegistry::load_from_ron(&materials_path(), crate::paths::namespace())
-            .expect("packages/sandbox/materials.ron loads")
-    }
-
-    /// The table the shader should see for `registry`: each material's color in
-    /// its own slot with alpha 1, and magenta in every slot past the end.
-    fn expected_table(registry: &MaterialRegistry) -> [[f32; 4]; MATERIAL_COLOR_SLOTS] {
-        let mut table = [[1.0, 0.0, 1.0, 1.0]; MATERIAL_COLOR_SLOTS];
-        for i in 0..registry.len().min(MATERIAL_COLOR_SLOTS) {
-            let color = registry.get(MaterialId(i as u16)).expect("id in range").color;
-            table[i] = [color[0], color[1], color[2], 1.0];
-        }
-        table
-    }
-
-    /// The uploaded table is the registry laid out by id: each material's color
-    /// in its own slot with alpha 1, and magenta in every slot past the end.
-    /// Substep 1 showed the old `params.rs` copy produced `expected_table`
-    /// exactly, so this is the proof that no color moved.
-    #[test]
-    fn the_color_table_is_the_registry_laid_out_by_id() {
-        let registry = shipped_registry();
-        let table = material_color_table(&registry);
-
-        assert_eq!(table, expected_table(&registry), "slot for slot");
-        // The padding is visibly wrong on purpose.
-        assert_eq!(table[registry.len()], [1.0, 0.0, 1.0, 1.0], "first slot past the registry");
-        assert_eq!(table[MATERIAL_COLOR_SLOTS - 1], [1.0, 0.0, 1.0, 1.0], "last slot");
-        // One material by name rather than by position.
-        let grass = registry
-            .resolve_str("grass_soil", crate::paths::namespace())
-            .expect("grass_soil is registered");
-        let color = registry.get(grass).expect("grass_soil resolves to a definition").color;
-        assert_eq!(table[grass.0 as usize], [color[0], color[1], color[2], 1.0]);
     }
 }

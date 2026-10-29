@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 
 use crate::package::Package;
 
-/// Workspace root. `CARGO_MANIFEST_DIR` is `<workspace>/crates/voxulacrum-app`
+/// Workspace root. `CARGO_MANIFEST_DIR` is `<workspace>/crates/voxulacrum-server-core`
 /// at compile time; the root is two levels up.
 pub fn asset_root() -> PathBuf {
     // Distribution: assets/packages/shaders/palettes ship next to the .exe, so resolve

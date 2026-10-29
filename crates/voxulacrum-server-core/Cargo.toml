@@ -1,0 +1,30 @@
+[package]
+name = "voxulacrum-server-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# World and chunk state, generation glue, fluids, persistence, the mutation
+# door, residency, the tick framework, the player step, the job system, and
+# package and registry loading. No renderer, windowing or UI crate may appear
+# anywhere in its dependencies (engine-design.md §12, "Crates and sides").
+[dependencies]
+voxel-core = { path = "../voxel-core" }
+nodegraph-ir = { path = "../nodegraph-ir" }
+nodegraph-eval = { path = "../nodegraph-eval" }
+nodegraph-hotreload = { path = "../nodegraph-hotreload" }
+
+# `libm`: the door's handlers and fluid simulation are Tier 1, so glam's own
+# transcendental math goes through the libm crate (engine-design.md §12).
+glam = { workspace = true, features = ["libm"] }
+bevy_ecs.workspace = true
+rayon.workspace = true
+smallvec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ron.workspace = true
+semver.workspace = true
+log.workspace = true
+num_cpus.workspace = true
+rusqlite.workspace = true
+zstd.workspace = true

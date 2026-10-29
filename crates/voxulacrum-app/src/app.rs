@@ -53,7 +53,7 @@ use crate::ecs::clocks::{PresentationClock, TickDriver};
 use crate::ecs::schedule::{build_frame_schedule, build_tick_schedule};
 use crate::rendering::render_world::build_render_schedule;
 use crate::input::{InputMap, InputState, PointerButton, PointerState, RawInputBuffer, RawInputEvent};
-use crate::world::room::RoomState;
+use crate::room::RoomState;
 
 pub const SHADOW_MAP_SIZE: u32 = 8192;
 

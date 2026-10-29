@@ -16,10 +16,10 @@ pub fn room_detection_system(
     world: Res<VoxelWorld>,
     players: Query<&crate::player::systems::Player>,
     play: Option<Res<crate::play::PlaySettings>>,
-    mut room: ResMut<crate::world::room::RoomState>,
+    mut room: ResMut<crate::room::RoomState>,
 ) {
     use crate::player::sim::WorldView;
-    use crate::world::room::{flood_visibility, overhead_coverage};
+    use crate::room::{flood_visibility, overhead_coverage};
 
     const BUDGET: u32 = 22;             // through-air flood budget (note §4.1)
     const OPEN_SKY_COVERAGE: f32 = 0.3; // below this overhead, skip the flood
@@ -115,7 +115,7 @@ pub fn room_detection_system(
 /// world (R3). Runs in Extract before `extract_system`, which uploads the
 /// texels and copies the frame state with its mask fields.
 pub fn visibility_mask_system(
-    mut room: ResMut<crate::world::room::RoomState>,
+    mut room: ResMut<crate::room::RoomState>,
     mut frame: ResMut<FrameState>,
     world: Res<VoxelWorld>,
     mut texels: ResMut<VisibilityMaskTexels>,

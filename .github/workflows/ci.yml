@@ -17,7 +17,8 @@ jobs:
     # checks here do not depend on the platform. Linux and macOS are built and
     # compared by the determinism job below (T7). Linux builds there still need
     # the windowing and GPU packages, until the headless server (R3c) gives the
-    # job a binary without them.
+    # job a binary without them; the server-core job below already builds
+    # without them.
     runs-on: windows-latest
 
     steps:
@@ -35,16 +36,20 @@ jobs:
         run: cargo build --workspace
 
       # Engine/game boundary (roadmap §7.2): consumers depend on the
-      # `voxulacrum` facade only.
-      - name: Facade dependency check
+      # `voxulacrum` facade only. Server rule (design §12, "Crates and
+      # sides"): no server crate reaches a renderer, windowing or UI crate
+      # through normal or build dependencies on any target.
+      - name: Boundary check
         run: cargo run -p boundary-check
 
-      # Tier-1 math (design §12, "Determinism"; R7): generation calls no
-      # platform math library, no fused multiply-add and no SIMD-backed glam
-      # type. The lists are in crates/nodegraph-eval/clippy.toml. Only those two
-      # lints are denied here; the crate's other clippy warnings are not.
+      # Tier-1 math (design §12, "Determinism"; R7): generation, the mutation
+      # door's handlers and fluids call no platform math library, no fused
+      # multiply-add and no SIMD-backed glam type. The lists are in each crate's
+      # clippy.toml; server-core's mirrors nodegraph-eval's, and its Tier-2
+      # player step opts out. Only those two lints are denied here; the crates'
+      # other clippy warnings are not.
       - name: Tier-1 math
-        run: cargo clippy -p nodegraph-eval --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_types
+        run: cargo clippy -p nodegraph-eval -p voxulacrum-server-core --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_types
 
       # Docs (F8, #87): any rustdoc warning, such as a broken intra-doc link or
       # a public doc linking a private item, fails the build. RUSTDOCFLAGS is set
@@ -63,8 +68,8 @@ jobs:
 
       # Code derives tick counts from TICK_RATE_HZ and never assumes 30
       # (engine-design.md §12, "Time"), so the tests run again at 20 Hz. The
-      # variable changes a constant, so this rebuilds the app crate and what
-      # depends on it.
+      # variable changes a constant, so this rebuilds the server-core crate and
+      # what depends on it.
       - name: Test at 20 Hz
         env:
           VOXULACRUM_TICK_RATE_HZ: "20"
@@ -79,6 +84,31 @@ jobs:
 
       - name: Verify generation determinism
         run: cargo run -p voxulacrum-app --bin voxulacrum-app -- --verify-generation 512
+
+  # Server-core on its own (design §12, "Crates and sides"): a bare Linux runner
+  # with only the Rust toolchain, no windowing or GPU packages. boundary-check
+  # proves the dependency graph is clean; this proves the crate builds and its
+  # tests pass without them. Building the one package also catches a feature
+  # it uses but only gets through another workspace crate's unification.
+  server-core:
+    name: Server core (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-core-linux
+
+      - name: Build
+        run: cargo build --locked -p voxulacrum-server-core
+
+      - name: Test
+        run: cargo test -p voxulacrum-server-core
 
   # Cross-platform determinism (roadmap §4.5, T7; design §12 "Determinism
   # tiers"). Each runner writes a manifest of its Tier-1 hashes: 512 generated

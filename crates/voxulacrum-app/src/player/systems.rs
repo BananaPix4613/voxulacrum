@@ -1,11 +1,10 @@
-//! ECS glue for the player sim: components, the `WorldView` impl, and the systems
-//! that wrap the pure `player_step`, which runs as a tick phase. No renderer type
-//! touches the player entity (the Phase-10 boundary); systems read the camera only
-//! to build the input frame and the spawn position.
+//! ECS glue for the player sim: components, and the systems that wrap the pure
+//! `player_step`, which runs as a tick phase. No renderer type touches the player
+//! entity (the Phase-10 boundary); systems read the camera only to build the input
+//! frame and the spawn position.
 
 use bevy_ecs::prelude::*;
 use glam::{IVec3, Vec2, Vec3};
-use voxel_core::ShapeId;
 
 use crate::ecs::resources::VoxelWorld;
 use crate::input::{GameAction, InputState};
@@ -27,30 +26,6 @@ pub struct Player {
 #[derive(Component, Default)]
 pub struct PlayerInputBuffer {
     pub pending: InputFrame,
-}
-
-/// Read-only world access for the pure sim: a voxel's solid vertical interval,
-/// honoring slabs, by world coordinate.
-impl WorldView for crate::world::World {
-    fn solid_interval(&self, voxel: IVec3) -> Option<(f32, f32)> {
-        let dim = CHUNK_SIZE as i32;
-        let chunk = IVec3::new(
-            voxel.x.div_euclid(dim),
-            voxel.y.div_euclid(dim),
-            voxel.z.div_euclid(dim),
-        );
-        let v = self.get_chunk(chunk)?.voxel(
-            voxel.x.rem_euclid(dim) as usize,
-            voxel.y.rem_euclid(dim) as usize,
-            voxel.z.rem_euclid(dim) as usize,
-        );
-        match v.shape {
-            ShapeId::Cube => Some((0.0, 1.0)),
-            ShapeId::SlabBottom => Some((0.0, 0.5)),
-            ShapeId::SlabTop => Some((0.5, 1.0)),
-            ShapeId::Empty => None,
-        }
-    }
 }
 
 /// Explicit `Authoring <-> Play` toggle (F5). Entering Play spawns the player at the
@@ -78,6 +53,9 @@ pub fn player_mode_toggle_system(
                 crate::play::SpawnRule::SurfaceUnderCamera => {
                     surface_spawn(&world.0, cam.x, cam.z).unwrap_or(cam)
                 }
+                // `SpawnRule` is non-exhaustive: a rule this build doesn't know
+                // spawns at the camera target itself.
+                _ => cam,
             };
             let state = PlayerState { position, ..Default::default() };
             commands.spawn((Player { curr: state, prev: state }, PlayerInputBuffer::default()));
